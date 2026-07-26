@@ -173,48 +173,58 @@ function SuperAdminPanel() {
                   <TableHead>اسم المكتب</TableHead>
                   <TableHead>الحالة</TableHead>
                   <TableHead>الاشتراك</TableHead>
-                  <TableHead className="text-center">حد المستخدمين</TableHead>
-                  <TableHead className="text-center">المستخدمون الحاليون</TableHead>
-                  <TableHead className="text-center">الفروع</TableHead>
+                  <TableHead className="text-center">المستخدمون</TableHead>
+                  <TableHead className="text-center">حصة القيود</TableHead>
                   <TableHead>تاريخ الإنشاء</TableHead>
                   <TableHead className="text-left">إجراءات</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(data?.tenants || []).map(t => (
-                  <TableRow key={t.id}>
-                    <TableCell><div className="font-semibold">{t.name}</div><div className="text-xs text-slate-500 font-mono">{t.slug}</div></TableCell>
-                    <TableCell>
-                      <Badge className={t.status === 'active' ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100' : t.status === 'suspended' ? 'bg-amber-100 text-amber-700 hover:bg-amber-100' : 'bg-rose-100 text-rose-700 hover:bg-rose-100'}>
-                        {t.status === 'active' ? 'نشط' : t.status === 'suspended' ? 'موقوف' : t.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell><Badge variant="outline">{t.subscription || 'trial'}</Badge></TableCell>
-                    <TableCell className="text-center font-bold">{t.max_users}</TableCell>
-                    <TableCell className="text-center">{t.users_count}/{t.max_users}</TableCell>
-                    <TableCell className="text-center">{t.max_branches}</TableCell>
-                    <TableCell className="text-xs">{fmtDate(t.created_at)}</TableCell>
-                    <TableCell className="text-left">
-                      <div className="flex gap-1 justify-end">
-                        <Button size="sm" variant="outline" onClick={() => setEditing(t)}><Settings className="w-3 h-3" /></Button>
-                        <Button size="sm" variant="outline" className={t.status === 'active' ? 'text-amber-600' : 'text-emerald-600'}
-                          onClick={async () => {
-                            const newStatus = t.status === 'active' ? 'suspended' : 'active'
-                            await api(`/admin/tenants/${t.id}`, { method: 'PATCH', body: { status: newStatus } })
-                            toast.success(newStatus === 'active' ? 'تم التفعيل' : 'تم الإيقاف'); load()
-                          }}><Power className="w-3 h-3" /></Button>
-                        <Button size="sm" variant="outline" className="text-rose-600"
-                          onClick={async () => {
-                            if (!confirm(`حذف المكتب "${t.name}" وجميع بياناته نهائياً؟`)) return
-                            await api(`/admin/tenants/${t.id}`, { method: 'DELETE' })
-                            toast.success('تم الحذف'); load()
-                          }}><Trash2 className="w-3 h-3" /></Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {(data?.tenants || []).map(t => {
+                  const q = t.journal_quota || { used: 0, limit: 500 }
+                  const pct = q.limit ? (q.used / q.limit) * 100 : 0
+                  return (
+                    <TableRow key={t.id}>
+                      <TableCell><div className="font-semibold">{t.name}</div><div className="text-xs text-slate-500 font-mono">{t.slug}</div></TableCell>
+                      <TableCell><Badge className={t.status === 'active' ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100' : 'bg-amber-100 text-amber-700 hover:bg-amber-100'}>{t.status === 'active' ? 'نشط' : 'موقوف'}</Badge></TableCell>
+                      <TableCell><Badge variant="outline">{t.subscription || 'trial'}</Badge></TableCell>
+                      <TableCell className="text-center">{t.users_count}/{t.max_users}</TableCell>
+                      <TableCell className="text-center">
+                        <div className="flex flex-col items-center gap-1">
+                          <div className={`text-xs font-bold ${pct >= 100 ? 'text-rose-600' : pct >= 90 ? 'text-amber-600' : 'text-slate-700'}`}>{q.used} / {q.limit}</div>
+                          <div className="w-20 h-1.5 rounded-full bg-slate-200 overflow-hidden"><div className={`h-full ${pct >= 100 ? 'bg-rose-500' : pct >= 90 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(100, pct)}%` }} /></div>
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-xs">{fmtDate(t.created_at)}</TableCell>
+                      <TableCell className="text-left">
+                        <div className="flex gap-1 justify-end">
+                          <Button size="sm" variant="outline" className="text-emerald-600" onClick={async () => {
+                            const amt = prompt(`إضافة رصيد قيود للمكتب "${t.name}" (عدد القيود):`, '500')
+                            if (!amt) return
+                            const n = Number(amt); if (!n || n < 1) return
+                            await api(`/admin/tenants/${t.id}`, { method: 'PATCH', body: { top_up_amount: n } })
+                            toast.success(`تم إضافة ${n} قيد`); load()
+                          }}><Plus className="w-3 h-3" /> رصيد</Button>
+                          <Button size="sm" variant="outline" onClick={() => setEditing(t)}><Settings className="w-3 h-3" /></Button>
+                          <Button size="sm" variant="outline" className={t.status === 'active' ? 'text-amber-600' : 'text-emerald-600'}
+                            onClick={async () => {
+                              const newStatus = t.status === 'active' ? 'suspended' : 'active'
+                              await api(`/admin/tenants/${t.id}`, { method: 'PATCH', body: { status: newStatus } })
+                              toast.success(newStatus === 'active' ? 'تم التفعيل' : 'تم الإيقاف'); load()
+                            }}><Power className="w-3 h-3" /></Button>
+                          <Button size="sm" variant="outline" className="text-rose-600"
+                            onClick={async () => {
+                              if (!confirm(`حذف المكتب "${t.name}" وجميع بياناته نهائياً؟`)) return
+                              await api(`/admin/tenants/${t.id}`, { method: 'DELETE' })
+                              toast.success('تم الحذف'); load()
+                            }}><Trash2 className="w-3 h-3" /></Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
                 {(!data?.tenants || data.tenants.length === 0) && (
-                  <TableRow><TableCell colSpan={8} className="text-center py-8 text-slate-400">لا توجد مكاتب. أنشئ المكتب الأول من الأعلى.</TableCell></TableRow>
+                  <TableRow><TableCell colSpan={7} className="text-center py-8 text-slate-400">لا توجد مكاتب. أنشئ المكتب الأول من الأعلى.</TableCell></TableRow>
                 )}
               </TableBody>
             </Table>
@@ -544,6 +554,9 @@ function TicketsScreen() {
   const [suppliers, setSuppliers] = useState([])
   const [openManual, setOpenManual] = useState(false)
   const [openBulk, setOpenBulk] = useState(false)
+  const [openSearch, setOpenSearch] = useState(false)
+  const [filter, setFilter] = useState(null)
+  const [selectedId, setSelectedId] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
@@ -552,42 +565,64 @@ function TicketsScreen() {
     } catch (e) { toast.error(e.message) }
   }
   useEffect(() => { load() }, [])
+  const filtered = applyFilter(tickets, filter)
+  const handleDelete = async () => {
+    if (!selectedId) return
+    if (!confirm('حذف هذه التذكرة وعكس القيد المحاسبي؟')) return
+    try { await api(`/tickets/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
+    catch (e) { toast.error(e.message) }
+  }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <TopBar
         title="حجز التذاكر"
         subtitle="شاشة مدمجة للشراء والبيع وحساب العمولة تلقائياً"
         right={
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>
-            <Button onClick={() => setOpenManual(true)} className="gap-2 grad-brand text-white shadow-lg shadow-blue-500/30"><Plus className="w-4 h-4" /> تذكرة جديدة</Button>
-          </div>
+          <Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>
         }
       />
+      <ActionToolbar
+        addLabel="تذكرة جديدة"
+        onAdd={() => setOpenManual(true)}
+        onRefresh={load}
+        onSearch={() => setOpenSearch(true)}
+        onDelete={handleDelete}
+        onPrint={() => { window.print() }}
+        selectedId={selectedId}
+        count={filtered.length}
+      />
+      {filter && (
+        <div className="flex items-center gap-2 p-2 bg-blue-50 border border-blue-200 rounded-lg text-xs">
+          <Filter className="w-4 h-4 text-blue-600" /> فلتر نشط: <b>{filter.field}</b> {filter.condition === 'equals' ? 'يساوي' : 'يحتوي على'} "<b>{filter.term}</b>"
+          <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
+        </div>
+      )}
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><Plane className="w-5 h-5 text-sky-600" /> سجل التذاكر ({tickets.length})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Plane className="w-5 h-5 text-sky-600" /> سجل التذاكر ({filtered.length}{filter ? ` من ${tickets.length}` : ''})</CardTitle></CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
             <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>التاريخ</TableHead><TableHead>PNR</TableHead><TableHead>خط السير</TableHead>
-                  <TableHead>المسافر</TableHead><TableHead>العميل</TableHead><TableHead>المورد</TableHead>
-                  <TableHead>العملة</TableHead><TableHead className="text-left">تكلفة</TableHead>
-                  <TableHead className="text-left">بيع</TableHead><TableHead className="text-left text-emerald-600">عمولة</TableHead>
-                </TableRow>
-              </TableHeader>
+              <TableHeader><TableRow>
+                <TableHead className="w-8"></TableHead>
+                <TableHead>التاريخ</TableHead><TableHead>PNR</TableHead><TableHead>خط السير</TableHead>
+                <TableHead>المسافر</TableHead><TableHead>العميل</TableHead><TableHead>المورد</TableHead>
+                <TableHead>الدفع</TableHead><TableHead>العملة</TableHead>
+                <TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead>
+                <TableHead className="text-left text-emerald-600">عمولة</TableHead>
+              </TableRow></TableHeader>
               <TableBody>
-                {tickets.length === 0 && <TableRow><TableCell colSpan={10} className="text-center text-slate-400 py-8">لا توجد تذاكر — أضف يدوياً أو ارفع Excel</TableCell></TableRow>}
-                {tickets.map(t => (
-                  <TableRow key={t.id}>
+                {filtered.length === 0 && <TableRow><TableCell colSpan={12} className="text-center text-slate-400 py-8">{filter ? 'لا نتائج للفلتر' : 'لا توجد تذاكر'}</TableCell></TableRow>}
+                {filtered.map(t => (
+                  <TableRow key={t.id} className={selectedId === t.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={() => setSelectedId(t.id === selectedId ? null : t.id)}>
+                    <TableCell><input type="radio" checked={selectedId === t.id} onChange={() => setSelectedId(t.id)} /></TableCell>
                     <TableCell className="text-xs">{fmtDate(t.date)}</TableCell>
                     <TableCell className="font-mono text-xs">{t.pnr || '—'}</TableCell>
                     <TableCell className="text-xs">{t.route || '—'}</TableCell>
                     <TableCell className="text-xs">{t.passenger_name || '—'}</TableCell>
                     <TableCell>{t.client_name}</TableCell>
                     <TableCell>{t.supplier_name}</TableCell>
+                    <TableCell>{t.payment_method === 'cash' ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">💵 نقد</Badge> : <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">🕓 آجل</Badge>}</TableCell>
                     <TableCell><Badge variant="outline">{t.currency}</Badge></TableCell>
                     <TableCell className="text-left font-semibold">{fmt(t.cost, t.currency)}</TableCell>
                     <TableCell className="text-left font-semibold">{fmt(t.sale_price, t.currency)}</TableCell>
@@ -603,6 +638,19 @@ function TicketsScreen() {
       <TicketDialog open={openManual} onOpenChange={setOpenManual} clients={clients} suppliers={suppliers} rates={rates}
         onSaved={() => { load(); toast.success('تم حفظ التذكرة وإنشاء القيد المحاسبي تلقائياً') }} />
       <BulkImportDialog open={openBulk} onOpenChange={setOpenBulk} kind="tickets" onDone={() => { load(); setOpenBulk(false) }} />
+      <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
+        fields={[
+          { key: 'pnr', label: 'رقم التذكرة (PNR)' },
+          { key: 'passenger_name', label: 'اسم المسافر' },
+          { key: 'client_name', label: 'اسم العميل' },
+          { key: 'supplier_name', label: 'اسم المورد' },
+          { key: 'route', label: 'خط السير' },
+          { key: 'sale_price', label: 'سعر البيع' },
+          { key: 'currency', label: 'العملة' },
+        ]}
+        onApply={setFilter}
+        onClear={() => setFilter(null)}
+      />
     </div>
   )
 }
@@ -633,16 +681,14 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }
             <Field label="نوع العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
             <Field label="اسم العميل" required>
-              <div className="flex gap-2">
-                <Select value={form.client_id} onValueChange={v => setForm({ ...form, client_id: v })}><SelectTrigger className="flex-1"><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{clients.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent></Select>
-                <Button type="button" size="icon" variant="outline" onClick={() => setQuickC(true)}><Plus className="w-4 h-4" /></Button>
-              </div>
+              <SmartAutocomplete kind="client" items={clients} value={form.client_id}
+                onChange={(id) => setForm({ ...form, client_id: id })}
+                onCreated={() => onSaved && onSaved()} />
             </Field>
             <Field label="اسم المورد" required>
-              <div className="flex gap-2">
-                <Select value={form.supplier_id} onValueChange={v => setForm({ ...form, supplier_id: v })}><SelectTrigger className="flex-1"><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent></Select>
-                <Button type="button" size="icon" variant="outline" onClick={() => setQuickS(true)}><Plus className="w-4 h-4" /></Button>
-              </div>
+              <SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id}
+                onChange={(id) => setForm({ ...form, supplier_id: id })}
+                onCreated={() => onSaved && onSaved()} />
             </Field>
             <Field label="رقم التذكرة / PNR"><Input value={form.pnr} onChange={e => setForm({ ...form, pnr: e.target.value })} /></Field>
             <Field label="خط السير"><Input value={form.route} onChange={e => setForm({ ...form, route: e.target.value })} placeholder="RUH - CAI" /></Field>
@@ -687,21 +733,187 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }
   )
 }
 
-function QuickAddDialog({ open, onOpenChange, kind, onSaved }) {
-  const [name, setName] = useState(''); const [phone, setPhone] = useState('')
+function QuickAddDialog({ open, onOpenChange, kind, onSaved, initialName }) {
+  const [name, setName] = useState(''); const [phone, setPhone] = useState(''); const [address, setAddress] = useState(''); const [serviceType, setServiceType] = useState('')
+  useEffect(() => { if (open && initialName) setName(initialName) }, [open, initialName])
   const save = async () => {
     if (!name) return toast.error('الاسم مطلوب')
-    try { await api(`/${kind === 'client' ? 'clients' : 'suppliers'}`, { method: 'POST', body: { name, phone } }); toast.success('تمت الإضافة'); onOpenChange(false); setName(''); setPhone(''); onSaved && onSaved() }
-    catch (e) { toast.error(e.message) }
+    try {
+      const body = { name, phone, notes: [address, serviceType].filter(Boolean).join(' • ') }
+      const created = await api(`/${kind === 'client' ? 'clients' : 'suppliers'}`, { method: 'POST', body })
+      toast.success('تمت الإضافة'); onOpenChange(false); setName(''); setPhone(''); setAddress(''); setServiceType('')
+      onSaved && onSaved(created)
+    } catch (e) { toast.error(e.message) }
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md" dir="rtl">
-        <DialogHeader><DialogTitle>إضافة {kind === 'client' ? 'عميل' : 'مورد'} سريع</DialogTitle></DialogHeader>
-        <div className="space-y-3"><Field label="الاسم" required><Input value={name} onChange={e => setName(e.target.value)} /></Field><Field label="الجوال"><Input value={phone} onChange={e => setPhone(e.target.value)} /></Field></div>
+        <DialogHeader><DialogTitle>إضافة {kind === 'client' ? 'عميل' : 'مورد'} سريع</DialogTitle><DialogDescription>سيُضاف مباشرةً للدليل المحاسبي وتُختار في الحقل الحالي</DialogDescription></DialogHeader>
+        <div className="space-y-3">
+          <Field label="الاسم" required><Input value={name} onChange={e => setName(e.target.value)} /></Field>
+          <Field label="الجوال"><Input value={phone} onChange={e => setPhone(e.target.value)} /></Field>
+          <Field label="العنوان"><Input value={address} onChange={e => setAddress(e.target.value)} /></Field>
+          {kind === 'supplier' && <Field label="نوع الخدمة"><Input value={serviceType} onChange={e => setServiceType(e.target.value)} placeholder="تذاكر / تأشيرات / فنادق" /></Field>}
+        </div>
         <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={save} className="grad-brand text-white">حفظ</Button></DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// ================================================================
+// SMART AUTOCOMPLETE (typeahead + inline create)
+// ================================================================
+function SmartAutocomplete({ kind, items, value, onChange, placeholder, onCreated }) {
+  const [query, setQuery] = useState('')
+  const [open, setOpen] = useState(false)
+  const [showCreate, setShowCreate] = useState(false)
+  const ref = useRef(null)
+
+  const selected = items.find(i => i.id === value)
+  const displayText = selected?.name || ''
+
+  useEffect(() => {
+    const onClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [])
+
+  const filtered = query.trim()
+    ? items.filter(i => i.name.toLowerCase().includes(query.toLowerCase().trim())).slice(0, 8)
+    : items.slice(0, 8)
+  const exactMatch = items.find(i => i.name.trim() === query.trim())
+
+  return (
+    <div className="relative" ref={ref}>
+      <Input
+        value={open ? query : displayText}
+        onFocus={() => { setQuery(displayText); setOpen(true) }}
+        onChange={e => { setQuery(e.target.value); setOpen(true); if (!e.target.value) onChange('') }}
+        placeholder={placeholder || (kind === 'client' ? 'اكتب اسم العميل أو اختر' : 'اكتب اسم المورد أو اختر')}
+      />
+      {open && (
+        <div className="absolute z-50 top-full right-0 left-0 mt-1 bg-white border rounded-lg shadow-2xl max-h-72 overflow-y-auto">
+          {filtered.length === 0 && query.trim() && !exactMatch && (
+            <button type="button" onClick={() => { setShowCreate(true); setOpen(false) }}
+              className="w-full text-right p-3 hover:bg-emerald-50 border-b border-slate-100 flex items-center gap-2 text-emerald-700 font-semibold">
+              <Plus className="w-4 h-4" /> إنشاء {kind === 'client' ? 'عميل' : 'مورد'} جديد: "{query}"
+            </button>
+          )}
+          {filtered.map(i => (
+            <button key={i.id} type="button" onClick={() => { onChange(i.id); setOpen(false); setQuery('') }}
+              className={`w-full text-right p-2.5 hover:bg-blue-50 border-b border-slate-100 text-sm ${i.id === value ? 'bg-blue-100 font-bold' : ''}`}>
+              <div className="flex items-center justify-between">
+                <span>{i.name}</span>
+                {i.phone && <span className="text-xs text-slate-500">{i.phone}</span>}
+              </div>
+            </button>
+          ))}
+          {filtered.length === 0 && !query.trim() && <div className="p-3 text-sm text-slate-400 text-center">اكتب للبحث أو أضف جديد</div>}
+        </div>
+      )}
+      <QuickAddDialog open={showCreate} onOpenChange={setShowCreate} kind={kind} initialName={query}
+        onSaved={(created) => { onCreated && onCreated(created); onChange(created.id); setQuery(''); }} />
+    </div>
+  )
+}
+
+// ================================================================
+// ACTION TOOLBAR (unified across screens)
+// ================================================================
+function ActionToolbar({ onAdd, onRefresh, onDelete, onSearch, onPrint, onExit, selectedId, count, addLabel }) {
+  const btn = (icon, label, cb, cls = '', disabled = false) => (
+    <Button size="sm" variant="outline" onClick={cb} disabled={disabled}
+      className={`gap-2 ${cls}`}>{icon}<span className="hidden md:inline">{label}</span></Button>
+  )
+  return (
+    <div className="flex flex-wrap items-center gap-2 p-2 bg-white border rounded-lg shadow-sm mb-4">
+      {onAdd && <Button onClick={onAdd} size="sm" className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> {addLabel || 'إضافة'}</Button>}
+      {onRefresh && btn(<Activity className="w-4 h-4" />, 'تحديث', onRefresh)}
+      {onSearch && btn(<Search className="w-4 h-4" />, 'بحث', onSearch)}
+      {onDelete && btn(<Trash2 className="w-4 h-4" />, 'حذف', onDelete, 'text-rose-600 hover:bg-rose-50', !selectedId)}
+      {onPrint && btn(<Printer className="w-4 h-4" />, 'طباعة', onPrint, 'text-blue-600 hover:bg-blue-50', !selectedId)}
+      <div className="flex-1" />
+      {count !== undefined && <Badge variant="secondary">{count} سجل</Badge>}
+      {onExit && btn(<LogOut className="w-4 h-4" />, 'خروج', onExit, 'text-slate-500')}
+    </div>
+  )
+}
+
+// ================================================================
+// UNIVERSAL SEARCH MODAL
+// ================================================================
+function UniversalSearchModal({ open, onOpenChange, fields, onApply, onClear }) {
+  const [field, setField] = useState(fields[0]?.key || '')
+  const [condition, setCondition] = useState('contains')
+  const [term, setTerm] = useState('')
+  useEffect(() => { if (open) { setField(fields[0]?.key || ''); setTerm('') } }, [open])
+  const apply = () => { onApply({ field, condition, term }); onOpenChange(false) }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md" dir="rtl">
+        <DialogHeader><DialogTitle className="flex items-center gap-2"><Search className="w-5 h-5 text-blue-600" /> بحث متقدم</DialogTitle><DialogDescription>اختر الحقل والشرط ثم أدخل قيمة البحث</DialogDescription></DialogHeader>
+        <div className="space-y-3">
+          <Field label="حقل البحث">
+            <Select value={field} onValueChange={setField}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>{fields.map(f => <SelectItem key={f.key} value={f.key}>{f.label}</SelectItem>)}</SelectContent>
+            </Select>
+          </Field>
+          <Field label="الشرط">
+            <Select value={condition} onValueChange={setCondition}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="contains">يحتوي على</SelectItem>
+                <SelectItem value="equals">يساوي بالضبط</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="قيمة البحث"><Input value={term} onChange={e => setTerm(e.target.value)} placeholder="اكتب هنا..." autoFocus /></Field>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => { onClear(); onOpenChange(false) }} className="text-slate-500">مسح الفلتر</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
+          <Button onClick={apply} className="grad-brand text-white gap-2"><Search className="w-4 h-4" /> بحث</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function applyFilter(data, filter) {
+  if (!filter || !filter.term) return data
+  const t = String(filter.term).toLowerCase().trim()
+  return data.filter(row => {
+    const v = row[filter.field]
+    if (v === undefined || v === null) return false
+    const vs = String(v).toLowerCase()
+    if (filter.condition === 'equals') return vs === t
+    return vs.includes(t)
+  })
+}
+
+// ================================================================
+// QUOTA BANNER
+// ================================================================
+function QuotaBanner({ quota }) {
+  if (!quota) return null
+  const pct = quota.limit ? (quota.used / quota.limit) * 100 : 0
+  if (pct < 90) return null
+  const isMax = quota.used >= quota.limit
+  return (
+    <div className={`mb-4 p-4 rounded-xl border-2 flex items-center gap-3 ${isMax ? 'bg-rose-50 border-rose-300' : 'bg-amber-50 border-amber-300'}`}>
+      <AlertTriangle className={`w-6 h-6 ${isMax ? 'text-rose-600' : 'text-amber-600'} shrink-0`} />
+      <div className="flex-1">
+        <div className={`font-bold ${isMax ? 'text-rose-800' : 'text-amber-800'}`}>
+          {isMax ? '🚫 انتهت حصة قيود اليومية — النظام في وضع القراءة فقط' : `⚠️ تحذير: اقتربت من نهاية حصة قيود اليومية`}
+        </div>
+        <div className="text-sm text-slate-600 mt-1">تم استخدام <b>{quota.used}</b> من أصل <b>{quota.limit}</b> قيد ({pct.toFixed(0)}%). {isMax ? 'تواصل مع Target Media لتجديد الاشتراك.' : 'يُنصح بالتجديد قريباً لتجنب إيقاف الإدخال.'}</div>
+      </div>
+      <div className={`w-24 h-3 rounded-full bg-slate-200 overflow-hidden shrink-0`}>
+        <div className={`h-full ${isMax ? 'bg-rose-500' : 'bg-amber-500'}`} style={{ width: `${Math.min(100, pct)}%` }} />
+      </div>
+    </div>
   )
 }
 
@@ -1086,8 +1298,8 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }) 
             <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
             <Field label="نوع الخدمة"><Select value={form.service_type} onValueChange={v => setForm({ ...form, service_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{VISA_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
-            <Field label="العميل" required><div className="flex gap-2"><Select value={form.client_id} onValueChange={v => setForm({ ...form, client_id: v })}><SelectTrigger className="flex-1"><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{clients.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent></Select><Button size="icon" variant="outline" onClick={() => setQc(true)}><Plus className="w-4 h-4" /></Button></div></Field>
-            <Field label="المورد" required><div className="flex gap-2"><Select value={form.supplier_id} onValueChange={v => setForm({ ...form, supplier_id: v })}><SelectTrigger className="flex-1"><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent></Select><Button size="icon" variant="outline" onClick={() => setQs(true)}><Plus className="w-4 h-4" /></Button></div></Field>
+            <Field label="العميل" required><SmartAutocomplete kind="client" items={clients} value={form.client_id} onChange={id => setForm({ ...form, client_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
+            <Field label="المورد" required><SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id} onChange={id => setForm({ ...form, supplier_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
             <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
             <Field label="اسم صاحب التأشيرة"><Input value={form.passenger_name} onChange={e => setForm({ ...form, passenger_name: e.target.value })} /></Field>
             <Field label="رقم الجواز"><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value })} /></Field>
@@ -1650,7 +1862,7 @@ function OfficeSettings() {
 // ================================================================
 function TenantApp() {
   const [tab, setTab] = useState('dashboard')
-  const { user, logout } = useAuth()
+  const { user, tenant, logout } = useAuth()
   return (
     <div className="flex min-h-screen bg-slate-50">
       <Sidebar current={tab} onChange={setTab} />
@@ -1658,6 +1870,7 @@ function TenantApp() {
         <div className="flex justify-end mb-2">
           <Button variant="ghost" onClick={logout} className="gap-2 text-slate-500 hover:text-rose-600"><LogOut className="w-4 h-4" /> خروج</Button>
         </div>
+        <QuotaBanner quota={tenant?.journal_quota} />
         {tab === 'dashboard' && <Dashboard setTab={setTab} />}
         {tab === 'tickets' && <TicketsScreen />}
         {tab === 'visas' && <VisasScreen />}

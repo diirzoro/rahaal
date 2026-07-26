@@ -417,6 +417,105 @@ backend:
       - working: true
         agent: "testing"
         comment: "✅ PASSED - Ticket with payment_method='cash' but missing box_id correctly returns 400 error 'اختر الصندوق/البنك للدفع النقدي'. Validation working correctly."
+  - task: "v2.2: Journal Quota in auth/me"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - GET /api/auth/me returns tenant.journal_quota with { used: 16, limit: 500, top_ups: [] }. All required fields present. quota.used > 0 as expected from previous tests."
+  - task: "v2.2: Delete Ticket Reverses Balances + JE + Quota"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Created ticket (cost=100, sale=150 SAR, credit payment). Client balance increased to 150, supplier to 100. Quota incremented by 1. DELETE /api/tickets/:id successfully reverted client balance to 0, supplier to 0, deleted journal entry, and decremented quota by 1. All balance reversals accurate."
+  - task: "v2.2: Delete Visa Reverses Balances"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Created visa (cost=50, sale=80 SAR). Client balance increased to 80. DELETE /api/visas/:id reverted client balance to 0 and decremented quota. Balance reversal working correctly."
+  - task: "v2.2: Delete Voucher (Receipt) Reverses Balances"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Created receipt voucher (100 SAR from client). Box balance increased by 100, client balance decreased by 100. DELETE /api/vouchers/:id reverted box balance and client balance correctly. Quota decremented."
+  - task: "v2.2: Delete FX Transaction Reverses Both Boxes"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Created FX BUY (50 USD @ 3.75 SAR). Box1 USD +50, Box2 SAR -187.5. DELETE /api/fx/:id reverted both box balances correctly (Box1 USD back to initial, Box2 SAR back to initial). Quota decremented."
+  - task: "v2.2: Delete Non-Existent ID Returns 404"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - DELETE /api/tickets/nonexistent-id returns 404. DELETE /api/visas/nonexistent-id returns 404. Error handling correct."
+  - task: "v2.2: Super Admin Quota Top-Up"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - As super admin, PATCH /api/admin/tenants/:id { top_up_amount: 100 } increased limit from 500 to 600. top_ups array updated with { amount: 100, date, by: 'admin@targetmedia.com' }. Top-up mechanism working correctly."
+  - task: "v2.2: Quota Block at Limit (402 Error)"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Set quota limit to current used (17). POST /api/tickets returned 402 with message 'انتهت حصة قيود اليومية (17/17)'. Manual journal entry also blocked with 402. Voucher creation blocked with 402. After top-up by 10, ticket creation succeeded. Quota enforcement working perfectly."
+  - task: "v2.2: Admin Tenants List Includes journal_quota"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - GET /api/admin/tenants returns all tenants with journal_quota field containing { used, limit, top_ups }. Verified for 2 tenants. All fields present and correct."
 
 frontend:
   - task: "RTL Arabic UI with sidebar navigation & 11 modules"
@@ -433,8 +532,8 @@ frontend:
 
 metadata:
   created_by: "main_agent"
-  version: "2.1"
-  test_sequence: 3
+  version: "2.2"
+  test_sequence: 4
   run_ui: false
 
 test_plan:
@@ -446,30 +545,35 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      MAJOR UPDATE — v2.0 SaaS: Added Multi-Tenant architecture + Auth + Super Admin + White-Label + Bulk Excel/CSV import.
-      Please re-test the backend end-to-end with the new authentication & tenant scoping.
+      V2.2 UPDATE: Added Journal Quota (metered billing), record deletion with balance reversal, quota top-up by super admin.
+      Please test the following NEW backend endpoints & behaviors:
 
-      SETUP:
-      - Two seeded accounts:
-        * Super Admin: admin@targetmedia.com / Target@2025
-        * Demo Tenant Owner: owner@demo.com / Demo@2025
+      1) **Quota field on tenants:**
+         - GET /api/auth/me (as owner@demo.com / Demo@2025) → response.tenant.journal_quota exists with { used, limit, top_ups }
+         - The 'used' counter should be ≥0 and equal to actual journal_entries count for that tenant (approximately)
 
-      TEST FLOWS:
-      1) POST /api/auth/login as super admin -> get cookie -> GET /api/auth/me should return role=super_admin
-      2) POST /api/admin/tenants (as super admin) with { name, owner_email, owner_password, max_users:2 } -> creates tenant + owner user + seeds accounts/boxes
-      3) PATCH /api/admin/tenants/:id { status:"suspended" } -> then attempt login as that tenant's owner -> should fail 403
-      4) Re-activate. Login as owner@demo.com -> auth/me returns role=owner + tenant + settings
-      5) Tenant isolation: create client under demo, then create another tenant + login there, verify GET /api/clients returns only that tenant's data.
-      6) POST /api/tickets (tenant scoped) -> auto journal entry works exactly like v1.
-      7) POST /api/import/tickets/preview with rows array -> returns validated rows with __errors, __dup, __commission; totals per currency; valid_count.
-      8) POST /api/import/tickets to actually insert -> returns { created, skipped, failed }. Also auto-creates missing clients/suppliers by name.
-      9) Same for /api/import/visas/preview and /api/import/visas (uses passport_no for dedup).
-      10) PUT /api/tenant/settings updates logo_base64, agency_name, tax_id, etc. GET /api/tenant/settings returns them.
-      11) POST /api/tenant/users respects max_users limit (should reject after limit reached).
-      12) PATCH /api/tenant/users/:id { active:false } -> user can no longer login.
-      13) Reports (profits, statement, trial-balance, income-statement) all scoped by tenant.
-      14) Role enforcement: as staff user (role='staff') PUT /tenant/settings and POST /tenant/users should return 403.
-      15) Error cases: unauthorized (no cookie) -> 401; wrong password -> 401; suspended tenant -> 403.
+      2) **Delete endpoints (all reverse balance changes + delete linked JE + decrement quota):**
+         - DELETE /api/tickets/:id — reverses client (or box for cash) + supplier balance, removes JE, decrements quota.used by 1
+         - DELETE /api/visas/:id — same
+         - DELETE /api/vouchers/:id — reverses box balance + party balance
+         - DELETE /api/fx/:id — reverses both boxes
+         - Verify quota.used decreases by 1 after each delete
+         - Verify balances actually revert (create a client + ticket, note client.balance, delete ticket, client.balance should be back to original)
+
+      3) **Super admin quota top-up:**
+         - As super admin: PATCH /api/admin/tenants/:id { top_up_amount: 100 } → tenant.journal_quota.limit += 100
+         - Response should be success; tenant document should have top_ups array with the record
+
+      4) **Quota block at limit:**
+         - Manually set demo tenant quota.used = quota.limit (via direct db.tenants.updateOne or via multiple ticket creations). 
+         - You can PATCH tenant quota_limit down to current used: PATCH /admin/tenants/:id { quota_limit: <current_used> }
+         - Then try POST /api/tickets → should return 402 with message "انتهت حصة قيود اليومية"
+         - Then top up: PATCH /admin/tenants/:id { top_up_amount: 10 } → then POST /api/tickets should succeed again
+
+      5) **Admin tenants list includes journal_quota:**
+         - GET /api/admin/tenants → each tenant object has journal_quota field
+
+      Return each with pass/fail. Do not modify code.
   - agent: "testing"
     message: |
       ✅ COMPREHENSIVE BACKEND TESTING COMPLETED - ALL TESTS PASSED (10/10)
@@ -665,3 +769,84 @@ agent_communication:
       - Supplier balance increases when credited (liability increases = we owe them more). This is correct accounting behavior.
       
       Backend v2.1 is production-ready. All new features verified and working correctly.
+  - agent: "testing"
+    message: |
+      ✅ v2.2 BACKEND TESTING COMPLETED - ALL 9 TESTS PASSED
+      
+      Comprehensive test suite executed for v2.2 features (Journal Quota, Delete Operations, Metered Billing):
+      
+      **Test Results: 9/9 PASSED**
+      
+      1. ✅ Quota in auth/me
+         - GET /api/auth/me returns tenant.journal_quota with { used: 16, limit: 500, top_ups: [] }
+         - All required fields present (used, limit, top_ups)
+         - quota.used > 0 as expected from previous tests
+      
+      2. ✅ Delete Ticket Reverses Balances + JE + Quota
+         - Created ticket: cost=100, sale=150 SAR (credit payment)
+         - Client balance increased to 150, supplier to 100, quota +1
+         - DELETE /api/tickets/:id successfully:
+           * Reverted client balance to 0
+           * Reverted supplier balance to 0
+           * Deleted journal entry
+           * Decremented quota by 1
+         - All balance reversals accurate
+      
+      3. ✅ Delete Visa Reverses Balances
+         - Created visa: cost=50, sale=80 SAR
+         - Client balance increased to 80
+         - DELETE /api/visas/:id reverted client balance to 0 and decremented quota
+      
+      4. ✅ Delete Voucher (Receipt) Reverses Balances
+         - Created receipt voucher: 100 SAR from client
+         - Box balance +100, client balance -100
+         - DELETE /api/vouchers/:id reverted both balances correctly
+         - Quota decremented
+      
+      5. ✅ Delete FX Transaction Reverses Both Boxes
+         - Created FX BUY: 50 USD @ 3.75 SAR
+         - Box1 USD +50, Box2 SAR -187.5
+         - DELETE /api/fx/:id reverted both box balances to initial values
+         - Quota decremented
+      
+      6. ✅ Delete Non-Existent ID Returns 404
+         - DELETE /api/tickets/nonexistent-id → 404
+         - DELETE /api/visas/nonexistent-id → 404
+         - Error handling correct
+      
+      7. ✅ Super Admin Quota Top-Up
+         - As super admin: PATCH /api/admin/tenants/:id { top_up_amount: 100 }
+         - Limit increased from 500 to 600
+         - top_ups array updated with { amount: 100, date, by: 'admin@targetmedia.com' }
+         - Top-up mechanism working correctly
+      
+      8. ✅ Quota Block at Limit (402 Error)
+         - Set quota limit to current used (17)
+         - POST /api/tickets → 402 with message 'انتهت حصة قيود اليومية (17/17)'
+         - Manual journal entry → 402 (blocked)
+         - Voucher creation → 402 (blocked)
+         - After top-up by 10, ticket creation succeeded
+         - Quota enforcement working perfectly
+      
+      9. ✅ Admin Tenants List Includes journal_quota
+         - GET /api/admin/tenants returns all tenants with journal_quota field
+         - Verified for 2 tenants: { used, limit, top_ups }
+         - All fields present and correct
+      
+      **CRITICAL VERIFICATIONS:**
+      ✅ Journal quota tracking - used counter increments/decrements correctly
+      ✅ Delete operations - all balance reversals accurate (tickets, visas, vouchers, fx)
+      ✅ Journal entry deletion - linked JEs removed on delete
+      ✅ Quota enforcement - 402 error when limit reached
+      ✅ Top-up mechanism - limit increases, top_ups array updated
+      ✅ Multi-entity balance reversal - client, supplier, box balances all reverted correctly
+      ✅ 404 error handling - non-existent IDs handled properly
+      
+      **METERED BILLING NOTES:**
+      - Quota system provides accurate metering for journal entries (used for billing)
+      - Delete operations correctly decrement quota (refund mechanism)
+      - Top-up mechanism allows flexible quota management by super admin
+      - 402 error provides clear Arabic message to users when quota exhausted
+      - All transactional operations (tickets, visas, vouchers, fx, manual JE) respect quota limits
+      
+      Backend v2.2 is production-ready. Journal quota and delete operations working flawlessly.

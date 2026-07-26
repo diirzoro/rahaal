@@ -75,6 +75,11 @@ async function seedInitial(db) {
         type: 'revenue', parent: '4', is_group: false, created_at: new Date(),
       })
     }
+    // Migration: initialize journal_quota if missing (500 entries default)
+    if (!tn.journal_quota) {
+      const usedCount = await db.collection('journal_entries').countDocuments({ tenant_id: tn.id })
+      await db.collection('tenants').updateOne({ id: tn.id }, { $set: { journal_quota: { used: usedCount, limit: 500, top_ups: [] } } })
+    }
   }
 
   // Super Admin bootstrap
@@ -150,8 +155,17 @@ async function updateBalance(db, col, filter, currency, delta) {
   await db.collection(col).updateOne(filter, { $inc: { [`balances.${currency}`]: delta } })
 }
 async function createJournalEntry(db, tenantId, { date, description, ref_type, ref_id, currency, lines }) {
+  // Enforce quota
+  const t = await db.collection('tenants').findOne({ id: tenantId })
+  const q = t?.journal_quota || { used: 0, limit: 500 }
+  if (q.used >= q.limit) {
+    const err = new Error(`انتهت حصة قيود اليومية (${q.used}/${q.limit}). يرجى تجديد الاشتراك مع الإدارة العامة.`)
+    err.code = 'QUOTA_EXCEEDED'
+    throw err
+  }
   const je = { id: uuidv4(), tenant_id: tenantId, date: new Date(date || Date.now()), description, ref_type, ref_id, currency, lines, created_at: new Date() }
   await db.collection('journal_entries').insertOne(je)
+  await db.collection('tenants').updateOne({ id: tenantId }, { $inc: { 'journal_quota.used': 1 } })
   return je
 }
 async function ensurePartyByName(db, tenantId, coll, name) {
@@ -215,7 +229,8 @@ async function handleRoute(request, { params }) {
       if (sess.blocked) return ok({ user: null, tenant: null, error: 'suspended' })
       let tenantSettings = null
       if (sess.tenant) tenantSettings = await db.collection('tenant_settings').findOne({ tenant_id: sess.tenant.id })
-      return ok({ user: sanitizeUser(sess.user), tenant: sanitizeTenant(sess.tenant), settings: tenantSettings ? { ...tenantSettings, _id: undefined } : null })
+      const quota = sess.tenant?.journal_quota || null
+      return ok({ user: sanitizeUser(sess.user), tenant: sess.tenant ? { ...sanitizeTenant(sess.tenant), journal_quota: quota } : null, settings: tenantSettings ? { ...tenantSettings, _id: undefined } : null })
     }
 
     if (!sess || sess.blocked) return bad('يجب تسجيل الدخول', 401)
@@ -249,7 +264,9 @@ async function handleRoute(request, { params }) {
         const tenant = {
           id: uuidv4(), slug, name: b.name, status: 'active',
           max_users: Number(b.max_users) || 2, max_branches: Number(b.max_branches) || 1,
-          subscription: b.subscription || 'trial', created_at: new Date(),
+          subscription: b.subscription || 'trial',
+          journal_quota: { used: 0, limit: Number(b.quota_limit) || 500, top_ups: [] },
+          created_at: new Date(),
         }
         await db.collection('tenants').insertOne(tenant)
         await db.collection('users').insertOne({
@@ -272,12 +289,26 @@ async function handleRoute(request, { params }) {
           if (b.name) upd.name = b.name
           if (b.max_users !== undefined) upd.max_users = Number(b.max_users)
           if (b.max_branches !== undefined) upd.max_branches = Number(b.max_branches)
+          if (b.quota_limit !== undefined) upd['journal_quota.limit'] = Number(b.quota_limit)
           await db.collection('tenants').updateOne({ id: tid }, { $set: upd })
+          // Top-up quota
+          if (b.top_up_amount) {
+            const amt = Number(b.top_up_amount) || 0
+            if (amt > 0) {
+              await db.collection('tenants').updateOne(
+                { id: tid },
+                {
+                  $inc: { 'journal_quota.limit': amt },
+                  $push: { 'journal_quota.top_ups': { amount: amt, date: new Date(), by: sess.user.email } }
+                }
+              )
+            }
+          }
           return ok({ success: true })
         }
         if (method === 'DELETE') {
           await db.collection('tenants').deleteOne({ id: tid })
-          for (const c of ['users', 'accounts', 'boxes', 'clients', 'suppliers', 'tickets', 'visas', 'vouchers', 'journal_entries', 'tenant_settings']) {
+          for (const c of ['users', 'accounts', 'boxes', 'clients', 'suppliers', 'tickets', 'visas', 'vouchers', 'journal_entries', 'tenant_settings', 'currency_exchanges']) {
             await db.collection(c).deleteMany({ tenant_id: tid })
           }
           return ok({ success: true })
@@ -509,6 +540,49 @@ async function handleRoute(request, { params }) {
     // Journal entries
     if (route === '/journal-entries' && method === 'GET') return ok(clean(await db.collection('journal_entries').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
 
+    // Universal DELETE for transactional records (reverses JE + balances + decrements quota)
+    const delMatch = route.match(/^\/(tickets|visas|vouchers|fx)\/([^/]+)$/)
+    if (delMatch && method === 'DELETE') {
+      const [_, kind, docId] = delMatch
+      const coll = kind === 'fx' ? 'currency_exchanges' : kind
+      const doc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
+      if (!doc) return bad('العنصر غير موجود', 404)
+      // Reverse balance updates & delete linked journal entry
+      const je = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
+      if (kind === 'tickets' || kind === 'visas') {
+        if (doc.payment_method === 'cash' && doc.box_id) {
+          await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
+        } else {
+          await updateBalance(db, 'clients', { id: doc.client_id, tenant_id: T }, doc.currency, -doc.sale_price)
+        }
+        await updateBalance(db, 'suppliers', { id: doc.supplier_id, tenant_id: T }, doc.currency, -doc.cost)
+      } else if (kind === 'vouchers') {
+        if (doc.type === 'receipt') {
+          await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.amount)
+          if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
+          if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+        } else {
+          await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, +doc.amount)
+          if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
+          if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+        }
+      } else if (kind === 'fx') {
+        if (doc.type === 'buy') {
+          await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, -doc.amount)
+          await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, +doc.counter_amount)
+        } else {
+          await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, +doc.amount)
+          await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, -doc.counter_amount)
+        }
+      }
+      if (je) {
+        await db.collection('journal_entries').deleteOne({ id: je.id })
+        await db.collection('tenants').updateOne({ id: T }, { $inc: { 'journal_quota.used': -1 } })
+      }
+      await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
+      return ok({ success: true, deleted: kind, id: docId })
+    }
+
     // Manual Journal Voucher (single-currency or dual)
     if (route === '/journal-entries' && method === 'POST') {
       const b = await request.json()
@@ -667,6 +741,7 @@ async function handleRoute(request, { params }) {
 
     return bad(`Route ${route} not found`, 404)
   } catch (e) {
+    if (e.code === 'QUOTA_EXCEEDED') return bad(e.message, 402)
     console.error('API Error:', e)
     return bad('Internal server error: ' + e.message, 500)
   }
