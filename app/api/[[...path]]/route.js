@@ -41,6 +41,7 @@ async function seedTenantDefaults(db, tenantId) {
     { id: uuidv4(), tenant_id: t, code: '4101', name_ar: 'إيرادات عمولات التذاكر', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '4102', name_ar: 'إيرادات عمولات التأشيرات والموافقات', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '4103', name_ar: 'إيرادات خدمات إضافية', type: 'revenue', parent: '4', is_group: false, created_at: now },
+    { id: uuidv4(), tenant_id: t, code: '4104', name_ar: 'أرباح وخسائر فروق العملات (مصارفة)', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '5', name_ar: 'المصروفات', type: 'expense', parent: null, is_group: true, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '5101', name_ar: 'مصاريف تشغيلية', type: 'expense', parent: '5', is_group: true, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '5201', name_ar: 'فروق عملة وتسويات', type: 'expense', parent: '5', is_group: false, created_at: now },
@@ -61,6 +62,19 @@ async function seedInitial(db) {
   // Purge legacy data lacking tenant_id (from earlier MVP)
   for (const c of ['accounts', 'boxes', 'clients', 'suppliers', 'tickets', 'visas', 'vouchers', 'journal_entries', 'settings']) {
     await db.collection(c).deleteMany({ tenant_id: { $exists: false } }).catch(() => {})
+  }
+
+  // Migration: ensure FX 4104 account exists for every tenant
+  const allTenants = await db.collection('tenants').find({}).toArray()
+  for (const tn of allTenants) {
+    const has = await db.collection('accounts').findOne({ tenant_id: tn.id, code: '4104' })
+    if (!has) {
+      await db.collection('accounts').insertOne({
+        id: uuidv4(), tenant_id: tn.id, code: '4104',
+        name_ar: 'أرباح وخسائر فروق العملات (مصارفة)',
+        type: 'revenue', parent: '4', is_group: false, created_at: new Date(),
+      })
+    }
   }
 
   // Super Admin bootstrap
@@ -495,6 +509,151 @@ async function handleRoute(request, { params }) {
     // Journal entries
     if (route === '/journal-entries' && method === 'GET') return ok(clean(await db.collection('journal_entries').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
 
+    // Manual Journal Voucher (single-currency or dual)
+    if (route === '/journal-entries' && method === 'POST') {
+      const b = await request.json()
+      // Modes: 
+      //  A) simple: { date, currency, description, lines: [{account_code, account_name, party_type, party_id, party_name, debit, credit}] }
+      //  B) dual:   { date, description, dual: true, debit_account_code, debit_account_name, debit_currency, debit_amount, credit_account_code, credit_account_name, credit_currency, credit_amount, exchange_rate_debit, exchange_rate_credit }
+      if (b.dual) {
+        const da = Number(b.debit_amount) || 0
+        const ca = Number(b.credit_amount) || 0
+        if (da <= 0 || ca <= 0) return bad('المبالغ يجب أن تكون أكبر من صفر')
+        if (!CURRENCIES.includes(b.debit_currency) || !CURRENCIES.includes(b.credit_currency)) return bad('العملات غير صالحة')
+        const rates = (await db.collection('tenant_settings').findOne(tf))?.rates || DEFAULT_RATES
+        // Convert both sides to base (USD) using tenant rates
+        const debitInUSD = da * (rates[b.debit_currency] || 1)
+        const creditInUSD = ca * (rates[b.credit_currency] || 1)
+        const fxDiff = +(debitInUSD - creditInUSD).toFixed(4)  // if debit>credit -> gain; else loss (credit)
+        const lines = [
+          { account_code: b.debit_account_code || 'MANUAL', account_name: b.debit_account_name || 'حساب مدين', party_type: b.debit_party_type || 'manual', party_id: b.debit_party_id || null, party_name: b.debit_party_name || b.debit_account_name || '—', currency: b.debit_currency, debit: da, credit: 0 },
+          { account_code: b.credit_account_code || 'MANUAL', account_name: b.credit_account_name || 'حساب دائن', party_type: b.credit_party_type || 'manual', party_id: b.credit_party_id || null, party_name: b.credit_party_name || b.credit_account_name || '—', currency: b.credit_currency, debit: 0, credit: ca },
+        ]
+        // Add FX gain/loss balancing line in USD equivalent
+        if (Math.abs(fxDiff) > 0.005) {
+          if (fxDiff > 0) {
+            // Debit side is larger in USD equivalent -> credit FX gain
+            lines.push({ account_code: '4104', account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: 'USD', debit: 0, credit: +fxDiff.toFixed(2) })
+          } else {
+            // Credit side is larger -> debit FX loss
+            lines.push({ account_code: '4104', account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: 'USD', debit: +Math.abs(fxDiff).toFixed(2), credit: 0 })
+          }
+        }
+        // Update client/supplier balances if party set (only on their native currency side)
+        for (const side of ['debit', 'credit']) {
+          const pt = b[`${side}_party_type`], pid = b[`${side}_party_id`], cur = b[`${side}_currency`]
+          const amt = side === 'debit' ? da : ca
+          if (pt === 'client' && pid) await updateBalance(db, 'clients', { id: pid, tenant_id: T }, cur, side === 'debit' ? amt : -amt)
+          if (pt === 'supplier' && pid) await updateBalance(db, 'suppliers', { id: pid, tenant_id: T }, cur, side === 'debit' ? -amt : amt)
+          if (pt === 'box' && pid) await updateBalance(db, 'boxes', { id: pid, tenant_id: T }, cur, side === 'debit' ? amt : -amt)
+        }
+        const je = await createJournalEntry(db, T, {
+          date: b.date, description: b.description || 'سند قيد ثنائي (مصارفة/تسوية)',
+          ref_type: 'manual_dual', ref_id: uuidv4(), currency: 'MULTI', lines,
+        })
+        return ok({ ...je, _id: undefined, fx_diff_usd: fxDiff })
+      }
+      // Single-currency manual JE
+      if (!CURRENCIES.includes(b.currency)) return bad('عملة غير صالحة')
+      const lines = Array.isArray(b.lines) ? b.lines : []
+      if (lines.length < 2) return bad('يجب إدخال طرفين على الأقل')
+      const totalD = lines.reduce((s, l) => s + (Number(l.debit) || 0), 0)
+      const totalC = lines.reduce((s, l) => s + (Number(l.credit) || 0), 0)
+      if (Math.abs(totalD - totalC) > 0.01) return bad(`القيد غير متوازن: مدين ${totalD.toFixed(2)} ≠ دائن ${totalC.toFixed(2)}`)
+      // Apply balance updates for known party types
+      for (const l of lines) {
+        const debit = Number(l.debit) || 0, credit = Number(l.credit) || 0
+        const delta = debit - credit
+        if (l.party_type === 'client' && l.party_id) await updateBalance(db, 'clients', { id: l.party_id, tenant_id: T }, b.currency, delta)
+        if (l.party_type === 'supplier' && l.party_id) await updateBalance(db, 'suppliers', { id: l.party_id, tenant_id: T }, b.currency, -delta)
+        if (l.party_type === 'box' && l.party_id) await updateBalance(db, 'boxes', { id: l.party_id, tenant_id: T }, b.currency, delta)
+      }
+      const je = await createJournalEntry(db, T, {
+        date: b.date, description: b.description || 'قيد يومية يدوي',
+        ref_type: 'manual', ref_id: uuidv4(), currency: b.currency,
+        lines: lines.map(l => ({
+          account_code: l.account_code || 'MANUAL', account_name: l.account_name || '—',
+          party_type: l.party_type || 'manual', party_id: l.party_id || null, party_name: l.party_name || l.account_name || '—',
+          debit: Number(l.debit) || 0, credit: Number(l.credit) || 0,
+        })),
+      })
+      return ok({ ...je, _id: undefined })
+    }
+
+    // ============ Currency Exchange (Buy/Sell) ============
+    if (route === '/fx' && method === 'GET') {
+      return ok(clean(await db.collection('currency_exchanges').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+    }
+    if (route === '/fx' && method === 'POST') {
+      const b = await request.json()
+      if (!['buy', 'sell'].includes(b.type)) return bad('نوع العملية غير صالح')
+      if (!CURRENCIES.includes(b.currency) || !CURRENCIES.includes(b.counter_currency)) return bad('العملات غير صالحة')
+      if (b.currency === b.counter_currency) return bad('يجب اختيار عملتين مختلفتين')
+      const amount = Number(b.amount) || 0
+      const rate = Number(b.exchange_rate) || 0
+      if (amount <= 0 || rate <= 0) return bad('المبلغ وسعر الصرف مطلوبان')
+      const counter_amount = +(amount * rate).toFixed(2)
+      const boxCur = await db.collection('boxes').findOne({ id: b.box_currency_id, tenant_id: T })
+      const boxCounter = await db.collection('boxes').findOne({ id: b.box_counter_id, tenant_id: T })
+      if (!boxCur || !boxCounter) return bad('اختر صناديق العملتين')
+      const rates = (await db.collection('tenant_settings').findOne(tf))?.rates || DEFAULT_RATES
+      // Compute FX P&L in USD equivalent:
+      //   BUY: office received `amount` (currency), paid `counter_amount` (counter). fx_gain_usd = amount*rates[currency] - counter_amount*rates[counter_currency]
+      //   SELL: office paid `amount`, received `counter_amount`. fx_gain_usd = counter_amount*rates[counter_currency] - amount*rates[currency]
+      const inUsd = amount * (rates[b.currency] || 1)
+      const outUsd = counter_amount * (rates[b.counter_currency] || 1)
+      const fx_gain_usd = +(b.type === 'buy' ? (inUsd - outUsd) : (outUsd - inUsd)).toFixed(4)
+      const doc = {
+        id: uuidv4(), tenant_id: T, type: b.type,
+        date: new Date(b.date || Date.now()),
+        currency: b.currency, amount, exchange_rate: rate,
+        counter_currency: b.counter_currency, counter_amount,
+        payment_method: b.payment_method || 'cash',
+        box_currency_id: boxCur.id, box_currency_name: boxCur.name_ar,
+        box_counter_id: boxCounter.id, box_counter_name: boxCounter.name_ar,
+        customer_name: b.customer_name || '',
+        customer_phone: b.customer_phone || '',
+        id_type: b.id_type || '',
+        id_number: b.id_number || '',
+        source_of_funds: b.source_of_funds || '',
+        purpose: b.purpose || '',
+        remarks: b.remarks || '',
+        fx_gain_usd, created_at: new Date(),
+      }
+      await db.collection('currency_exchanges').insertOne(doc)
+      // Update box balances
+      if (b.type === 'buy') {
+        await updateBalance(db, 'boxes', { id: boxCur.id, tenant_id: T }, b.currency, +amount)
+        await updateBalance(db, 'boxes', { id: boxCounter.id, tenant_id: T }, b.counter_currency, -counter_amount)
+      } else {
+        await updateBalance(db, 'boxes', { id: boxCur.id, tenant_id: T }, b.currency, -amount)
+        await updateBalance(db, 'boxes', { id: boxCounter.id, tenant_id: T }, b.counter_currency, +counter_amount)
+      }
+      // Journal entry (multi-currency lines)
+      const lines = []
+      if (b.type === 'buy') {
+        lines.push({ account_code: boxCur.type === 'cash' ? '1101' : '1201', account_name: boxCur.name_ar, party_type: 'box', party_id: boxCur.id, party_name: boxCur.name_ar, currency: b.currency, debit: amount, credit: 0 })
+        lines.push({ account_code: boxCounter.type === 'cash' ? '1101' : '1201', account_name: boxCounter.name_ar, party_type: 'box', party_id: boxCounter.id, party_name: boxCounter.name_ar, currency: b.counter_currency, debit: 0, credit: counter_amount })
+      } else {
+        lines.push({ account_code: boxCounter.type === 'cash' ? '1101' : '1201', account_name: boxCounter.name_ar, party_type: 'box', party_id: boxCounter.id, party_name: boxCounter.name_ar, currency: b.counter_currency, debit: counter_amount, credit: 0 })
+        lines.push({ account_code: boxCur.type === 'cash' ? '1101' : '1201', account_name: boxCur.name_ar, party_type: 'box', party_id: boxCur.id, party_name: boxCur.name_ar, currency: b.currency, debit: 0, credit: amount })
+      }
+      if (Math.abs(fx_gain_usd) > 0.005) {
+        if (fx_gain_usd > 0) {
+          lines.push({ account_code: '4104', account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: 'USD', debit: 0, credit: +fx_gain_usd.toFixed(2) })
+        } else {
+          lines.push({ account_code: '4104', account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: 'USD', debit: +Math.abs(fx_gain_usd).toFixed(2), credit: 0 })
+        }
+      }
+      await createJournalEntry(db, T, {
+        date: doc.date,
+        description: `${b.type === 'buy' ? 'شراء عملة' : 'بيع عملة'} — ${amount} ${b.currency} @ ${rate} ${b.counter_currency}${doc.customer_name ? ' — ' + doc.customer_name : ''}`,
+        ref_type: b.type === 'buy' ? 'fx_buy' : 'fx_sell',
+        ref_id: doc.id, currency: 'MULTI', lines,
+      })
+      const { _id, ...rest } = doc; return ok(rest)
+    }
+
     // Dashboard
     if (route === '/dashboard' && method === 'GET') {
       return ok(await computeDashboard(db, T))
@@ -522,25 +681,39 @@ async function createTicket(db, T, b) {
   const cli = await db.collection('clients').findOne({ id: b.client_id, tenant_id: T })
   const sup = await db.collection('suppliers').findOne({ id: b.supplier_id, tenant_id: T })
   if (!cli || !sup) return { error: 'العميل أو المورد غير موجود' }
+  const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+  let box = null
+  if (paymentMethod === 'cash') {
+    if (!b.box_id) return { error: 'اختر الصندوق/البنك للدفع النقدي' }
+    box = await db.collection('boxes').findOne({ id: b.box_id, tenant_id: T })
+    if (!box) return { error: 'الصندوق غير موجود' }
+  }
   const doc = {
     id: uuidv4(), tenant_id: T, date: new Date(b.date || Date.now()), currency: b.currency,
     exchange_rate: Number(b.exchange_rate) || 1,
     client_id: cli.id, client_name: cli.name, supplier_id: sup.id, supplier_name: sup.name,
     pnr: b.pnr || '', route: b.route || '', passenger_name: b.passenger_name || '',
     passport_no: b.passport_no || '', travel_date: b.travel_date ? new Date(b.travel_date) : null,
-    cost, sale_price: sale, commission, created_at: new Date(),
+    cost, sale_price: sale, commission,
+    payment_method: paymentMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
+    created_at: new Date(),
   }
   await db.collection('tickets').insertOne(doc)
-  await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
+  // Balance updates + journal
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
+  const lines = []
+  if (paymentMethod === 'cash') {
+    await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
+    lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
+  } else {
+    await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
+    lines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
+  }
+  lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
+  lines.push({ account_code: '4101', account_name: 'إيرادات عمولات التذاكر', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التذاكر', debit: 0, credit: commission })
   await createJournalEntry(db, T, {
-    date: doc.date, description: `حجز تذكرة PNR ${doc.pnr || '-'} — ${cli.name}`,
-    ref_type: 'ticket', ref_id: doc.id, currency: b.currency,
-    lines: [
-      { account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 },
-      { account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost },
-      { account_code: '4101', account_name: 'إيرادات عمولات التذاكر', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التذاكر', debit: 0, credit: commission },
-    ],
+    date: doc.date, description: `حجز تذكرة ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} PNR ${doc.pnr || '-'} — ${cli.name}`,
+    ref_type: 'ticket', ref_id: doc.id, currency: b.currency, lines,
   })
   const { _id, ...rest } = doc; return { doc: rest }
 }
@@ -553,25 +726,38 @@ async function createVisa(db, T, b) {
   const cli = await db.collection('clients').findOne({ id: b.client_id, tenant_id: T })
   const sup = await db.collection('suppliers').findOne({ id: b.supplier_id, tenant_id: T })
   if (!cli || !sup) return { error: 'العميل أو المورد غير موجود' }
+  const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+  let box = null
+  if (paymentMethod === 'cash') {
+    if (!b.box_id) return { error: 'اختر الصندوق/البنك للدفع النقدي' }
+    box = await db.collection('boxes').findOne({ id: b.box_id, tenant_id: T })
+    if (!box) return { error: 'الصندوق غير موجود' }
+  }
   const doc = {
     id: uuidv4(), tenant_id: T, date: new Date(b.date || Date.now()), service_type: b.service_type || 'تأشيرة عمرة',
     currency: b.currency, exchange_rate: Number(b.exchange_rate) || 1,
     client_id: cli.id, client_name: cli.name, supplier_id: sup.id, supplier_name: sup.name,
     passenger_name: b.passenger_name || '', passport_no: b.passport_no || '',
     nationality: b.nationality || '', attachment_url: b.attachment_url || '',
-    cost, sale_price: sale, commission, created_at: new Date(),
+    cost, sale_price: sale, commission,
+    payment_method: paymentMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
+    created_at: new Date(),
   }
   await db.collection('visas').insertOne(doc)
-  await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
+  const lines = []
+  if (paymentMethod === 'cash') {
+    await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
+    lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
+  } else {
+    await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
+    lines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
+  }
+  lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
+  lines.push({ account_code: '4102', account_name: 'إيرادات عمولات التأشيرات', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التأشيرات', debit: 0, credit: commission })
   await createJournalEntry(db, T, {
-    date: doc.date, description: `${doc.service_type} — ${doc.passenger_name || cli.name}`,
-    ref_type: 'visa', ref_id: doc.id, currency: b.currency,
-    lines: [
-      { account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 },
-      { account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost },
-      { account_code: '4102', account_name: 'إيرادات عمولات التأشيرات', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التأشيرات', debit: 0, credit: commission },
-    ],
+    date: doc.date, description: `${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.passenger_name || cli.name}`,
+    ref_type: 'visa', ref_id: doc.id, currency: b.currency, lines,
   })
   const { _id, ...rest } = doc; return { doc: rest }
 }
@@ -725,15 +911,16 @@ async function reportTrialBalance(db, T) {
   const map = {}
   for (const je of jes) {
     for (const l of je.lines || []) {
+      const cur = l.currency || je.currency
       const label = l.party_name || l.account_name
-      const key = `${l.account_code}|${je.currency}|${label}`
-      if (!map[key]) map[key] = { code: l.account_code, name: l.account_name, party_name: l.party_name, currency: je.currency, debit: 0, credit: 0 }
+      const key = `${l.account_code}|${cur}|${label}`
+      if (!map[key]) map[key] = { code: l.account_code, name: l.account_name, party_name: l.party_name, currency: cur, debit: 0, credit: 0 }
       map[key].debit += l.debit || 0; map[key].credit += l.credit || 0
     }
   }
   const rows = Object.values(map).map(r => ({ ...r, balance: r.debit - r.credit }))
   const totals = { USD: { d: 0, c: 0 }, SAR: { d: 0, c: 0 }, YER: { d: 0, c: 0 } }
-  for (const r of rows) { totals[r.currency].d += r.debit; totals[r.currency].c += r.credit }
+  for (const r of rows) { if (totals[r.currency]) { totals[r.currency].d += r.debit; totals[r.currency].c += r.credit } }
   return { rows, totals }
 }
 async function reportIncome(db, T, q) {
@@ -741,19 +928,29 @@ async function reportIncome(db, T, q) {
   const to = q.to ? new Date(q.to) : new Date(); to.setHours(23,59,59,999)
   const tf = { tenant_id: T, date: { $gte: from, $lte: to } }
   const rates = (await db.collection('tenant_settings').findOne({ tenant_id: T }))?.rates || DEFAULT_RATES
-  const [tickets, visas, vouchers] = await Promise.all([
+  const [tickets, visas, vouchers, jes] = await Promise.all([
     db.collection('tickets').find(tf).toArray(),
     db.collection('visas').find(tf).toArray(),
     db.collection('vouchers').find({ ...tf, type: 'payment', party_type: 'expense' }).toArray(),
+    db.collection('journal_entries').find(tf).toArray(),
   ])
   const rev = { tickets: {USD:0,SAR:0,YER:0}, visas: {USD:0,SAR:0,YER:0}, other: {USD:0,SAR:0,YER:0} }
   for (const t of tickets) rev.tickets[t.currency] += t.commission || 0
   for (const v of visas) rev.visas[v.currency] += v.commission || 0
   const exp = { USD:0, SAR:0, YER:0 }
   for (const p of vouchers) exp[p.currency] += p.amount || 0
-  const totalRevUsd = Object.values(rev).reduce((s, cur) => s + Object.entries(cur).reduce((ss, [c, v]) => ss + v * (rates[c] || 1), 0), 0)
+  // FX gain/loss from account 4104 (stored in USD reporting)
+  let fx_gain_usd = 0
+  for (const je of jes) {
+    for (const l of je.lines || []) {
+      if (l.account_code === '4104') {
+        fx_gain_usd += (l.credit || 0) - (l.debit || 0)  // credit is gain, debit is loss
+      }
+    }
+  }
+  const totalRevUsd = Object.values(rev).reduce((s, cur) => s + Object.entries(cur).reduce((ss, [c, v]) => ss + v * (rates[c] || 1), 0), 0) + fx_gain_usd
   const totalExpUsd = Object.entries(exp).reduce((s, [c, v]) => s + v * (rates[c] || 1), 0)
-  return { revenue: rev, expenses: exp, total_revenue_usd: +totalRevUsd.toFixed(2), total_expenses_usd: +totalExpUsd.toFixed(2), net_profit_usd: +(totalRevUsd - totalExpUsd).toFixed(2) }
+  return { revenue: rev, expenses: exp, fx_gain_usd: +fx_gain_usd.toFixed(2), total_revenue_usd: +totalRevUsd.toFixed(2), total_expenses_usd: +totalExpUsd.toFixed(2), net_profit_usd: +(totalRevUsd - totalExpUsd).toFixed(2) }
 }
 
 export const GET = handleRoute

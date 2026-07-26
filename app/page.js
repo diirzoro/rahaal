@@ -10,6 +10,7 @@ import {
   Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
   Building, Settings, Upload, FileSpreadsheet, CheckCircle2, XCircle,
   AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key,
+  ArrowLeftRight,
 } from 'lucide-react'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTip, ResponsiveContainer,
@@ -325,6 +326,7 @@ const NAV = [
   { id: 'dashboard', label: 'لوحة التحكم', icon: LayoutDashboard, color: 'from-blue-600 to-cyan-500' },
   { id: 'tickets',   label: 'حجز التذاكر', icon: Plane, color: 'from-sky-600 to-blue-500' },
   { id: 'visas',     label: 'التأشيرات والخدمات', icon: FileBadge2, color: 'from-emerald-600 to-teal-500' },
+  { id: 'fx',        label: 'صرافة العملات', icon: ArrowLeftRight, color: 'from-fuchsia-600 to-purple-500' },
   { id: 'receipt',   label: 'سند قبض', icon: ArrowDownLeft, color: 'from-green-600 to-emerald-500' },
   { id: 'payment',   label: 'سند صرف', icon: ArrowUpRight, color: 'from-rose-600 to-pink-500' },
   { id: 'clients',   label: 'العملاء', icon: Users, color: 'from-indigo-600 to-violet-500' },
@@ -606,22 +608,26 @@ function TicketsScreen() {
 }
 
 function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }) {
-  const [form, setForm] = useState({ date: todayISO(), currency: 'USD', exchange_rate: 1, client_id: '', supplier_id: '', pnr: '', route: '', passenger_name: '', passport_no: '', travel_date: '', cost: '', sale_price: '' })
+  const [form, setForm] = useState({ date: todayISO(), currency: 'USD', exchange_rate: 1, client_id: '', supplier_id: '', pnr: '', route: '', passenger_name: '', passport_no: '', travel_date: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' })
+  const [boxes, setBoxes] = useState([])
   const [saving, setSaving] = useState(false)
   const [quickC, setQuickC] = useState(false); const [quickS, setQuickS] = useState(false)
   useEffect(() => { if (rates && form.currency) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
+  useEffect(() => { if (open) api('/boxes').then(setBoxes).catch(()=>{}) }, [open])
+  useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: boxes[0].id })) }, [form.payment_method, boxes])
   const commission = useMemo(() => (Number(form.sale_price) || 0) - (Number(form.cost) || 0), [form.sale_price, form.cost])
   const submit = async () => {
     if (!form.client_id || !form.supplier_id) return toast.error('اختر العميل والمورد')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
-    try { setSaving(true); await api('/tickets', { method: 'POST', body: form }); onOpenChange(false); setForm({ date: todayISO(), currency: 'USD', exchange_rate: 1, client_id: '', supplier_id: '', pnr: '', route: '', passenger_name: '', passport_no: '', travel_date: '', cost: '', sale_price: '' }); onSaved() }
+    if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق للدفع النقدي')
+    try { setSaving(true); await api('/tickets', { method: 'POST', body: form }); onOpenChange(false); setForm({ date: todayISO(), currency: 'USD', exchange_rate: 1, client_id: '', supplier_id: '', pnr: '', route: '', passenger_name: '', passport_no: '', travel_date: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }); onSaved() }
     catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" dir="rtl">
-          <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><div className="w-9 h-9 rounded-lg grad-brand flex items-center justify-center"><Plane className="w-4 h-4 text-white -rotate-45" /></div>حجز تذكرة جديدة</DialogTitle><DialogDescription>سيتم إنشاء قيد يومية تلقائي: العميل مدين، المورد دائن، العمولة إيراد</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><div className="w-9 h-9 rounded-lg grad-brand flex items-center justify-center"><Plane className="w-4 h-4 text-white -rotate-45" /></div>حجز تذكرة جديدة</DialogTitle><DialogDescription>سيتم إنشاء قيد يومية تلقائي — نقد (خصم من الصندوق) أو آجل (على حساب العميل)</DialogDescription></DialogHeader>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-2">
             <Field label="تاريخ الحركة"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
             <Field label="نوع العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
@@ -644,6 +650,24 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }
             <Field label="رقم الجواز"><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value })} /></Field>
             <Field label="تاريخ السفر"><Input type="date" value={form.travel_date} onChange={e => setForm({ ...form, travel_date: e.target.value })} /></Field>
           </div>
+
+          {/* Payment method selector */}
+          <div className="bg-slate-50 border rounded-xl p-3 mt-2 flex items-center gap-4">
+            <div className="text-sm font-bold text-slate-700">طريقة الدفع:</div>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => setForm({ ...form, payment_method: 'credit' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'credit' ? 'bg-amber-500 text-white border-amber-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-amber-400'}`}>🕓 آجل (على حساب العميل)</button>
+              <button type="button" onClick={() => setForm({ ...form, payment_method: 'cash' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'cash' ? 'bg-emerald-500 text-white border-emerald-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-emerald-400'}`}>💵 نقد (صندوق/بنك)</button>
+            </div>
+            {form.payment_method === 'cash' && (
+              <div className="flex-1">
+                <Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })}>
+                  <SelectTrigger><SelectValue placeholder="اختر الصندوق/البنك" /></SelectTrigger>
+                  <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+            )}
+          </div>
+
           <div className="bg-gradient-to-l from-blue-50 to-emerald-50 border rounded-xl p-4 mt-2">
             <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Banknote className="w-4 h-4 text-blue-600" /> الجانب المالي</div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1038,15 +1062,19 @@ function VisasScreen() {
 }
 
 function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }) {
-  const [form, setForm] = useState({ date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', cost: '', sale_price: '' })
+  const [form, setForm] = useState({ date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' })
+  const [boxes, setBoxes] = useState([])
   const [saving, setSaving] = useState(false)
   const [qc, setQc] = useState(false); const [qs, setQs] = useState(false)
   useEffect(() => { if (rates) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
+  useEffect(() => { if (open) api('/boxes').then(setBoxes).catch(()=>{}) }, [open])
+  useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: boxes[0].id })) }, [form.payment_method, boxes])
   const commission = (Number(form.sale_price) || 0) - (Number(form.cost) || 0)
   const submit = async () => {
     if (!form.client_id || !form.supplier_id) return toast.error('اختر العميل والمورد')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
-    try { setSaving(true); await api('/visas', { method: 'POST', body: form }); onOpenChange(false); onSaved(); setForm({ date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', cost: '', sale_price: '' }) }
+    if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق للدفع النقدي')
+    try { setSaving(true); await api('/visas', { method: 'POST', body: form }); onOpenChange(false); onSaved(); setForm({ date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }) }
     catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
   return (
@@ -1064,6 +1092,16 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }) 
             <Field label="اسم صاحب التأشيرة"><Input value={form.passenger_name} onChange={e => setForm({ ...form, passenger_name: e.target.value })} /></Field>
             <Field label="رقم الجواز"><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value })} /></Field>
             <Field label="الجنسية"><Input value={form.nationality} onChange={e => setForm({ ...form, nationality: e.target.value })} /></Field>
+          </div>
+          <div className="bg-slate-50 border rounded-xl p-3 mt-2 flex items-center gap-4">
+            <div className="text-sm font-bold text-slate-700">طريقة الدفع:</div>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => setForm({ ...form, payment_method: 'credit' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'credit' ? 'bg-amber-500 text-white border-amber-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-amber-400'}`}>🕓 آجل</button>
+              <button type="button" onClick={() => setForm({ ...form, payment_method: 'cash' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'cash' ? 'bg-emerald-500 text-white border-emerald-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-emerald-400'}`}>💵 نقد</button>
+            </div>
+            {form.payment_method === 'cash' && (
+              <div className="flex-1"><Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })}><SelectTrigger><SelectValue placeholder="اختر الصندوق/البنك" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></div>
+            )}
           </div>
           <div className="bg-gradient-to-l from-emerald-50 to-blue-50 border rounded-xl p-4 mt-2">
             <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Banknote className="w-4 h-4 text-emerald-600" /> الجانب المالي</div>
@@ -1267,19 +1305,43 @@ function ChartScreen() {
 
 function JournalScreen() {
   const [rows, setRows] = useState([])
-  useEffect(() => { api('/journal-entries').then(setRows).catch(e => toast.error(e.message)) }, [])
+  const [open, setOpen] = useState(false)
+  const load = () => api('/journal-entries').then(setRows).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [])
   return (
     <div className="space-y-6">
-      <TopBar title="قيود اليومية" subtitle="جميع القيود المحاسبية التلقائية" />
+      <TopBar title="قيود اليومية" subtitle="جميع القيود المحاسبية التلقائية واليدوية"
+        right={<Button onClick={() => setOpen(true)} className="gap-2 grad-slate text-white shadow-lg"><Plus className="w-4 h-4" /> إضافة قيد يومي</Button>} />
       <div className="space-y-3">
         {rows.map(je => {
           const totalDebit = (je.lines || []).reduce((s, l) => s + (l.debit || 0), 0)
+          const isMulti = je.currency === 'MULTI'
           return (
             <Card key={je.id} className="overflow-hidden">
-              <CardHeader className="pb-2 bg-slate-50"><div className="flex items-center justify-between"><div><div className="text-sm font-bold text-slate-800">{je.description}</div><div className="text-xs text-slate-500">{fmtDate(je.date)} • {je.ref_type} • {je.currency}</div></div><Badge variant="secondary" className="text-sm font-bold">{fmt(totalDebit, je.currency)}</Badge></div></CardHeader>
+              <CardHeader className="pb-2 bg-slate-50">
+                <div className="flex items-center justify-between">
+                  <div><div className="text-sm font-bold text-slate-800">{je.description}</div><div className="text-xs text-slate-500">{fmtDate(je.date)} • {je.ref_type} • {isMulti ? 'متعدد العملات' : je.currency}</div></div>
+                  {!isMulti && <Badge variant="secondary" className="text-sm font-bold">{fmt(totalDebit, je.currency)}</Badge>}
+                  {isMulti && <Badge className="bg-fuchsia-100 text-fuchsia-700 hover:bg-fuchsia-100">قيد متعدد العملات</Badge>}
+                </div>
+              </CardHeader>
               <CardContent className="p-0">
-                <Table><TableHeader><TableRow><TableHead>الحساب</TableHead><TableHead>الطرف</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead></TableRow></TableHeader>
-                  <TableBody>{(je.lines || []).map((l, i) => (<TableRow key={i}><TableCell className="text-xs">{l.account_code} — {l.account_name}</TableCell><TableCell className="text-xs">{l.party_name}</TableCell><TableCell className="text-left font-semibold text-blue-700">{l.debit ? fmt(l.debit, je.currency) : '—'}</TableCell><TableCell className="text-left font-semibold text-rose-700">{l.credit ? fmt(l.credit, je.currency) : '—'}</TableCell></TableRow>))}</TableBody>
+                <Table>
+                  <TableHeader><TableRow><TableHead>الحساب</TableHead><TableHead>الطرف</TableHead>{isMulti && <TableHead>العملة</TableHead>}<TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead></TableRow></TableHeader>
+                  <TableBody>
+                    {(je.lines || []).map((l, i) => {
+                      const cur = l.currency || je.currency
+                      return (
+                        <TableRow key={i}>
+                          <TableCell className="text-xs">{l.account_code} — {l.account_name}</TableCell>
+                          <TableCell className="text-xs">{l.party_name}</TableCell>
+                          {isMulti && <TableCell><Badge variant="outline">{cur}</Badge></TableCell>}
+                          <TableCell className="text-left font-semibold text-blue-700">{l.debit ? fmt(l.debit, cur) : '—'}</TableCell>
+                          <TableCell className="text-left font-semibold text-rose-700">{l.credit ? fmt(l.credit, cur) : '—'}</TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
                 </Table>
               </CardContent>
             </Card>
@@ -1287,6 +1349,7 @@ function JournalScreen() {
         })}
         {rows.length === 0 && <div className="text-center text-slate-400 py-10">لا توجد قيود</div>}
       </div>
+      <ManualJournalDialog open={open} onOpenChange={setOpen} onSaved={load} />
     </div>
   )
 }
@@ -1379,6 +1442,14 @@ function IncomeStatement() {
           <div><div className="text-sm font-bold text-slate-700 mb-2">الإيرادات</div>
             <div className="grid grid-cols-3 gap-2">{['tickets', 'visas', 'other'].map(k => (<Card key={k}><CardContent className="p-3"><div className="text-xs text-slate-500">{k === 'tickets' ? 'عمولات تذاكر' : k === 'visas' ? 'عمولات تأشيرات' : 'أخرى'}</div>{CURRENCIES.map(c => <div key={c} className="text-xs flex justify-between"><span>{c}</span><span className="font-bold text-emerald-600">{fmt(data.revenue[k][c], c)}</span></div>)}</CardContent></Card>))}</div>
           </div>
+          {data.fx_gain_usd !== undefined && (
+            <Card className={`border-2 ${data.fx_gain_usd >= 0 ? 'border-emerald-200 bg-emerald-50/50' : 'border-rose-200 bg-rose-50/50'}`}>
+              <CardContent className="p-4 flex items-center justify-between">
+                <div><div className="text-sm font-bold text-slate-700">{data.fx_gain_usd >= 0 ? 'أرباح' : 'خسائر'} فروق العملات (المصارفة) — حساب 4104</div><div className="text-xs text-slate-500">بمعادل الدولار</div></div>
+                <div className={`text-2xl font-extrabold ${data.fx_gain_usd >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(data.fx_gain_usd, 'USD')}</div>
+              </CardContent>
+            </Card>
+          )}
           <div><div className="text-sm font-bold text-slate-700 mb-2">المصروفات</div>
             <Card><CardContent className="p-3">{CURRENCIES.map(c => <div key={c} className="text-sm flex justify-between"><span>{c}</span><span className="font-bold text-rose-600">{fmt(data.expenses[c], c)}</span></div>)}</CardContent></Card>
           </div>
@@ -1590,6 +1661,7 @@ function TenantApp() {
         {tab === 'dashboard' && <Dashboard setTab={setTab} />}
         {tab === 'tickets' && <TicketsScreen />}
         {tab === 'visas' && <VisasScreen />}
+        {tab === 'fx' && <FxScreen />}
         {tab === 'receipt' && <VoucherScreen mode="receipt" />}
         {tab === 'payment' && <VoucherScreen mode="payment" />}
         {tab === 'clients' && <PartiesScreen kind="clients" />}
@@ -1601,6 +1673,278 @@ function TenantApp() {
         {tab === 'settings' && user.role === 'owner' && <OfficeSettings />}
       </main>
     </div>
+  )
+}
+
+// ================================================================
+// CURRENCY EXCHANGE SCREEN (Buy / Sell)
+// ================================================================
+function FxScreen() {
+  const [txs, setTxs] = useState([])
+  const [boxes, setBoxes] = useState([])
+  const [openBuy, setOpenBuy] = useState(false)
+  const [openSell, setOpenSell] = useState(false)
+  const load = async () => {
+    try {
+      const [t, b] = await Promise.all([api('/fx'), api('/boxes')])
+      setTxs(t); setBoxes(b)
+    } catch (e) { toast.error(e.message) }
+  }
+  useEffect(() => { load() }, [])
+  const totalGain = txs.reduce((s, t) => s + (t.fx_gain_usd || 0), 0)
+  return (
+    <div className="space-y-6">
+      <TopBar
+        title="صرافة العملات"
+        subtitle="شراء وبيع العملات مع حساب فروق الصرف تلقائياً في قائمة الدخل"
+        right={
+          <div className="flex gap-2">
+            <Button onClick={() => setOpenBuy(true)} className="gap-2 grad-green text-white shadow-lg"><ArrowDownLeft className="w-4 h-4" /> شراء عملة</Button>
+            <Button onClick={() => setOpenSell(true)} className="gap-2 grad-rose text-white shadow-lg"><ArrowUpRight className="w-4 h-4" /> بيع عملة</Button>
+          </div>
+        }
+      />
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <StatCard icon={ArrowLeftRight} label="إجمالي عمليات الصرافة" value={txs.length} grad="grad-purple" />
+        <StatCard icon={TrendingUp} label={totalGain >= 0 ? 'إجمالي أرباح فروق العملات' : 'إجمالي خسائر فروق العملات'} value={fmt(totalGain, 'USD')} grad={totalGain >= 0 ? 'grad-green' : 'grad-rose'} />
+        <StatCard icon={Sparkles} label="آخر عملية" value={txs[0] ? fmtDate(txs[0].date) : '—'} grad="grad-brand" />
+      </div>
+
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2"><ArrowLeftRight className="w-5 h-5 text-fuchsia-600" /> سجل عمليات الصرافة</CardTitle></CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader><TableRow>
+                <TableHead>التاريخ</TableHead><TableHead>النوع</TableHead>
+                <TableHead>المبلغ</TableHead><TableHead>السعر</TableHead>
+                <TableHead>القيمة</TableHead><TableHead>العميل</TableHead>
+                <TableHead>الغرض</TableHead>
+                <TableHead className="text-left">فرق الصرف (USD)</TableHead>
+              </TableRow></TableHeader>
+              <TableBody>
+                {txs.length === 0 && <TableRow><TableCell colSpan={8} className="text-center text-slate-400 py-8">لا توجد عمليات صرافة</TableCell></TableRow>}
+                {txs.map(t => (
+                  <TableRow key={t.id}>
+                    <TableCell className="text-xs">{fmtDate(t.date)}</TableCell>
+                    <TableCell><Badge className={t.type === 'buy' ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100' : 'bg-rose-100 text-rose-700 hover:bg-rose-100'}>{t.type === 'buy' ? 'شراء' : 'بيع'}</Badge></TableCell>
+                    <TableCell className="font-bold">{fmt(t.amount, t.currency)}</TableCell>
+                    <TableCell className="font-mono text-xs">{t.exchange_rate}</TableCell>
+                    <TableCell className="font-bold">{fmt(t.counter_amount, t.counter_currency)}</TableCell>
+                    <TableCell>{t.customer_name || '—'}</TableCell>
+                    <TableCell className="text-xs">{t.purpose || '—'}</TableCell>
+                    <TableCell className={`text-left font-bold ${(t.fx_gain_usd || 0) >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(t.fx_gain_usd, 'USD')}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
+
+      <FxDialog open={openBuy} onOpenChange={setOpenBuy} type="buy" boxes={boxes} onSaved={() => { load(); toast.success('تم تسجيل عملية الشراء + قيد محاسبي') }} />
+      <FxDialog open={openSell} onOpenChange={setOpenSell} type="sell" boxes={boxes} onSaved={() => { load(); toast.success('تم تسجيل عملية البيع + قيد محاسبي') }} />
+    </div>
+  )
+}
+
+function FxDialog({ open, onOpenChange, type, boxes, onSaved }) {
+  const cfg = type === 'buy'
+    ? { title: 'شراء عملات', color: 'grad-green', desc: 'يشتري المكتب عملة من الزبون ويدفع مقابلها بعملة أخرى' }
+    : { title: 'بيع عملات', color: 'grad-rose', desc: 'يبيع المكتب عملة للزبون ويستلم مقابلها بعملة أخرى' }
+  const [form, setForm] = useState({
+    date: todayISO(), currency: 'USD', amount: '', exchange_rate: '',
+    counter_currency: 'SAR', payment_method: 'cash',
+    box_currency_id: '', box_counter_id: '',
+    customer_name: '', customer_phone: '', id_type: 'هوية وطنية', id_number: '',
+    source_of_funds: '', purpose: '', remarks: '',
+  })
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    if (boxes.length && !form.box_currency_id) {
+      setForm(f => ({ ...f, box_currency_id: boxes[0].id, box_counter_id: boxes[1]?.id || boxes[0].id }))
+    }
+  }, [boxes])
+  const counter_amount = (Number(form.amount) || 0) * (Number(form.exchange_rate) || 0)
+  const submit = async () => {
+    if (!form.amount || !form.exchange_rate) return toast.error('أدخل المبلغ وسعر الصرف')
+    if (form.currency === form.counter_currency) return toast.error('اختر عملتين مختلفتين')
+    if (!form.box_currency_id || !form.box_counter_id) return toast.error('اختر الصناديق')
+    try { setSaving(true); await api('/fx', { method: 'POST', body: { type, ...form } }); onOpenChange(false); onSaved(); setForm(f => ({ ...f, amount: '', exchange_rate: '', customer_name: '', customer_phone: '', id_number: '', source_of_funds: '', purpose: '', remarks: '' })) }
+    catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto" dir="rtl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-xl">
+            <div className={`w-9 h-9 rounded-lg ${cfg.color} flex items-center justify-center`}><ArrowLeftRight className="w-4 h-4 text-white" /></div>
+            {cfg.title}
+          </DialogTitle>
+          <DialogDescription>{cfg.desc}</DialogDescription>
+        </DialogHeader>
+
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-2">
+          <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
+          <Field label="العملة" required><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
+          <Field label="المبلغ" required><Input type="number" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
+          <Field label="سعر الصرف" required><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} className="text-lg font-bold" /></Field>
+
+          <Field label="المقابل بعملة" required><Select value={form.counter_currency} onValueChange={v => setForm({ ...form, counter_currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
+          <Field label="القيمة الإجمالية">
+            <div className={`px-3 py-2 rounded-md border text-lg font-extrabold bg-blue-50 border-blue-200 text-blue-700`}>
+              {fmt(counter_amount, form.counter_currency)}
+            </div>
+          </Field>
+          <Field label={`صندوق ${form.currency}`} required><Select value={form.box_currency_id} onValueChange={v => setForm({ ...form, box_currency_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></Field>
+          <Field label={`صندوق ${form.counter_currency}`} required><Select value={form.box_counter_id} onValueChange={v => setForm({ ...form, box_counter_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></Field>
+        </div>
+
+        <Separator className="my-2" />
+        <div className="text-sm font-bold text-slate-700">بيانات الزبون</div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <Field label="اسم الزبون"><Input value={form.customer_name} onChange={e => setForm({ ...form, customer_name: e.target.value })} /></Field>
+          <Field label="هاتف الزبون"><Input value={form.customer_phone} onChange={e => setForm({ ...form, customer_phone: e.target.value })} /></Field>
+          <Field label="نوع الهوية"><Select value={form.id_type} onValueChange={v => setForm({ ...form, id_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="هوية وطنية">هوية وطنية</SelectItem><SelectItem value="جواز سفر">جواز سفر</SelectItem><SelectItem value="إقامة">إقامة</SelectItem><SelectItem value="أخرى">أخرى</SelectItem></SelectContent></Select></Field>
+          <Field label="رقم الهوية"><Input value={form.id_number} onChange={e => setForm({ ...form, id_number: e.target.value })} /></Field>
+          <Field label="مصدر الأموال"><Input value={form.source_of_funds} onChange={e => setForm({ ...form, source_of_funds: e.target.value })} placeholder="راتب / تجارة / تحويلات" /></Field>
+          <Field label="الغرض من المعاملة"><Input value={form.purpose} onChange={e => setForm({ ...form, purpose: e.target.value })} placeholder="سياحة / علاج / تحويل" /></Field>
+          <div className="md:col-span-3"><Field label="ملاحظات"><Textarea rows={2} value={form.remarks} onChange={e => setForm({ ...form, remarks: e.target.value })} /></Field></div>
+        </div>
+
+        <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 flex items-center gap-2">
+          <Sparkles className="w-4 h-4" /> سيتم حساب فرق الصرف (ربح/خسارة) تلقائياً بمقارنة سعر الصرف المُدخل مع أسعار الصرف المرجعية للمكتب، وترحيله للحساب 4104
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
+          <Button onClick={submit} disabled={saving} className={`${cfg.color} text-white`}>{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ + إنشاء قيد'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ================================================================
+// MANUAL JOURNAL VOUCHER DIALOG (Single & Dual)
+// ================================================================
+function ManualJournalDialog({ open, onOpenChange, onSaved }) {
+  const [mode, setMode] = useState('single')  // 'single' | 'dual'
+  const [singleForm, setSingleForm] = useState({
+    date: todayISO(), currency: 'USD', description: '',
+    lines: [
+      { account_code: '', account_name: '', debit: '', credit: '' },
+      { account_code: '', account_name: '', debit: '', credit: '' },
+    ],
+  })
+  const [dualForm, setDualForm] = useState({
+    date: todayISO(), description: '',
+    debit_account_code: '', debit_account_name: '', debit_currency: 'USD', debit_amount: '',
+    credit_account_code: '', credit_account_name: '', credit_currency: 'SAR', credit_amount: '',
+  })
+  const [saving, setSaving] = useState(false)
+
+  const totalD = singleForm.lines.reduce((s, l) => s + (Number(l.debit) || 0), 0)
+  const totalC = singleForm.lines.reduce((s, l) => s + (Number(l.credit) || 0), 0)
+  const balanced = Math.abs(totalD - totalC) < 0.01 && totalD > 0
+
+  const addLine = () => setSingleForm(f => ({ ...f, lines: [...f.lines, { account_code: '', account_name: '', debit: '', credit: '' }] }))
+  const removeLine = (i) => setSingleForm(f => ({ ...f, lines: f.lines.filter((_, idx) => idx !== i) }))
+  const updateLine = (i, k, v) => setSingleForm(f => ({ ...f, lines: f.lines.map((l, idx) => idx === i ? { ...l, [k]: v } : l) }))
+
+  const submit = async () => {
+    try {
+      setSaving(true)
+      if (mode === 'single') {
+        if (!balanced) return toast.error('القيد غير متوازن — يجب أن يتساوى مجموع المدين والدائن')
+        await api('/journal-entries', { method: 'POST', body: singleForm })
+      } else {
+        if (!dualForm.debit_amount || !dualForm.credit_amount) return toast.error('أدخل المبالغ')
+        await api('/journal-entries', { method: 'POST', body: { dual: true, ...dualForm } })
+      }
+      toast.success('تم حفظ القيد اليدوي')
+      onOpenChange(false); onSaved()
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto" dir="rtl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-xl">
+            <div className="w-9 h-9 rounded-lg grad-slate flex items-center justify-center"><ReceiptText className="w-4 h-4 text-white" /></div>
+            سند قيد يومي (يدوي)
+          </DialogTitle>
+          <DialogDescription>لتسجيل التسويات المحاسبية أو القيود بين حسابات بعملات مختلفة</DialogDescription>
+        </DialogHeader>
+
+        <div className="flex gap-2 mb-2">
+          <button onClick={() => setMode('single')} className={`px-4 py-2 rounded-lg text-sm font-bold border ${mode === 'single' ? 'bg-blue-500 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300'}`}>قيد عادي (عملة واحدة)</button>
+          <button onClick={() => setMode('dual')} className={`px-4 py-2 rounded-lg text-sm font-bold border ${mode === 'dual' ? 'bg-fuchsia-500 text-white border-fuchsia-600' : 'bg-white text-slate-600 border-slate-300'}`}>قيد ثنائي (عملتين مختلفتين)</button>
+        </div>
+
+        {mode === 'single' ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-3">
+              <Field label="التاريخ"><Input type="date" value={singleForm.date} onChange={e => setSingleForm({ ...singleForm, date: e.target.value })} /></Field>
+              <Field label="العملة"><Select value={singleForm.currency} onValueChange={v => setSingleForm({ ...singleForm, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
+              <Field label="البيان"><Input value={singleForm.description} onChange={e => setSingleForm({ ...singleForm, description: e.target.value })} placeholder="سبب القيد" /></Field>
+            </div>
+            <Table>
+              <TableHeader><TableRow><TableHead>الحساب</TableHead><TableHead>الوصف / الطرف</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead></TableHead></TableRow></TableHeader>
+              <TableBody>
+                {singleForm.lines.map((l, i) => (
+                  <TableRow key={i}>
+                    <TableCell><Input value={l.account_code} onChange={e => updateLine(i, 'account_code', e.target.value)} placeholder="1301" className="text-xs w-24" /></TableCell>
+                    <TableCell><Input value={l.account_name} onChange={e => updateLine(i, 'account_name', e.target.value)} placeholder="اسم الحساب" /></TableCell>
+                    <TableCell><Input type="number" step="0.01" value={l.debit} onChange={e => updateLine(i, 'debit', e.target.value)} className="text-left w-32" /></TableCell>
+                    <TableCell><Input type="number" step="0.01" value={l.credit} onChange={e => updateLine(i, 'credit', e.target.value)} className="text-left w-32" /></TableCell>
+                    <TableCell>{singleForm.lines.length > 2 && <Button size="icon" variant="ghost" onClick={() => removeLine(i)}><Trash2 className="w-3 h-3 text-rose-500" /></Button>}</TableCell>
+                  </TableRow>
+                ))}
+                <TableRow className="font-bold bg-slate-50"><TableCell colSpan={2} className="text-left">الإجمالي</TableCell><TableCell className="text-left text-blue-700">{fmt(totalD, singleForm.currency)}</TableCell><TableCell className="text-left text-rose-700">{fmt(totalC, singleForm.currency)}</TableCell><TableCell>{balanced ? <CheckCircle2 className="w-5 h-5 text-emerald-500" /> : <XCircle className="w-5 h-5 text-amber-500" />}</TableCell></TableRow>
+              </TableBody>
+            </Table>
+            <Button variant="outline" onClick={addLine} className="gap-2"><Plus className="w-4 h-4" /> إضافة سطر</Button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="التاريخ"><Input type="date" value={dualForm.date} onChange={e => setDualForm({ ...dualForm, date: e.target.value })} /></Field>
+              <Field label="البيان"><Input value={dualForm.description} onChange={e => setDualForm({ ...dualForm, description: e.target.value })} placeholder="مصارفة / تسوية" /></Field>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="border-2 border-blue-200 rounded-lg p-4 bg-blue-50/40">
+                <div className="text-sm font-bold text-blue-700 mb-3">الطرف المدين (Debit)</div>
+                <div className="space-y-3">
+                  <Field label="كود الحساب"><Input value={dualForm.debit_account_code} onChange={e => setDualForm({ ...dualForm, debit_account_code: e.target.value })} placeholder="1101" /></Field>
+                  <Field label="اسم الحساب"><Input value={dualForm.debit_account_name} onChange={e => setDualForm({ ...dualForm, debit_account_name: e.target.value })} placeholder="صندوق دولار" /></Field>
+                  <Field label="العملة"><Select value={dualForm.debit_currency} onValueChange={v => setDualForm({ ...dualForm, debit_currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
+                  <Field label="المبلغ" required><Input type="number" step="0.01" value={dualForm.debit_amount} onChange={e => setDualForm({ ...dualForm, debit_amount: e.target.value })} className="text-lg font-bold text-blue-700" /></Field>
+                </div>
+              </div>
+              <div className="border-2 border-rose-200 rounded-lg p-4 bg-rose-50/40">
+                <div className="text-sm font-bold text-rose-700 mb-3">الطرف الدائن (Credit)</div>
+                <div className="space-y-3">
+                  <Field label="كود الحساب"><Input value={dualForm.credit_account_code} onChange={e => setDualForm({ ...dualForm, credit_account_code: e.target.value })} placeholder="1102" /></Field>
+                  <Field label="اسم الحساب"><Input value={dualForm.credit_account_name} onChange={e => setDualForm({ ...dualForm, credit_account_name: e.target.value })} placeholder="صندوق سعودي" /></Field>
+                  <Field label="العملة"><Select value={dualForm.credit_currency} onValueChange={v => setDualForm({ ...dualForm, credit_currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
+                  <Field label="المبلغ" required><Input type="number" step="0.01" value={dualForm.credit_amount} onChange={e => setDualForm({ ...dualForm, credit_amount: e.target.value })} className="text-lg font-bold text-rose-700" /></Field>
+                </div>
+              </div>
+            </div>
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 flex items-center gap-2">
+              <Sparkles className="w-4 h-4" /> سيتم موازنة القيد تلقائياً بإضافة سطر فرق العملة (حساب 4104) بالفرق بين مقابلَي المبلغين بمعادل الدولار
+            </div>
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
+          <Button onClick={submit} disabled={saving} className="grad-slate text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ القيد'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

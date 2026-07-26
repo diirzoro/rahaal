@@ -285,6 +285,138 @@ backend:
       - working: true
         agent: "testing"
         comment: "✅ PASSED - POST /api/tenant/users (as owner) creates new users. max_users limit enforced: tenant with max_users=2 correctly rejects 3rd user with 'تم الوصول إلى الحد الأقصى للمستخدمين' message. PATCH /api/tenant/users/:id {active:false} deactivates user, login as deactivated user returns 401. Role enforcement working: staff users cannot PUT /tenant/settings or POST /tenant/users (403)."
+  - task: "v2.1: FX 4104 Account Seeded"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Account 4104 'أرباح وخسائر فروق العملات (مصارفة)' is seeded for all tenants. Migration ensures it exists for existing tenants."
+  - task: "v2.1: Ticket with payment_method='cash'"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Ticket with payment_method='cash' and box_id creates correct journal entry: box debit (1101), supplier credit (2101), revenue credit (4101). Box balance increases by sale_price (1000), supplier balance increases by cost (800), client balance unchanged (no debit on client for cash). Description includes '(نقد)'. All balances and journal entries correct."
+  - task: "v2.1: Ticket with payment_method='credit' (default)"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Ticket with payment_method='credit' (default behavior) creates correct journal entry: client debit (1301), supplier credit (2101), revenue credit (4101). Client balance increases by sale_price (600), supplier balance increases by cost (500). Description includes '(آجل)'. Default behavior preserved."
+  - task: "v2.1: Visa with cash payment"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Visa with payment_method='cash' works same as ticket cash payment. Box balance increases by sale_price (400), supplier balance increases by cost (300), client balance unchanged. Revenue uses account 4102 (visa revenue). All correct."
+  - task: "v2.1: Currency Exchange BUY"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - FX BUY: 100 USD @ 3.75 SAR creates transaction with counter_amount=375, fx_gain_usd=-0.125 (loss). Box1 USD balance +100, Box2 SAR balance -375. Journal entry has 3 lines: box1 debit 100 USD, box2 credit 375 SAR, FX loss (4104) debit 0.13 USD. All calculations and balances correct."
+  - task: "v2.1: Currency Exchange SELL"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - FX SELL: 50 USD @ 3.80 SAR creates transaction with counter_amount=190, fx_gain_usd=0.73 (profit). Box1 USD balance -50, Box2 SAR balance +190. Journal entry has FX gain (4104) credit 0.73 USD. All calculations and balances correct."
+  - task: "v2.1: Currency Exchange Validation Errors"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Validation errors working: (1) Same currency both sides returns 400 'يجب اختيار عملتين مختلفتين'. (2) Amount <= 0 returns 400. (3) Invalid type returns 400. All validation working correctly."
+  - task: "v2.1: Manual Journal - Single Currency"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Manual journal entry with single currency creates correctly. Supplier balance updates correctly (credit increases liability). Unbalanced journal entries correctly rejected with 'القيد غير متوازن' error. Accounting logic correct: crediting supplier liability increases balance (we owe them more)."
+  - task: "v2.1: Manual Journal - DUAL Currency"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Dual currency manual journal entry creates correctly with 3 lines: USD debit 100, SAR credit 375, FX loss (4104) debit 0.13 USD. Response includes fx_diff_usd=-0.125. Multi-currency journal entries working correctly."
+  - task: "v2.1: Income Statement includes fx_gain_usd"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Income statement includes fx_gain_usd field (sum of 4104 credits - debits). net_profit_usd incorporates fx_gain_usd. Tested with date range 2020-2030, returned fx_gain_usd=0.21, net_profit_usd=330.01. All fields present and calculated correctly."
+  - task: "v2.1: Trial Balance supports per-line currency"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Trial balance returns rows with per-line currency field. Multiple currencies (USD, SAR, YER) present in rows. Totals per currency provided. NOTE: In multi-currency systems with FX transactions, individual currency totals may appear unbalanced because FX gain/loss lines (in USD) balance the multi-currency journal entries. This is EXPECTED behavior. When converted to common base currency, everything balances correctly."
+  - task: "v2.1: Ticket cash payment missing box_id error"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - Ticket with payment_method='cash' but missing box_id correctly returns 400 error 'اختر الصندوق/البنك للدفع النقدي'. Validation working correctly."
 
 frontend:
   - task: "RTL Arabic UI with sidebar navigation & 11 modules"
@@ -301,8 +433,8 @@ frontend:
 
 metadata:
   created_by: "main_agent"
-  version: "2.0"
-  test_sequence: 2
+  version: "2.1"
+  test_sequence: 3
   run_ui: false
 
 test_plan:
@@ -444,3 +576,92 @@ agent_communication:
       ✅ Deactivated user - Cannot login
       
       Backend v2.0 SaaS is production-ready. All multi-tenant features verified.
+
+  - agent: "testing"
+    message: |
+      ✅ v2.1 BACKEND TESTING COMPLETED - ALL 12 NEW FEATURES PASSED
+      
+      Comprehensive test suite executed for v2.1 features (FX account, cash payments, currency exchange, manual journals, enhanced reports):
+      
+      **Test Results: 12/12 PASSED**
+      
+      1. ✅ FX 4104 Account Seeded
+         - Account 4104 'أرباح وخسائر فروق العملات (مصارفة)' exists
+         - Migration ensures it's seeded for all tenants
+      
+      2. ✅ Ticket with payment_method='cash'
+         - Box balance increases by sale_price (1000 SAR)
+         - Supplier balance increases by cost (800 SAR)
+         - Client balance unchanged (no debit on client for cash)
+         - Journal entry: box debit (1101), supplier credit (2101), revenue credit (4101)
+         - Description includes '(نقد)'
+      
+      3. ✅ Ticket with payment_method='credit' (default)
+         - Client balance increases by sale_price (600 SAR)
+         - Supplier balance increases by cost (500 SAR)
+         - Journal entry: client debit (1301), supplier credit (2101), revenue credit (4101)
+         - Description includes '(آجل)'
+         - Default behavior preserved
+      
+      4. ✅ Visa with cash payment
+         - Same pattern as ticket cash payment
+         - Box +400, supplier +300, client unchanged
+         - Revenue uses account 4102 (visa revenue)
+      
+      5. ✅ Currency Exchange BUY
+         - 100 USD @ 3.75 SAR → counter_amount=375
+         - fx_gain_usd=-0.125 (loss calculated correctly)
+         - Box1 USD +100, Box2 SAR -375
+         - Journal entry: box1 debit 100 USD, box2 credit 375 SAR, FX loss (4104) debit 0.13 USD
+      
+      6. ✅ Currency Exchange SELL
+         - 50 USD @ 3.80 SAR → counter_amount=190
+         - fx_gain_usd=0.73 (profit calculated correctly)
+         - Box1 USD -50, Box2 SAR +190
+         - Journal entry includes FX gain (4104) credit 0.73 USD
+      
+      7. ✅ Currency Exchange Validation Errors
+         - Same currency both sides: 400 'يجب اختيار عملتين مختلفتين'
+         - Amount <= 0: 400 error
+         - Invalid type: 400 error
+      
+      8. ✅ Manual Journal - Single Currency
+         - Creates correctly with balanced lines
+         - Supplier balance updates correctly (credit increases liability)
+         - Unbalanced entries rejected with 'القيد غير متوازن'
+      
+      9. ✅ Manual Journal - DUAL Currency
+         - Creates with 3 lines: USD debit 100, SAR credit 375, FX loss (4104) debit 0.13 USD
+         - Response includes fx_diff_usd=-0.125
+         - Multi-currency journal entries working correctly
+      
+      10. ✅ Income Statement includes fx_gain_usd
+          - fx_gain_usd field present (sum of 4104 credits - debits)
+          - net_profit_usd incorporates fx_gain_usd
+          - Tested: fx_gain_usd=0.21, net_profit_usd=330.01
+      
+      11. ✅ Trial Balance supports per-line currency
+          - Rows include currency field
+          - Multiple currencies (USD, SAR, YER) present
+          - Totals per currency provided
+          - NOTE: Individual currency totals may appear unbalanced in multi-currency systems with FX transactions. This is EXPECTED behavior because FX gain/loss lines (in USD) balance the multi-currency journal entries. When converted to common base currency, everything balances correctly.
+      
+      12. ✅ Ticket cash payment missing box_id error
+          - Correctly returns 400 'اختر الصندوق/البنك للدفع النقدي'
+      
+      **CRITICAL VERIFICATIONS:**
+      ✅ FX account (4104) seeded for all tenants
+      ✅ Cash payment method working for tickets and visas
+      ✅ Credit payment method (default) preserved
+      ✅ Currency exchange BUY/SELL with FX gain/loss calculation
+      ✅ Multi-currency journal entries with FX balancing
+      ✅ Manual journals (single and dual currency)
+      ✅ Income statement includes FX gain/loss
+      ✅ Trial balance supports per-line currency
+      ✅ All validation errors working correctly
+      
+      **ACCOUNTING NOTES:**
+      - Multi-currency journal entries (fx_buy, fx_sell, manual_dual) show per-currency imbalances, which is EXPECTED. The FX gain/loss lines (account 4104 in USD) balance the entries when converted to base currency.
+      - Supplier balance increases when credited (liability increases = we owe them more). This is correct accounting behavior.
+      
+      Backend v2.1 is production-ready. All new features verified and working correctly.
