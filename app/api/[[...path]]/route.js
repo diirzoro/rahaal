@@ -16,7 +16,20 @@ async function connectToMongo() {
 }
 
 const CURRENCIES = ['USD', 'SAR', 'YER']
-const DEFAULT_RATES = { USD: 1, SAR: 0.267, YER: 0.0038 }
+// Base currency = YER. Rates represent: 1 unit of currency = X YER
+const DEFAULT_RATES = { USD: 1554, SAR: 410, YER: 1 }
+const BASE_CURRENCY = 'YER'
+// Helper: convert amount to base (YER)
+function toBase(amount, currency, rates) {
+  const r = rates?.[currency]
+  const rate = (r && typeof r === 'object') ? (Number(r.transfer) || 1) : (Number(r) || 1)
+  return (Number(amount) || 0) * rate
+}
+function getTransferRate(rates, cur) {
+  const r = rates?.[cur]
+  if (r && typeof r === 'object') return Number(r.transfer) || 1
+  return Number(r) || 1
+}
 const emptyBalances = () => ({ USD: 0, SAR: 0, YER: 0 })
 const SESSION_DAYS = 14
 
@@ -54,7 +67,13 @@ async function seedTenantDefaults(db, tenantId) {
     id: uuidv4(), tenant_id: t,
     agency_name: '', logo_base64: '', header: '', footer: '', tax_id: '', commercial_id: '',
     phone: '', address: '', email: '', primary_color: '#1e3a8a',
-    rates: DEFAULT_RATES, updated_at: new Date(),
+    base_currency: BASE_CURRENCY,
+    rates: {
+      USD: { transfer: 1554, buy: 1550, sell: 1560, min: 1530, max: 1580, remarks: '' },
+      SAR: { transfer: 410, buy: 408, sell: 412, min: 400, max: 420, remarks: '' },
+      YER: { transfer: 1, buy: 1, sell: 1, min: 1, max: 1, remarks: 'العملة الأساسية' },
+    },
+    updated_at: new Date(),
   })
 }
 
@@ -62,6 +81,27 @@ async function seedInitial(db) {
   // Purge legacy data lacking tenant_id (from earlier MVP)
   for (const c of ['accounts', 'boxes', 'clients', 'suppliers', 'tickets', 'visas', 'vouchers', 'journal_entries', 'settings']) {
     await db.collection(c).deleteMany({ tenant_id: { $exists: false } }).catch(() => {})
+  }
+
+  // Migrate rate schema: flat number → { transfer, buy, sell, min, max, remarks }
+  const allSettings = await db.collection('tenant_settings').find({}).toArray()
+  for (const s of allSettings) {
+    if (!s.rates) continue
+    let needUpdate = false
+    const newRates = {}
+    for (const c of CURRENCIES) {
+      const r = s.rates[c]
+      if (typeof r === 'number' || !r || !r.transfer) {
+        // Convert legacy or seed defaults per currency
+        const def = DEFAULT_RATES[c]
+        // If legacy value < 1 (old USD-base scheme) → invert or replace with new YER-base defaults
+        newRates[c] = { transfer: def, buy: def * 0.997, sell: def * 1.003, min: def * 0.95, max: def * 1.05, remarks: c === 'YER' ? 'العملة الأساسية' : '' }
+        needUpdate = true
+      } else {
+        newRates[c] = r
+      }
+    }
+    if (needUpdate) await db.collection('tenant_settings').updateOne({ id: s.id }, { $set: { rates: newRates, base_currency: BASE_CURRENCY } })
   }
 
   // Migration: ensure FX 4104 account exists for every tenant
@@ -75,7 +115,6 @@ async function seedInitial(db) {
         type: 'revenue', parent: '4', is_group: false, created_at: new Date(),
       })
     }
-    // Migration: initialize journal_quota if missing (500 entries default)
     if (!tn.journal_quota) {
       const usedCount = await db.collection('journal_entries').countDocuments({ tenant_id: tn.id })
       await db.collection('tenants').updateOne({ id: tn.id }, { $set: { journal_quota: { used: usedCount, limit: 500, top_ups: [] } } })
@@ -596,9 +635,9 @@ async function handleRoute(request, { params }) {
         if (!CURRENCIES.includes(b.debit_currency) || !CURRENCIES.includes(b.credit_currency)) return bad('العملات غير صالحة')
         const rates = (await db.collection('tenant_settings').findOne(tf))?.rates || DEFAULT_RATES
         // Convert both sides to base (USD) using tenant rates
-        const debitInUSD = da * (rates[b.debit_currency] || 1)
-        const creditInUSD = ca * (rates[b.credit_currency] || 1)
-        const fxDiff = +(debitInUSD - creditInUSD).toFixed(4)  // if debit>credit -> gain; else loss (credit)
+        const debitInBase = toBase(da, b.debit_currency, rates)
+        const creditInBase = toBase(ca, b.credit_currency, rates)
+        const fxDiff = +(debitInBase - creditInBase).toFixed(4)  // if debit>credit -> gain; else loss (credit)
         const lines = [
           { account_code: b.debit_account_code || 'MANUAL', account_name: b.debit_account_name || 'حساب مدين', party_type: b.debit_party_type || 'manual', party_id: b.debit_party_id || null, party_name: b.debit_party_name || b.debit_account_name || '—', currency: b.debit_currency, debit: da, credit: 0 },
           { account_code: b.credit_account_code || 'MANUAL', account_name: b.credit_account_name || 'حساب دائن', party_type: b.credit_party_type || 'manual', party_id: b.credit_party_id || null, party_name: b.credit_party_name || b.credit_account_name || '—', currency: b.credit_currency, debit: 0, credit: ca },
@@ -606,11 +645,11 @@ async function handleRoute(request, { params }) {
         // Add FX gain/loss balancing line in USD equivalent
         if (Math.abs(fxDiff) > 0.005) {
           if (fxDiff > 0) {
-            // Debit side is larger in USD equivalent -> credit FX gain
-            lines.push({ account_code: '4104', account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: 'USD', debit: 0, credit: +fxDiff.toFixed(2) })
+            // Debit side is larger in base equivalent -> credit FX gain
+            lines.push({ account_code: '4104', account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: BASE_CURRENCY, debit: 0, credit: +fxDiff.toFixed(2) })
           } else {
             // Credit side is larger -> debit FX loss
-            lines.push({ account_code: '4104', account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: 'USD', debit: +Math.abs(fxDiff).toFixed(2), credit: 0 })
+            lines.push({ account_code: '4104', account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: BASE_CURRENCY, debit: +Math.abs(fxDiff).toFixed(2), credit: 0 })
           }
         }
         // Update client/supplier balances if party set (only on their native currency side)
@@ -672,11 +711,11 @@ async function handleRoute(request, { params }) {
       if (!boxCur || !boxCounter) return bad('اختر صناديق العملتين')
       const rates = (await db.collection('tenant_settings').findOne(tf))?.rates || DEFAULT_RATES
       // Compute FX P&L in USD equivalent:
-      //   BUY: office received `amount` (currency), paid `counter_amount` (counter). fx_gain_usd = amount*rates[currency] - counter_amount*rates[counter_currency]
-      //   SELL: office paid `amount`, received `counter_amount`. fx_gain_usd = counter_amount*rates[counter_currency] - amount*rates[currency]
-      const inUsd = amount * (rates[b.currency] || 1)
-      const outUsd = counter_amount * (rates[b.counter_currency] || 1)
-      const fx_gain_usd = +(b.type === 'buy' ? (inUsd - outUsd) : (outUsd - inUsd)).toFixed(4)
+      //   BUY: office received `amount` (currency), paid `counter_amount` (counter). fx_gain_base = amount*rate[currency] - counter_amount*rate[counter_currency]
+      //   SELL: office paid `amount`, received `counter_amount`. fx_gain_base = counter_amount*rate[counter_currency] - amount*rate[currency]
+      const inBase = toBase(amount, b.currency, rates)
+      const outBase = toBase(counter_amount, b.counter_currency, rates)
+      const fx_gain_base = +(b.type === 'buy' ? (inBase - outBase) : (outBase - inBase)).toFixed(4)
       const doc = {
         id: uuidv4(), tenant_id: T, type: b.type,
         date: new Date(b.date || Date.now()),
@@ -692,7 +731,7 @@ async function handleRoute(request, { params }) {
         source_of_funds: b.source_of_funds || '',
         purpose: b.purpose || '',
         remarks: b.remarks || '',
-        fx_gain_usd, created_at: new Date(),
+        fx_gain_base, created_at: new Date(),
       }
       await db.collection('currency_exchanges').insertOne(doc)
       // Update box balances
@@ -712,11 +751,11 @@ async function handleRoute(request, { params }) {
         lines.push({ account_code: boxCounter.type === 'cash' ? '1101' : '1201', account_name: boxCounter.name_ar, party_type: 'box', party_id: boxCounter.id, party_name: boxCounter.name_ar, currency: b.counter_currency, debit: counter_amount, credit: 0 })
         lines.push({ account_code: boxCur.type === 'cash' ? '1101' : '1201', account_name: boxCur.name_ar, party_type: 'box', party_id: boxCur.id, party_name: boxCur.name_ar, currency: b.currency, debit: 0, credit: amount })
       }
-      if (Math.abs(fx_gain_usd) > 0.005) {
-        if (fx_gain_usd > 0) {
-          lines.push({ account_code: '4104', account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: 'USD', debit: 0, credit: +fx_gain_usd.toFixed(2) })
+      if (Math.abs(fx_gain_base) > 0.005) {
+        if (fx_gain_base > 0) {
+          lines.push({ account_code: '4104', account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: BASE_CURRENCY, debit: 0, credit: +fx_gain_base.toFixed(2) })
         } else {
-          lines.push({ account_code: '4104', account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: 'USD', debit: +Math.abs(fx_gain_usd).toFixed(2), credit: 0 })
+          lines.push({ account_code: '4104', account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: BASE_CURRENCY, debit: +Math.abs(fx_gain_base).toFixed(2), credit: 0 })
         }
       }
       await createJournalEntry(db, T, {
@@ -914,11 +953,11 @@ async function computeDashboard(db, T) {
   }
   for (const t of [...ticketsMonth, ...visasMonth]) {
     const key = new Date(t.date).toISOString().slice(0, 10)
-    if (dayMap[key]) { const r = rates[t.currency] || 1; dayMap[key].sales += (t.sale_price||0)*r; dayMap[key].profit += (t.commission||0)*r }
+    if (dayMap[key]) { const r = getTransferRate(rates, t.currency); dayMap[key].sales += (t.sale_price||0)*r; dayMap[key].profit += (t.commission||0)*r }
   }
   for (const k of Object.keys(dayMap)) { dayMap[k].sales = +dayMap[k].sales.toFixed(2); dayMap[k].profit = +dayMap[k].profit.toFixed(2) }
   const pieMap = { 'تذاكر': 0, 'تأشيرات عمرة': 0, 'تأشيرات سياحية/عمل': 0, 'موافقات أمنية': 0, 'حجز فنادق': 0, 'أخرى': 0 }
-  for (const t of ticketsMonth) pieMap['تذاكر'] += (t.commission||0)*(rates[t.currency]||1)
+  for (const t of ticketsMonth) pieMap['تذاكر'] += (t.commission||0)*getTransferRate(rates, t.currency)
   for (const v of visasMonth) {
     const st = v.service_type || 'أخرى'
     let key = 'أخرى'
@@ -926,7 +965,7 @@ async function computeDashboard(db, T) {
     else if (st.includes('موافق')) key = 'موافقات أمنية'
     else if (st.includes('فندق')) key = 'حجز فنادق'
     else if (st.includes('سياح') || st.includes('عمل')) key = 'تأشيرات سياحية/عمل'
-    pieMap[key] += (v.commission||0)*(rates[v.currency]||1)
+    pieMap[key] += (v.commission||0)*getTransferRate(rates, v.currency)
   }
   const recentTickets = await db.collection('tickets').find(tf).sort({ created_at: -1 }).limit(5).toArray()
   const recentVisas   = await db.collection('visas').find(tf).sort({ created_at: -1 }).limit(5).toArray()
@@ -963,23 +1002,64 @@ async function reportProfits(db, T, q) {
 async function reportStatement(db, T, q) {
   const { party_type, party_id } = q
   if (!party_type || !party_id) throw new Error('نوع الطرف والمعرف مطلوبان')
-  const jes = await db.collection('journal_entries').find({ tenant_id: T }).sort({ date: 1, created_at: 1 }).toArray()
-  const rows = []; const run = { USD: 0, SAR: 0, YER: 0 }
+
+  // Time period filter
+  let dateFilter = null
+  const now = new Date()
+  if (q.period === 'day') {
+    const d = q.day ? new Date(q.day) : now
+    dateFilter = { $gte: new Date(d.getFullYear(), d.getMonth(), d.getDate()), $lte: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23,59,59,999) }
+  } else if (q.period === 'month') {
+    const [y, m] = (q.month || `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`).split('-').map(Number)
+    dateFilter = { $gte: new Date(y, m-1, 1), $lte: new Date(y, m, 0, 23,59,59,999) }
+  } else if (q.period === 'range') {
+    const start = q.from ? new Date(q.from) : new Date(0)
+    const end = q.to ? new Date(q.to) : new Date(); end.setHours(23,59,59,999)
+    dateFilter = { $gte: start, $lte: end }
+  } else if (q.period === 'up_to_date' && q.to) {
+    const end = new Date(q.to); end.setHours(23,59,59,999)
+    dateFilter = { $lte: end }
+  }
+
+  const filter = { tenant_id: T }
+  if (dateFilter) filter.date = dateFilter
+
+  const jes = await db.collection('journal_entries').find(filter).sort({ date: 1, created_at: 1 }).toArray()
+  const rows = []
+  const run = { USD: 0, SAR: 0, YER: 0 }
+  const totals = { USD: { d: 0, c: 0 }, SAR: { d: 0, c: 0 }, YER: { d: 0, c: 0 } }
   for (const je of jes) {
     for (const l of je.lines || []) {
       if (l.party_type === party_type && l.party_id === party_id) {
+        const cur = l.currency || je.currency
+        if (!['USD','SAR','YER'].includes(cur)) continue
         let delta = 0
         if (party_type === 'client') delta = (l.debit || 0) - (l.credit || 0)
         if (party_type === 'supplier') delta = (l.credit || 0) - (l.debit || 0)
-        run[je.currency] += delta
-        rows.push({ date: je.date, description: je.description, ref_type: je.ref_type, currency: je.currency, debit: l.debit || 0, credit: l.credit || 0, balance: run[je.currency] })
+        run[cur] += delta
+        totals[cur].d += l.debit || 0
+        totals[cur].c += l.credit || 0
+        rows.push({ date: je.date, description: je.description, ref_type: je.ref_type, currency: cur, debit: l.debit || 0, credit: l.credit || 0, balance: run[cur] })
       }
     }
   }
+
   const party = party_type === 'client'
     ? await db.collection('clients').findOne({ id: party_id, tenant_id: T })
     : await db.collection('suppliers').findOne({ id: party_id, tenant_id: T })
-  return { party: party ? { id: party.id, name: party.name, balances: party.balances } : null, rows }
+
+  // Currency display mode: 'all_summary' | 'all_detail' | 'USD' | 'SAR' | 'YER'
+  const mode = q.currency_mode || 'all_detail'
+  let finalRows = rows
+  if (['USD','SAR','YER'].includes(mode)) finalRows = rows.filter(r => r.currency === mode)
+
+  const summary = CURRENCIES.map(c => ({ currency: c, total_debit: +totals[c].d.toFixed(2), total_credit: +totals[c].c.toFixed(2), balance: +run[c].toFixed(2) }))
+
+  return {
+    party: party ? { id: party.id, name: party.name, phone: party.phone, balances: party.balances } : null,
+    rows: mode === 'all_summary' ? [] : finalRows,
+    summary, currency_mode: mode, period: q.period || 'all',
+  }
 }
 async function reportTrialBalance(db, T) {
   const jes = await db.collection('journal_entries').find({ tenant_id: T }).toArray()
@@ -1014,18 +1094,28 @@ async function reportIncome(db, T, q) {
   for (const v of visas) rev.visas[v.currency] += v.commission || 0
   const exp = { USD:0, SAR:0, YER:0 }
   for (const p of vouchers) exp[p.currency] += p.amount || 0
-  // FX gain/loss from account 4104 (stored in USD reporting)
-  let fx_gain_usd = 0
+  // FX gain/loss from account 4104 (already stored in BASE currency = YER)
+  let fx_gain_base = 0
   for (const je of jes) {
     for (const l of je.lines || []) {
-      if (l.account_code === '4104') {
-        fx_gain_usd += (l.credit || 0) - (l.debit || 0)  // credit is gain, debit is loss
-      }
+      if (l.account_code === '4104') fx_gain_base += (l.credit || 0) - (l.debit || 0)
     }
   }
-  const totalRevUsd = Object.values(rev).reduce((s, cur) => s + Object.entries(cur).reduce((ss, [c, v]) => ss + v * (rates[c] || 1), 0), 0) + fx_gain_usd
-  const totalExpUsd = Object.entries(exp).reduce((s, [c, v]) => s + v * (rates[c] || 1), 0)
-  return { revenue: rev, expenses: exp, fx_gain_usd: +fx_gain_usd.toFixed(2), total_revenue_usd: +totalRevUsd.toFixed(2), total_expenses_usd: +totalExpUsd.toFixed(2), net_profit_usd: +(totalRevUsd - totalExpUsd).toFixed(2) }
+  const totalRevBase = Object.values(rev).reduce((s, cur) => s + Object.entries(cur).reduce((ss, [c, v]) => ss + toBase(v, c, rates), 0), 0) + fx_gain_base
+  const totalExpBase = Object.entries(exp).reduce((s, [c, v]) => s + toBase(v, c, rates), 0)
+  return {
+    base_currency: BASE_CURRENCY,
+    revenue: rev, expenses: exp,
+    fx_gain_base: +fx_gain_base.toFixed(2),
+    total_revenue_base: +totalRevBase.toFixed(2),
+    total_expenses_base: +totalExpBase.toFixed(2),
+    net_profit_base: +(totalRevBase - totalExpBase).toFixed(2),
+    // Backward compat aliases
+    fx_gain_usd: +fx_gain_base.toFixed(2),
+    total_revenue_usd: +totalRevBase.toFixed(2),
+    total_expenses_usd: +totalExpBase.toFixed(2),
+    net_profit_usd: +(totalRevBase - totalExpBase).toFixed(2),
+  }
 }
 
 export const GET = handleRoute

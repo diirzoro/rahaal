@@ -1606,20 +1606,110 @@ function ProfitsReport() {
 function StatementReport() {
   const [type, setType] = useState('client'); const [id, setId] = useState('')
   const [clients, setClients] = useState([]); const [suppliers, setSuppliers] = useState([]); const [data, setData] = useState(null)
+  const [q, setQ] = useState('')
+  const [currencyMode, setCurrencyMode] = useState('all_detail')
+  const [period, setPeriod] = useState('all')
+  const [day, setDay] = useState(todayISO())
+  const [month, setMonth] = useState(todayISO().slice(0, 7))
+  const [from, setFrom] = useState(new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10))
+  const [to, setTo] = useState(todayISO())
   useEffect(() => { api('/clients').then(setClients); api('/suppliers').then(setSuppliers) }, [])
-  const list = type === 'client' ? clients : suppliers
-  const load = async () => { if (!id) return; try { setData(await api(`/reports/statement?party_type=${type}&party_id=${id}`)) } catch (e) { toast.error(e.message) } }
-  useEffect(() => { load() }, [type, id])
+  const list = (type === 'client' ? clients : suppliers).filter(x => !q || x.name.includes(q) || (x.phone || '').includes(q))
+  const load = async () => {
+    if (!id) return
+    const p = new URLSearchParams({ party_type: type, party_id: id, currency_mode: currencyMode, period })
+    if (period === 'day') p.set('day', day)
+    if (period === 'month') p.set('month', month)
+    if (period === 'range' || period === 'up_to_date') { p.set('from', from); p.set('to', to) }
+    try { setData(await api(`/reports/statement?${p}`)) } catch (e) { toast.error(e.message) }
+  }
+  useEffect(() => { load() }, [type, id, currencyMode, period, day, month, from, to])
+
   return (
-    <Card><CardContent className="p-4">
-      <div className="flex items-end gap-2 mb-4">
-        <Field label="النوع"><Select value={type} onValueChange={v => { setType(v); setId(''); setData(null) }}><SelectTrigger className="w-32"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="client">عميل</SelectItem><SelectItem value="supplier">مورد</SelectItem></SelectContent></Select></Field>
-        <Field label={type === 'client' ? 'العميل' : 'المورد'}><Select value={id} onValueChange={setId}><SelectTrigger className="w-64"><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{list.map(x => <SelectItem key={x.id} value={x.id}>{x.name}</SelectItem>)}</SelectContent></Select></Field>
+    <Card><CardContent className="p-4 space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 p-3 bg-slate-50 rounded-lg">
+        <Field label="نوع الحساب"><Select value={type} onValueChange={v => { setType(v); setId(''); setData(null) }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="client">عميل (مدين)</SelectItem><SelectItem value="supplier">مورد / وكيل</SelectItem></SelectContent></Select></Field>
+        <Field label="بحث بالاسم / الهاتف"><Input value={q} onChange={e => setQ(e.target.value)} placeholder="اكتب اسم صاحب الحساب..." /></Field>
+        <div className="md:col-span-2"><Field label="اختر الحساب"><Select value={id} onValueChange={setId}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{list.map(x => <SelectItem key={x.id} value={x.id}>{x.name} {x.phone && `• ${x.phone}`}</SelectItem>)}</SelectContent></Select></Field></div>
       </div>
-      {data?.party && <div className="mb-3 p-3 rounded-lg bg-slate-50 border"><div className="text-sm font-bold">{data.party.name}</div><div className="flex gap-4 text-xs mt-1">{CURRENCIES.map(c => <div key={c}>{c}: <span className="font-bold">{fmt(data.party.balances?.[c] || 0, c)}</span></div>)}</div></div>}
-      {data && (
-        <Table><TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>البيان</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
-          <TableBody>{data.rows.map((r, i) => (<TableRow key={i}><TableCell className="text-xs">{fmtDate(r.date)}</TableCell><TableCell className="text-xs">{r.description}</TableCell><TableCell>{r.currency}</TableCell><TableCell className="text-left text-blue-700">{r.debit ? fmt(r.debit, r.currency) : '—'}</TableCell><TableCell className="text-left text-rose-700">{r.credit ? fmt(r.credit, r.currency) : '—'}</TableCell><TableCell className="text-left font-bold">{fmt(r.balance, r.currency)}</TableCell></TableRow>))}{data.rows.length === 0 && <TableRow><TableCell colSpan={6} className="text-center text-slate-400 py-6">لا توجد حركات</TableCell></TableRow>}</TableBody>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <Card><CardContent className="p-3">
+          <div className="text-xs font-bold text-slate-600 mb-2">عرض العملات</div>
+          <div className="flex flex-wrap gap-1">
+            {[{v:'all_summary',l:'كافة العملات (إجمالي)'},{v:'all_detail',l:'كافة العملات (تفصيلي)'},{v:'YER',l:'ريال يمني'},{v:'SAR',l:'ريال سعودي'},{v:'USD',l:'دولار'}].map(o => (
+              <button key={o.v} onClick={() => setCurrencyMode(o.v)} className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${currencyMode === o.v ? 'bg-blue-500 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300 hover:border-blue-400'}`}>{o.l}</button>
+            ))}
+          </div>
+        </CardContent></Card>
+        <Card><CardContent className="p-3">
+          <div className="text-xs font-bold text-slate-600 mb-2">النطاق الزمني</div>
+          <div className="flex flex-wrap gap-1 mb-2">
+            {[{v:'all',l:'كل الفترات'},{v:'up_to_date',l:'حتى تاريخ'},{v:'day',l:'خلال يوم'},{v:'month',l:'خلال شهر'},{v:'range',l:'من — إلى'}].map(o => (
+              <button key={o.v} onClick={() => setPeriod(o.v)} className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${period === o.v ? 'bg-emerald-500 text-white border-emerald-600' : 'bg-white text-slate-600 border-slate-300 hover:border-emerald-400'}`}>{o.l}</button>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {period === 'day' && <Input type="date" value={day} onChange={e => setDay(e.target.value)} />}
+            {period === 'month' && <Input type="month" value={month} onChange={e => setMonth(e.target.value)} />}
+            {period === 'range' && <><Input type="date" value={from} onChange={e => setFrom(e.target.value)} /><Input type="date" value={to} onChange={e => setTo(e.target.value)} /></>}
+            {period === 'up_to_date' && <Input type="date" value={to} onChange={e => setTo(e.target.value)} />}
+          </div>
+        </CardContent></Card>
+      </div>
+
+      {data?.party && (
+        <div className="p-3 rounded-lg bg-gradient-to-l from-blue-50 to-slate-50 border border-blue-100">
+          <div className="flex items-center justify-between">
+            <div><div className="text-lg font-bold text-slate-800">{data.party.name}</div>{data.party.phone && <div className="text-xs text-slate-500">📞 {data.party.phone}</div>}</div>
+            <div className="flex gap-2">
+              {CURRENCIES.map(c => (
+                <div key={c} className="text-center px-3 py-1.5 rounded-lg bg-white border">
+                  <div className="text-[10px] text-slate-500">{c}</div>
+                  <div className={`text-sm font-bold ${(data.party.balances?.[c] || 0) > 0 ? 'text-emerald-600' : (data.party.balances?.[c] || 0) < 0 ? 'text-rose-600' : 'text-slate-400'}`}>{fmt(data.party.balances?.[c] || 0, c)}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {data && data.currency_mode === 'all_summary' && (
+        <div>
+          <div className="text-sm font-bold text-slate-700 mb-2">إجمالي كل العملات في الفترة المحددة</div>
+          <Table>
+            <TableHeader><TableRow><TableHead>العملة</TableHead><TableHead className="text-left">إجمالي مدين</TableHead><TableHead className="text-left">إجمالي دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
+            <TableBody>
+              {(data.summary || []).map(s => (
+                <TableRow key={s.currency}>
+                  <TableCell><Badge variant="outline" className="font-bold">{s.currency}</Badge></TableCell>
+                  <TableCell className="text-left text-blue-700 font-bold">{fmt(s.total_debit, s.currency)}</TableCell>
+                  <TableCell className="text-left text-rose-700 font-bold">{fmt(s.total_credit, s.currency)}</TableCell>
+                  <TableCell className={`text-left font-extrabold ${s.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(s.balance, s.currency)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+
+      {data && data.currency_mode !== 'all_summary' && (
+        <Table>
+          <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>البيان</TableHead><TableHead>مرجع</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
+          <TableBody>
+            {(data.rows || []).map((r, i) => (
+              <TableRow key={i}>
+                <TableCell className="text-xs">{fmtDate(r.date)}</TableCell>
+                <TableCell className="text-xs">{r.description}</TableCell>
+                <TableCell className="text-xs"><Badge variant="outline">{r.ref_type}</Badge></TableCell>
+                <TableCell><Badge variant="secondary">{r.currency}</Badge></TableCell>
+                <TableCell className="text-left text-blue-700">{r.debit ? fmt(r.debit, r.currency) : '—'}</TableCell>
+                <TableCell className="text-left text-rose-700">{r.credit ? fmt(r.credit, r.currency) : '—'}</TableCell>
+                <TableCell className={`text-left font-bold ${r.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(r.balance, r.currency)}</TableCell>
+              </TableRow>
+            ))}
+            {(!data.rows || data.rows.length === 0) && <TableRow><TableCell colSpan={7} className="text-center text-slate-400 py-6">لا توجد حركات في هذا النطاق</TableCell></TableRow>}
+          </TableBody>
         </Table>
       )}
     </CardContent></Card>
@@ -1654,18 +1744,18 @@ function IncomeStatement() {
           <div><div className="text-sm font-bold text-slate-700 mb-2">الإيرادات</div>
             <div className="grid grid-cols-3 gap-2">{['tickets', 'visas', 'other'].map(k => (<Card key={k}><CardContent className="p-3"><div className="text-xs text-slate-500">{k === 'tickets' ? 'عمولات تذاكر' : k === 'visas' ? 'عمولات تأشيرات' : 'أخرى'}</div>{CURRENCIES.map(c => <div key={c} className="text-xs flex justify-between"><span>{c}</span><span className="font-bold text-emerald-600">{fmt(data.revenue[k][c], c)}</span></div>)}</CardContent></Card>))}</div>
           </div>
-          {data.fx_gain_usd !== undefined && (
-            <Card className={`border-2 ${data.fx_gain_usd >= 0 ? 'border-emerald-200 bg-emerald-50/50' : 'border-rose-200 bg-rose-50/50'}`}>
+          {(data.fx_gain_base ?? data.fx_gain_usd) !== undefined && (
+            <Card className={`border-2 ${(data.fx_gain_base ?? data.fx_gain_usd) >= 0 ? 'border-emerald-200 bg-emerald-50/50' : 'border-rose-200 bg-rose-50/50'}`}>
               <CardContent className="p-4 flex items-center justify-between">
-                <div><div className="text-sm font-bold text-slate-700">{data.fx_gain_usd >= 0 ? 'أرباح' : 'خسائر'} فروق العملات (المصارفة) — حساب 4104</div><div className="text-xs text-slate-500">بمعادل الدولار</div></div>
-                <div className={`text-2xl font-extrabold ${data.fx_gain_usd >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(data.fx_gain_usd, 'USD')}</div>
+                <div><div className="text-sm font-bold text-slate-700">{(data.fx_gain_base ?? data.fx_gain_usd) >= 0 ? 'أرباح' : 'خسائر'} فروق العملات (المصارفة) — حساب 4104</div><div className="text-xs text-slate-500">بالريال اليمني</div></div>
+                <div className={`text-2xl font-extrabold ${(data.fx_gain_base ?? data.fx_gain_usd) >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(data.fx_gain_base ?? data.fx_gain_usd, 'YER')}</div>
               </CardContent>
             </Card>
           )}
           <div><div className="text-sm font-bold text-slate-700 mb-2">المصروفات</div>
             <Card><CardContent className="p-3">{CURRENCIES.map(c => <div key={c} className="text-sm flex justify-between"><span>{c}</span><span className="font-bold text-rose-600">{fmt(data.expenses[c], c)}</span></div>)}</CardContent></Card>
           </div>
-          <Card className="grad-brand text-white"><CardContent className="p-4"><div className="text-xs opacity-80">صافي الربح (بمعادل الدولار)</div><div className="text-3xl font-extrabold">{fmt(data.net_profit_usd, 'USD')}</div><div className="text-xs opacity-80 mt-2 grid grid-cols-2 gap-2"><div>إيرادات: {fmt(data.total_revenue_usd, 'USD')}</div><div>مصروفات: {fmt(data.total_expenses_usd, 'USD')}</div></div></CardContent></Card>
+          <Card className="grad-brand text-white"><CardContent className="p-4"><div className="text-xs opacity-80">صافي الربح (بالريال اليمني - العملة الأساسية)</div><div className="text-3xl font-extrabold">{fmt(data.net_profit_base ?? data.net_profit_usd, 'YER')}</div><div className="text-xs opacity-80 mt-2 grid grid-cols-2 gap-2"><div>إيرادات: {fmt(data.total_revenue_base ?? data.total_revenue_usd, 'YER')}</div><div>مصروفات: {fmt(data.total_expenses_base ?? data.total_expenses_usd, 'YER')}</div></div></CardContent></Card>
         </div>
       )}
     </CardContent></Card>
@@ -1803,15 +1893,49 @@ function OfficeSettings() {
 
         <TabsContent value="rates" className="mt-4">
           <Card>
-            <CardHeader><CardTitle>أسعار الصرف مقابل الدولار</CardTitle><CardDescription>تُستخدم لتوحيد المؤشرات في لوحة التحكم وقائمة الدخل</CardDescription></CardHeader>
-            <CardContent className="grid grid-cols-3 gap-4">
-              {CURRENCIES.map(c => (
-                <Field key={c} label={`${c} = ؟ USD`}>
-                  <Input type="number" step="0.0001" value={f.rates?.[c] || 1} onChange={e => setF({ ...f, rates: { ...f.rates, [c]: Number(e.target.value) } })} />
-                </Field>
-              ))}
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2"><ArrowLeftRight className="w-5 h-5 text-fuchsia-600" /> دليل أسعار العملات</CardTitle>
+              <CardDescription>العملة الأساسية للنظام هي <b>الريال اليمني (YER)</b>. الأسعار تمثل: 1 وحدة من العملة = كم ريال يمني</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>العملة</TableHead>
+                    <TableHead>تحويل إلى</TableHead>
+                    <TableHead className="text-left">سعر التحويل</TableHead>
+                    <TableHead className="text-left">سعر الشراء</TableHead>
+                    <TableHead className="text-left">سعر البيع</TableHead>
+                    <TableHead className="text-left">الحد الأدنى</TableHead>
+                    <TableHead className="text-left">الحد الأعلى</TableHead>
+                    <TableHead>ملاحظات</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {CURRENCIES.map(c => {
+                    const r = f.rates?.[c] || {}
+                    const rObj = typeof r === 'object' ? r : { transfer: r, buy: r, sell: r, min: r, max: r, remarks: '' }
+                    const upd = (k, v) => setF({ ...f, rates: { ...f.rates, [c]: { ...rObj, [k]: v === '' ? '' : Number(v) } } })
+                    return (
+                      <TableRow key={c}>
+                        <TableCell><Badge className="text-sm font-bold" variant="outline">{c}</Badge> <span className="text-xs text-slate-500">{CUR_NAME[c]}</span></TableCell>
+                        <TableCell><Badge variant="secondary">YER</Badge></TableCell>
+                        <TableCell><Input type="number" step="0.0001" value={rObj.transfer || ''} onChange={e => upd('transfer', e.target.value)} className="w-28 text-left font-bold" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" step="0.0001" value={rObj.buy || ''} onChange={e => upd('buy', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" step="0.0001" value={rObj.sell || ''} onChange={e => upd('sell', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" step="0.0001" value={rObj.min || ''} onChange={e => upd('min', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" step="0.0001" value={rObj.max || ''} onChange={e => upd('max', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input value={rObj.remarks || ''} onChange={e => setF({ ...f, rates: { ...f.rates, [c]: { ...rObj, remarks: e.target.value } } })} className="w-40" placeholder="ملاحظة" disabled={c === 'YER'} /></TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+              <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-slate-600 flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-blue-600" /> <span>الأسعار الافتراضية: <b>1 USD = 1,554 YER</b> | <b>1 SAR = 410 YER</b> — يمكنك تعديلها لتناسب معدلات السوق اليومية</span>
+              </div>
             </CardContent>
-            <div className="p-4"><Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ الأسعار'}</Button></div>
+            <div className="p-4"><Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ أسعار العملات'}</Button></div>
           </Card>
         </TabsContent>
 
