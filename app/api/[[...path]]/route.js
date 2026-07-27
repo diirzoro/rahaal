@@ -73,6 +73,8 @@ async function seedTenantDefaults(db, tenantId) {
       SAR: { transfer: 410, buy: 408, sell: 412, min: 400, max: 420, remarks: '' },
       YER: { transfer: 1, buy: 1, sell: 1, min: 1, max: 1, remarks: 'العملة الأساسية' },
     },
+    // Direct USD/SAR cross-conversion rates (bypass YER for direct exchanges)
+    pair_usd_sar: { transfer: 3.75, buy: 3.74, sell: 3.76, remarks: 'سعر التحويل المباشر بين الدولار والريال السعودي' },
     updated_at: new Date(),
   })
 }
@@ -370,7 +372,7 @@ async function handleRoute(request, { params }) {
     if (route === '/tenant/settings' && method === 'PUT') {
       if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
       const b = await request.json()
-      const allowed = ['agency_name', 'logo_base64', 'header', 'footer', 'tax_id', 'commercial_id', 'phone', 'address', 'email', 'primary_color', 'rates']
+      const allowed = ['agency_name', 'logo_base64', 'header', 'footer', 'tax_id', 'commercial_id', 'phone', 'address', 'email', 'primary_color', 'rates', 'pair_usd_sar']
       const upd = { updated_at: new Date() }
       for (const k of allowed) if (b[k] !== undefined) upd[k] = b[k]
       await db.collection('tenant_settings').updateOne(tf, { $set: upd }, { upsert: true })

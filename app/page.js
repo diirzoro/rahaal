@@ -549,6 +549,7 @@ const EmptyChart = () => <div className="h-full flex flex-col items-center justi
 // TICKETS SCREEN with Manual + Bulk import
 // ================================================================
 function TicketsScreen() {
+  const { settings, tenant } = useAuth()
   const [tickets, setTickets] = useState([])
   const [clients, setClients] = useState([])
   const [suppliers, setSuppliers] = useState([])
@@ -566,11 +567,36 @@ function TicketsScreen() {
   }
   useEffect(() => { load() }, [])
   const filtered = applyFilter(tickets, filter)
+  const selected = filtered.find(t => t.id === selectedId)
   const handleDelete = async () => {
     if (!selectedId) return
     if (!confirm('حذف هذه التذكرة وعكس القيد المحاسبي؟')) return
     try { await api(`/tickets/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
     catch (e) { toast.error(e.message) }
+  }
+  const handlePrintVoucher = () => {
+    if (!selected) return toast.error('اختر تذكرة أولاً')
+    printVoucher({ kind: 'ticket', record: selected, settings, tenant })
+  }
+  const handlePrintTable = () => {
+    const totals = { cost: 0, sale_price: 0, commission: 0 }
+    for (const r of filtered) { totals.cost += r.cost; totals.sale_price += r.sale_price; totals.commission += r.commission }
+    printTable({
+      title: 'كشف التذاكر', settings, tenant, rows: filtered,
+      columns: [
+        { key: 'date', label: 'التاريخ', render: r => fmtDate(r.date) },
+        { key: 'pnr', label: 'PNR' },
+        { key: 'route', label: 'خط السير' },
+        { key: 'passenger_name', label: 'المسافر' },
+        { key: 'client_name', label: 'العميل' },
+        { key: 'supplier_name', label: 'المورد' },
+        { key: 'currency', label: 'عملة' },
+        { key: 'cost', label: 'تكلفة', align: 'left', render: r => fmt(r.cost, r.currency) },
+        { key: 'sale_price', label: 'بيع', align: 'left', render: r => fmt(r.sale_price, r.currency) },
+        { key: 'commission', label: 'عمولة', align: 'left', render: r => fmt(r.commission, r.currency) },
+      ],
+      totals: { cost: totals.cost.toFixed(2), sale_price: totals.sale_price.toFixed(2), commission: totals.commission.toFixed(2) },
+    })
   }
 
   return (
@@ -578,19 +604,12 @@ function TicketsScreen() {
       <TopBar
         title="حجز التذاكر"
         subtitle="شاشة مدمجة للشراء والبيع وحساب العمولة تلقائياً"
-        right={
-          <Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>
-        }
+        right={<Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>}
       />
       <ActionToolbar
-        addLabel="تذكرة جديدة"
-        onAdd={() => setOpenManual(true)}
-        onRefresh={load}
-        onSearch={() => setOpenSearch(true)}
-        onDelete={handleDelete}
-        onPrint={() => { window.print() }}
-        selectedId={selectedId}
-        count={filtered.length}
+        addLabel="تذكرة جديدة" onAdd={() => setOpenManual(true)} onRefresh={load} onSearch={() => setOpenSearch(true)}
+        onDelete={handleDelete} onPrintVoucher={handlePrintVoucher} onPrintTable={handlePrintTable}
+        selectedId={selectedId} count={filtered.length}
       />
       {filter && (
         <div className="flex items-center gap-2 p-2 bg-blue-50 border border-blue-200 rounded-lg text-xs">
@@ -604,10 +623,9 @@ function TicketsScreen() {
           <div className="overflow-x-auto">
             <Table>
               <TableHeader><TableRow>
-                <TableHead className="w-8"></TableHead>
-                <TableHead>التاريخ</TableHead><TableHead>PNR</TableHead><TableHead>خط السير</TableHead>
-                <TableHead>المسافر</TableHead><TableHead>العميل</TableHead><TableHead>المورد</TableHead>
-                <TableHead>الدفع</TableHead><TableHead>العملة</TableHead>
+                <TableHead className="w-8"></TableHead><TableHead>التاريخ</TableHead><TableHead>PNR</TableHead>
+                <TableHead>خط السير</TableHead><TableHead>المسافر</TableHead><TableHead>العميل</TableHead>
+                <TableHead>المورد</TableHead><TableHead>الدفع</TableHead><TableHead>العملة</TableHead>
                 <TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead>
                 <TableHead className="text-left text-emerald-600">عمولة</TableHead>
               </TableRow></TableHeader>
@@ -634,22 +652,16 @@ function TicketsScreen() {
           </div>
         </CardContent>
       </Card>
-
       <TicketDialog open={openManual} onOpenChange={setOpenManual} clients={clients} suppliers={suppliers} rates={rates}
         onSaved={() => { load(); toast.success('تم حفظ التذكرة وإنشاء القيد المحاسبي تلقائياً') }} />
       <BulkImportDialog open={openBulk} onOpenChange={setOpenBulk} kind="tickets" onDone={() => { load(); setOpenBulk(false) }} />
       <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
         fields={[
-          { key: 'pnr', label: 'رقم التذكرة (PNR)' },
-          { key: 'passenger_name', label: 'اسم المسافر' },
-          { key: 'client_name', label: 'اسم العميل' },
-          { key: 'supplier_name', label: 'اسم المورد' },
-          { key: 'route', label: 'خط السير' },
-          { key: 'sale_price', label: 'سعر البيع' },
-          { key: 'currency', label: 'العملة' },
+          { key: 'pnr', label: 'رقم التذكرة (PNR)' }, { key: 'passenger_name', label: 'اسم المسافر' },
+          { key: 'client_name', label: 'اسم العميل' }, { key: 'supplier_name', label: 'اسم المورد' },
+          { key: 'route', label: 'خط السير' }, { key: 'sale_price', label: 'سعر البيع' }, { key: 'currency', label: 'العملة' },
         ]}
-        onApply={setFilter}
-        onClear={() => setFilter(null)}
+        onApply={setFilter} onClear={() => setFilter(null)}
       />
     </div>
   )
@@ -762,8 +774,148 @@ function QuickAddDialog({ open, onOpenChange, kind, onSaved, initialName }) {
 }
 
 // ================================================================
-// SMART AUTOCOMPLETE (typeahead + inline create)
+// PRINT ENGINE (Voucher + Table with tenant branding)
 // ================================================================
+function escHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])) }
+
+function buildPrintHead(settings, tenant, title) {
+  const color = settings?.primary_color || '#1e3a8a'
+  const logo = settings?.logo_base64 ? `<img src="${settings.logo_base64}" style="height:64px;object-fit:contain;" />` : `<div style="width:64px;height:64px;background:${color};border-radius:12px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:22px;">${(settings?.agency_name || tenant?.name || 'R')[0]}</div>`
+  return `<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>${escHtml(title)}</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
+*{box-sizing:border-box;font-family:'Cairo',sans-serif}
+body{margin:0;padding:24px;color:#0f172a;background:#fff}
+.brand{border-bottom:4px solid ${color};padding-bottom:12px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.brand .r{text-align:left}
+.brand h1{color:${color};font-size:24px;margin:0 0 4px}
+.meta{font-size:11px;color:#64748b;line-height:1.6}
+.title{background:${color}15;border-right:4px solid ${color};padding:10px 14px;margin:16px 0;font-weight:800;font-size:16px}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+th{background:${color}10;color:${color};padding:8px 10px;text-align:right;border-bottom:2px solid ${color}55;font-weight:700}
+td{padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:right}
+.total-row{background:${color}08;font-weight:800}
+.total-row td{border-top:2px solid ${color};border-bottom:none;color:${color}}
+.info-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:6px 24px;font-size:13px;margin:12px 0;padding:12px;background:#f8fafc;border-radius:8px}
+.info-grid div{padding:4px 0;border-bottom:1px dashed #e2e8f0}
+.info-grid b{color:${color}}
+.big{font-size:22px;font-weight:800;color:${color};text-align:left;padding:12px;background:${color}10;border-radius:8px;margin-top:12px}
+.sig{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:40px;font-size:12px;text-align:center;color:#64748b}
+.sig div{border-top:1px solid #94a3b8;padding-top:6px}
+.footer{margin-top:24px;padding-top:12px;border-top:1px dashed #cbd5e1;text-align:center;font-size:10px;color:#94a3b8}
+.badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700}
+.badge-cash{background:#d1fae5;color:#065f46}
+.badge-credit{background:#fef3c7;color:#92400e}
+@media print{body{padding:12px}@page{margin:12mm}}
+</style></head><body>
+<div class="brand">
+  <div style="display:flex;gap:14px;align-items:center">
+    ${logo}
+    <div>
+      <h1>${escHtml(settings?.agency_name || tenant?.name || 'مكتب السفريات')}</h1>
+      <div class="meta">
+        ${settings?.address ? `📍 ${escHtml(settings.address)}<br/>` : ''}
+        ${settings?.phone ? `📞 ${escHtml(settings.phone)}` : ''}
+        ${settings?.email ? ` • ✉ ${escHtml(settings.email)}` : ''}
+        ${settings?.tax_id ? `<br/>الرقم الضريبي: ${escHtml(settings.tax_id)}` : ''}
+        ${settings?.commercial_id ? ` • س.ت: ${escHtml(settings.commercial_id)}` : ''}
+      </div>
+    </div>
+  </div>
+  <div class="r">
+    <div style="font-size:13px;color:#64748b">${escHtml(title)}</div>
+    <div style="font-weight:800;font-size:14px;color:${color}">${fmtDate(new Date())}</div>
+  </div>
+</div>
+${settings?.header ? `<div style="text-align:center;padding:8px;background:#f1f5f9;border-radius:6px;margin-bottom:12px;font-size:13px">${escHtml(settings.header)}</div>` : ''}
+`
+}
+function buildPrintFoot(settings, extra = '') {
+  return `${extra}
+${settings?.footer ? `<div style="text-align:center;font-size:12px;color:#64748b;margin-top:24px;padding-top:12px;border-top:1px dashed #cbd5e1">${escHtml(settings.footer)}</div>` : ''}
+<div class="footer">Powered by <b>Target Media ERP</b> • Rahaal SaaS © 2025</div>
+</body></html>`
+}
+function openPrint(html) {
+  const w = window.open('', '_blank', 'width=900,height=1100')
+  if (!w) return toast.error('السماح للنوافذ المنبثقة مطلوب للطباعة')
+  w.document.write(html); w.document.close()
+  setTimeout(() => { w.focus(); w.print() }, 400)
+}
+
+function printVoucher({ kind, record, settings, tenant }) {
+  const titleMap = {
+    ticket: 'سند/فاتورة حجز تذكرة',
+    visa: 'سند/فاتورة تأشيرة/خدمة',
+    receipt: 'سند قبض',
+    payment: 'سند صرف',
+    fx: 'سند صرافة عملات',
+  }
+  const title = titleMap[kind] || 'سند'
+  let content = ''
+  if (kind === 'ticket') {
+    content = `<div class="title">${title} — PNR: ${escHtml(record.pnr || '—')}</div>
+      <div class="info-grid">
+        <div><b>التاريخ:</b> ${fmtDate(record.date)}</div>
+        <div><b>خط السير:</b> ${escHtml(record.route || '—')}</div>
+        <div><b>المسافر:</b> ${escHtml(record.passenger_name || '—')}</div>
+        <div><b>رقم الجواز:</b> ${escHtml(record.passport_no || '—')}</div>
+        <div><b>العميل:</b> ${escHtml(record.client_name)}</div>
+        <div><b>المورد:</b> ${escHtml(record.supplier_name)}</div>
+        <div><b>تاريخ السفر:</b> ${record.travel_date ? fmtDate(record.travel_date) : '—'}</div>
+        <div><b>طريقة الدفع:</b> <span class="badge ${record.payment_method === 'cash' ? 'badge-cash' : 'badge-credit'}">${record.payment_method === 'cash' ? 'نقد' : 'آجل'}</span></div>
+      </div>
+      <table><thead><tr><th>الوصف</th><th style="text-align:left">التكلفة</th><th style="text-align:left">البيع</th><th style="text-align:left">العمولة</th></tr></thead>
+      <tbody><tr><td>تذكرة طيران</td><td style="text-align:left">${fmt(record.cost, record.currency)}</td><td style="text-align:left">${fmt(record.sale_price, record.currency)}</td><td style="text-align:left"><b>${fmt(record.commission, record.currency)}</b></td></tr></tbody></table>
+      <div class="big">المبلغ المستحق: ${fmt(record.sale_price, record.currency)}</div>`
+  } else if (kind === 'visa') {
+    content = `<div class="title">${title} — ${escHtml(record.service_type)}</div>
+      <div class="info-grid">
+        <div><b>التاريخ:</b> ${fmtDate(record.date)}</div><div><b>نوع الخدمة:</b> ${escHtml(record.service_type)}</div>
+        <div><b>اسم المسافر:</b> ${escHtml(record.passenger_name || '—')}</div><div><b>رقم الجواز:</b> ${escHtml(record.passport_no || '—')}</div>
+        <div><b>الجنسية:</b> ${escHtml(record.nationality || '—')}</div><div><b>العميل:</b> ${escHtml(record.client_name)}</div>
+        <div><b>المورد:</b> ${escHtml(record.supplier_name)}</div>
+        <div><b>طريقة الدفع:</b> <span class="badge ${record.payment_method === 'cash' ? 'badge-cash' : 'badge-credit'}">${record.payment_method === 'cash' ? 'نقد' : 'آجل'}</span></div>
+      </div>
+      <table><thead><tr><th>الوصف</th><th style="text-align:left">التكلفة</th><th style="text-align:left">البيع</th><th style="text-align:left">العمولة</th></tr></thead>
+      <tbody><tr><td>${escHtml(record.service_type)}</td><td style="text-align:left">${fmt(record.cost, record.currency)}</td><td style="text-align:left">${fmt(record.sale_price, record.currency)}</td><td style="text-align:left"><b>${fmt(record.commission, record.currency)}</b></td></tr></tbody></table>
+      <div class="big">المبلغ المستحق: ${fmt(record.sale_price, record.currency)}</div>`
+  } else if (kind === 'receipt' || kind === 'payment') {
+    content = `<div class="title">${title} — ${escHtml(record.party_name)}</div>
+      <div class="info-grid">
+        <div><b>التاريخ:</b> ${fmtDate(record.date)}</div>
+        <div><b>${kind === 'receipt' ? 'المستلم من' : 'المدفوع إلى'}:</b> ${escHtml(record.party_name)}</div>
+        <div><b>الطريقة:</b> ${escHtml(record.method)}</div>
+        <div><b>الصندوق/البنك:</b> ${escHtml(record.box_name)}</div>
+      </div>
+      ${record.description ? `<p style="padding:12px;background:#f8fafc;border-radius:6px"><b>البيان:</b> ${escHtml(record.description)}</p>` : ''}
+      <div class="big">${kind === 'receipt' ? 'مبلغ القبض' : 'مبلغ الصرف'}: ${fmt(record.amount, record.currency)}</div>`
+  } else if (kind === 'fx') {
+    content = `<div class="title">${title} — ${record.type === 'buy' ? 'شراء عملة' : 'بيع عملة'}</div>
+      <div class="info-grid">
+        <div><b>التاريخ:</b> ${fmtDate(record.date)}</div><div><b>النوع:</b> ${record.type === 'buy' ? 'شراء' : 'بيع'}</div>
+        <div><b>الزبون:</b> ${escHtml(record.customer_name || '—')}</div><div><b>الهاتف:</b> ${escHtml(record.customer_phone || '—')}</div>
+        <div><b>نوع الهوية:</b> ${escHtml(record.id_type || '—')}</div><div><b>رقم الهوية:</b> ${escHtml(record.id_number || '—')}</div>
+        <div><b>مصدر الأموال:</b> ${escHtml(record.source_of_funds || '—')}</div><div><b>الغرض:</b> ${escHtml(record.purpose || '—')}</div>
+      </div>
+      <table><thead><tr><th>الوصف</th><th style="text-align:left">المبلغ</th><th style="text-align:left">السعر</th><th style="text-align:left">القيمة</th></tr></thead>
+      <tbody><tr><td>${record.type === 'buy' ? 'شراء' : 'بيع'} ${escHtml(record.currency)}</td><td style="text-align:left"><b>${fmt(record.amount, record.currency)}</b></td><td style="text-align:left">${record.exchange_rate}</td><td style="text-align:left"><b>${fmt(record.counter_amount, record.counter_currency)}</b></td></tr></tbody></table>
+      ${record.remarks ? `<p style="padding:10px;background:#f8fafc;border-radius:6px"><b>ملاحظات:</b> ${escHtml(record.remarks)}</p>` : ''}`
+  }
+  const sig = `<div class="sig"><div>المحاسب</div><div>أمين الصندوق</div><div>توقيع العميل</div></div>`
+  openPrint(buildPrintHead(settings, tenant, title) + content + buildPrintFoot(settings, sig))
+}
+
+function printTable({ title, columns, rows, totals, settings, tenant }) {
+  const head = `<div class="title">${escHtml(title)} — إجمالي ${rows.length} سجل</div>
+  <table><thead><tr>${columns.map(c => `<th${c.align === 'left' ? ' style="text-align:left"' : ''}>${escHtml(c.label)}</th>`).join('')}</tr></thead>
+  <tbody>${rows.map(r => `<tr>${columns.map(c => `<td${c.align === 'left' ? ' style="text-align:left"' : ''}>${escHtml(c.render ? c.render(r) : (r[c.key] ?? '—'))}</td>`).join('')}</tr>`).join('')}
+  ${totals ? `<tr class="total-row">${columns.map((c, i) => `<td${c.align === 'left' ? ' style="text-align:left"' : ''}>${i === 0 ? 'الإجمالي' : (totals[c.key] !== undefined ? escHtml(totals[c.key]) : '')}</td>`).join('')}</tr>` : ''}
+  </tbody></table>`
+  openPrint(buildPrintHead(settings, tenant, title) + head + buildPrintFoot(settings))
+}
+
+
 function SmartAutocomplete({ kind, items, value, onChange, placeholder, onCreated }) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
@@ -821,7 +973,7 @@ function SmartAutocomplete({ kind, items, value, onChange, placeholder, onCreate
 // ================================================================
 // ACTION TOOLBAR (unified across screens)
 // ================================================================
-function ActionToolbar({ onAdd, onRefresh, onDelete, onSearch, onPrint, onExit, selectedId, count, addLabel }) {
+function ActionToolbar({ onAdd, onRefresh, onDelete, onSearch, onPrint, onPrintVoucher, onPrintTable, onEdit, onExit, selectedId, count, addLabel }) {
   const btn = (icon, label, cb, cls = '', disabled = false) => (
     <Button size="sm" variant="outline" onClick={cb} disabled={disabled}
       className={`gap-2 ${cls}`}>{icon}<span className="hidden md:inline">{label}</span></Button>
@@ -829,9 +981,12 @@ function ActionToolbar({ onAdd, onRefresh, onDelete, onSearch, onPrint, onExit, 
   return (
     <div className="flex flex-wrap items-center gap-2 p-2 bg-white border rounded-lg shadow-sm mb-4">
       {onAdd && <Button onClick={onAdd} size="sm" className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> {addLabel || 'إضافة'}</Button>}
+      {onEdit && btn(<Key className="w-4 h-4" />, 'تعديل', onEdit, 'text-amber-600 hover:bg-amber-50', !selectedId)}
+      {onDelete && btn(<Trash2 className="w-4 h-4" />, 'حذف', onDelete, 'text-rose-600 hover:bg-rose-50', !selectedId)}
       {onRefresh && btn(<Activity className="w-4 h-4" />, 'تحديث', onRefresh)}
       {onSearch && btn(<Search className="w-4 h-4" />, 'بحث', onSearch)}
-      {onDelete && btn(<Trash2 className="w-4 h-4" />, 'حذف', onDelete, 'text-rose-600 hover:bg-rose-50', !selectedId)}
+      {onPrintVoucher && btn(<Printer className="w-4 h-4" />, 'طباعة السند', onPrintVoucher, 'text-blue-600 hover:bg-blue-50', !selectedId)}
+      {onPrintTable && btn(<FileSpreadsheet className="w-4 h-4" />, 'طباعة الجدول', onPrintTable, 'text-emerald-600 hover:bg-emerald-50')}
       {onPrint && btn(<Printer className="w-4 h-4" />, 'طباعة', onPrint, 'text-blue-600 hover:bg-blue-50', !selectedId)}
       <div className="flex-1" />
       {count !== undefined && <Badge variant="secondary">{count} سجل</Badge>}
@@ -1931,6 +2086,31 @@ function OfficeSettings() {
                   })}
                 </TableBody>
               </Table>
+              {/* Direct USD/SAR Cross-Rate */}
+              <div className="mt-4 p-3 border-2 border-fuchsia-200 rounded-lg bg-fuchsia-50/50">
+                <div className="text-sm font-bold text-fuchsia-800 mb-2 flex items-center gap-2">
+                  <ArrowLeftRight className="w-4 h-4" /> سعر التحويل المباشر بين الدولار والريال السعودي (USD ↔ SAR)
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                  <Field label="سعر التحويل المباشر">
+                    <Input type="number" step="0.0001" value={f.pair_usd_sar?.transfer ?? 3.75}
+                      onChange={e => setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), transfer: Number(e.target.value) } })} className="text-lg font-bold" />
+                  </Field>
+                  <Field label="سعر شراء الدولار (SAR)">
+                    <Input type="number" step="0.0001" value={f.pair_usd_sar?.buy ?? 3.74}
+                      onChange={e => setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), buy: Number(e.target.value) } })} />
+                  </Field>
+                  <Field label="سعر بيع الدولار (SAR)">
+                    <Input type="number" step="0.0001" value={f.pair_usd_sar?.sell ?? 3.76}
+                      onChange={e => setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), sell: Number(e.target.value) } })} />
+                  </Field>
+                  <Field label="ملاحظات">
+                    <Input value={f.pair_usd_sar?.remarks || ''}
+                      onChange={e => setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), remarks: e.target.value } })} placeholder="سعر السوق اليومي" />
+                  </Field>
+                </div>
+                <div className="text-xs text-slate-500 mt-2">💡 يُستخدم هذا السعر مباشرة عند التحويل بين $/SAR دون المرور بالريال اليمني — مثلاً: 1 USD = 3.75 SAR</div>
+              </div>
               <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-slate-600 flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-blue-600" /> <span>الأسعار الافتراضية: <b>1 USD = 1,554 YER</b> | <b>1 SAR = 410 YER</b> — يمكنك تعديلها لتناسب معدلات السوق اليومية</span>
               </div>
