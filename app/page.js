@@ -558,6 +558,7 @@ function TicketsScreen() {
   const [openSearch, setOpenSearch] = useState(false)
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
+  const [editing, setEditing] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
@@ -574,6 +575,11 @@ function TicketsScreen() {
     try { await api(`/tickets/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
     catch (e) { toast.error(e.message) }
   }
+  const handleEdit = () => {
+    if (!selected) return toast.error('اختر تذكرة أولاً')
+    setEditing(selected); setOpenManual(true)
+  }
+  const handleAdd = () => { setEditing(null); setOpenManual(true) }
   const handlePrintVoucher = () => {
     if (!selected) return toast.error('اختر تذكرة أولاً')
     printVoucher({ kind: 'ticket', record: selected, settings, tenant })
@@ -607,8 +613,8 @@ function TicketsScreen() {
         right={<Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>}
       />
       <ActionToolbar
-        addLabel="تذكرة جديدة" onAdd={() => setOpenManual(true)} onRefresh={load} onSearch={() => setOpenSearch(true)}
-        onDelete={handleDelete} onPrintVoucher={handlePrintVoucher} onPrintTable={handlePrintTable}
+        addLabel="تذكرة جديدة" onAdd={handleAdd} onRefresh={load} onSearch={() => setOpenSearch(true)}
+        onEdit={handleEdit} onDelete={handleDelete} onPrintVoucher={handlePrintVoucher} onPrintTable={handlePrintTable}
         selectedId={selectedId} count={filtered.length}
       />
       {filter && (
@@ -652,8 +658,8 @@ function TicketsScreen() {
           </div>
         </CardContent>
       </Card>
-      <TicketDialog open={openManual} onOpenChange={setOpenManual} clients={clients} suppliers={suppliers} rates={rates}
-        onSaved={() => { load(); toast.success('تم حفظ التذكرة وإنشاء القيد المحاسبي تلقائياً') }} />
+      <TicketDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }} clients={clients} suppliers={suppliers} rates={rates} record={editing}
+        onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل التذكرة وعكس القيد السابق تلقائياً' : 'تم حفظ التذكرة وإنشاء القيد المحاسبي تلقائياً') }} />
       <BulkImportDialog open={openBulk} onOpenChange={setOpenBulk} kind="tickets" onDone={() => { load(); setOpenBulk(false) }} />
       <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
         fields={[
@@ -667,12 +673,32 @@ function TicketsScreen() {
   )
 }
 
-function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }) {
-  const [form, setForm] = useState({ date: todayISO(), currency: 'USD', exchange_rate: 1, client_id: '', supplier_id: '', pnr: '', route: '', passenger_name: '', passport_no: '', travel_date: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' })
+function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
+  const isEdit = !!record
+  const emptyForm = { date: todayISO(), currency: 'USD', exchange_rate: 1, client_id: '', supplier_id: '', pnr: '', route: '', passenger_name: '', passport_no: '', travel_date: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }
+  const [form, setForm] = useState(emptyForm)
   const [boxes, setBoxes] = useState([])
   const [saving, setSaving] = useState(false)
   const [quickC, setQuickC] = useState(false); const [quickS, setQuickS] = useState(false)
-  useEffect(() => { if (rates && form.currency) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
+  useEffect(() => {
+    if (!open) return
+    if (record) {
+      setForm({
+        date: record.date ? new Date(record.date).toISOString().slice(0,10) : todayISO(),
+        currency: record.currency || 'USD',
+        exchange_rate: record.exchange_rate || 1,
+        client_id: record.client_id || '', supplier_id: record.supplier_id || '',
+        pnr: record.pnr || '', route: record.route || '',
+        passenger_name: record.passenger_name || '', passport_no: record.passport_no || '',
+        travel_date: record.travel_date ? new Date(record.travel_date).toISOString().slice(0,10) : '',
+        cost: record.cost ?? '', sale_price: record.sale_price ?? '',
+        payment_method: record.payment_method || 'credit', box_id: record.box_id || '',
+      })
+    } else {
+      setForm(emptyForm)
+    }
+  }, [open, record])
+  useEffect(() => { if (rates && form.currency && !isEdit) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
   useEffect(() => { if (open) api('/boxes').then(setBoxes).catch(()=>{}) }, [open])
   useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: boxes[0].id })) }, [form.payment_method, boxes])
   const commission = useMemo(() => (Number(form.sale_price) || 0) - (Number(form.cost) || 0), [form.sale_price, form.cost])
@@ -680,14 +706,21 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }
     if (!form.client_id || !form.supplier_id) return toast.error('اختر العميل والمورد')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
     if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق للدفع النقدي')
-    try { setSaving(true); await api('/tickets', { method: 'POST', body: form }); onOpenChange(false); setForm({ date: todayISO(), currency: 'USD', exchange_rate: 1, client_id: '', supplier_id: '', pnr: '', route: '', passenger_name: '', passport_no: '', travel_date: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }); onSaved() }
-    catch (e) { toast.error(e.message) } finally { setSaving(false) }
+    try {
+      setSaving(true)
+      if (isEdit) {
+        await api(`/tickets/${record.id}`, { method: 'PUT', body: form })
+      } else {
+        await api('/tickets', { method: 'POST', body: form })
+      }
+      onOpenChange(false); setForm(emptyForm); onSaved()
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" dir="rtl">
-          <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><div className="w-9 h-9 rounded-lg grad-brand flex items-center justify-center"><Plane className="w-4 h-4 text-white -rotate-45" /></div>حجز تذكرة جديدة</DialogTitle><DialogDescription>سيتم إنشاء قيد يومية تلقائي — نقد (خصم من الصندوق) أو آجل (على حساب العميل)</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><div className="w-9 h-9 rounded-lg grad-brand flex items-center justify-center"><Plane className="w-4 h-4 text-white -rotate-45" /></div>{isEdit ? '✏️ تعديل تذكرة' : 'حجز تذكرة جديدة'}</DialogTitle><DialogDescription>{isEdit ? 'سيتم عكس القيد المحاسبي القديم وإعادة الترحيل بالقيم الجديدة تلقائياً — دون خصم من حصة القيود' : 'سيتم إنشاء قيد يومية تلقائي — نقد (خصم من الصندوق) أو آجل (على حساب العميل)'}</DialogDescription></DialogHeader>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-2">
             <Field label="تاريخ الحركة"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
             <Field label="نوع العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
@@ -736,7 +769,7 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }
               </Field>
             </div>
           </div>
-          <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} disabled={saving} className="grad-brand text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ + إنشاء قيد'}</Button></DialogFooter>
+          <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} disabled={saving} className="grad-brand text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (isEdit ? '💾 حفظ التعديل + عكس القيد' : 'حفظ + إنشاء قيد')}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
       <QuickAddDialog open={quickC} onOpenChange={setQuickC} kind="client" onSaved={onSaved} />
@@ -1360,11 +1393,16 @@ function StatMini({ label, value, color }) {
 const VISA_TYPES = ['تأشيرة عمرة', 'موافقة أمنية', 'فيزا سياحية', 'فيزا عمل', 'حجز فندق', 'خدمات أخرى']
 
 function VisasScreen() {
+  const { settings, tenant } = useAuth()
   const [visas, setVisas] = useState([])
   const [clients, setClients] = useState([])
   const [suppliers, setSuppliers] = useState([])
   const [openManual, setOpenManual] = useState(false)
   const [openBulk, setOpenBulk] = useState(false)
+  const [openSearch, setOpenSearch] = useState(false)
+  const [filter, setFilter] = useState(null)
+  const [selectedId, setSelectedId] = useState(null)
+  const [editing, setEditing] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
@@ -1373,36 +1411,78 @@ function VisasScreen() {
     } catch (e) { toast.error(e.message) }
   }
   useEffect(() => { load() }, [])
+  const filtered = applyFilter(visas, filter)
+  const selected = filtered.find(v => v.id === selectedId)
+  const handleAdd = () => { setEditing(null); setOpenManual(true) }
+  const handleEdit = () => { if (!selected) return toast.error('اختر خدمة أولاً'); setEditing(selected); setOpenManual(true) }
+  const handleDelete = async () => {
+    if (!selectedId) return
+    if (!confirm('حذف هذه الخدمة/التأشيرة وعكس القيد المحاسبي؟')) return
+    try { await api(`/visas/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const handlePrintVoucher = () => {
+    if (!selected) return toast.error('اختر سجلاً أولاً')
+    printVoucher({ kind: 'visa', record: selected, settings, tenant })
+  }
+  const handlePrintTable = () => {
+    const totals = { cost: 0, sale_price: 0, commission: 0 }
+    for (const r of filtered) { totals.cost += r.cost; totals.sale_price += r.sale_price; totals.commission += r.commission }
+    printTable({
+      title: 'كشف التأشيرات والخدمات', settings, tenant, rows: filtered,
+      columns: [
+        { key: 'date', label: 'التاريخ', render: r => fmtDate(r.date) },
+        { key: 'service_type', label: 'الخدمة' },
+        { key: 'passenger_name', label: 'المسافر' },
+        { key: 'passport_no', label: 'الجواز' },
+        { key: 'client_name', label: 'العميل' },
+        { key: 'supplier_name', label: 'المورد' },
+        { key: 'currency', label: 'العملة' },
+        { key: 'cost', label: 'تكلفة', align: 'left', render: r => fmt(r.cost, r.currency) },
+        { key: 'sale_price', label: 'بيع', align: 'left', render: r => fmt(r.sale_price, r.currency) },
+        { key: 'commission', label: 'عمولة', align: 'left', render: r => fmt(r.commission, r.currency) },
+      ],
+      totals: { cost: totals.cost.toFixed(2), sale_price: totals.sale_price.toFixed(2), commission: totals.commission.toFixed(2) },
+    })
+  }
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <TopBar
         title="التأشيرات والخدمات"
         subtitle="تأشيرات عمرة، موافقات أمنية، فيز، حجز فنادق — إدخال يدوي أو استيراد Excel"
-        right={
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>
-            <Button onClick={() => setOpenManual(true)} className="gap-2 grad-green text-white shadow-lg"><Plus className="w-4 h-4" /> خدمة جديدة</Button>
-          </div>
-        }
+        right={<Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>}
       />
+      <ActionToolbar
+        addLabel="خدمة جديدة" onAdd={handleAdd} onRefresh={load} onSearch={() => setOpenSearch(true)}
+        onEdit={handleEdit} onDelete={handleDelete} onPrintVoucher={handlePrintVoucher} onPrintTable={handlePrintTable}
+        selectedId={selectedId} count={filtered.length}
+      />
+      {filter && (
+        <div className="flex items-center gap-2 p-2 bg-blue-50 border border-blue-200 rounded-lg text-xs">
+          <Filter className="w-4 h-4 text-blue-600" /> فلتر نشط: <b>{filter.field}</b> {filter.condition === 'equals' ? 'يساوي' : 'يحتوي على'} "<b>{filter.term}</b>"
+          <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
+        </div>
+      )}
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><FileBadge2 className="w-5 h-5 text-emerald-600" /> سجل التأشيرات ({visas.length})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><FileBadge2 className="w-5 h-5 text-emerald-600" /> سجل التأشيرات ({filtered.length}{filter ? ` من ${visas.length}` : ''})</CardTitle></CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-8"></TableHead>
                   <TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>المسافر</TableHead>
                   <TableHead>الجواز</TableHead><TableHead>الجنسية</TableHead><TableHead>العميل</TableHead>
-                  <TableHead>المورد</TableHead><TableHead>العملة</TableHead>
+                  <TableHead>المورد</TableHead><TableHead>الدفع</TableHead><TableHead>العملة</TableHead>
                   <TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead>
                   <TableHead className="text-left text-emerald-600">عمولة</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {visas.length === 0 && <TableRow><TableCell colSpan={11} className="text-center text-slate-400 py-8">لا توجد خدمات</TableCell></TableRow>}
-                {visas.map(v => (
-                  <TableRow key={v.id}>
+                {filtered.length === 0 && <TableRow><TableCell colSpan={13} className="text-center text-slate-400 py-8">{filter ? 'لا نتائج للفلتر' : 'لا توجد خدمات'}</TableCell></TableRow>}
+                {filtered.map(v => (
+                  <TableRow key={v.id} className={selectedId === v.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={() => setSelectedId(v.id === selectedId ? null : v.id)}>
+                    <TableCell><input type="radio" checked={selectedId === v.id} onChange={() => setSelectedId(v.id)} /></TableCell>
                     <TableCell className="text-xs">{fmtDate(v.date)}</TableCell>
                     <TableCell><Badge variant="secondary">{v.service_type}</Badge></TableCell>
                     <TableCell>{v.passenger_name || '—'}</TableCell>
@@ -1410,6 +1490,7 @@ function VisasScreen() {
                     <TableCell className="text-xs">{v.nationality || '—'}</TableCell>
                     <TableCell>{v.client_name}</TableCell>
                     <TableCell>{v.supplier_name}</TableCell>
+                    <TableCell>{v.payment_method === 'cash' ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">💵 نقد</Badge> : <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">🕓 آجل</Badge>}</TableCell>
                     <TableCell><Badge variant="outline">{v.currency}</Badge></TableCell>
                     <TableCell className="text-left font-semibold">{fmt(v.cost, v.currency)}</TableCell>
                     <TableCell className="text-left font-semibold">{fmt(v.sale_price, v.currency)}</TableCell>
@@ -1421,19 +1502,45 @@ function VisasScreen() {
           </div>
         </CardContent>
       </Card>
-      <VisaDialog open={openManual} onOpenChange={setOpenManual} clients={clients} suppliers={suppliers} rates={rates}
-        onSaved={() => { load(); toast.success('تم حفظ الخدمة') }} />
+      <VisaDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }} clients={clients} suppliers={suppliers} rates={rates} record={editing}
+        onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل الخدمة وعكس القيد السابق تلقائياً' : 'تم حفظ الخدمة') }} />
       <BulkImportDialog open={openBulk} onOpenChange={setOpenBulk} kind="visas" onDone={() => { load(); setOpenBulk(false) }} />
+      <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
+        fields={[
+          { key: 'passenger_name', label: 'اسم المسافر' }, { key: 'passport_no', label: 'رقم الجواز' },
+          { key: 'client_name', label: 'اسم العميل' }, { key: 'supplier_name', label: 'اسم المورد' },
+          { key: 'service_type', label: 'نوع الخدمة' }, { key: 'nationality', label: 'الجنسية' },
+          { key: 'sale_price', label: 'سعر البيع' }, { key: 'currency', label: 'العملة' },
+        ]}
+        onApply={setFilter} onClear={() => setFilter(null)}
+      />
     </div>
   )
 }
 
-function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }) {
-  const [form, setForm] = useState({ date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' })
+function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
+  const isEdit = !!record
+  const emptyForm = { date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }
+  const [form, setForm] = useState(emptyForm)
   const [boxes, setBoxes] = useState([])
   const [saving, setSaving] = useState(false)
   const [qc, setQc] = useState(false); const [qs, setQs] = useState(false)
-  useEffect(() => { if (rates) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
+  useEffect(() => {
+    if (!open) return
+    if (record) {
+      setForm({
+        date: record.date ? new Date(record.date).toISOString().slice(0,10) : todayISO(),
+        service_type: record.service_type || 'تأشيرة عمرة',
+        currency: record.currency || 'SAR', exchange_rate: record.exchange_rate || 1,
+        client_id: record.client_id || '', supplier_id: record.supplier_id || '',
+        passenger_name: record.passenger_name || '', passport_no: record.passport_no || '',
+        nationality: record.nationality || '',
+        cost: record.cost ?? '', sale_price: record.sale_price ?? '',
+        payment_method: record.payment_method || 'credit', box_id: record.box_id || '',
+      })
+    } else { setForm(emptyForm) }
+  }, [open, record])
+  useEffect(() => { if (rates && !isEdit) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
   useEffect(() => { if (open) api('/boxes').then(setBoxes).catch(()=>{}) }, [open])
   useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: boxes[0].id })) }, [form.payment_method, boxes])
   const commission = (Number(form.sale_price) || 0) - (Number(form.cost) || 0)
@@ -1441,14 +1548,18 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }) 
     if (!form.client_id || !form.supplier_id) return toast.error('اختر العميل والمورد')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
     if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق للدفع النقدي')
-    try { setSaving(true); await api('/visas', { method: 'POST', body: form }); onOpenChange(false); onSaved(); setForm({ date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }) }
-    catch (e) { toast.error(e.message) } finally { setSaving(false) }
+    try {
+      setSaving(true)
+      if (isEdit) await api(`/visas/${record.id}`, { method: 'PUT', body: form })
+      else await api('/visas', { method: 'POST', body: form })
+      onOpenChange(false); onSaved(); setForm(emptyForm)
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" dir="rtl">
-          <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><div className="w-9 h-9 rounded-lg grad-green flex items-center justify-center"><FileBadge2 className="w-4 h-4 text-white" /></div>خدمة / تأشيرة جديدة</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><div className="w-9 h-9 rounded-lg grad-green flex items-center justify-center"><FileBadge2 className="w-4 h-4 text-white" /></div>{isEdit ? '✏️ تعديل خدمة / تأشيرة' : 'خدمة / تأشيرة جديدة'}</DialogTitle>{isEdit && <DialogDescription>سيتم عكس القيد المحاسبي القديم وإعادة الترحيل تلقائياً — دون خصم من الحصة</DialogDescription>}</DialogHeader>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
             <Field label="نوع الخدمة"><Select value={form.service_type} onValueChange={v => setForm({ ...form, service_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{VISA_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent></Select></Field>
@@ -1478,7 +1589,7 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }) 
               <Field label={`العمولة (${form.currency})`}><div className={`px-3 py-2 rounded-md border text-lg font-extrabold ${commission >= 0 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>{fmt(commission, form.currency)}</div></Field>
             </div>
           </div>
-          <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} disabled={saving} className="grad-green text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ + قيد'}</Button></DialogFooter>
+          <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} disabled={saving} className="grad-green text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (isEdit ? '💾 حفظ التعديل + عكس القيد' : 'حفظ + قيد')}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
       <QuickAddDialog open={qc} onOpenChange={setQc} kind="client" onSaved={onSaved} />
@@ -1491,6 +1602,7 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved }) 
 // VOUCHER + PARTIES + BOXES + CHART + JOURNAL + REPORTS (same as v1)
 // ================================================================
 function VoucherScreen({ mode }) {
+  const { settings, tenant } = useAuth()
   const cfg = mode === 'receipt'
     ? { title: 'سند قبض', subtitle: 'المستلم من العميل / المورد', icon: ArrowDownLeft, grad: 'grad-green', partyLabel: 'المستلم من', defaultParty: 'client' }
     : { title: 'سند صرف', subtitle: 'المدفوع إلى المورد / مصروفات', icon: ArrowUpRight, grad: 'grad-rose', partyLabel: 'المدفوع إلى', defaultParty: 'supplier' }
@@ -1499,26 +1611,72 @@ function VoucherScreen({ mode }) {
   const [suppliers, setSuppliers] = useState([])
   const [boxes, setBoxes] = useState([])
   const [open, setOpen] = useState(false)
+  const [openSearch, setOpenSearch] = useState(false)
+  const [filter, setFilter] = useState(null)
+  const [selectedId, setSelectedId] = useState(null)
+  const [editing, setEditing] = useState(null)
   const load = async () => {
     try {
       const [v, c, s, b] = await Promise.all([api(`/vouchers?type=${mode}`), api('/clients'), api('/suppliers'), api('/boxes')])
       setVouchers(v); setClients(c); setSuppliers(s); setBoxes(b)
     } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load() }, [mode])
+  useEffect(() => { load(); setSelectedId(null); setFilter(null) }, [mode])
+  const filtered = applyFilter(vouchers, filter)
+  const selected = filtered.find(v => v.id === selectedId)
+  const handleAdd = () => { setEditing(null); setOpen(true) }
+  const handleEdit = () => { if (!selected) return toast.error('اختر سنداً أولاً'); setEditing(selected); setOpen(true) }
+  const handleDelete = async () => {
+    if (!selectedId) return
+    if (!confirm('حذف هذا السند وعكس القيد المحاسبي؟')) return
+    try { await api(`/vouchers/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const handlePrintVoucher = () => {
+    if (!selected) return toast.error('اختر سنداً أولاً')
+    printVoucher({ kind: mode, record: selected, settings, tenant })
+  }
+  const handlePrintTable = () => {
+    const totals = { amount: 0 }
+    for (const r of filtered) { totals.amount += r.amount }
+    printTable({
+      title: `كشف ${cfg.title}`, settings, tenant, rows: filtered,
+      columns: [
+        { key: 'date', label: 'التاريخ', render: r => fmtDate(r.date) },
+        { key: 'party_name', label: cfg.partyLabel },
+        { key: 'description', label: 'البيان' },
+        { key: 'method', label: 'الطريقة' },
+        { key: 'box_name', label: 'الصندوق' },
+        { key: 'currency', label: 'العملة' },
+        { key: 'amount', label: 'المبلغ', align: 'left', render: r => fmt(r.amount, r.currency) },
+      ],
+      totals: { amount: totals.amount.toFixed(2) },
+    })
+  }
   return (
-    <div className="space-y-6">
-      <TopBar title={cfg.title} subtitle={cfg.subtitle}
-        right={<Button onClick={() => setOpen(true)} className={`gap-2 ${cfg.grad} text-white shadow-lg`}><Plus className="w-4 h-4" /> {cfg.title} جديد</Button>} />
+    <div className="space-y-4">
+      <TopBar title={cfg.title} subtitle={cfg.subtitle} />
+      <ActionToolbar
+        addLabel={`${cfg.title} جديد`} onAdd={handleAdd} onRefresh={load} onSearch={() => setOpenSearch(true)}
+        onEdit={handleEdit} onDelete={handleDelete} onPrintVoucher={handlePrintVoucher} onPrintTable={handlePrintTable}
+        selectedId={selectedId} count={filtered.length}
+      />
+      {filter && (
+        <div className="flex items-center gap-2 p-2 bg-blue-50 border border-blue-200 rounded-lg text-xs">
+          <Filter className="w-4 h-4 text-blue-600" /> فلتر: <b>{filter.field}</b> "<b>{filter.term}</b>"
+          <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
+        </div>
+      )}
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><cfg.icon className="w-5 h-5" /> سجل السندات ({vouchers.length})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><cfg.icon className="w-5 h-5" /> سجل السندات ({filtered.length}{filter ? ` من ${vouchers.length}` : ''})</CardTitle></CardHeader>
         <CardContent>
           <Table>
-            <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>{cfg.partyLabel}</TableHead><TableHead>البيان</TableHead><TableHead>الطريقة</TableHead><TableHead>الصندوق</TableHead><TableHead>العملة</TableHead><TableHead className="text-left">المبلغ</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead className="w-8"></TableHead><TableHead>التاريخ</TableHead><TableHead>{cfg.partyLabel}</TableHead><TableHead>البيان</TableHead><TableHead>الطريقة</TableHead><TableHead>الصندوق</TableHead><TableHead>العملة</TableHead><TableHead className="text-left">المبلغ</TableHead></TableRow></TableHeader>
             <TableBody>
-              {vouchers.length === 0 && <TableRow><TableCell colSpan={7} className="text-center text-slate-400 py-8">لا توجد سندات</TableCell></TableRow>}
-              {vouchers.map(v => (
-                <TableRow key={v.id}>
+              {filtered.length === 0 && <TableRow><TableCell colSpan={8} className="text-center text-slate-400 py-8">لا توجد سندات</TableCell></TableRow>}
+              {filtered.map(v => (
+                <TableRow key={v.id} className={selectedId === v.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={() => setSelectedId(v.id === selectedId ? null : v.id)}>
+                  <TableCell><input type="radio" checked={selectedId === v.id} onChange={() => setSelectedId(v.id)} /></TableCell>
                   <TableCell className="text-xs">{fmtDate(v.date)}</TableCell>
                   <TableCell className="font-semibold">{v.party_name}</TableCell>
                   <TableCell className="text-xs">{v.description || '—'}</TableCell>
@@ -1532,29 +1690,59 @@ function VoucherScreen({ mode }) {
           </Table>
         </CardContent>
       </Card>
-      <VoucherDialog open={open} onOpenChange={setOpen} mode={mode} clients={clients} suppliers={suppliers} boxes={boxes} onSaved={() => { load(); toast.success('تم حفظ السند') }} />
+      <VoucherDialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }} mode={mode} clients={clients} suppliers={suppliers} boxes={boxes} record={editing}
+        onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل السند وعكس القيد تلقائياً' : 'تم حفظ السند') }} />
+      <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
+        fields={[
+          { key: 'party_name', label: 'اسم الطرف' }, { key: 'description', label: 'البيان' },
+          { key: 'amount', label: 'المبلغ' }, { key: 'currency', label: 'العملة' },
+          { key: 'method', label: 'طريقة الدفع' },
+        ]}
+        onApply={setFilter} onClear={() => setFilter(null)}
+      />
     </div>
   )
 }
 
-function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, onSaved }) {
+function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, onSaved, record }) {
+  const isEdit = !!record
   const defaultParty = mode === 'receipt' ? 'client' : 'supplier'
-  const [form, setForm] = useState({ date: todayISO(), currency: 'USD', amount: '', party_type: defaultParty, party_id: '', party_name: '', box_id: '', method: '', description: '' })
+  const emptyForm = { date: todayISO(), currency: 'USD', amount: '', party_type: defaultParty, party_id: '', party_name: '', box_id: '', method: '', description: '' }
+  const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
-  useEffect(() => { setForm(f => ({ ...f, party_type: defaultParty, party_id: '', party_name: '' })) }, [mode, defaultParty])
+  useEffect(() => {
+    if (!open) return
+    if (record) {
+      setForm({
+        date: record.date ? new Date(record.date).toISOString().slice(0,10) : todayISO(),
+        currency: record.currency || 'USD',
+        amount: record.amount ?? '',
+        party_type: record.party_type || defaultParty,
+        party_id: record.party_id || '', party_name: record.party_name || '',
+        box_id: record.box_id || '', method: record.method || '', description: record.description || '',
+      })
+    } else {
+      setForm({ ...emptyForm, party_type: defaultParty })
+    }
+  }, [open, record, mode])
+  useEffect(() => { if (!isEdit) setForm(f => ({ ...f, party_type: defaultParty, party_id: '', party_name: '' })) }, [mode, defaultParty])
   useEffect(() => { if (boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: boxes[0].id })) }, [boxes])
   const list = form.party_type === 'client' ? clients : form.party_type === 'supplier' ? suppliers : []
   const submit = async () => {
     if (!form.amount) return toast.error('أدخل المبلغ')
     if (form.party_type !== 'expense' && !form.party_id) return toast.error('اختر الطرف')
     if (!form.box_id) return toast.error('اختر الصندوق')
-    try { setSaving(true); await api('/vouchers', { method: 'POST', body: { type: mode, ...form } }); onOpenChange(false); setForm({ date: todayISO(), currency: 'USD', amount: '', party_type: defaultParty, party_id: '', party_name: '', box_id: boxes[0]?.id || '', method: '', description: '' }); onSaved() }
-    catch (e) { toast.error(e.message) } finally { setSaving(false) }
+    try {
+      setSaving(true)
+      if (isEdit) await api(`/vouchers/${record.id}`, { method: 'PUT', body: { type: mode, ...form } })
+      else await api('/vouchers', { method: 'POST', body: { type: mode, ...form } })
+      onOpenChange(false); setForm({ ...emptyForm, party_type: defaultParty, box_id: boxes[0]?.id || '' }); onSaved()
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl" dir="rtl">
-        <DialogHeader><DialogTitle>{mode === 'receipt' ? 'سند قبض جديد' : 'سند صرف جديد'}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{isEdit ? `✏️ تعديل ${mode === 'receipt' ? 'سند قبض' : 'سند صرف'}` : (mode === 'receipt' ? 'سند قبض جديد' : 'سند صرف جديد')}</DialogTitle>{isEdit && <DialogDescription>سيتم عكس القيد المحاسبي القديم وإعادة الترحيل بالقيم الجديدة تلقائياً</DialogDescription>}</DialogHeader>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
           <Field label="نوع الطرف"><Select value={form.party_type} onValueChange={v => setForm({ ...form, party_type: v, party_id: '' })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="client">عميل</SelectItem><SelectItem value="supplier">مورد</SelectItem>{mode === 'payment' && <SelectItem value="expense">مصروف</SelectItem>}</SelectContent></Select></Field>
@@ -1569,7 +1757,7 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
           <Field label="طريقة الدفع"><Input value={form.method} onChange={e => setForm({ ...form, method: e.target.value })} placeholder="نقدي / حوالة" /></Field>
           <div className="md:col-span-2"><Field label="البيان"><Textarea rows={2} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></Field></div>
         </div>
-        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} disabled={saving} className={mode === 'receipt' ? 'grad-green text-white' : 'grad-rose text-white'}>{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ'}</Button></DialogFooter>
+        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} disabled={saving} className={mode === 'receipt' ? 'grad-green text-white' : 'grad-rose text-white'}>{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (isEdit ? '💾 حفظ التعديل' : 'حفظ')}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -1671,23 +1859,86 @@ function ChartScreen() {
 }
 
 function JournalScreen() {
+  const { settings, tenant } = useAuth()
   const [rows, setRows] = useState([])
   const [open, setOpen] = useState(false)
+  const [selectedId, setSelectedId] = useState(null)
+  const [editing, setEditing] = useState(null)
   const load = () => api('/journal-entries').then(setRows).catch(e => toast.error(e.message))
   useEffect(() => { load() }, [])
+  const selected = rows.find(je => je.id === selectedId)
+  const isEditableJe = selected && (selected.ref_type === 'manual' || selected.ref_type === 'manual_dual')
+  const handleAdd = () => { setEditing(null); setOpen(true) }
+  const handleEdit = () => {
+    if (!selected) return toast.error('اختر قيداً أولاً')
+    if (!isEditableJe) return toast.error('لا يمكن تعديل قيود المعاملات مباشرةً — عدّل السجل الأصلي (تذكرة/تأشيرة/سند...)')
+    setEditing(selected); setOpen(true)
+  }
+  const handleDelete = async () => {
+    if (!selected) return
+    if (!isEditableJe) return toast.error('لا يمكن حذف قيد معاملة مباشرةً — احذف السجل الأصلي')
+    if (!confirm('حذف هذا القيد اليدوي؟')) return
+    try {
+      // Reverse effects then delete via generic route (backend keeps this clean for manual JEs only)
+      // Simplest: We call DELETE on /journal-entries/:id (needs backend support) — for now, disallow via toast
+      toast.error('حذف القيود اليدوية غير مدعوم بعد — عدّل بدلاً من ذلك')
+    } catch (e) { toast.error(e.message) }
+  }
+  const handlePrintTable = () => {
+    // Flatten JE lines for printing
+    const flat = []
+    for (const je of rows) {
+      for (const l of je.lines || []) {
+        flat.push({
+          date: je.date, description: je.description, ref_type: je.ref_type,
+          account: `${l.account_code} — ${l.account_name}`,
+          party: l.party_name || '—',
+          currency: l.currency || je.currency,
+          debit: l.debit || 0, credit: l.credit || 0,
+        })
+      }
+    }
+    const totals = flat.reduce((a, r) => ({ debit: a.debit + r.debit, credit: a.credit + r.credit }), { debit: 0, credit: 0 })
+    printTable({
+      title: 'كشف قيود اليومية', settings, tenant, rows: flat,
+      columns: [
+        { key: 'date', label: 'التاريخ', render: r => fmtDate(r.date) },
+        { key: 'ref_type', label: 'النوع' },
+        { key: 'description', label: 'البيان' },
+        { key: 'account', label: 'الحساب' },
+        { key: 'party', label: 'الطرف' },
+        { key: 'currency', label: 'العملة' },
+        { key: 'debit', label: 'مدين', align: 'left', render: r => r.debit ? fmt(r.debit, r.currency) : '—' },
+        { key: 'credit', label: 'دائن', align: 'left', render: r => r.credit ? fmt(r.credit, r.currency) : '—' },
+      ],
+      totals: { debit: totals.debit.toFixed(2), credit: totals.credit.toFixed(2) },
+    })
+  }
   return (
-    <div className="space-y-6">
-      <TopBar title="قيود اليومية" subtitle="جميع القيود المحاسبية التلقائية واليدوية"
-        right={<Button onClick={() => setOpen(true)} className="gap-2 grad-slate text-white shadow-lg"><Plus className="w-4 h-4" /> إضافة قيد يومي</Button>} />
+    <div className="space-y-4">
+      <TopBar title="قيود اليومية" subtitle="جميع القيود المحاسبية التلقائية واليدوية" />
+      <ActionToolbar
+        addLabel="إضافة قيد يومي" onAdd={handleAdd} onRefresh={load}
+        onEdit={handleEdit} onDelete={handleDelete} onPrintTable={handlePrintTable}
+        selectedId={selectedId} count={rows.length}
+      />
       <div className="space-y-3">
         {rows.map(je => {
           const totalDebit = (je.lines || []).reduce((s, l) => s + (l.debit || 0), 0)
           const isMulti = je.currency === 'MULTI'
+          const isSelected = selectedId === je.id
+          const editable = je.ref_type === 'manual' || je.ref_type === 'manual_dual'
           return (
-            <Card key={je.id} className="overflow-hidden">
+            <Card key={je.id} className={`overflow-hidden cursor-pointer ${isSelected ? 'ring-2 ring-blue-500' : ''}`} onClick={() => setSelectedId(je.id === selectedId ? null : je.id)}>
               <CardHeader className="pb-2 bg-slate-50">
                 <div className="flex items-center justify-between">
-                  <div><div className="text-sm font-bold text-slate-800">{je.description}</div><div className="text-xs text-slate-500">{fmtDate(je.date)} • {je.ref_type} • {isMulti ? 'متعدد العملات' : je.currency}</div></div>
+                  <div className="flex items-center gap-2">
+                    <input type="radio" checked={isSelected} onChange={() => setSelectedId(je.id)} onClick={e => e.stopPropagation()} />
+                    <div>
+                      <div className="text-sm font-bold text-slate-800">{je.description}</div>
+                      <div className="text-xs text-slate-500">{fmtDate(je.date)} • {je.ref_type} • {isMulti ? 'متعدد العملات' : je.currency}{editable && <Badge variant="outline" className="mr-2 text-emerald-600 border-emerald-300">قابل للتعديل</Badge>}</div>
+                    </div>
+                  </div>
                   {!isMulti && <Badge variant="secondary" className="text-sm font-bold">{fmt(totalDebit, je.currency)}</Badge>}
                   {isMulti && <Badge className="bg-fuchsia-100 text-fuchsia-700 hover:bg-fuchsia-100">قيد متعدد العملات</Badge>}
                 </div>
@@ -1716,7 +1967,7 @@ function JournalScreen() {
         })}
         {rows.length === 0 && <div className="text-center text-slate-400 py-10">لا توجد قيود</div>}
       </div>
-      <ManualJournalDialog open={open} onOpenChange={setOpen} onSaved={load} />
+      <ManualJournalDialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }} record={editing} onSaved={() => { load(); setEditing(null) }} />
     </div>
   )
 }
@@ -2197,10 +2448,15 @@ function TenantApp() {
 // CURRENCY EXCHANGE SCREEN (Buy / Sell)
 // ================================================================
 function FxScreen() {
+  const { settings, tenant } = useAuth()
   const [txs, setTxs] = useState([])
   const [boxes, setBoxes] = useState([])
   const [openBuy, setOpenBuy] = useState(false)
   const [openSell, setOpenSell] = useState(false)
+  const [openSearch, setOpenSearch] = useState(false)
+  const [filter, setFilter] = useState(null)
+  const [selectedId, setSelectedId] = useState(null)
+  const [editing, setEditing] = useState(null)
   const load = async () => {
     try {
       const [t, b] = await Promise.all([api('/fx'), api('/boxes')])
@@ -2208,24 +2464,73 @@ function FxScreen() {
     } catch (e) { toast.error(e.message) }
   }
   useEffect(() => { load() }, [])
-  const totalGain = txs.reduce((s, t) => s + (t.fx_gain_usd || 0), 0)
+  const filtered = applyFilter(txs, filter)
+  const selected = filtered.find(t => t.id === selectedId)
+  const totalGain = filtered.reduce((s, t) => s + (t.fx_gain_usd || t.fx_gain_base || 0), 0)
+  const handleEdit = () => {
+    if (!selected) return toast.error('اختر عملية أولاً')
+    setEditing(selected)
+    if (selected.type === 'buy') setOpenBuy(true); else setOpenSell(true)
+  }
+  const handleDelete = async () => {
+    if (!selectedId) return
+    if (!confirm('حذف هذه العملية وعكس القيد المحاسبي؟')) return
+    try { await api(`/fx/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const handlePrintVoucher = () => {
+    if (!selected) return toast.error('اختر عملية أولاً')
+    printVoucher({ kind: 'fx', record: selected, settings, tenant })
+  }
+  const handlePrintTable = () => {
+    const totals = { amount: 0, counter_amount: 0, fx_gain: 0 }
+    for (const r of filtered) { totals.amount += r.amount; totals.counter_amount += r.counter_amount; totals.fx_gain += (r.fx_gain_usd || r.fx_gain_base || 0) }
+    printTable({
+      title: 'كشف عمليات الصرافة', settings, tenant, rows: filtered,
+      columns: [
+        { key: 'date', label: 'التاريخ', render: r => fmtDate(r.date) },
+        { key: 'type', label: 'النوع', render: r => r.type === 'buy' ? 'شراء' : 'بيع' },
+        { key: 'currency', label: 'العملة' },
+        { key: 'amount', label: 'المبلغ', align: 'left', render: r => fmt(r.amount, r.currency) },
+        { key: 'exchange_rate', label: 'السعر', render: r => String(r.exchange_rate) },
+        { key: 'counter_currency', label: 'مقابل' },
+        { key: 'counter_amount', label: 'القيمة', align: 'left', render: r => fmt(r.counter_amount, r.counter_currency) },
+        { key: 'customer_name', label: 'الزبون' },
+        { key: 'fx_gain_usd', label: 'فرق الصرف', align: 'left', render: r => fmt(r.fx_gain_usd || r.fx_gain_base || 0, 'YER') },
+      ],
+      totals: { amount: totals.amount.toFixed(2), counter_amount: totals.counter_amount.toFixed(2), fx_gain_usd: totals.fx_gain.toFixed(2) },
+    })
+  }
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <TopBar
         title="صرافة العملات"
         subtitle="شراء وبيع العملات مع حساب فروق الصرف تلقائياً في قائمة الدخل"
         right={
           <div className="flex gap-2">
-            <Button onClick={() => setOpenBuy(true)} className="gap-2 grad-green text-white shadow-lg"><ArrowDownLeft className="w-4 h-4" /> شراء عملة</Button>
-            <Button onClick={() => setOpenSell(true)} className="gap-2 grad-rose text-white shadow-lg"><ArrowUpRight className="w-4 h-4" /> بيع عملة</Button>
+            <Button onClick={() => { setEditing(null); setOpenBuy(true) }} className="gap-2 grad-green text-white shadow-lg"><ArrowDownLeft className="w-4 h-4" /> شراء عملة</Button>
+            <Button onClick={() => { setEditing(null); setOpenSell(true) }} className="gap-2 grad-rose text-white shadow-lg"><ArrowUpRight className="w-4 h-4" /> بيع عملة</Button>
           </div>
         }
       />
 
+      <ActionToolbar
+        onRefresh={load} onSearch={() => setOpenSearch(true)}
+        onEdit={handleEdit} onDelete={handleDelete} onPrintVoucher={handlePrintVoucher} onPrintTable={handlePrintTable}
+        selectedId={selectedId} count={filtered.length}
+      />
+
+      {filter && (
+        <div className="flex items-center gap-2 p-2 bg-blue-50 border border-blue-200 rounded-lg text-xs">
+          <Filter className="w-4 h-4 text-blue-600" /> فلتر: <b>{filter.field}</b> "<b>{filter.term}</b>"
+          <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <StatCard icon={ArrowLeftRight} label="إجمالي عمليات الصرافة" value={txs.length} grad="grad-purple" />
-        <StatCard icon={TrendingUp} label={totalGain >= 0 ? 'إجمالي أرباح فروق العملات' : 'إجمالي خسائر فروق العملات'} value={fmt(totalGain, 'USD')} grad={totalGain >= 0 ? 'grad-green' : 'grad-rose'} />
-        <StatCard icon={Sparkles} label="آخر عملية" value={txs[0] ? fmtDate(txs[0].date) : '—'} grad="grad-brand" />
+        <StatCard icon={ArrowLeftRight} label="إجمالي عمليات الصرافة" value={filtered.length} grad="grad-purple" />
+        <StatCard icon={TrendingUp} label={totalGain >= 0 ? 'إجمالي أرباح فروق العملات' : 'إجمالي خسائر فروق العملات'} value={fmt(totalGain, 'YER')} grad={totalGain >= 0 ? 'grad-green' : 'grad-rose'} />
+        <StatCard icon={Sparkles} label="آخر عملية" value={filtered[0] ? fmtDate(filtered[0].date) : '—'} grad="grad-brand" />
       </div>
 
       <Card>
@@ -2234,50 +2539,85 @@ function FxScreen() {
           <div className="overflow-x-auto">
             <Table>
               <TableHeader><TableRow>
+                <TableHead className="w-8"></TableHead>
                 <TableHead>التاريخ</TableHead><TableHead>النوع</TableHead>
                 <TableHead>المبلغ</TableHead><TableHead>السعر</TableHead>
                 <TableHead>القيمة</TableHead><TableHead>العميل</TableHead>
                 <TableHead>الغرض</TableHead>
-                <TableHead className="text-left">فرق الصرف (USD)</TableHead>
+                <TableHead className="text-left">فرق الصرف</TableHead>
               </TableRow></TableHeader>
               <TableBody>
-                {txs.length === 0 && <TableRow><TableCell colSpan={8} className="text-center text-slate-400 py-8">لا توجد عمليات صرافة</TableCell></TableRow>}
-                {txs.map(t => (
-                  <TableRow key={t.id}>
-                    <TableCell className="text-xs">{fmtDate(t.date)}</TableCell>
-                    <TableCell><Badge className={t.type === 'buy' ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100' : 'bg-rose-100 text-rose-700 hover:bg-rose-100'}>{t.type === 'buy' ? 'شراء' : 'بيع'}</Badge></TableCell>
-                    <TableCell className="font-bold">{fmt(t.amount, t.currency)}</TableCell>
-                    <TableCell className="font-mono text-xs">{t.exchange_rate}</TableCell>
-                    <TableCell className="font-bold">{fmt(t.counter_amount, t.counter_currency)}</TableCell>
-                    <TableCell>{t.customer_name || '—'}</TableCell>
-                    <TableCell className="text-xs">{t.purpose || '—'}</TableCell>
-                    <TableCell className={`text-left font-bold ${(t.fx_gain_usd || 0) >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(t.fx_gain_usd, 'USD')}</TableCell>
-                  </TableRow>
-                ))}
+                {filtered.length === 0 && <TableRow><TableCell colSpan={9} className="text-center text-slate-400 py-8">لا توجد عمليات صرافة</TableCell></TableRow>}
+                {filtered.map(t => {
+                  const gain = t.fx_gain_usd || t.fx_gain_base || 0
+                  return (
+                    <TableRow key={t.id} className={selectedId === t.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={() => setSelectedId(t.id === selectedId ? null : t.id)}>
+                      <TableCell><input type="radio" checked={selectedId === t.id} onChange={() => setSelectedId(t.id)} /></TableCell>
+                      <TableCell className="text-xs">{fmtDate(t.date)}</TableCell>
+                      <TableCell><Badge className={t.type === 'buy' ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100' : 'bg-rose-100 text-rose-700 hover:bg-rose-100'}>{t.type === 'buy' ? 'شراء' : 'بيع'}</Badge></TableCell>
+                      <TableCell className="font-bold">{fmt(t.amount, t.currency)}</TableCell>
+                      <TableCell className="font-mono text-xs">{t.exchange_rate}</TableCell>
+                      <TableCell className="font-bold">{fmt(t.counter_amount, t.counter_currency)}</TableCell>
+                      <TableCell>{t.customer_name || '—'}</TableCell>
+                      <TableCell className="text-xs">{t.purpose || '—'}</TableCell>
+                      <TableCell className={`text-left font-bold ${gain >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(gain, 'YER')}</TableCell>
+                    </TableRow>
+                  )
+                })}
               </TableBody>
             </Table>
           </div>
         </CardContent>
       </Card>
 
-      <FxDialog open={openBuy} onOpenChange={setOpenBuy} type="buy" boxes={boxes} onSaved={() => { load(); toast.success('تم تسجيل عملية الشراء + قيد محاسبي') }} />
-      <FxDialog open={openSell} onOpenChange={setOpenSell} type="sell" boxes={boxes} onSaved={() => { load(); toast.success('تم تسجيل عملية البيع + قيد محاسبي') }} />
+      <FxDialog open={openBuy} onOpenChange={(v) => { setOpenBuy(v); if (!v) setEditing(null) }} type="buy" boxes={boxes} record={editing?.type === 'buy' ? editing : null} onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل العملية وعكس القيد تلقائياً' : 'تم تسجيل عملية الشراء + قيد محاسبي') }} />
+      <FxDialog open={openSell} onOpenChange={(v) => { setOpenSell(v); if (!v) setEditing(null) }} type="sell" boxes={boxes} record={editing?.type === 'sell' ? editing : null} onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل العملية وعكس القيد تلقائياً' : 'تم تسجيل عملية البيع + قيد محاسبي') }} />
+      <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
+        fields={[
+          { key: 'customer_name', label: 'اسم الزبون' }, { key: 'currency', label: 'العملة' },
+          { key: 'counter_currency', label: 'العملة المقابلة' }, { key: 'purpose', label: 'الغرض' },
+          { key: 'id_number', label: 'رقم الهوية' }, { key: 'amount', label: 'المبلغ' },
+        ]}
+        onApply={setFilter} onClear={() => setFilter(null)}
+      />
     </div>
   )
 }
 
-function FxDialog({ open, onOpenChange, type, boxes, onSaved }) {
+function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
+  const isEdit = !!record
   const cfg = type === 'buy'
     ? { title: 'شراء عملات', color: 'grad-green', desc: 'يشتري المكتب عملة من الزبون ويدفع مقابلها بعملة أخرى' }
     : { title: 'بيع عملات', color: 'grad-rose', desc: 'يبيع المكتب عملة للزبون ويستلم مقابلها بعملة أخرى' }
-  const [form, setForm] = useState({
+  const emptyForm = {
     date: todayISO(), currency: 'USD', amount: '', exchange_rate: '',
     counter_currency: 'SAR', payment_method: 'cash',
     box_currency_id: '', box_counter_id: '',
     customer_name: '', customer_phone: '', id_type: 'هوية وطنية', id_number: '',
     source_of_funds: '', purpose: '', remarks: '',
-  })
+  }
+  const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    if (!open) return
+    if (record) {
+      setForm({
+        date: record.date ? new Date(record.date).toISOString().slice(0,10) : todayISO(),
+        currency: record.currency || 'USD', amount: record.amount ?? '',
+        exchange_rate: record.exchange_rate ?? '',
+        counter_currency: record.counter_currency || 'SAR',
+        payment_method: record.payment_method || 'cash',
+        box_currency_id: record.box_currency_id || '',
+        box_counter_id: record.box_counter_id || '',
+        customer_name: record.customer_name || '', customer_phone: record.customer_phone || '',
+        id_type: record.id_type || 'هوية وطنية', id_number: record.id_number || '',
+        source_of_funds: record.source_of_funds || '', purpose: record.purpose || '',
+        remarks: record.remarks || '',
+      })
+    } else {
+      setForm(emptyForm)
+    }
+  }, [open, record])
   useEffect(() => {
     if (boxes.length && !form.box_currency_id) {
       setForm(f => ({ ...f, box_currency_id: boxes[0].id, box_counter_id: boxes[1]?.id || boxes[0].id }))
@@ -2288,8 +2628,12 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved }) {
     if (!form.amount || !form.exchange_rate) return toast.error('أدخل المبلغ وسعر الصرف')
     if (form.currency === form.counter_currency) return toast.error('اختر عملتين مختلفتين')
     if (!form.box_currency_id || !form.box_counter_id) return toast.error('اختر الصناديق')
-    try { setSaving(true); await api('/fx', { method: 'POST', body: { type, ...form } }); onOpenChange(false); onSaved(); setForm(f => ({ ...f, amount: '', exchange_rate: '', customer_name: '', customer_phone: '', id_number: '', source_of_funds: '', purpose: '', remarks: '' })) }
-    catch (e) { toast.error(e.message) } finally { setSaving(false) }
+    try {
+      setSaving(true)
+      if (isEdit) await api(`/fx/${record.id}`, { method: 'PUT', body: { type, ...form } })
+      else await api('/fx', { method: 'POST', body: { type, ...form } })
+      onOpenChange(false); onSaved(); setForm(f => ({ ...f, amount: '', exchange_rate: '', customer_name: '', customer_phone: '', id_number: '', source_of_funds: '', purpose: '', remarks: '' }))
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -2297,9 +2641,9 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved }) {
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-xl">
             <div className={`w-9 h-9 rounded-lg ${cfg.color} flex items-center justify-center`}><ArrowLeftRight className="w-4 h-4 text-white" /></div>
-            {cfg.title}
+            {isEdit ? `✏️ تعديل ${cfg.title}` : cfg.title}
           </DialogTitle>
-          <DialogDescription>{cfg.desc}</DialogDescription>
+          <DialogDescription>{isEdit ? 'سيتم عكس القيد المحاسبي القديم وإعادة الترحيل بالقيم الجديدة تلقائياً' : cfg.desc}</DialogDescription>
         </DialogHeader>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-2">
@@ -2336,7 +2680,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved }) {
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
-          <Button onClick={submit} disabled={saving} className={`${cfg.color} text-white`}>{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ + إنشاء قيد'}</Button>
+          <Button onClick={submit} disabled={saving} className={`${cfg.color} text-white`}>{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (isEdit ? '💾 حفظ التعديل + عكس القيد' : 'حفظ + إنشاء قيد')}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -2346,8 +2690,10 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved }) {
 // ================================================================
 // MANUAL JOURNAL VOUCHER DIALOG (Single & Dual)
 // ================================================================
-function ManualJournalDialog({ open, onOpenChange, onSaved }) {
-  const [mode, setMode] = useState('single')  // 'single' | 'dual'
+function ManualJournalDialog({ open, onOpenChange, onSaved, record }) {
+  const isEdit = !!record
+  const initialMode = record?.ref_type === 'manual_dual' ? 'dual' : 'single'
+  const [mode, setMode] = useState(initialMode)
   const [singleForm, setSingleForm] = useState({
     date: todayISO(), currency: 'USD', description: '',
     lines: [
@@ -2362,6 +2708,35 @@ function ManualJournalDialog({ open, onOpenChange, onSaved }) {
   })
   const [saving, setSaving] = useState(false)
 
+  useEffect(() => {
+    if (!open) return
+    if (record) {
+      const dateStr = record.date ? new Date(record.date).toISOString().slice(0,10) : todayISO()
+      if (record.ref_type === 'manual_dual') {
+        setMode('dual')
+        const debitLine = (record.lines || []).find(l => (l.debit || 0) > 0) || {}
+        const creditLine = (record.lines || []).find(l => (l.credit || 0) > 0 && l.account_code !== '4104') || {}
+        setDualForm({
+          date: dateStr, description: record.description || '',
+          debit_account_code: debitLine.account_code || '', debit_account_name: debitLine.account_name || '',
+          debit_currency: debitLine.currency || 'USD', debit_amount: debitLine.debit || '',
+          credit_account_code: creditLine.account_code || '', credit_account_name: creditLine.account_name || '',
+          credit_currency: creditLine.currency || 'SAR', credit_amount: creditLine.credit || '',
+        })
+      } else {
+        setMode('single')
+        setSingleForm({
+          date: dateStr, currency: record.currency || 'USD', description: record.description || '',
+          lines: (record.lines || []).map(l => ({
+            account_code: l.account_code || '', account_name: l.account_name || '',
+            party_type: l.party_type, party_id: l.party_id, party_name: l.party_name,
+            debit: l.debit || '', credit: l.credit || '',
+          })),
+        })
+      }
+    }
+  }, [open, record])
+
   const totalD = singleForm.lines.reduce((s, l) => s + (Number(l.debit) || 0), 0)
   const totalC = singleForm.lines.reduce((s, l) => s + (Number(l.credit) || 0), 0)
   const balanced = Math.abs(totalD - totalC) < 0.01 && totalD > 0
@@ -2375,12 +2750,14 @@ function ManualJournalDialog({ open, onOpenChange, onSaved }) {
       setSaving(true)
       if (mode === 'single') {
         if (!balanced) return toast.error('القيد غير متوازن — يجب أن يتساوى مجموع المدين والدائن')
-        await api('/journal-entries', { method: 'POST', body: singleForm })
+        if (isEdit) await api(`/journal-entries/${record.id}`, { method: 'PUT', body: singleForm })
+        else await api('/journal-entries', { method: 'POST', body: singleForm })
       } else {
         if (!dualForm.debit_amount || !dualForm.credit_amount) return toast.error('أدخل المبالغ')
-        await api('/journal-entries', { method: 'POST', body: { dual: true, ...dualForm } })
+        if (isEdit) await api(`/journal-entries/${record.id}`, { method: 'PUT', body: { dual: true, ...dualForm } })
+        else await api('/journal-entries', { method: 'POST', body: { dual: true, ...dualForm } })
       }
-      toast.success('تم حفظ القيد اليدوي')
+      toast.success(isEdit ? '✅ تم تعديل القيد اليدوي وعكس الأثر السابق تلقائياً' : 'تم حفظ القيد اليدوي')
       onOpenChange(false); onSaved()
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
@@ -2391,14 +2768,14 @@ function ManualJournalDialog({ open, onOpenChange, onSaved }) {
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-xl">
             <div className="w-9 h-9 rounded-lg grad-slate flex items-center justify-center"><ReceiptText className="w-4 h-4 text-white" /></div>
-            سند قيد يومي (يدوي)
+            {isEdit ? '✏️ تعديل قيد يومي (يدوي)' : 'سند قيد يومي (يدوي)'}
           </DialogTitle>
-          <DialogDescription>لتسجيل التسويات المحاسبية أو القيود بين حسابات بعملات مختلفة</DialogDescription>
+          <DialogDescription>{isEdit ? 'سيتم عكس الأثر المحاسبي للقيد السابق تلقائياً' : 'لتسجيل التسويات المحاسبية أو القيود بين حسابات بعملات مختلفة'}</DialogDescription>
         </DialogHeader>
 
         <div className="flex gap-2 mb-2">
-          <button onClick={() => setMode('single')} className={`px-4 py-2 rounded-lg text-sm font-bold border ${mode === 'single' ? 'bg-blue-500 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300'}`}>قيد عادي (عملة واحدة)</button>
-          <button onClick={() => setMode('dual')} className={`px-4 py-2 rounded-lg text-sm font-bold border ${mode === 'dual' ? 'bg-fuchsia-500 text-white border-fuchsia-600' : 'bg-white text-slate-600 border-slate-300'}`}>قيد ثنائي (عملتين مختلفتين)</button>
+          <button onClick={() => setMode('single')} disabled={isEdit} className={`px-4 py-2 rounded-lg text-sm font-bold border ${mode === 'single' ? 'bg-blue-500 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300'} ${isEdit ? 'opacity-60 cursor-not-allowed' : ''}`}>قيد عادي (عملة واحدة)</button>
+          <button onClick={() => setMode('dual')} disabled={isEdit} className={`px-4 py-2 rounded-lg text-sm font-bold border ${mode === 'dual' ? 'bg-fuchsia-500 text-white border-fuchsia-600' : 'bg-white text-slate-600 border-slate-300'} ${isEdit ? 'opacity-60 cursor-not-allowed' : ''}`}>قيد ثنائي (عملتين مختلفتين)</button>
         </div>
 
         {mode === 'single' ? (
@@ -2458,7 +2835,7 @@ function ManualJournalDialog({ open, onOpenChange, onSaved }) {
         )}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
-          <Button onClick={submit} disabled={saving} className="grad-slate text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ القيد'}</Button>
+          <Button onClick={submit} disabled={saving} className="grad-slate text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (isEdit ? '💾 حفظ التعديل + عكس القيد' : 'حفظ القيد')}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
