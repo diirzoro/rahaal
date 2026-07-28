@@ -69,12 +69,12 @@ export default function SignupPage() {
               <div className="flex items-center gap-2 text-amber-800 font-bold mb-1">
                 <Gift className="w-5 h-5" /> تمّت دعوتك عبر رمز إحالة: <code className="font-mono text-amber-700 mx-1">{ref}</code>
               </div>
-              <div className="text-xs text-amber-700">ستحصل على 500 قيد يومية مجانية، وسيحصل صاحب رابط الدعوة على +15 قيد إضافي عند إتمام تسجيلك.</div>
+              <div className="text-xs text-amber-700">ستحصل على 30 قيد يومية مجانية، وسيحصل صاحب رابط الدعوة على +50 قيد إضافي عند إتمام تسجيلك.</div>
             </div>
           )}
           <div className="space-y-2">
             {[
-              '500 قيد يومي مجاناً في الفترة التجريبية',
+              '30 قيد يومي مجاناً في الفترة التجريبية + 50 قيد إضافي عند دعوة أي مكتب آخر',
               'محاسبة متعددة العملات (YER / USD / SAR)',
               'إدارة تذاكر الطيران والتأشيرات',
               'صرافة العملات مع حساب فروق الصرف تلقائياً',

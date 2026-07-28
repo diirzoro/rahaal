@@ -2058,3 +2058,242 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+
+  - agent: "main"
+    message: |
+      🚀 v2.8 IMPLEMENTATION — REFERRAL 30/+50 + AD MANAGEMENT + SUSPEND/IMPERSONATE + OUT-OF-QUOTA MODAL + PLAN TIER GATES
+      
+      ## BACKEND (`/app/app/api/[[...path]]/route.js`)
+      
+      ### 1) Referral Simplification
+      - New tenant default quota: **30** (was 500).
+      - Referrer bonus: **+50 immediately on signup** (was split as +15 signup / +50 activation).
+      - Removed intermediate "signup_+15 pending activation" flow — direct +50 on registration.
+      - Both `/public/signup` and `/admin/tenants POST` updated.
+      
+      ### 2) Subscription Tiers
+      - New `plan_tier` field on tenants: `standard | silver | bronze | gold` (default: standard).
+      - `subscription_price`, `subscription_expires_at` fields exposed via `sanitizeTenant`.
+      - `PATCH /admin/tenants/:id` extended to accept: `plan_tier, subscription, subscription_price, subscription_expires_at, max_users (null = unlimited), max_branches (null = unlimited), quota_limit, top_up_amount, top_up_note`.
+      - `/tenant/users POST` now blocked for non-Gold plans with clear Arabic error message. Gold users can self-create (no throttling other than max_users limit if set).
+      
+      ### 3) Suspend / Activate Tenant
+      - New: `POST /admin/tenants/:id/toggle-status` — flips status between `active ↔ suspended`.
+      
+      ### 4) Impersonation (Login as Tenant)
+      - New: `POST /admin/tenants/:id/impersonate` — Super admin creates a 30-minute session for the tenant's owner. Session flagged `impersonation: true`, records `impersonated_by_id/email`.
+      - `/auth/me` now returns `impersonation: true` + `impersonated_by` when in an impersonation session.
+      
+      ### 5) Announcements System (NEW)
+      - Collection: `announcements`. Fields: `id, type ('popup'|'banner'), title, body, image_url, link_url, active, starts_at, ends_at, created_by, created_at`.
+      - Super admin CRUD: `GET/POST /admin/announcements`, `PUT/DELETE /admin/announcements/:id`.
+      - Tenant read: `GET /announcements/active` — filters by active + date window.
+      
+      ### 6) Subscription Plans Config
+      - Collection: `subscription_plans`. Bootstrap seeds 3 defaults:
+        - `voucher_pack_500` ($50 → +500 vouchers, kind=topup)
+        - `gold_monthly` ($150 → 30 days, kind=subscription, tier=gold)
+        - `gold_annual` ($1500 → 365 days, kind=subscription, tier=gold)
+      - Super admin: `GET/PUT /admin/plans`.
+      - Tenant (for the Out-of-Quota modal): `GET /plans` — public list.
+      
+      ### 7) Quota Exceeded Response Enrichment
+      - When `createJournalEntry` throws `QUOTA_EXCEEDED`, the response now includes `{ error, quota_exceeded: true, code: 'QUOTA_EXCEEDED' }` with HTTP 402. The frontend `api()` helper detects this flag and triggers `window.__rahaalOnQuotaExceeded()` to open the modal automatically.
+      
+      ## FRONTEND (`/app/app/page.js` + `/app/app/signup/page.js`)
+      
+      ### LoginPage Cleanup ✅ VISUALLY VERIFIED
+      - Removed the "حسابات تجريبية" (demo accounts) card entirely.
+      - Updated the CTA text to: "🎁 ليس لديك حساب؟ احصل على 30 قيد تجريبي فور التسجيل، و+50 قيد إضافي عند دعوة أي مكتب آخر".
+      
+      ### Signup Page
+      - Benefit list #1 updated to "30 قيد يومي مجاناً في الفترة التجريبية + 50 قيد إضافي عند دعوة أي مكتب آخر".
+      - Referral banner text updated to +50 (was +15).
+      
+      ### Referrals Tab
+      - Rewards explanation card updated: "+50 قيد مجاني" on signup (removed +15 signup / +50 activation split).
+      - Invitees table now shows single unified badge "✅ تم منح +50 قيد مكافأة" per invitee.
+      
+      ### TenantApp — Global Enhancements
+      - **Impersonation Banner**: Red animated banner at top when `impersonation=true` from /auth/me, with "أنت متصفّح كـ Super Admin" and "إنهاء الجلسة" button.
+      - **Announcement Banner Ticker**: Amber gradient banner near top when a `type=banner` active announcement exists. Shows title + body inline.
+      - **Popup Announcement**: Auto-opens a Dialog on load when a `type=popup` active announcement exists AND not yet dismissed this session (sessionStorage flag per announcement id).
+      - **Out-of-Quota Modal**: Globally registered; opens automatically when any API call returns `quota_exceeded: true`. Two side-by-side CTAs:
+        - Left (emerald): "🎁 ادعُ مكتباً" — shows referral link with copy + WhatsApp share buttons.
+        - Right (blue): "💳 حاسِب وسدّد" — lists active plans from `/plans` with prices, plus WhatsApp CTA to contact admin.
+      
+      ### Super Admin Panel
+      - **New "Referred By" info** in the الإحالة column (shows shortened `referred_by` id when applicable).
+      - **Status Badges**: "✅ نشط" / "⏸️ معلّق".
+      - **"⏸️ تعليق / ▶️ تفعيل" button** per tenant.
+      - **"🎭 دخول كـ" button** — opens new tab with impersonation session; shows confirmation dialog.
+      - **"💳 تأكيد دفع" button** preserved for backwards compatibility (though no longer grants extra bonus in v2.8).
+      - **Announcements Manager Card** at bottom of the tenants panel:
+        - Table listing all announcements with type badge (💬 نافذة / 📢 شريط), title, body, status (🟢 نشط / ⏸️ متوقف), period.
+        - Actions per row: ⏸️ إيقاف / ▶️ تفعيل toggle, delete.
+        - "إعلان جديد" button opens Dialog with fields: type dropdown (popup/banner), title, body, image URL, link URL, active switch.
+      
+      ## SMOKE TEST RESULTS (curl)
+      - Bootstrap seeds 3 default plans ✅
+      - Announcement created via admin API + fetched via `/announcements/active` ✅
+      - Public signup with referral: new tenant created with quota=30, referrer got +50 (verified pre=687 → post=737) ✅
+      - Health endpoint still working (GET/HEAD/OPTIONS) ✅
+      
+      ## VISUAL CONFIRMATION
+      - LoginPage screenshot: demo card removed, new promo text visible.
+      
+      ## NEEDS BACKEND RETESTING
+      - Referral end-to-end: verify +50 immediate on signup (both public and admin routes).
+      - New default quota is 30 for signup, not 500.
+      - `POST /admin/tenants/:id/toggle-status` — flip and confirm status.
+      - `POST /admin/tenants/:id/impersonate` — returns valid 30-min session; new session shows `impersonation: true` on `/auth/me`.
+      - Announcements full CRUD.
+      - `/announcements/active` filters correctly by `active`, `starts_at`, `ends_at`.
+      - `/plans` returns 3 default plans; only `active: true` plans returned.
+      - `/tenant/users POST`: blocked for non-Gold plans (403 with Arabic message); allowed for Gold (respects max_users).
+      - `PATCH /admin/tenants/:id` accepts new fields (plan_tier, subscription_price, subscription_expires_at, unlimited limits via null).
+      - Quota-exceeded response body includes `quota_exceeded: true` (verify by exhausting quota on a test tenant).
+
+backend:
+  - task: "v2.8 Referral Simplification — 30 signup quota + 50 immediate referrer bonus"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Curl smoke test: signup → referrer +50 (687 → 737). New default quota = 30. Existing tenants unaffected."
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (3/3 tests) - Public signup WITH referral: new tenant quota=30, referrer +50 immediate (no activation_confirmed step), referral_stats updated (signups +1, bonus_earned +50). Public signup WITHOUT referral: quota=30, no referrer bonus. Admin route with referral: quota=30, referrer +50. Fixed minor issue: added journal_quota to public signup response."
+  - task: "v2.8 Announcements CRUD + Active endpoint"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Full CRUD + /announcements/active filter working. Created popup announcement via admin, filtered correctly in tenant view."
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (8/8 tests) - POST /admin/announcements creates popup and banner with IDs. GET /admin/announcements lists all. PUT toggles active status. GET /announcements/active filters correctly (inactive popup hidden, active banner visible). Date window filtering works: starts_at=tomorrow and ends_at=yesterday announcements do NOT appear in /active. DELETE removes announcement successfully."
+  - task: "v2.8 Suspend/Activate + Impersonate + Plan Tier Gate"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "toggle-status flips status; impersonate creates 30-min session flagged impersonation=true; /tenant/users POST blocks non-Gold plans."
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (9/9 tests) - POST /admin/tenants/:id/toggle-status suspends tenant (status='suspended'). Suspended tenant owner blocked (user=null, error='suspended'). Toggle again reactivates (status='active'). POST /admin/tenants/:id/impersonate creates 30-min session with impersonation=true and impersonated_by=admin@targetmedia.com. Standard plan blocked from creating users (403 with Arabic error about Gold plan). Gold plan allows user creation (respects max_users limit). Fixed minor issue: getSession now returns impersonation fields from session document."
+  - task: "v2.8 Subscription Plans Config + Quota-Exceeded Response Flag"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "3 default plans seeded on bootstrap. /plans returns active ones. QUOTA_EXCEEDED response now includes quota_exceeded:true for frontend to open modal."
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (5/5 tests) - GET /plans returns 3 active plans (voucher_pack_500, gold_monthly, gold_annual) with correct prices. GET /admin/plans returns same 3. PUT /admin/plans updates price (voucher_pack_500: 50→60→50). Quota exceeded test: created temp tenant with quota_limit=2, consumed quota with 2 tickets, 3rd ticket blocked with HTTP 402, response contains quota_exceeded=true, code='QUOTA_EXCEEDED', and Arabic error message. Temp tenant cleaned up."
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      ✅ v2.8 BACKEND TESTING COMPLETED — ALL 4 TASKS PASSED (25/25 tests)
+      
+      Comprehensive test suite executed for v2.8 features (Referral Simplification, Announcements, Suspend/Impersonate, Plans, Quota-Exceeded Flag):
+      
+      **Test Results: 25/25 PASSED**
+      
+      **TASK 1: Referral Simplification (3/3 tests)**
+      1. ✅ Public signup WITH referral code:
+         - New tenant has quota_limit = 30 (not 500)
+         - Referrer quota increased by exactly +50 immediately
+         - referral_stats updated: signups +1, bonus_earned +50
+         - NO activation_confirmed step needed (bonus applied immediately)
+         - Auto-login session created
+      
+      2. ✅ Public signup WITHOUT referral code:
+         - New tenant has quota_limit = 30
+         - No referrer bonus applied
+      
+      3. ✅ Admin route POST /admin/tenants with referral_code:
+         - New tenant has quota_limit = 30
+         - Referrer quota increased by +50 again
+      
+      **TASK 2: Announcements CRUD + Active endpoint (8/8 tests)**
+      1. ✅ POST /admin/announcements creates popup announcement with ID
+      2. ✅ POST /admin/announcements creates banner announcement with ID
+      3. ✅ GET /admin/announcements lists all announcements (at least 2)
+      4. ✅ PUT /admin/announcements/:id toggles active to false
+      5. ✅ GET /announcements/active (tenant view) returns only active announcements (banner visible, inactive popup hidden)
+      6. ✅ Date window filtering: starts_at = tomorrow → does NOT appear in /active
+      7. ✅ Date window filtering: ends_at = yesterday → does NOT appear in /active
+      8. ✅ DELETE /admin/announcements/:id removes announcement successfully
+      
+      **TASK 3: Suspend/Activate + Impersonate + Plan Tier Gate (9/9 tests)**
+      1. ✅ POST /admin/tenants/:id/toggle-status suspends tenant (status='suspended')
+      2. ✅ Suspended tenant owner blocked (GET /auth/me returns user=null, error='suspended')
+      3. ✅ POST /admin/tenants/:id/toggle-status reactivates tenant (status='active')
+      4. ✅ Reactivated tenant owner can access (GET /auth/me returns user)
+      5. ✅ POST /admin/tenants/:id/impersonate creates 30-min session with session_id
+      6. ✅ Impersonation session verified: impersonation=true, impersonated_by=admin@targetmedia.com
+      7. ✅ Standard plan blocked from creating users (403 with Arabic error mentioning Gold plan)
+      8. ✅ Gold plan allows user creation (respects max_users limit)
+      9. ✅ Downgrade back to standard for cleanup
+      
+      **TASK 4: Subscription Plans + Quota-Exceeded Flag (5/5 tests)**
+      1. ✅ GET /plans returns 3 active plans (voucher_pack_500, gold_monthly, gold_annual) with correct IDs and prices
+      2. ✅ GET /admin/plans returns 3 plans
+      3. ✅ PUT /admin/plans updates voucher_pack_500 price from 50 to 60, verified
+      4. ✅ PUT /admin/plans restores price back to 50
+      5. ✅ Quota exceeded response flag test:
+         - Created temp tenant with quota_limit=2
+         - Consumed quota with 2 tickets
+         - 3rd ticket blocked with HTTP 402
+         - Response contains: quota_exceeded=true, code='QUOTA_EXCEEDED', Arabic error message
+         - Temp tenant cleaned up
+      
+      **REGRESSION TESTS (2/2 tests)**
+      1. ✅ GET /health returns 200 with status='ok', version='2.7'
+      2. ✅ Create/edit ticket flow still works (POST + PUT + DELETE)
+      
+      **CRITICAL VERIFICATIONS:**
+      ✅ Referral simplification: 30 quota on signup (not 500), +50 immediate bonus (no activation step)
+      ✅ Announcements CRUD: Full lifecycle (create, list, update, delete) working
+      ✅ Active announcements filtering: active flag + date window (starts_at, ends_at) working
+      ✅ Suspend/Activate: Status toggle working, suspended users blocked
+      ✅ Impersonation: 30-min session created, impersonation flag set correctly
+      ✅ Plan tier gate: Standard plan blocked from creating users, Gold plan allowed
+      ✅ Subscription plans: 3 default plans seeded, CRUD working
+      ✅ Quota exceeded flag: HTTP 402 with quota_exceeded=true, code='QUOTA_EXCEEDED'
+      ✅ Regression: v2.7 and earlier features still working
+      
+      **MINOR FIXES APPLIED DURING TESTING:**
+      1. Fixed public signup response to include journal_quota field
+      2. Fixed getSession to return impersonation fields from session document
+      
+      Backend v2.8 is production-ready. All new features verified and working correctly.
+

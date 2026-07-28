@@ -49,7 +49,13 @@ async function api(path, opts = {}) {
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   })
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || 'خطأ في الاتصال')
+  if (!res.ok) {
+    // v2.8 — trigger out-of-quota modal automatically if backend flags quota_exceeded
+    if (data.quota_exceeded && typeof window !== 'undefined' && window.__rahaalOnQuotaExceeded) {
+      try { window.__rahaalOnQuotaExceeded() } catch {}
+    }
+    throw new Error(data.error || 'خطأ في الاتصال')
+  }
   return data
 }
 
@@ -108,12 +114,7 @@ function LoginPage({ onLogin }) {
               </Button>
             </form>
             <div className="text-center mt-3">
-              <a href="/signup" className="text-xs text-emerald-400 hover:text-emerald-300 font-bold">🎁 ليس لديك حساب؟ سجّل مكتبك مجاناً</a>
-            </div>
-            <div className="mt-6 p-3 rounded-lg bg-slate-800/50 border border-slate-700 text-xs text-slate-400 space-y-1">
-              <div className="font-bold text-slate-300 mb-1">حسابات تجريبية:</div>
-              <div><ShieldCheck className="inline w-3 h-3 ml-1" /> <span className="text-amber-400">Super Admin:</span> <code dir="ltr">admin@targetmedia.com / Target@2025</code></div>
-              <div><Building className="inline w-3 h-3 ml-1" /> <span className="text-emerald-400">مالك مكتب:</span> <code dir="ltr">owner@demo.com / Demo@2025</code></div>
+              <a href="/signup" className="text-xs text-emerald-400 hover:text-emerald-300 font-bold">🎁 ليس لديك حساب؟ احصل على 30 قيد تجريبي فور التسجيل، و+50 قيد إضافي عند دعوة أي مكتب آخر</a>
             </div>
           </CardContent>
         </Card>
@@ -190,11 +191,15 @@ function SuperAdminPanel() {
                   return (
                     <TableRow key={t.id}>
                       <TableCell><div className="font-semibold">{t.name}</div><div className="text-xs text-slate-500 font-mono">{t.slug}</div></TableCell>
-                      <TableCell><Badge className={t.status === 'active' ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100' : 'bg-amber-100 text-amber-700 hover:bg-amber-100'}>{t.status === 'active' ? 'نشط' : 'موقوف'}</Badge></TableCell>
-                      <TableCell><Badge variant="outline">{t.subscription || 'trial'}</Badge></TableCell>
+                      <TableCell>
+                        {t.status === 'suspended'
+                          ? <Badge className="bg-rose-100 text-rose-700 hover:bg-rose-100">⏸️ معلّق</Badge>
+                          : <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">✅ نشط</Badge>}
+                      </TableCell>
+                      <TableCell><Badge variant="outline">{t.subscription || 'trial'} • {t.plan_tier || 'standard'}</Badge></TableCell>
                       <TableCell className="text-xs">
                         <div className="font-mono text-emerald-700 font-bold">{t.referral_code || '—'}</div>
-                        {t.referred_by && <div className="text-[10px] text-slate-500 mt-0.5">مُحال بواسطة</div>}
+                        {t.referred_by && <div className="text-[10px] text-slate-500 mt-0.5">مُحال بواسطة: <span className="font-mono">{t.referred_by_name || t.referred_by.slice(0,8)}...</span></div>}
                         {t.activation_confirmed && <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 text-[10px] mt-1">✅ دفع مؤكد</Badge>}
                       </TableCell>
                       <TableCell className="text-center">{t.users_count}/{t.max_users}</TableCell>
@@ -206,14 +211,29 @@ function SuperAdminPanel() {
                       </TableCell>
                       <TableCell className="text-xs">{fmtDate(t.created_at)}</TableCell>
                       <TableCell className="text-left">
-                        <div className="flex gap-1 justify-end">
+                        <div className="flex gap-1 justify-end flex-wrap">
+                          <Button size="sm" variant={t.status === 'suspended' ? 'default' : 'outline'} className={t.status === 'suspended' ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'text-amber-600 border-amber-300'} onClick={async () => {
+                            const action = t.status === 'suspended' ? 'تفعيل' : 'تعليق'
+                            if (!confirm(`${action} المكتب "${t.name}"؟`)) return
+                            try { const r = await api(`/admin/tenants/${t.id}/toggle-status`, { method: 'POST' }); toast.success(`تم — الحالة الآن: ${r.status === 'active' ? 'نشط' : 'معلّق'}`); load() }
+                            catch (e) { toast.error(e.message) }
+                          }}>{t.status === 'suspended' ? '▶️ تفعيل' : '⏸️ تعليق'}</Button>
+                          <Button size="sm" variant="outline" className="text-purple-600 border-purple-300" onClick={async () => {
+                            if (!confirm(`الدخول كمالك المكتب "${t.name}"؟\n\nستُفتح جلسة مؤقتة (30 دقيقة) في تاب جديد. سيظهر شريط أحمر أعلى الشاشة يذكّرك بحالة الجلسة.`)) return
+                            try {
+                              const r = await api(`/admin/tenants/${t.id}/impersonate`, { method: 'POST' })
+                              // Open new tab with the session cookie
+                              // The cookie is set by the backend already; open a new tab
+                              window.open('/', '_blank')
+                              toast.success(`🎭 جلسة "دخول كـ ${r.tenant.name}" فُتحت في تاب جديد`)
+                            } catch (e) { toast.error(e.message) }
+                          }}>🎭 دخول كـ</Button>
                           {!t.activation_confirmed && (
                             <Button size="sm" variant="outline" className="text-blue-600 border-blue-300" onClick={async () => {
-                              if (!confirm(`تأكيد أن المكتب "${t.name}" قد دفع القسط الأول؟\n\n${t.referred_by ? '⚠️ سيحصل المُحيل على +50 قيد مجاني تلقائياً.' : 'لا يوجد مكتب مُحيل مرتبط.'}`)) return
+                              if (!confirm(`تأكيد أن المكتب "${t.name}" قد دفع القسط الأول؟`)) return
                               try {
                                 const r = await api(`/admin/tenants/${t.id}/confirm-payment`, { method: 'POST' })
-                                if (r.referrer_bonus) toast.success(`✅ تم التأكيد + منح ${r.referrer_bonus.bonus_added} قيد مكافأة إلى "${r.referrer_bonus.referrer_name}"`)
-                                else toast.success('✅ تم تأكيد الدفع')
+                                toast.success(r.referrer_bonus ? `✅ تم التأكيد + منح +${r.referrer_bonus.bonus_added} قيد إلى "${r.referrer_bonus.referrer_name}"` : '✅ تم تأكيد الدفع')
                                 load()
                               } catch (e) { toast.error(e.message) }
                             }}>💳 تأكيد دفع</Button>
@@ -250,11 +270,96 @@ function SuperAdminPanel() {
             </Table>
           </CardContent>
         </Card>
+
+        {/* v2.8 — Announcements Management */}
+        <AnnouncementsManager />
       </div>
 
       <NewTenantDialog open={openNew} onOpenChange={setOpenNew} onSaved={() => { load(); setOpenNew(false) }} />
       <EditTenantDialog tenant={editing} onOpenChange={() => setEditing(null)} onSaved={() => { load(); setEditing(null) }} />
     </div>
+  )
+}
+
+function AnnouncementsManager() {
+  const [list, setList] = useState([])
+  const [openNew, setOpenNew] = useState(false)
+  const [form, setForm] = useState({ type: 'popup', title: '', body: '', image_url: '', link_url: '', active: true })
+  const load = () => api('/admin/announcements').then(setList).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [])
+  const submit = async () => {
+    if (!form.title || !form.body) return toast.error('العنوان والنص مطلوبان')
+    try { await api('/admin/announcements', { method: 'POST', body: form }); toast.success('✅ تم النشر'); setForm({ type: 'popup', title: '', body: '', image_url: '', link_url: '', active: true }); setOpenNew(false); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const toggleActive = async (a) => {
+    try { await api(`/admin/announcements/${a.id}`, { method: 'PUT', body: { active: !a.active } }); toast.success(a.active ? 'أُوقف الإعلان' : '🚀 تم التفعيل'); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const del = async (a) => {
+    if (!confirm(`حذف الإعلان "${a.title}"؟`)) return
+    try { await api(`/admin/announcements/${a.id}`, { method: 'DELETE' }); toast.success('حُذف'); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle className="flex items-center gap-2">📢 إدارة الإعلانات والإشعارات</CardTitle>
+        <Button onClick={() => setOpenNew(true)} className="grad-gold text-white gap-2"><Plus className="w-4 h-4" /> إعلان جديد</Button>
+      </CardHeader>
+      <CardContent>
+        <Table>
+          <TableHeader><TableRow>
+            <TableHead>النوع</TableHead>
+            <TableHead>العنوان</TableHead>
+            <TableHead>النص</TableHead>
+            <TableHead>الحالة</TableHead>
+            <TableHead>الفترة</TableHead>
+            <TableHead className="text-left">إجراءات</TableHead>
+          </TableRow></TableHeader>
+          <TableBody>
+            {list.length === 0 && <TableRow><TableCell colSpan={6} className="text-center py-8 text-slate-400">لا توجد إعلانات. أنشئ الأول من الأعلى.</TableCell></TableRow>}
+            {list.map(a => (
+              <TableRow key={a.id}>
+                <TableCell><Badge variant={a.type === 'popup' ? 'default' : 'secondary'}>{a.type === 'popup' ? '💬 نافذة' : '📢 شريط'}</Badge></TableCell>
+                <TableCell className="font-bold">{a.title}</TableCell>
+                <TableCell className="text-xs max-w-[300px] truncate">{a.body}</TableCell>
+                <TableCell>{a.active ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">🟢 نشط</Badge> : <Badge className="bg-slate-200 text-slate-600 hover:bg-slate-200">⏸️ متوقف</Badge>}</TableCell>
+                <TableCell className="text-xs">{a.starts_at ? fmtDate(a.starts_at) : 'الآن'} → {a.ends_at ? fmtDate(a.ends_at) : 'دائم'}</TableCell>
+                <TableCell className="text-left">
+                  <div className="flex gap-1 justify-end">
+                    <Button size="sm" variant="outline" onClick={() => toggleActive(a)}>{a.active ? '⏸️ إيقاف' : '▶️ تفعيل'}</Button>
+                    <Button size="sm" variant="outline" className="text-rose-600 border-rose-300" onClick={() => del(a)}><Trash2 className="w-3 h-3" /></Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </CardContent>
+      <Dialog open={openNew} onOpenChange={setOpenNew}>
+        <DialogContent dir="rtl" className="max-w-2xl">
+          <DialogHeader><DialogTitle>إنشاء إعلان جديد</DialogTitle><DialogDescription>سيظهر لجميع المكاتب حال تسجيل دخولهم أو في أعلى لوحتهم</DialogDescription></DialogHeader>
+          <div className="space-y-3">
+            <Field label="النوع">
+              <Select value={form.type} onValueChange={v => setForm({ ...form, type: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="popup">💬 نافذة منبثقة (تظهر عند تسجيل الدخول)</SelectItem>
+                  <SelectItem value="banner">📢 شريط علوي (يظهر باستمرار أعلى الشاشة)</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="العنوان" required><Input value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="عرض ترحيبي" /></Field>
+            <Field label="النص" required><Textarea rows={4} value={form.body} onChange={e => setForm({ ...form, body: e.target.value })} placeholder="محتوى الإعلان..." /></Field>
+            <Field label="رابط الصورة (اختياري)"><Input dir="ltr" value={form.image_url} onChange={e => setForm({ ...form, image_url: e.target.value })} placeholder="https://..." /></Field>
+            <Field label="رابط المزيد (اختياري)"><Input dir="ltr" value={form.link_url} onChange={e => setForm({ ...form, link_url: e.target.value })} placeholder="https://..." /></Field>
+            <div className="flex items-center gap-2"><Switch checked={form.active} onCheckedChange={v => setForm({ ...form, active: v })} /><span className="text-sm">تفعيل فوري</span></div>
+          </div>
+          <DialogFooter><Button variant="outline" onClick={() => setOpenNew(false)}>إلغاء</Button><Button onClick={submit} className="grad-gold text-white">🚀 نشر</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
   )
 }
 
@@ -2524,8 +2629,8 @@ function ReferralsTab() {
               <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
                 <div className="font-bold mb-1">💡 كيف تعمل المكافآت؟</div>
                 <ul className="list-disc list-inside space-y-1">
-                  <li>عند تسجيل مكتب جديد عبر رابطك → <b>+15 قيد مجاني</b> يُضاف إلى حصتك تلقائياً.</li>
-                  <li>عند تفعيل المكتب المُحال لاشتراكه المدفوع (يؤكده الإدارة العامة) → <b>+50 قيد مجاني</b> إضافي.</li>
+                  <li>عند تسجيل مكتب جديد عبر رابطك → <b>+50 قيد مجاني</b> يُضاف إلى حصتك فوراً وتلقائياً.</li>
+                  <li>لا حدود لعدد الإحالات — كل مكتب جديد يعني +50 قيد إضافي لك!</li>
                 </ul>
               </div>
             </CardContent>
@@ -2553,9 +2658,7 @@ function ReferralsTab() {
                     <TableCell className="text-xs">{fmtDate(v.created_at)}</TableCell>
                     <TableCell><Badge variant={v.subscription === 'paid' ? 'default' : 'secondary'}>{v.subscription === 'paid' ? 'مدفوع' : 'تجريبي'}</Badge></TableCell>
                     <TableCell>
-                      {v.activation_confirmed
-                        ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">✅ +50 مكافأة نشطة</Badge>
-                        : <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">🎁 +15 مكافأة تسجيل — بانتظار دفع الاشتراك</Badge>}
+                      <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">✅ تم منح +50 قيد مكافأة</Badge>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -2820,10 +2923,48 @@ function OfficeSettings() {
 function TenantApp() {
   const [tab, setTab] = useState('dashboard')
   const { user, tenant, logout } = useAuth()
+  const [announcements, setAnnouncements] = useState([])
+  const [popupShown, setPopupShown] = useState(false)
+  const [popupAnn, setPopupAnn] = useState(null)
+  const [isImpersonating, setIsImpersonating] = useState(false)
+  const [quotaModalOpen, setQuotaModalOpen] = useState(false)
+
+  useEffect(() => {
+    // Load announcements
+    api('/announcements/active').then(list => {
+      setAnnouncements(list || [])
+      const popup = (list || []).find(a => a.type === 'popup')
+      if (popup && !sessionStorage.getItem(`rahaal_popup_${popup.id}_seen`)) {
+        setPopupAnn(popup); setPopupShown(true)
+      }
+    }).catch(() => {})
+    // Detect impersonation via /auth/me flag
+    api('/auth/me').then(me => { if (me?.impersonation) setIsImpersonating(true) }).catch(() => {})
+    // Register global quota-exceeded listener
+    window.__rahaalOnQuotaExceeded = () => setQuotaModalOpen(true)
+    return () => { delete window.__rahaalOnQuotaExceeded }
+  }, [])
+
+  const banner = announcements.find(a => a.type === 'banner')
+
   return (
     <div className="flex min-h-screen bg-slate-50">
       <Sidebar current={tab} onChange={setTab} />
       <main className="flex-1 p-6 md:p-8 max-w-[1600px]">
+        {isImpersonating && (
+          <div className="mb-3 px-4 py-2 rounded-lg bg-gradient-to-l from-red-600 to-rose-600 text-white flex items-center gap-2 shadow-lg animate-pulse">
+            <span className="text-xl">👁️</span>
+            <div className="font-bold text-sm">أنت متصفّح كـ Super Admin — جلسة مؤقتة</div>
+            <Button size="sm" variant="secondary" className="mr-auto h-7" onClick={logout}>إنهاء الجلسة</Button>
+          </div>
+        )}
+        {banner && (
+          <div className="mb-3 px-4 py-2 rounded-lg bg-gradient-to-l from-amber-500 to-orange-500 text-white flex items-center gap-2 shadow-md">
+            <span className="text-xl">📢</span>
+            <div className="flex-1"><b className="text-sm">{banner.title}:</b> <span className="text-sm">{banner.body}</span></div>
+            {banner.link_url && <a href={banner.link_url} target="_blank" rel="noopener" className="text-xs underline">تفاصيل</a>}
+          </div>
+        )}
         <div className="flex justify-end mb-2">
           <Button variant="ghost" onClick={logout} className="gap-2 text-slate-500 hover:text-rose-600"><LogOut className="w-4 h-4" /> خروج</Button>
         </div>
@@ -2842,7 +2983,84 @@ function TenantApp() {
         {tab === 'reports' && <ReportsScreen />}
         {tab === 'settings' && user.role === 'owner' && <OfficeSettings />}
       </main>
+
+      {/* Popup Announcement */}
+      {popupShown && popupAnn && (
+        <Dialog open={popupShown} onOpenChange={(v) => { setPopupShown(v); if (!v) sessionStorage.setItem(`rahaal_popup_${popupAnn.id}_seen`, '1') }}>
+          <DialogContent className="max-w-lg" dir="rtl">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-xl">📢 {popupAnn.title}</DialogTitle>
+            </DialogHeader>
+            {popupAnn.image_url && <img src={popupAnn.image_url} alt="" className="w-full rounded-lg" />}
+            <div className="text-sm text-slate-700 whitespace-pre-line leading-relaxed">{popupAnn.body}</div>
+            {popupAnn.link_url && <a href={popupAnn.link_url} target="_blank" rel="noopener" className="text-blue-600 font-bold text-sm">🔗 المزيد</a>}
+            <DialogFooter>
+              <Button onClick={() => { setPopupShown(false); sessionStorage.setItem(`rahaal_popup_${popupAnn.id}_seen`, '1') }} className="grad-brand text-white">فهمت — إغلاق</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {/* Out-of-Quota Modal */}
+      <OutOfQuotaModal open={quotaModalOpen} onOpenChange={setQuotaModalOpen} tenant={tenant} />
     </div>
+  )
+}
+
+function OutOfQuotaModal({ open, onOpenChange, tenant }) {
+  const [plans, setPlans] = useState([])
+  const [refCode, setRefCode] = useState('')
+  useEffect(() => {
+    if (!open) return
+    api('/plans').then(setPlans).catch(() => {})
+    api('/referrals').then(r => setRefCode(r.code)).catch(() => {})
+  }, [open])
+  const publicBase = typeof window !== 'undefined' ? window.location.origin : ''
+  const inviteLink = `${publicBase}/signup?ref=${refCode}`
+  const shareWA = () => {
+    const msg = `🎁 انضم إلى منصة رحّال (Rahaal ERP)!\nاحصل على 30 قيد تجريبي مجاناً + أكسب +50 قيد إضافي عبر رابط الإحالة:\n${inviteLink}`
+    window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
+  }
+  const copy = (t) => { navigator.clipboard.writeText(t); toast.success('📋 تم النسخ') }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl" dir="rtl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-xl text-rose-700">⚠️ انتهت حصّة القيود</DialogTitle>
+          <DialogDescription>لقد استنفدت جميع القيود المتاحة في باقتك. اختر إحدى الطريقتين لمواصلة العمل:</DialogDescription>
+        </DialogHeader>
+        <div className="grid md:grid-cols-2 gap-3">
+          <Card className="border-emerald-300 bg-emerald-50">
+            <CardHeader className="pb-2"><CardTitle className="text-emerald-800">🎁 ادعُ مكتباً</CardTitle><CardDescription>احصل على +50 قيد فوراً</CardDescription></CardHeader>
+            <CardContent className="space-y-2">
+              <div className="text-xs text-emerald-800">ادعُ مكتب سفريات آخر عبر رابطك الخاص، وستحصل على <b>+50 قيد إضافي فوراً</b> عند تسجيله. لا حدود لعدد الإحالات!</div>
+              <div className="p-2 bg-white rounded border text-xs" dir="ltr">{inviteLink}</div>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => copy(inviteLink)} className="flex-1">📋 نسخ الرابط</Button>
+                <Button size="sm" onClick={shareWA} className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white">📲 مشاركة واتساب</Button>
+              </div>
+            </CardContent>
+          </Card>
+          <Card className="border-blue-300 bg-blue-50">
+            <CardHeader className="pb-2"><CardTitle className="text-blue-800">💳 حاسِب وسدّد</CardTitle><CardDescription>باقات متنوعة قابلة للترقية</CardDescription></CardHeader>
+            <CardContent className="space-y-2">
+              {plans.length === 0 ? <div className="text-xs text-slate-400">لا توجد باقات متاحة</div> : plans.map(p => (
+                <div key={p.id} className="p-2 bg-white rounded border flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-bold text-slate-800">{p.name}</div>
+                    <div className="text-[11px] text-slate-500">{p.description}</div>
+                  </div>
+                  <Badge className="bg-blue-600 text-white hover:bg-blue-600 text-sm">${p.price_usd}</Badge>
+                </div>
+              ))}
+              <div className="text-[11px] text-blue-800 mt-2">💬 للسداد والاشتراك، تواصل مع الإدارة العامة عبر واتساب أو البريد.</div>
+              <Button size="sm" onClick={() => window.open(`https://wa.me/?text=${encodeURIComponent('أرغب في ترقية باقة رحّال ERP لمكتب: ' + (tenant?.name || ''))}`, '_blank')} className="w-full bg-blue-600 hover:bg-blue-700 text-white">📲 تواصل مع الإدارة</Button>
+            </CardContent>
+          </Card>
+        </div>
+        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إغلاق</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

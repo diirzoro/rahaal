@@ -161,6 +161,16 @@ async function seedInitial(db) {
   // Backfill referral codes for any existing tenants missing one
   const missingRef = await tenants.find({ $or: [{ referral_code: { $exists: false } }, { referral_code: null }] }).toArray()
   for (const t of missingRef) await ensureReferralCode(db, t.id)
+
+  // v2.8 — Seed default subscription plans if none exist
+  const plans = db.collection('subscription_plans')
+  if (!(await plans.countDocuments())) {
+    await plans.insertMany([
+      { id: 'voucher_pack_500', name: 'باقة قيود إضافية', description: '500 قيد إضافي — إضافة فورية للحصة الحالية', price_usd: 50, vouchers: 500, kind: 'topup', active: true, updated_at: new Date() },
+      { id: 'gold_monthly', name: 'Gold — شهري', description: 'قيود غير محدودة + إنشاء ذاتي لفروع ومستخدمين — شهر واحد', price_usd: 150, vouchers: 100000, plan_tier: 'gold', duration_days: 30, kind: 'subscription', active: true, updated_at: new Date() },
+      { id: 'gold_annual', name: 'Gold — سنوي', description: 'قيود غير محدودة + إنشاء ذاتي لفروع ومستخدمين — سنة كاملة (توفير شهرين)', price_usd: 1500, vouchers: 100000, plan_tier: 'gold', duration_days: 365, kind: 'subscription', active: true, updated_at: new Date() },
+    ])
+  }
 }
 
 // ================= CORS =================
@@ -190,10 +200,14 @@ async function getSession(request, db) {
   let tenant = null
   if (user.tenant_id) tenant = await db.collection('tenants').findOne({ id: user.tenant_id })
   if (tenant && tenant.status !== 'active') return { session, user, tenant, blocked: true }
-  return { session, user, tenant }
+  return { 
+    session, user, tenant, 
+    impersonation: !!session.impersonation, 
+    impersonated_by_email: session.impersonated_by_email 
+  }
 }
 function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, tenant_id: u.tenant_id, active: u.active } }
-function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by } : null }
+function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price } : null }
 
 // Referral helpers
 function genReferralCode() {
@@ -356,7 +370,8 @@ async function handleRoute(request, { params }) {
       const tenant = {
         id: uuidv4(), slug, name: b.name, status: 'active',
         max_users: 2, max_branches: 1, subscription: 'trial',
-        journal_quota: { used: 0, limit: 500, top_ups: [] },
+        plan_tier: 'standard', // v2.8 default tier (standard | silver | bronze | gold)
+        journal_quota: { used: 0, limit: 30, top_ups: [] }, // v2.8 — 30 free entries on signup (was 500)
         referral_code: myCode, referred_by: referredBy,
         referral_stats: { signups: 0, activations: 0, bonus_earned: 0 },
         activation_confirmed: false,
@@ -364,11 +379,12 @@ async function handleRoute(request, { params }) {
       }
       await db.collection('tenants').insertOne(tenant)
       if (referredBy) {
+        // v2.8 — +50 immediately to referrer on signup (simplified from +15/+50 two-phase)
         await db.collection('tenants').updateOne(
           { id: referredBy },
           {
-            $inc: { 'journal_quota.limit': 15, 'referral_stats.signups': 1, 'referral_stats.bonus_earned': 15 },
-            $push: { 'journal_quota.top_ups': { amount: 15, date: new Date(), by: 'referral_signup', referred_tenant: tenant.id } }
+            $inc: { 'journal_quota.limit': 50, 'referral_stats.signups': 1, 'referral_stats.bonus_earned': 50 },
+            $push: { 'journal_quota.top_ups': { amount: 50, date: new Date(), by: 'referral_signup', referred_tenant: tenant.id } }
           }
         )
       }
@@ -385,7 +401,7 @@ async function handleRoute(request, { params }) {
       const expires = new Date(Date.now() + SESSION_DAYS * 86400000)
       await db.collection('sessions').insertOne({ id: sid, user_id: userId, expires_at: expires, created_at: new Date() })
       const cookie = `rahaal_session=${sid}; HttpOnly; Path=/; Max-Age=${SESSION_DAYS * 86400}; SameSite=Lax`
-      return ok({ tenant: sanitizeTenant(tenant), referral_applied: !!referredBy }, cookie)
+      return ok({ tenant: { ...sanitizeTenant(tenant), journal_quota: tenant.journal_quota }, referral_applied: !!referredBy }, cookie)
     }
 
     // ============ AUTH ============
@@ -424,7 +440,13 @@ async function handleRoute(request, { params }) {
       let tenantSettings = null
       if (sess.tenant) tenantSettings = await db.collection('tenant_settings').findOne({ tenant_id: sess.tenant.id })
       const quota = sess.tenant?.journal_quota || null
-      return ok({ user: sanitizeUser(sess.user), tenant: sess.tenant ? { ...sanitizeTenant(sess.tenant), journal_quota: quota } : null, settings: tenantSettings ? { ...tenantSettings, _id: undefined } : null })
+      return ok({
+        user: sanitizeUser(sess.user),
+        tenant: sess.tenant ? { ...sanitizeTenant(sess.tenant), journal_quota: quota } : null,
+        settings: tenantSettings ? { ...tenantSettings, _id: undefined } : null,
+        impersonation: !!sess.impersonation,
+        impersonated_by: sess.impersonation ? sess.impersonated_by_email : null,
+      })
     }
 
     if (!sess || sess.blocked) return bad('يجب تسجيل الدخول', 401)
@@ -467,21 +489,24 @@ async function handleRoute(request, { params }) {
           id: uuidv4(), slug, name: b.name, status: 'active',
           max_users: Number(b.max_users) || 2, max_branches: Number(b.max_branches) || 1,
           subscription: b.subscription || 'trial',
-          journal_quota: { used: 0, limit: Number(b.quota_limit) || 500, top_ups: [] },
+          plan_tier: b.plan_tier || 'standard',
+          journal_quota: { used: 0, limit: Number(b.quota_limit) || 30, top_ups: [] },
           referral_code: myCode,
           referred_by: referredBy,
           referral_stats: { signups: 0, activations: 0, bonus_earned: 0 },
           activation_confirmed: false,
+          subscription_expires_at: b.subscription_expires_at ? new Date(b.subscription_expires_at) : null,
+          subscription_price: Number(b.subscription_price) || 0,
           created_at: new Date(),
         }
         await db.collection('tenants').insertOne(tenant)
-        // Reward referrer with +15 free entries on trial signup
+        // Reward referrer with +50 free entries on signup (v2.8 simplified)
         if (referredBy) {
           await db.collection('tenants').updateOne(
             { id: referredBy },
             {
-              $inc: { 'journal_quota.limit': 15, 'referral_stats.signups': 1, 'referral_stats.bonus_earned': 15 },
-              $push: { 'journal_quota.top_ups': { amount: 15, date: new Date(), by: 'referral_signup', referred_tenant: tenant.id } }
+              $inc: { 'journal_quota.limit': 50, 'referral_stats.signups': 1, 'referral_stats.bonus_earned': 50 },
+              $push: { 'journal_quota.top_ups': { amount: 50, date: new Date(), by: 'referral_signup', referred_tenant: tenant.id } }
             }
           )
         }
@@ -526,9 +551,13 @@ async function handleRoute(request, { params }) {
           const upd = {}
           if (b.status) upd.status = b.status
           if (b.name) upd.name = b.name
-          if (b.max_users !== undefined) upd.max_users = Number(b.max_users)
-          if (b.max_branches !== undefined) upd.max_branches = Number(b.max_branches)
+          if (b.max_users !== undefined) upd.max_users = b.max_users === null ? null : Number(b.max_users)
+          if (b.max_branches !== undefined) upd.max_branches = b.max_branches === null ? null : Number(b.max_branches)
           if (b.quota_limit !== undefined) upd['journal_quota.limit'] = Number(b.quota_limit)
+          if (b.plan_tier !== undefined) upd.plan_tier = b.plan_tier
+          if (b.subscription !== undefined) upd.subscription = b.subscription
+          if (b.subscription_price !== undefined) upd.subscription_price = Number(b.subscription_price) || 0
+          if (b.subscription_expires_at !== undefined) upd.subscription_expires_at = b.subscription_expires_at ? new Date(b.subscription_expires_at) : null
           await db.collection('tenants').updateOne({ id: tid }, { $set: upd })
           // Top-up quota
           if (b.top_up_amount) {
@@ -538,7 +567,7 @@ async function handleRoute(request, { params }) {
                 { id: tid },
                 {
                   $inc: { 'journal_quota.limit': amt },
-                  $push: { 'journal_quota.top_ups': { amount: amt, date: new Date(), by: sess.user.email } }
+                  $push: { 'journal_quota.top_ups': { amount: amt, date: new Date(), by: sess.user.email, note: b.top_up_note || 'manual top-up' } }
                 }
               )
             }
@@ -552,6 +581,91 @@ async function handleRoute(request, { params }) {
           }
           return ok({ success: true })
         }
+      }
+
+      // v2.8 — Suspend / Activate tenant
+      const toggleMatch = route.match(/^\/admin\/tenants\/([^/]+)\/toggle-status$/)
+      if (toggleMatch && method === 'POST') {
+        const tid = toggleMatch[1]
+        const t = await db.collection('tenants').findOne({ id: tid })
+        if (!t) return bad('المكتب غير موجود', 404)
+        const newStatus = t.status === 'suspended' ? 'active' : 'suspended'
+        await db.collection('tenants').updateOne({ id: tid }, { $set: { status: newStatus, status_changed_at: new Date() } })
+        return ok({ success: true, status: newStatus })
+      }
+
+      // v2.8 — Impersonate: super admin logs in as tenant (30-min session)
+      const imperMatch = route.match(/^\/admin\/tenants\/([^/]+)\/impersonate$/)
+      if (imperMatch && method === 'POST') {
+        const tid = imperMatch[1]
+        const t = await db.collection('tenants').findOne({ id: tid })
+        if (!t) return bad('المكتب غير موجود', 404)
+        // Find the tenant's owner
+        const owner = await db.collection('users').findOne({ tenant_id: tid, role: 'owner', active: true })
+        if (!owner) return bad('لا يوجد مالك نشط لهذا المكتب', 404)
+        // Create a short-lived impersonation session
+        const sid = uuidv4()
+        const expires = new Date(Date.now() + 30 * 60000) // 30 minutes
+        await db.collection('sessions').insertOne({
+          id: sid, user_id: owner.id,
+          impersonation: true,
+          impersonated_by_id: sess.user.id,
+          impersonated_by_email: sess.user.email,
+          expires_at: expires, created_at: new Date(),
+        })
+        return ok({ session_id: sid, expires_at: expires, tenant: sanitizeTenant(t), user: sanitizeUser(owner) })
+      }
+
+      // v2.8 — Subscription plan config (voucher pack + gold monthly + gold annual)
+      if (route === '/admin/plans' && method === 'GET') {
+        const plans = await db.collection('subscription_plans').find({}).toArray()
+        return ok(plans.map(p => ({ ...p, _id: undefined })))
+      }
+      if (route === '/admin/plans' && method === 'PUT') {
+        const b = await request.json()
+        if (!b.id) return bad('id مطلوب')
+        await db.collection('subscription_plans').updateOne({ id: b.id }, { $set: { ...b, updated_at: new Date() } }, { upsert: true })
+        return ok({ success: true })
+      }
+
+      // v2.8 — Announcements CRUD (popup + banner)
+      if (route === '/admin/announcements' && method === 'GET') {
+        const list = await db.collection('announcements').find({}).sort({ created_at: -1 }).toArray()
+        return ok(list.map(a => ({ ...a, _id: undefined })))
+      }
+      if (route === '/admin/announcements' && method === 'POST') {
+        const b = await request.json()
+        const doc = {
+          id: uuidv4(),
+          type: b.type || 'popup', // 'popup' | 'banner'
+          title: b.title || '',
+          body: b.body || '',
+          image_url: b.image_url || '',
+          link_url: b.link_url || '',
+          active: b.active !== false,
+          starts_at: b.starts_at ? new Date(b.starts_at) : null,
+          ends_at: b.ends_at ? new Date(b.ends_at) : null,
+          created_by: sess.user.email,
+          created_at: new Date(),
+        }
+        await db.collection('announcements').insertOne(doc)
+        return ok({ ...doc, _id: undefined })
+      }
+      const annMatch = route.match(/^\/admin\/announcements\/([^/]+)$/)
+      if (annMatch && method === 'PUT') {
+        const id = annMatch[1]
+        const b = await request.json()
+        const upd = {}
+        for (const k of ['type', 'title', 'body', 'image_url', 'link_url', 'active']) if (b[k] !== undefined) upd[k] = b[k]
+        if (b.starts_at !== undefined) upd.starts_at = b.starts_at ? new Date(b.starts_at) : null
+        if (b.ends_at !== undefined) upd.ends_at = b.ends_at ? new Date(b.ends_at) : null
+        upd.updated_at = new Date()
+        await db.collection('announcements').updateOne({ id }, { $set: upd })
+        return ok({ success: true })
+      }
+      if (annMatch && method === 'DELETE') {
+        await db.collection('announcements').deleteOne({ id: annMatch[1] })
+        return ok({ success: true })
       }
 
       return bad(`Admin route ${route} not found`, 404)
@@ -587,8 +701,15 @@ async function handleRoute(request, { params }) {
       if (sess.user.role !== 'owner') return bad('غير مصرح', 403)
       const b = await request.json()
       if (!b.email || !b.password || !b.name) return bad('الحقول مطلوبة')
+      // v2.8 — Plan tier gate: only Gold plan tenants can self-create users
+      const tenantFull = await db.collection('tenants').findOne({ id: T })
+      const tier = tenantFull?.plan_tier || 'standard'
+      if (tier !== 'gold') {
+        return bad('إنشاء المستخدمين الذاتي متاح لباقة Gold فقط. تواصل مع الإدارة العامة لترقية الباقة.', 403)
+      }
       const count = await db.collection('users').countDocuments(tf)
-      if (count >= (sess.tenant.max_users || 2)) return bad(`تم الوصول إلى الحد الأقصى للمستخدمين (${sess.tenant.max_users}). تواصل مع الإدارة لرفع الحد.`)
+      const maxUsers = sess.tenant.max_users
+      if (maxUsers !== null && maxUsers !== undefined && count >= maxUsers) return bad(`تم الوصول إلى الحد الأقصى للمستخدمين (${maxUsers}). تواصل مع الإدارة لرفع الحد.`)
       if (await db.collection('users').findOne({ email: String(b.email).toLowerCase().trim() })) return bad('البريد مستخدم بالفعل')
       const doc = {
         id: uuidv4(), tenant_id: T, email: String(b.email).toLowerCase().trim(), name: b.name,
@@ -608,6 +729,25 @@ async function handleRoute(request, { params }) {
       if (b.password) upd.password_hash = bcrypt.hashSync(b.password, 8)
       await db.collection('users').updateOne({ id: userIdMatch[1], tenant_id: T }, { $set: upd })
       return ok({ success: true })
+    }
+
+    // v2.8 — Public plans list for the "Out of Quota" top-up modal
+    if (route === '/plans' && method === 'GET') {
+      const list = await db.collection('subscription_plans').find({ active: { $ne: false } }).toArray()
+      return ok(list.map(p => ({ ...p, _id: undefined })))
+    }
+
+    // v2.8 — Active announcements for tenant popup + banner
+    if (route === '/announcements/active' && method === 'GET') {
+      const now = new Date()
+      const list = await db.collection('announcements').find({
+        active: true,
+        $and: [
+          { $or: [{ starts_at: null }, { starts_at: { $lte: now } }, { starts_at: { $exists: false } }] },
+          { $or: [{ ends_at: null }, { ends_at: { $gte: now } }, { ends_at: { $exists: false } }] },
+        ],
+      }).sort({ created_at: -1 }).toArray()
+      return ok(list.map(a => ({ id: a.id, type: a.type, title: a.title, body: a.body, image_url: a.image_url, link_url: a.link_url })))
     }
 
     // Rates (per-tenant)
@@ -962,7 +1102,9 @@ async function handleRoute(request, { params }) {
 
     return bad(`Route ${route} not found`, 404)
   } catch (e) {
-    if (e.code === 'QUOTA_EXCEEDED') return bad(e.message, 402)
+    if (e.code === 'QUOTA_EXCEEDED') {
+      return NextResponse.json({ error: e.message, quota_exceeded: true, code: 'QUOTA_EXCEEDED' }, { status: 402, headers: { 'Access-Control-Allow-Origin': process.env.CORS_ORIGINS || '*' } })
+    }
     console.error('API Error:', e)
     return bad('Internal server error: ' + e.message, 500)
   }
