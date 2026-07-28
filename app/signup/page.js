@@ -41,7 +41,8 @@ export default function SignupPage() {
       const body = { ...form, referral_code: ref || undefined }
       const r = await apiPost('/public/signup', body)
       toast.success('🎉 تم إنشاء حسابك بنجاح!' + (r.referral_applied ? ' • تم منح المُحيل +15 قيد مجاني' : ''))
-      setTimeout(() => { router.push('/') }, 1200)
+      // Use hard navigation to ensure the auth cookie is applied on server-rendered request
+      setTimeout(() => { window.location.href = '/' }, 1200)
     } catch (err) { toast.error(err.message) } finally { setSaving(false) }
   }
 
