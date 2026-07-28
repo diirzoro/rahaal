@@ -2297,3 +2297,36 @@ agent_communication:
       
       Backend v2.8 is production-ready. All new features verified and working correctly.
 
+
+backend:
+  - task: "v2.8 Referral Simplification — 30 signup quota + 50 immediate referrer bonus"
+    working: true
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "3/3 tests passed. New tenant quota=30, referrer +50 immediate on signup, no activation step needed."
+  - task: "v2.8 Announcements CRUD + Active endpoint"
+    working: true
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "8/8 tests passed. Full CRUD + filtering by active flag + date window (starts_at, ends_at) all working."
+  - task: "v2.8 Suspend/Activate + Impersonate + Plan Tier Gate"
+    working: true
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "9/9 tests passed. Suspend blocks tenant, impersonation creates 30-min session with impersonation=true flag, Standard plan blocks user creation with Arabic message, Gold plan allows it."
+  - task: "v2.8 Subscription Plans Config + Quota-Exceeded Response Flag"
+    working: true
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "5/5 tests passed. 3 default plans seeded on bootstrap, price updates work, /plans returns active only, quota_exceeded:true flag confirmed on HTTP 402 response."
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
