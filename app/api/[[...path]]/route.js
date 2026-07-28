@@ -1486,8 +1486,27 @@ async function reportIncome(db, T, q) {
   }
 }
 
+// Dedicated HEAD handler — required for UptimeRobot / uptime monitors which prefer HEAD requests.
+// For /health, respond immediately without auth. For other paths, delegate to standard handler.
+async function handleHead(request, ctx) {
+  const url = new URL(request.url)
+  const path = url.pathname
+  if (path === '/api/health' || path.endsWith('/api/health')) {
+    return new NextResponse(null, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'Access-Control-Allow-Origin': '*',
+      },
+    })
+  }
+  return handleRoute(request, ctx)
+}
+
 export const GET = handleRoute
 export const POST = handleRoute
 export const PUT = handleRoute
 export const DELETE = handleRoute
 export const PATCH = handleRoute
+export const HEAD = handleHead
