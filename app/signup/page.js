@@ -47,18 +47,23 @@ export default function SignupPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-bl from-emerald-50 via-blue-50 to-white flex items-center justify-center p-4" dir="rtl">
+    <div className="min-h-screen bg-gradient-to-bl from-[#0f1e4d] via-blue-50 to-orange-50 flex flex-col items-center justify-center p-4" dir="rtl">
       <Toaster position="top-center" richColors />
       <div className="max-w-4xl w-full grid md:grid-cols-2 gap-6">
         {/* Left: benefits */}
-        <div className="p-8 space-y-6">
+        <div className="p-8 space-y-6 bg-white/70 backdrop-blur rounded-2xl border border-blue-100">
           <div className="flex items-center gap-3">
-            <div className="w-14 h-14 rounded-2xl bg-gradient-to-l from-emerald-500 to-blue-500 flex items-center justify-center shadow-xl">
-              <Plane className="w-7 h-7 text-white -rotate-45" />
+            <div className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-[#1e3a8a] via-[#1e40af] to-[#0f1e4d] flex items-center justify-center shadow-2xl border border-orange-400/40">
+              <svg viewBox="0 0 64 64" fill="none" className="w-10 h-10">
+                <path d="M8 40 L28 36 L40 20 L50 20 L44 34 L54 32 L58 40 L44 42 L38 50 L30 50 L34 42 L14 44 Z" fill="#f97316" stroke="#fff" strokeWidth="1.5" strokeLinejoin="round"/>
+                <circle cx="52" cy="16" r="3" fill="#f97316" />
+              </svg>
+              <div className="absolute -bottom-1 -left-1 w-4 h-4 rounded-full bg-[#f97316] border-2 border-white shadow" />
             </div>
             <div>
-              <div className="text-3xl font-extrabold text-slate-800">رحّال</div>
-              <div className="text-sm text-slate-500">نظام إدارة مكاتب السفريات — Rahaal ERP</div>
+              <div className="text-3xl font-extrabold text-[#1e3a8a]">رحّـــال</div>
+              <div className="text-sm font-black text-[#f97316] tracking-widest" style={{ letterSpacing: '0.15em' }}>RAHAL ERP</div>
+              <div className="text-[11px] text-slate-500 mt-0.5">نظام إدارة مكاتب السفريات</div>
             </div>
           </div>
           <div className="text-slate-600 text-sm">
@@ -74,7 +79,7 @@ export default function SignupPage() {
           )}
           <div className="space-y-2">
             {[
-              '30 قيد يومي مجاناً في الفترة التجريبية + 50 قيد إضافي عند دعوة أي مكتب آخر',
+              '30 قيد عند التسجيل + 50 قيد إضافي عند دعوة أي مكتب آخر',
               'محاسبة متعددة العملات (YER / USD / SAR)',
               'إدارة تذاكر الطيران والتأشيرات',
               'صرافة العملات مع حساب فروق الصرف تلقائياً',
@@ -118,13 +123,34 @@ export default function SignupPage() {
                 <label className="text-xs text-slate-600 mb-1 block">رمز الإحالة (اختياري)</label>
                 <Input dir="ltr" value={ref} onChange={e => setRef(e.target.value.toUpperCase())} placeholder="ABCD1234" />
               </div>
-              <Button type="submit" disabled={saving} className="w-full grad-brand text-white gap-2 text-lg py-5">
+              <Button type="submit" disabled={saving} className="w-full bg-gradient-to-l from-[#1e3a8a] to-[#f97316] hover:opacity-90 text-white gap-2 text-lg py-5 shadow-lg">
                 {saving ? <Loader2 className="w-5 h-5 animate-spin" /> : <>🚀 ابدأ الآن مجاناً</>}
               </Button>
-              <div className="text-center text-xs text-slate-500">لديك حساب بالفعل؟ <a href="/" className="text-blue-600 font-bold">سجّل الدخول</a></div>
+              <div className="text-center text-xs text-slate-500">لديك حساب بالفعل؟ <a href="/" className="text-[#1e3a8a] font-bold hover:text-[#f97316]">سجّل الدخول</a></div>
             </form>
           </CardContent>
         </Card>
+      </div>
+      {/* Footer with contact info + Target Media badge */}
+      <div className="mt-6 text-center text-xs text-slate-600 space-y-2 max-w-4xl">
+        <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+          <span>📍 اليمن - عدن - الشيخ عثمان - بجانب بنك التضامن</span>
+          <span className="text-slate-300">·</span>
+          <span dir="ltr">📞 +967 781 115 482</span>
+          <span className="text-slate-300">·</span>
+          <span dir="ltr">📞 +967 781 455 584</span>
+        </div>
+        <div className="flex items-center justify-center gap-2 pt-2">
+          <span className="text-[11px] text-slate-500">Powered by</span>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="10" stroke="#1e3a8a" strokeWidth="2.5" />
+            <circle cx="12" cy="12" r="5" fill="#f97316" />
+            <circle cx="12" cy="12" r="1.5" fill="#fff" />
+          </svg>
+          <span className="text-xs font-black text-[#1e3a8a]">Target Media</span>
+          <span className="text-[10px] text-slate-500">· تارجت ميديا</span>
+          <span className="text-slate-500">© 2025</span>
+        </div>
       </div>
     </div>
   )

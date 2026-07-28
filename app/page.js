@@ -65,6 +65,69 @@ const useAuth = () => useContext(AuthCtx)
 // ================================================================
 // LOGIN
 // ================================================================
+// ============ v2.8.1 — Brand Components (Target Media theme: royal blue + orange) ============
+function RahaalLogo({ size = 'md', variant = 'dark' }) {
+  const sizeMap = { sm: { box: 40, text: 'text-lg', ar: 'text-xl' }, md: { box: 56, text: 'text-2xl', ar: 'text-3xl' }, lg: { box: 76, text: 'text-4xl', ar: 'text-5xl' } }
+  const s = sizeMap[size] || sizeMap.md
+  const arColor = variant === 'light' ? 'text-white' : 'text-[#1e3a8a]'
+  const enColor = variant === 'light' ? 'text-orange-400' : 'text-[#f97316]'
+  return (
+    <div className="inline-flex items-center gap-3">
+      <div className="relative" style={{ width: s.box, height: s.box }}>
+        <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-[#1e3a8a] via-[#1e40af] to-[#0f1e4d] shadow-xl shadow-blue-900/40 flex items-center justify-center">
+          <svg viewBox="0 0 64 64" fill="none" style={{ width: s.box * 0.6, height: s.box * 0.6 }} xmlns="http://www.w3.org/2000/svg">
+            <path d="M8 40 L28 36 L40 20 L50 20 L44 34 L54 32 L58 40 L44 42 L38 50 L30 50 L34 42 L14 44 Z" fill="#f97316" stroke="#fff" strokeWidth="1.5" strokeLinejoin="round"/>
+            <circle cx="52" cy="16" r="3" fill="#f97316" />
+          </svg>
+        </div>
+        <div className="absolute -bottom-1 -left-1 w-4 h-4 rounded-full bg-[#f97316] border-2 border-white shadow" />
+      </div>
+      <div className="text-right leading-none">
+        <div className={`font-extrabold tracking-tight ${s.ar} ${arColor}`}>رحّـــال</div>
+        <div className={`font-black tracking-widest ${s.text} ${enColor}`} style={{ letterSpacing: '0.15em' }}>RAHAL</div>
+      </div>
+    </div>
+  )
+}
+
+function TargetMediaBadge({ dark = false }) {
+  const textCol = dark ? 'text-slate-300' : 'text-slate-600'
+  const tmBlue = dark ? 'text-blue-300' : 'text-[#1e3a8a]'
+  return (
+    <div className="inline-flex items-center gap-2">
+      <div className={`text-[11px] ${textCol}`}>Powered by</div>
+      <div className="inline-flex items-center gap-1.5">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="12" cy="12" r="10" stroke="#1e3a8a" strokeWidth="2.5" />
+          <circle cx="12" cy="12" r="5" fill="#f97316" />
+          <circle cx="12" cy="12" r="1.5" fill="#fff" />
+        </svg>
+        <div className={`text-xs font-black ${tmBlue}`}>Target Media</div>
+        <span className={`text-[10px] ${textCol}`}>· تارجت ميديا</span>
+      </div>
+    </div>
+  )
+}
+
+function RahaalFooter({ dark = false }) {
+  const textCol = dark ? 'text-slate-400' : 'text-slate-600'
+  return (
+    <div className={`mt-6 text-center text-xs ${textCol} space-y-2`}>
+      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+        <span>📍 اليمن - عدن - الشيخ عثمان - بجانب بنك التضامن</span>
+        <span>·</span>
+        <span dir="ltr">📞 +967 781 115 482</span>
+        <span>·</span>
+        <span dir="ltr">📞 +967 781 455 584</span>
+      </div>
+      <div className="flex items-center justify-center gap-3 pt-2 border-t border-slate-700/30">
+        <TargetMediaBadge dark={dark} />
+        <span className={textCol}>© 2025</span>
+      </div>
+    </div>
+  )
+}
+
 function LoginPage({ onLogin }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -83,18 +146,15 @@ function LoginPage({ onLogin }) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 p-4">
-      <div className="absolute inset-0 opacity-20" style={{ backgroundImage: 'radial-gradient(circle at 20% 20%, rgba(59,130,246,0.3), transparent 40%), radial-gradient(circle at 80% 80%, rgba(16,185,129,0.2), transparent 40%)' }} />
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[#0f1e4d] via-[#1e3a8a] to-[#0f1e4d] p-4">
+      <div className="absolute inset-0 opacity-25" style={{ backgroundImage: 'radial-gradient(circle at 20% 20%, rgba(249,115,22,0.35), transparent 45%), radial-gradient(circle at 80% 80%, rgba(30,64,175,0.4), transparent 45%)' }} />
       <div className="relative w-full max-w-md animate-fade-in">
         <div className="text-center mb-6">
-          <div className="w-16 h-16 rounded-2xl grad-brand flex items-center justify-center mx-auto mb-4 shadow-2xl shadow-blue-500/40">
-            <Plane className="w-8 h-8 text-white -rotate-45" />
-          </div>
-          <h1 className="text-4xl font-extrabold text-white tracking-tight">رحّـــال</h1>
-          <p className="text-slate-400 text-sm mt-1">نظام محاسبة مكاتب السفريات السحابي</p>
+          <RahaalLogo size="lg" variant="light" />
+          <p className="text-slate-300 text-sm mt-2">نظام محاسبة مكاتب السفريات السحابي</p>
         </div>
 
-        <Card className="border-slate-700 bg-slate-900/80 backdrop-blur-xl shadow-2xl">
+        <Card className="border-blue-900/60 bg-slate-900/80 backdrop-blur-xl shadow-2xl">
           <CardHeader>
             <CardTitle className="text-white">تسجيل الدخول</CardTitle>
             <CardDescription className="text-slate-400">أدخل بيانات حسابك للوصول للنظام</CardDescription>
@@ -114,11 +174,11 @@ function LoginPage({ onLogin }) {
               </Button>
             </form>
             <div className="text-center mt-3">
-              <a href="/signup" className="text-xs text-emerald-400 hover:text-emerald-300 font-bold">🎁 ليس لديك حساب؟ احصل على 30 قيد تجريبي فور التسجيل، و+50 قيد إضافي عند دعوة أي مكتب آخر</a>
+              <a href="/signup" className="text-xs text-orange-300 hover:text-orange-200 font-bold">🎁 ليس لديك حساب؟ احصل على 30 قيد عند التسجيل، و+50 قيد إضافي عند دعوة أي مكتب آخر</a>
             </div>
           </CardContent>
         </Card>
-        <div className="text-center text-xs text-slate-500 mt-4">Powered by <span className="text-amber-400 font-bold">Target Media</span> © 2025</div>
+        <RahaalFooter dark />
       </div>
     </div>
   )
@@ -477,19 +537,22 @@ const NAV = [
 function Sidebar({ current, onChange }) {
   const { tenant, settings, user } = useAuth()
   return (
-    <aside className="w-64 shrink-0 h-screen sticky top-0 bg-gradient-to-b from-slate-900 via-slate-900 to-blue-950 text-slate-100 flex flex-col border-l border-slate-800">
-      <div className="p-5 border-b border-slate-800/70">
+    <aside className="w-64 shrink-0 h-screen sticky top-0 bg-gradient-to-b from-[#0f1e4d] via-[#1e3a8a] to-[#0a1544] text-slate-100 flex flex-col border-l border-blue-900/60">
+      <div className="p-5 border-b border-blue-900/50">
         <div className="flex items-center gap-3">
           {settings?.logo_base64 ? (
             <img src={settings.logo_base64} alt="logo" className="w-11 h-11 rounded-xl object-cover bg-white" />
           ) : (
-            <div className="w-11 h-11 rounded-xl grad-brand flex items-center justify-center shadow-lg shadow-blue-500/30">
-              <Plane className="w-6 h-6 text-white -rotate-45" />
+            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-[#1e40af] to-[#0f1e4d] flex items-center justify-center shadow-lg shadow-orange-500/20 border border-orange-400/40">
+              <svg viewBox="0 0 64 64" fill="none" className="w-7 h-7">
+                <path d="M8 40 L28 36 L40 20 L50 20 L44 34 L54 32 L58 40 L44 42 L38 50 L30 50 L34 42 L14 44 Z" fill="#f97316" />
+                <circle cx="52" cy="16" r="3" fill="#f97316" />
+              </svg>
             </div>
           )}
           <div className="min-w-0">
             <div className="text-lg font-extrabold tracking-tight truncate">{settings?.agency_name || tenant?.name || 'رحّـــال'}</div>
-            <div className="text-[11px] text-slate-400">نظام محاسبة السفريات</div>
+            <div className="text-[10px] text-orange-300 font-black tracking-widest" style={{ letterSpacing: '0.15em' }}>RAHAL ERP</div>
           </div>
         </div>
       </div>
@@ -2982,6 +3045,28 @@ function TenantApp() {
         {tab === 'journal' && <JournalScreen />}
         {tab === 'reports' && <ReportsScreen />}
         {tab === 'settings' && user.role === 'owner' && <OfficeSettings />}
+
+        {/* v2.8.1 — Global footer with contact + Target Media badge */}
+        <div className="mt-8 pt-4 border-t border-slate-200 text-center text-xs text-slate-500 space-y-2">
+          <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+            <span>📍 اليمن - عدن - الشيخ عثمان - بجانب بنك التضامن</span>
+            <span className="text-slate-300">·</span>
+            <span dir="ltr">📞 +967 781 115 482</span>
+            <span className="text-slate-300">·</span>
+            <span dir="ltr">📞 +967 781 455 584</span>
+          </div>
+          <div className="flex items-center justify-center gap-2 pt-1">
+            <span className="text-[11px]">Powered by</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="10" stroke="#1e3a8a" strokeWidth="2.5" />
+              <circle cx="12" cy="12" r="5" fill="#f97316" />
+              <circle cx="12" cy="12" r="1.5" fill="#fff" />
+            </svg>
+            <span className="text-xs font-black text-[#1e3a8a]">Target Media</span>
+            <span className="text-[10px]">· تارجت ميديا</span>
+            <span>© 2025</span>
+          </div>
+        </div>
       </main>
 
       {/* Popup Announcement */}
