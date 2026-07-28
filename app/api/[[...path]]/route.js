@@ -322,6 +322,24 @@ async function handleRoute(request, { params }) {
     // Health
     if (route === '/' || route === '/root') return ok({ ok: true, app: 'Rahaal ERP', version: '2.0-saas' })
 
+    // ============ HEALTH CHECK (public, no auth — for uptime monitors) ============
+    if (route === '/health' && method === 'GET') {
+      try {
+        // Confirm DB is reachable
+        await db.command({ ping: 1 })
+        return ok({
+          status: 'ok',
+          timestamp: new Date().toISOString(),
+          uptime_sec: Math.floor(process.uptime()),
+          service: 'rahaal-erp',
+          version: '2.7',
+          db: 'connected',
+        })
+      } catch (e) {
+        return NextResponse.json({ status: 'degraded', error: e.message, timestamp: new Date().toISOString() }, { status: 503 })
+      }
+    }
+
     // ============ PUBLIC SIGNUP (no auth) ============
     if (route === '/public/signup' && method === 'POST') {
       const b = await request.json()

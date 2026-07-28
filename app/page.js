@@ -708,13 +708,15 @@ function TicketsScreen() {
             <Table>
               <TableHeader><TableRow>
                 <TableHead className="w-8"></TableHead><TableHead>التاريخ</TableHead><TableHead>PNR</TableHead>
-                <TableHead>خط السير</TableHead><TableHead>المسافر</TableHead><TableHead>العميل</TableHead>
+                <TableHead>خط السير</TableHead><TableHead>المسافر</TableHead>
+                <TableHead>🚌 الشركة الناقلة</TableHead>
+                <TableHead>العميل</TableHead>
                 <TableHead>المورد</TableHead><TableHead>الدفع</TableHead><TableHead>العملة</TableHead>
                 <TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead>
                 <TableHead className="text-left text-emerald-600">عمولة</TableHead>
               </TableRow></TableHeader>
               <TableBody>
-                {filtered.length === 0 && <TableRow><TableCell colSpan={12} className="text-center text-slate-400 py-8">{filter ? 'لا نتائج للفلتر' : 'لا توجد تذاكر'}</TableCell></TableRow>}
+                {filtered.length === 0 && <TableRow><TableCell colSpan={13} className="text-center text-slate-400 py-8">{filter ? 'لا نتائج للفلتر' : 'لا توجد تذاكر'}</TableCell></TableRow>}
                 {filtered.map(t => (
                   <TableRow key={t.id} className={selectedId === t.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={() => setSelectedId(t.id === selectedId ? null : t.id)}>
                     <TableCell><input type="radio" checked={selectedId === t.id} onChange={() => setSelectedId(t.id)} /></TableCell>
@@ -722,6 +724,7 @@ function TicketsScreen() {
                     <TableCell className="font-mono text-xs">{t.pnr || '—'}</TableCell>
                     <TableCell className="text-xs">{t.route || '—'}</TableCell>
                     <TableCell className="text-xs">{t.passenger_name || '—'}</TableCell>
+                    <TableCell className="text-xs">{t.carrier_name ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-amber-800 font-semibold">🚌 {t.carrier_name}</span> : <span className="text-slate-300">—</span>}</TableCell>
                     <TableCell>{t.client_name}</TableCell>
                     <TableCell>{t.supplier_name}</TableCell>
                     <TableCell>{t.payment_method === 'cash' ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">💵 نقد</Badge> : <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">🕓 آجل</Badge>}</TableCell>
