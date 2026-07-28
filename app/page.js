@@ -753,7 +753,15 @@ function TicketsScreen() {
 
 function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
   const isEdit = !!record
-  const emptyForm = { date: todayISO(), currency: 'USD', exchange_rate: 1, client_id: '', supplier_id: '', pnr: '', route: '', passenger_name: '', passport_no: '', travel_date: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }
+  const emptyForm = {
+    date: todayISO(), currency: 'USD', exchange_rate: 1, client_id: '', supplier_id: '',
+    pnr: '', route: '', passenger_name: '', passport_no: '', travel_date: '',
+    cost: '', sale_price: '', payment_method: 'credit', box_id: '',
+    // v2.7 non-financial fields
+    carrier_name: '', passenger_phone: '', passenger_age: '', id_type: 'هوية شخصية',
+    id_issue_place: '', id_issue_date: '', ticket_number: '', flight_number: '',
+    ticket_type: 'عادي', arrival_time: '', departure_time: '', boarding_point: '', sale_point: '',
+  }
   const [form, setForm] = useState(emptyForm)
   const [boxes, setBoxes] = useState([])
   const [saving, setSaving] = useState(false)
@@ -771,6 +779,17 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
         travel_date: record.travel_date ? new Date(record.travel_date).toISOString().slice(0,10) : '',
         cost: record.cost ?? '', sale_price: record.sale_price ?? '',
         payment_method: record.payment_method || 'credit', box_id: record.box_id || '',
+        carrier_name: record.carrier_name || '', passenger_phone: record.passenger_phone || '',
+        passenger_age: record.passenger_age || '', id_type: record.id_type || 'هوية شخصية',
+        id_issue_place: record.id_issue_place || '',
+        id_issue_date: record.id_issue_date ? String(record.id_issue_date).slice(0,10) : '',
+        ticket_number: record.ticket_number || record.pnr || '',
+        flight_number: record.flight_number || '',
+        ticket_type: record.ticket_type || 'عادي',
+        arrival_time: record.arrival_time || '',
+        departure_time: record.departure_time || '',
+        boarding_point: record.boarding_point || '',
+        sale_point: record.sale_point || '',
       })
     } else {
       setForm(emptyForm)
@@ -818,6 +837,64 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
             <Field label="اسم المسافر"><Input value={form.passenger_name} onChange={e => setForm({ ...form, passenger_name: e.target.value })} /></Field>
             <Field label="رقم الجواز"><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value })} /></Field>
             <Field label="تاريخ السفر"><Input type="date" value={form.travel_date} onChange={e => setForm({ ...form, travel_date: e.target.value })} /></Field>
+          </div>
+
+          {/* v2.7 — Carrier & extended traveler/booking info (text-only, no accounting impact) */}
+          <div className="bg-gradient-to-l from-amber-50 to-orange-50 border-2 border-amber-300 rounded-xl p-4 mt-2">
+            <div className="text-sm font-bold text-amber-900 mb-2 flex items-center gap-2">
+              🚌 <span>الشركة الناقلة (يُطبع على التذكرة فقط — لا يؤثر على القيود المحاسبية)</span>
+            </div>
+            <Input value={form.carrier_name} onChange={e => setForm({ ...form, carrier_name: e.target.value })}
+              placeholder="مثال: شركة البركة للنقل الجماعي (الرويشان)"
+              className="text-base font-bold bg-white border-amber-300" />
+          </div>
+
+          <div className="bg-slate-50 border rounded-xl p-4 mt-2">
+            <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2">👤 بيانات المسافر الإضافية (للطباعة)</div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Field label="رقم هاتف المسافر"><Input dir="ltr" value={form.passenger_phone} onChange={e => setForm({ ...form, passenger_phone: e.target.value })} placeholder="777xxxxxxx" /></Field>
+              <Field label="العمر"><Input value={form.passenger_age} onChange={e => setForm({ ...form, passenger_age: e.target.value })} placeholder="30" /></Field>
+              <Field label="نوع الهوية">
+                <Select value={form.id_type} onValueChange={v => setForm({ ...form, id_type: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="هوية شخصية">هوية شخصية</SelectItem>
+                    <SelectItem value="جواز سفر">جواز سفر</SelectItem>
+                    <SelectItem value="بطاقة عائلية">بطاقة عائلية</SelectItem>
+                    <SelectItem value="رخصة قيادة">رخصة قيادة</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="جهة إصدار الهوية"><Input value={form.id_issue_place} onChange={e => setForm({ ...form, id_issue_place: e.target.value })} placeholder="عدن، صنعاء..." /></Field>
+              <Field label="تاريخ إصدار الهوية"><Input type="date" value={form.id_issue_date} onChange={e => setForm({ ...form, id_issue_date: e.target.value })} /></Field>
+            </div>
+          </div>
+
+          <div className="bg-slate-50 border rounded-xl p-4 mt-2">
+            <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2">🎫 بيانات الرحلة الإضافية (للطباعة)</div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Field label="رقم التذكرة (المُسلسل)"><Input value={form.ticket_number} onChange={e => setForm({ ...form, ticket_number: e.target.value })} placeholder="262054673" /></Field>
+              <Field label="رقم الرحلة"><Input value={form.flight_number} onChange={e => setForm({ ...form, flight_number: e.target.value })} placeholder="26205054" /></Field>
+              <Field label="نوع التذكرة">
+                <Select value={form.ticket_type} onValueChange={v => setForm({ ...form, ticket_type: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="عادي">عادي</SelectItem>
+                    <SelectItem value="VIP">VIP</SelectItem>
+                    <SelectItem value="سياحية">سياحية</SelectItem>
+                    <SelectItem value="أعمال">أعمال</SelectItem>
+                    <SelectItem value="ذهاب">ذهاب</SelectItem>
+                    <SelectItem value="ذهاب وعودة">ذهاب وعودة</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="وقت الحضور"><Input value={form.arrival_time} onChange={e => setForm({ ...form, arrival_time: e.target.value })} placeholder="07:30 ص" /></Field>
+              <Field label="وقت الانطلاق"><Input value={form.departure_time} onChange={e => setForm({ ...form, departure_time: e.target.value })} placeholder="08:00 ص" /></Field>
+              <Field label="نقطة الصعود"><Input value={form.boarding_point} onChange={e => setForm({ ...form, boarding_point: e.target.value })} placeholder="محطة عدن الرئيسية" /></Field>
+              <div className="md:col-span-3">
+                <Field label="نقطة البيع / الفرع"><Input value={form.sale_point} onChange={e => setForm({ ...form, sale_point: e.target.value })} placeholder="مكتب الرحّال — الفرع الرئيسي" /></Field>
+              </div>
+            </div>
           </div>
 
           {/* Payment method selector */}
@@ -965,20 +1042,105 @@ function printVoucher({ kind, record, settings, tenant }) {
   const title = titleMap[kind] || 'سند'
   let content = ''
   if (kind === 'ticket') {
-    content = `<div class="title">${title} — PNR: ${escHtml(record.pnr || '—')}</div>
-      <div class="info-grid">
-        <div><b>التاريخ:</b> ${fmtDate(record.date)}</div>
-        <div><b>خط السير:</b> ${escHtml(record.route || '—')}</div>
-        <div><b>المسافر:</b> ${escHtml(record.passenger_name || '—')}</div>
-        <div><b>رقم الجواز:</b> ${escHtml(record.passport_no || '—')}</div>
-        <div><b>العميل:</b> ${escHtml(record.client_name)}</div>
-        <div><b>المورد:</b> ${escHtml(record.supplier_name)}</div>
-        <div><b>تاريخ السفر:</b> ${record.travel_date ? fmtDate(record.travel_date) : '—'}</div>
-        <div><b>طريقة الدفع:</b> <span class="badge ${record.payment_method === 'cash' ? 'badge-cash' : 'badge-credit'}">${record.payment_method === 'cash' ? 'نقد' : 'آجل'}</span></div>
+    // v2.7 — Three-coupon ticket layout (Passenger / Dispatch / Branch) with prominent Carrier banner
+    const carrier = escHtml(record.carrier_name || 'غير محددة')
+    const tktNum = escHtml(record.ticket_number || record.pnr || '—')
+    const flightNo = escHtml(record.flight_number || record.pnr || '—')
+    const tktType = escHtml(record.ticket_type || 'عادي')
+    const passName = escHtml(record.passenger_name || '—')
+    const passPhone = escHtml(record.passenger_phone || '—')
+    const passAge = escHtml(record.passenger_age || '—')
+    const idType = escHtml(record.id_type || 'هوية')
+    const idNo = escHtml(record.passport_no || '—')
+    const idPlace = escHtml(record.id_issue_place || '—')
+    const idDate = record.id_issue_date ? fmtDate(record.id_issue_date) : '—'
+    const route = escHtml(record.route || '—')
+    const bookDate = fmtDate(record.date)
+    const travelDate = record.travel_date ? fmtDate(record.travel_date) : '—'
+    const arrTime = escHtml(record.arrival_time || '—')
+    const depTime = escHtml(record.departure_time || '—')
+    const boarding = escHtml(record.boarding_point || '—')
+    const salePoint = escHtml(record.sale_point || (tenant?.name || '—'))
+    const priceStr = fmt(record.sale_price, record.currency)
+
+    const carrierBanner = `<div style="border:2px solid #b45309; background: linear-gradient(90deg, #fef3c7, #fde68a); padding: 10px 14px; border-radius: 10px; margin-bottom: 12px; text-align:center; font-size: 16px; font-weight: 900; color: #78350f; letter-spacing: 0.5px;">🚌 الشركة الناقلة: ${carrier}</div>`
+
+    const infoRow = (label, val) => `<div style="display:flex; gap:6px; padding: 4px 6px; border-bottom:1px dotted #cbd5e1; font-size: 12px;"><span style="font-weight:700; color:#475569;">${label}:</span><span style="color:#0f172a;">${val}</span></div>`
+
+    const passengerCopy = `
+      <div style="border: 3px solid #1e40af; border-radius: 12px; padding: 14px; margin-bottom: 14px; background: #ffffff;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <div style="font-size: 18px; font-weight: 900; color: #1e40af;">🎫 نسخة الراكب — Passenger Copy</div>
+          <div style="font-size: 13px; padding: 4px 10px; background:#dbeafe; border-radius: 6px; color:#1e40af; font-weight:700;">نوع التذكرة: ${tktType}</div>
+        </div>
+        ${carrierBanner}
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px;">
+          <div style="padding:8px; background:#f0f9ff; border-radius:8px; border:1px solid #bae6fd;">
+            <div style="font-weight:900; color:#0369a1; margin-bottom:4px; font-size:13px;">👤 بيانات المسافر</div>
+            ${infoRow('الاسم', passName)}
+            ${infoRow('رقم الهاتف', passPhone)}
+            ${infoRow('العمر', passAge)}
+            ${infoRow('نوع الهوية', idType)}
+            ${infoRow('رقم الهوية/الجواز', idNo)}
+            ${infoRow('جهة الإصدار', idPlace)}
+            ${infoRow('تاريخ الإصدار', idDate)}
+          </div>
+          <div style="padding:8px; background:#f0fdf4; border-radius:8px; border:1px solid #bbf7d0;">
+            <div style="font-weight:900; color:#047857; margin-bottom:4px; font-size:13px;">✈️ تفاصيل الرحلة</div>
+            ${infoRow('رقم التذكرة', tktNum)}
+            ${infoRow('رقم الرحلة', flightNo)}
+            ${infoRow('المسار', route)}
+            ${infoRow('تاريخ الحجز', bookDate)}
+            ${infoRow('تاريخ الرحلة', travelDate)}
+            ${infoRow('وقت الحضور', arrTime)}
+            ${infoRow('وقت الانطلاق', depTime)}
+            ${infoRow('نقطة الصعود', boarding)}
+            ${infoRow('نقطة البيع', salePoint)}
+          </div>
+        </div>
+        <div style="padding:10px; background:#fef2f2; border:1px dashed #fecaca; border-radius:8px; font-size:11px; color:#7f1d1d;">
+          <div style="font-weight:900; margin-bottom:4px;">⚠️ ملاحظات وشروط الحجز:</div>
+          <ul style="margin:0; padding-right:18px; line-height:1.6;">
+            <li>يُشترط الحضور قبل موعد الرحلة بساعتين على الأقل.</li>
+            <li>غرامة التأجيل: 10% من قيمة التذكرة إن كان قبل الرحلة بأقل من 24 ساعة.</li>
+            <li>الإلغاء: يخضع لسياسة الشركة الناقلة، تُخصم رسوم إدارية 5% مع استرداد الباقي.</li>
+            <li>على الراكب حمل بطاقته الأصلية وعرضها عند نقطة الصعود.</li>
+            <li>غير قابلة للتحويل لشخص آخر بدون إشعار مسبق.</li>
+          </ul>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px; padding:8px 12px; background:linear-gradient(90deg,#1e40af,#3b82f6); border-radius:8px; color:white;">
+          <div style="font-size:13px;">إجمالي القيمة المدفوعة</div>
+          <div style="font-size:22px; font-weight:900;">${priceStr}</div>
+        </div>
       </div>
-      <table><thead><tr><th>الوصف</th><th style="text-align:left">التكلفة</th><th style="text-align:left">البيع</th><th style="text-align:left">العمولة</th></tr></thead>
-      <tbody><tr><td>تذكرة طيران</td><td style="text-align:left">${fmt(record.cost, record.currency)}</td><td style="text-align:left">${fmt(record.sale_price, record.currency)}</td><td style="text-align:left"><b>${fmt(record.commission, record.currency)}</b></td></tr></tbody></table>
-      <div class="big">المبلغ المستحق: ${fmt(record.sale_price, record.currency)}</div>`
+    `
+
+    const stubCopy = (label, color, bgColor) => `
+      <div style="border: 2px dashed ${color}; border-radius: 10px; padding: 10px; margin-bottom: 10px; background: ${bgColor};">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+          <div style="font-size: 14px; font-weight: 900; color: ${color};">✂️ ${label}</div>
+          <div style="font-size: 11px; color:#64748b;">قصّ عند النقاط</div>
+        </div>
+        <div style="border:1px solid ${color}; background:#fff; border-radius:6px; padding:6px; font-size: 11px; margin-bottom:6px; text-align:center; font-weight: 800; color: ${color};">🚌 ${carrier}</div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; font-size:11px;">
+          <div><b>المسافر:</b> ${passName}</div>
+          <div><b>رقم التذكرة:</b> ${tktNum}</div>
+          <div><b>الرحلة:</b> ${flightNo}</div>
+          <div><b>المسار:</b> ${route}</div>
+          <div><b>التاريخ:</b> ${travelDate}</div>
+          <div><b>الوقت:</b> ${depTime}</div>
+          <div><b>الهوية:</b> ${idNo}</div>
+          <div><b>نقطة الصعود:</b> ${boarding}</div>
+          <div style="font-weight:900; color:${color};">السعر: ${priceStr}</div>
+        </div>
+      </div>
+    `
+
+    content = `<div style="max-width: 100%;">
+      ${passengerCopy}
+      ${stubCopy('نسخة الترحيل — Dispatch Copy', '#065f46', '#ecfdf5')}
+      ${stubCopy('نسخة الفرع — Branch Copy', '#7c3aed', '#faf5ff')}
+    </div>`
   } else if (kind === 'visa') {
     content = `<div class="title">${title} — ${escHtml(record.service_type)}</div>
       <div class="info-grid">
