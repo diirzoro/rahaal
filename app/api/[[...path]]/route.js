@@ -157,6 +157,10 @@ async function seedInitial(db) {
     })
   }
   await seedTenantDefaults(db, demo.id)
+
+  // Backfill referral codes for any existing tenants missing one
+  const missingRef = await tenants.find({ $or: [{ referral_code: { $exists: false } }, { referral_code: null }] }).toArray()
+  for (const t of missingRef) await ensureReferralCode(db, t.id)
 }
 
 // ================= CORS =================
@@ -189,7 +193,23 @@ async function getSession(request, db) {
   return { session, user, tenant }
 }
 function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, tenant_id: u.tenant_id, active: u.active } }
-function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches } : null }
+function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by } : null }
+
+// Referral helpers
+function genReferralCode() {
+  const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
+  let s = ''; for (let i = 0; i < 8; i++) s += chars[Math.floor(Math.random() * chars.length)]
+  return s
+}
+async function ensureReferralCode(db, tenantId) {
+  const t = await db.collection('tenants').findOne({ id: tenantId })
+  if (!t) return null
+  if (t.referral_code) return t.referral_code
+  let code
+  do { code = genReferralCode() } while (await db.collection('tenants').findOne({ referral_code: code }))
+  await db.collection('tenants').updateOne({ id: tenantId }, { $set: { referral_code: code, referral_stats: t.referral_stats || { signups: 0, activations: 0, bonus_earned: 0 } } })
+  return code
+}
 
 // ================= Helpers =================
 async function updateBalance(db, col, filter, currency, delta) {
@@ -233,12 +253,18 @@ async function reverseTransactionEffects(db, T, kind, doc) {
       if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
     }
   } else if (kind === 'fx') {
-    if (doc.type === 'buy') {
-      await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, -doc.amount)
-      await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, +doc.counter_amount)
-    } else {
-      await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, +doc.amount)
-      await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, -doc.counter_amount)
+    // Use stored refs (falls back to box_currency_id for pre-v2.6 records)
+    const refCur = doc.currency_ref || { kind: 'box', id: doc.box_currency_id }
+    const refCounter = doc.counter_ref || { kind: 'box', id: doc.box_counter_id }
+    const accCur = await resolveAccountRef(db, T, refCur)
+    const accCounter = await resolveAccountRef(db, T, refCounter)
+    const debitAmtCur = doc.type === 'buy' ? doc.amount : -doc.amount
+    const debitAmtCounter = doc.type === 'buy' ? -doc.counter_amount : doc.counter_amount
+    if (accCur && accCur.updateBalance) {
+      await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, doc.currency, -debitAmtCur * accCur.debitSign)
+    }
+    if (accCounter && accCounter.updateBalance) {
+      await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, doc.counter_currency, -debitAmtCounter * accCounter.debitSign)
     }
   }
 }
@@ -295,6 +321,54 @@ async function handleRoute(request, { params }) {
 
     // Health
     if (route === '/' || route === '/root') return ok({ ok: true, app: 'Rahaal ERP', version: '2.0-saas' })
+
+    // ============ PUBLIC SIGNUP (no auth) ============
+    if (route === '/public/signup' && method === 'POST') {
+      const b = await request.json()
+      if (!b.name || !b.owner_email || !b.owner_password || !b.owner_name) return bad('الاسم الكامل، اسم المكتب، البريد وكلمة المرور مطلوبة')
+      const email = String(b.owner_email).toLowerCase().trim()
+      if (await db.collection('users').findOne({ email })) return bad('البريد الإلكتروني مستخدم بالفعل')
+      const slug = (b.slug || b.name).toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 40) + '-' + uuidv4().slice(0, 4)
+      let referredBy = null
+      if (b.referral_code) {
+        const ref = await db.collection('tenants').findOne({ referral_code: String(b.referral_code).toUpperCase().trim() })
+        if (ref) referredBy = ref.id
+      }
+      const myCode = genReferralCode()
+      const tenant = {
+        id: uuidv4(), slug, name: b.name, status: 'active',
+        max_users: 2, max_branches: 1, subscription: 'trial',
+        journal_quota: { used: 0, limit: 500, top_ups: [] },
+        referral_code: myCode, referred_by: referredBy,
+        referral_stats: { signups: 0, activations: 0, bonus_earned: 0 },
+        activation_confirmed: false,
+        created_at: new Date(),
+      }
+      await db.collection('tenants').insertOne(tenant)
+      if (referredBy) {
+        await db.collection('tenants').updateOne(
+          { id: referredBy },
+          {
+            $inc: { 'journal_quota.limit': 15, 'referral_stats.signups': 1, 'referral_stats.bonus_earned': 15 },
+            $push: { 'journal_quota.top_ups': { amount: 15, date: new Date(), by: 'referral_signup', referred_tenant: tenant.id } }
+          }
+        )
+      }
+      const userId = uuidv4()
+      await db.collection('users').insertOne({
+        id: userId, tenant_id: tenant.id, email, name: b.owner_name,
+        role: 'owner', active: true,
+        password_hash: bcrypt.hashSync(b.owner_password, 8),
+        created_at: new Date(),
+      })
+      await seedTenantDefaults(db, tenant.id)
+      // Auto-login
+      const sid = uuidv4()
+      const expires = new Date(Date.now() + SESSION_DAYS * 86400000)
+      await db.collection('sessions').insertOne({ id: sid, user_id: userId, expires_at: expires, created_at: new Date() })
+      const cookie = `rahaal_session=${sid}; HttpOnly; Path=/; Max-Age=${SESSION_DAYS * 86400}; SameSite=Lax`
+      return ok({ tenant: sanitizeTenant(tenant), referral_applied: !!referredBy }, cookie)
+    }
 
     // ============ AUTH ============
     if (route === '/auth/login' && method === 'POST') {
@@ -363,14 +437,36 @@ async function handleRoute(request, { params }) {
         const slug = (b.slug || b.name).toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 40) + '-' + uuidv4().slice(0, 4)
         const existingUser = await db.collection('users').findOne({ email: String(b.owner_email).toLowerCase().trim() })
         if (existingUser) return bad('البريد الإلكتروني مستخدم بالفعل')
+        // Resolve referrer if code provided
+        let referredBy = null
+        if (b.referral_code) {
+          const ref = await db.collection('tenants').findOne({ referral_code: String(b.referral_code).toUpperCase().trim() })
+          if (!ref) return bad('رمز الإحالة غير صحيح')
+          referredBy = ref.id
+        }
+        const myCode = genReferralCode()
         const tenant = {
           id: uuidv4(), slug, name: b.name, status: 'active',
           max_users: Number(b.max_users) || 2, max_branches: Number(b.max_branches) || 1,
           subscription: b.subscription || 'trial',
           journal_quota: { used: 0, limit: Number(b.quota_limit) || 500, top_ups: [] },
+          referral_code: myCode,
+          referred_by: referredBy,
+          referral_stats: { signups: 0, activations: 0, bonus_earned: 0 },
+          activation_confirmed: false,
           created_at: new Date(),
         }
         await db.collection('tenants').insertOne(tenant)
+        // Reward referrer with +15 free entries on trial signup
+        if (referredBy) {
+          await db.collection('tenants').updateOne(
+            { id: referredBy },
+            {
+              $inc: { 'journal_quota.limit': 15, 'referral_stats.signups': 1, 'referral_stats.bonus_earned': 15 },
+              $push: { 'journal_quota.top_ups': { amount: 15, date: new Date(), by: 'referral_signup', referred_tenant: tenant.id } }
+            }
+          )
+        }
         await db.collection('users').insertOne({
           id: uuidv4(), tenant_id: tenant.id, email: String(b.owner_email).toLowerCase().trim(),
           name: b.owner_name || 'مالك المكتب', role: 'owner', active: true,
@@ -379,6 +475,29 @@ async function handleRoute(request, { params }) {
         })
         await seedTenantDefaults(db, tenant.id)
         return ok({ ...tenant, _id: undefined })
+      }
+
+      // Confirm payment activation (grants +50 to referrer)
+      const confirmMatch = route.match(/^\/admin\/tenants\/([^/]+)\/confirm-payment$/)
+      if (confirmMatch && method === 'POST') {
+        const tid = confirmMatch[1]
+        const t = await db.collection('tenants').findOne({ id: tid })
+        if (!t) return bad('المكتب غير موجود', 404)
+        if (t.activation_confirmed) return bad('تم تأكيد الدفع لهذا المكتب من قبل')
+        await db.collection('tenants').updateOne({ id: tid }, { $set: { activation_confirmed: true, activation_confirmed_at: new Date(), subscription: 'paid' } })
+        let referrerBonus = null
+        if (t.referred_by) {
+          await db.collection('tenants').updateOne(
+            { id: t.referred_by },
+            {
+              $inc: { 'journal_quota.limit': 50, 'referral_stats.activations': 1, 'referral_stats.bonus_earned': 50 },
+              $push: { 'journal_quota.top_ups': { amount: 50, date: new Date(), by: 'referral_activation', referred_tenant: tid } }
+            }
+          )
+          const ref = await db.collection('tenants').findOne({ id: t.referred_by })
+          referrerBonus = { referrer_id: ref.id, referrer_name: ref.name, bonus_added: 50 }
+        }
+        return ok({ success: true, referrer_bonus: referrerBonus })
       }
 
       const tenantIdMatch = route.match(/^\/admin\/tenants\/([^/]+)$/)
@@ -477,6 +596,68 @@ async function handleRoute(request, { params }) {
     if (route === '/rates' && method === 'GET') {
       const s = await db.collection('tenant_settings').findOne(tf)
       return ok({ rates: s?.rates || DEFAULT_RATES, updated_at: s?.updated_at })
+    }
+
+    // ============ REFERRALS ============
+    if (route === '/referrals' && method === 'GET') {
+      const code = await ensureReferralCode(db, T)
+      const t = await db.collection('tenants').findOne({ id: T })
+      const invitees = await db.collection('tenants').find({ referred_by: T }).sort({ created_at: -1 }).toArray()
+      return ok({
+        code, link_hint: `/signup?ref=${code}`,
+        stats: t.referral_stats || { signups: 0, activations: 0, bonus_earned: 0 },
+        invitees: invitees.map(x => ({
+          id: x.id, name: x.name, slug: x.slug, created_at: x.created_at,
+          subscription: x.subscription || 'trial',
+          activation_confirmed: !!x.activation_confirmed,
+          bonus_status: x.activation_confirmed ? 'activated_+50' : 'signup_+15',
+        })),
+      })
+    }
+
+    // ============ UNIFIED CHART OF ACCOUNTS (for FX 'account' mode + Statement) ============
+    if (route === '/accounts/all' && method === 'GET') {
+      const [clients, suppliers, boxes, coa] = await Promise.all([
+        db.collection('clients').find(tf).sort({ name: 1 }).toArray(),
+        db.collection('suppliers').find(tf).sort({ name: 1 }).toArray(),
+        db.collection('boxes').find(tf).sort({ name_ar: 1 }).toArray(),
+        db.collection('accounts').find(tf).sort({ code: 1 }).toArray(),
+      ])
+      const list = [
+        ...clients.map(c => ({ kind: 'client', id: c.id, code: '1301', name: c.name, group: 'العملاء', balances: c.balances })),
+        ...suppliers.map(s => ({ kind: 'supplier', id: s.id, code: '2101', name: s.name, group: 'الموردون', balances: s.balances })),
+        ...boxes.map(b => ({ kind: 'box', id: b.id, code: b.type === 'cash' ? '1101' : '1201', name: b.name_ar, group: b.type === 'cash' ? 'الصناديق' : 'البنوك', balances: b.balances })),
+        ...coa.map(a => ({ kind: 'account', id: a.id, code: a.code, name: a.name_ar || a.name, group: a.type || 'دليل الحسابات' })),
+      ]
+      return ok(list)
+    }
+
+    // ============ TOMORROW TRAVELERS ============
+    if (route === '/dashboard/tomorrow-travelers' && method === 'GET') {
+      const now = new Date()
+      const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0)
+      const dayAfter = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 2, 0, 0, 0, 0)
+      const tickets = await db.collection('tickets').find({ tenant_id: T, travel_date: { $gte: tomorrow, $lt: dayAfter } }).sort({ travel_date: 1 }).toArray()
+      // Enrich with client phone
+      const cliMap = {}
+      const cliIds = [...new Set(tickets.map(t => t.client_id).filter(Boolean))]
+      if (cliIds.length) {
+        const cs = await db.collection('clients').find({ tenant_id: T, id: { $in: cliIds } }).toArray()
+        for (const c of cs) cliMap[c.id] = c
+      }
+      const rows = tickets.map(t => {
+        const c = cliMap[t.client_id] || {}
+        return {
+          id: t.id, pnr: t.pnr, route: t.route,
+          passenger_name: t.passenger_name || c.name || '',
+          passport_no: t.passport_no,
+          travel_date: t.travel_date,
+          client_name: t.client_name,
+          client_phone: c.phone || '',
+          currency: t.currency, sale_price: t.sale_price,
+        }
+      })
+      return ok(rows)
     }
     if (route === '/rates' && method === 'POST') {
       const body = await request.json()
@@ -917,6 +1098,27 @@ async function createVoucher(db, T, b, opts = {}) {
   const { _id, ...rest } = doc; return { doc: rest }
 }
 
+async function resolveAccountRef(db, T, ref) {
+  if (!ref || !ref.id) return null
+  if (ref.kind === 'client') {
+    const d = await db.collection('clients').findOne({ id: ref.id, tenant_id: T })
+    return d ? { kind: 'client', id: d.id, name: d.name, code: '1301', updateBalance: true, collection: 'clients', debitSign: +1 } : null
+  }
+  if (ref.kind === 'supplier') {
+    const d = await db.collection('suppliers').findOne({ id: ref.id, tenant_id: T })
+    return d ? { kind: 'supplier', id: d.id, name: d.name, code: '2101', updateBalance: true, collection: 'suppliers', debitSign: -1 } : null
+  }
+  if (ref.kind === 'box') {
+    const d = await db.collection('boxes').findOne({ id: ref.id, tenant_id: T })
+    return d ? { kind: 'box', id: d.id, name: d.name_ar, code: d.type === 'cash' ? '1101' : '1201', updateBalance: true, collection: 'boxes', debitSign: +1 } : null
+  }
+  if (ref.kind === 'account') {
+    const d = await db.collection('accounts').findOne({ id: ref.id, tenant_id: T })
+    return d ? { kind: 'account', id: d.id, name: d.name_ar || d.name, code: d.code, updateBalance: false, collection: 'accounts', debitSign: +1 } : null
+  }
+  return null
+}
+
 async function createFx(db, T, b, opts = {}) {
   if (!['buy', 'sell'].includes(b.type)) return { error: 'نوع العملية غير صالح' }
   if (!CURRENCIES.includes(b.currency) || !CURRENCIES.includes(b.counter_currency)) return { error: 'العملات غير صالحة' }
@@ -925,9 +1127,13 @@ async function createFx(db, T, b, opts = {}) {
   const rate = Number(b.exchange_rate) || 0
   if (amount <= 0 || rate <= 0) return { error: 'المبلغ وسعر الصرف مطلوبان' }
   const counter_amount = +(amount * rate).toFixed(2)
-  const boxCur = await db.collection('boxes').findOne({ id: b.box_currency_id, tenant_id: T })
-  const boxCounter = await db.collection('boxes').findOne({ id: b.box_counter_id, tenant_id: T })
-  if (!boxCur || !boxCounter) return { error: 'اختر صناديق العملتين' }
+  const payment_method = b.payment_method === 'account' ? 'account' : 'cash'
+  // Resolve refs — 'cash' uses box_currency_id/box_counter_id; 'account' uses currency_ref/counter_ref (or falls back)
+  const refCur = b.currency_ref ? { kind: b.currency_ref.kind, id: b.currency_ref.id } : { kind: 'box', id: b.box_currency_id }
+  const refCounter = b.counter_ref ? { kind: b.counter_ref.kind, id: b.counter_ref.id } : { kind: 'box', id: b.box_counter_id }
+  const accCur = await resolveAccountRef(db, T, refCur)
+  const accCounter = await resolveAccountRef(db, T, refCounter)
+  if (!accCur || !accCounter) return { error: payment_method === 'cash' ? 'اختر صناديق العملتين' : 'اختر الحسابين للطرفين' }
   const rates = (await db.collection('tenant_settings').findOne({ tenant_id: T }))?.rates || DEFAULT_RATES
   const inBase = toBase(amount, b.currency, rates)
   const outBase = toBase(counter_amount, b.counter_currency, rates)
@@ -937,9 +1143,12 @@ async function createFx(db, T, b, opts = {}) {
     date: new Date(b.date || Date.now()),
     currency: b.currency, amount, exchange_rate: rate,
     counter_currency: b.counter_currency, counter_amount,
-    payment_method: b.payment_method || 'cash',
-    box_currency_id: boxCur.id, box_currency_name: boxCur.name_ar,
-    box_counter_id: boxCounter.id, box_counter_name: boxCounter.name_ar,
+    payment_method,
+    // Backwards-compat + new schema
+    box_currency_id: accCur.id, box_currency_name: accCur.name,
+    box_counter_id: accCounter.id, box_counter_name: accCounter.name,
+    currency_ref: { kind: accCur.kind, id: accCur.id, name: accCur.name, code: accCur.code },
+    counter_ref: { kind: accCounter.kind, id: accCounter.id, name: accCounter.name, code: accCounter.code },
     customer_name: b.customer_name || '',
     customer_phone: b.customer_phone || '',
     id_type: b.id_type || '',
@@ -952,20 +1161,24 @@ async function createFx(db, T, b, opts = {}) {
     ...(opts.existingId ? { updated_at: new Date() } : {}),
   }
   await db.collection('currency_exchanges').insertOne(doc)
-  if (b.type === 'buy') {
-    await updateBalance(db, 'boxes', { id: boxCur.id, tenant_id: T }, b.currency, +amount)
-    await updateBalance(db, 'boxes', { id: boxCounter.id, tenant_id: T }, b.counter_currency, -counter_amount)
-  } else {
-    await updateBalance(db, 'boxes', { id: boxCur.id, tenant_id: T }, b.currency, -amount)
-    await updateBalance(db, 'boxes', { id: boxCounter.id, tenant_id: T }, b.counter_currency, +counter_amount)
+  // Balance updates — only for accounts that track balances (client/supplier/box); COA accounts skip.
+  // Buy: office receives `amount currency` (debit refCur), pays `counter_amount counter_currency` (credit refCounter)
+  // Sell: opposite
+  const debitAmtCur = b.type === 'buy' ? amount : -amount
+  const debitAmtCounter = b.type === 'buy' ? -counter_amount : counter_amount
+  if (accCur.updateBalance) {
+    await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, b.currency, debitAmtCur * accCur.debitSign)
+  }
+  if (accCounter.updateBalance) {
+    await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, b.counter_currency, debitAmtCounter * accCounter.debitSign)
   }
   const lines = []
   if (b.type === 'buy') {
-    lines.push({ account_code: boxCur.type === 'cash' ? '1101' : '1201', account_name: boxCur.name_ar, party_type: 'box', party_id: boxCur.id, party_name: boxCur.name_ar, currency: b.currency, debit: amount, credit: 0 })
-    lines.push({ account_code: boxCounter.type === 'cash' ? '1101' : '1201', account_name: boxCounter.name_ar, party_type: 'box', party_id: boxCounter.id, party_name: boxCounter.name_ar, currency: b.counter_currency, debit: 0, credit: counter_amount })
+    lines.push({ account_code: accCur.code, account_name: accCur.name, party_type: accCur.kind, party_id: accCur.id, party_name: accCur.name, currency: b.currency, debit: amount, credit: 0 })
+    lines.push({ account_code: accCounter.code, account_name: accCounter.name, party_type: accCounter.kind, party_id: accCounter.id, party_name: accCounter.name, currency: b.counter_currency, debit: 0, credit: counter_amount })
   } else {
-    lines.push({ account_code: boxCounter.type === 'cash' ? '1101' : '1201', account_name: boxCounter.name_ar, party_type: 'box', party_id: boxCounter.id, party_name: boxCounter.name_ar, currency: b.counter_currency, debit: counter_amount, credit: 0 })
-    lines.push({ account_code: boxCur.type === 'cash' ? '1101' : '1201', account_name: boxCur.name_ar, party_type: 'box', party_id: boxCur.id, party_name: boxCur.name_ar, currency: b.currency, debit: 0, credit: amount })
+    lines.push({ account_code: accCounter.code, account_name: accCounter.name, party_type: accCounter.kind, party_id: accCounter.id, party_name: accCounter.name, currency: b.counter_currency, debit: counter_amount, credit: 0 })
+    lines.push({ account_code: accCur.code, account_name: accCur.name, party_type: accCur.kind, party_id: accCur.id, party_name: accCur.name, currency: b.currency, debit: 0, credit: amount })
   }
   if (Math.abs(fx_gain_base) > 0.005) {
     if (fx_gain_base > 0) {
@@ -976,7 +1189,7 @@ async function createFx(db, T, b, opts = {}) {
   }
   await createJournalEntry(db, T, {
     date: doc.date,
-    description: `${opts.existingId ? 'تعديل ' : ''}${b.type === 'buy' ? 'شراء عملة' : 'بيع عملة'} — ${amount} ${b.currency} @ ${rate} ${b.counter_currency}${doc.customer_name ? ' — ' + doc.customer_name : ''}`,
+    description: `${opts.existingId ? 'تعديل ' : ''}${b.type === 'buy' ? 'شراء عملة' : 'بيع عملة'} — ${amount} ${b.currency} @ ${rate} ${b.counter_currency}${doc.customer_name ? ' — ' + doc.customer_name : ''}${payment_method === 'account' ? ' [حساب]' : ''}`,
     ref_type: b.type === 'buy' ? 'fx_buy' : 'fx_sell',
     ref_id: doc.id, currency: 'MULTI', lines,
   }, { skipQuota: !!opts.skipQuota })
@@ -1148,7 +1361,9 @@ async function reportStatement(db, T, q) {
         if (!['USD','SAR','YER'].includes(cur)) continue
         let delta = 0
         if (party_type === 'client') delta = (l.debit || 0) - (l.credit || 0)
-        if (party_type === 'supplier') delta = (l.credit || 0) - (l.debit || 0)
+        else if (party_type === 'supplier') delta = (l.credit || 0) - (l.debit || 0)
+        else if (party_type === 'box') delta = (l.debit || 0) - (l.credit || 0)
+        else delta = (l.debit || 0) - (l.credit || 0)  // generic COA account (asset convention)
         run[cur] += delta
         totals[cur].d += l.debit || 0
         totals[cur].c += l.credit || 0
@@ -1157,9 +1372,16 @@ async function reportStatement(db, T, q) {
     }
   }
 
-  const party = party_type === 'client'
-    ? await db.collection('clients').findOne({ id: party_id, tenant_id: T })
-    : await db.collection('suppliers').findOne({ id: party_id, tenant_id: T })
+  let party = null
+  if (party_type === 'client') party = await db.collection('clients').findOne({ id: party_id, tenant_id: T })
+  else if (party_type === 'supplier') party = await db.collection('suppliers').findOne({ id: party_id, tenant_id: T })
+  else if (party_type === 'box') {
+    const b = await db.collection('boxes').findOne({ id: party_id, tenant_id: T })
+    if (b) party = { id: b.id, name: b.name_ar, phone: '', balances: b.balances }
+  } else if (party_type === 'account') {
+    const a = await db.collection('accounts').findOne({ id: party_id, tenant_id: T })
+    if (a) party = { id: a.id, name: `${a.code} — ${a.name_ar || a.name}`, phone: '', balances: {} }
+  }
 
   // Currency display mode: 'all_summary' | 'all_detail' | 'USD' | 'SAR' | 'YER'
   const mode = q.currency_mode || 'all_detail'

@@ -107,6 +107,9 @@ function LoginPage({ onLogin }) {
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'دخول'}
               </Button>
             </form>
+            <div className="text-center mt-3">
+              <a href="/signup" className="text-xs text-emerald-400 hover:text-emerald-300 font-bold">🎁 ليس لديك حساب؟ سجّل مكتبك مجاناً</a>
+            </div>
             <div className="mt-6 p-3 rounded-lg bg-slate-800/50 border border-slate-700 text-xs text-slate-400 space-y-1">
               <div className="font-bold text-slate-300 mb-1">حسابات تجريبية:</div>
               <div><ShieldCheck className="inline w-3 h-3 ml-1" /> <span className="text-amber-400">Super Admin:</span> <code dir="ltr">admin@targetmedia.com / Target@2025</code></div>
@@ -173,6 +176,7 @@ function SuperAdminPanel() {
                   <TableHead>اسم المكتب</TableHead>
                   <TableHead>الحالة</TableHead>
                   <TableHead>الاشتراك</TableHead>
+                  <TableHead>الإحالة</TableHead>
                   <TableHead className="text-center">المستخدمون</TableHead>
                   <TableHead className="text-center">حصة القيود</TableHead>
                   <TableHead>تاريخ الإنشاء</TableHead>
@@ -188,6 +192,11 @@ function SuperAdminPanel() {
                       <TableCell><div className="font-semibold">{t.name}</div><div className="text-xs text-slate-500 font-mono">{t.slug}</div></TableCell>
                       <TableCell><Badge className={t.status === 'active' ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100' : 'bg-amber-100 text-amber-700 hover:bg-amber-100'}>{t.status === 'active' ? 'نشط' : 'موقوف'}</Badge></TableCell>
                       <TableCell><Badge variant="outline">{t.subscription || 'trial'}</Badge></TableCell>
+                      <TableCell className="text-xs">
+                        <div className="font-mono text-emerald-700 font-bold">{t.referral_code || '—'}</div>
+                        {t.referred_by && <div className="text-[10px] text-slate-500 mt-0.5">مُحال بواسطة</div>}
+                        {t.activation_confirmed && <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 text-[10px] mt-1">✅ دفع مؤكد</Badge>}
+                      </TableCell>
                       <TableCell className="text-center">{t.users_count}/{t.max_users}</TableCell>
                       <TableCell className="text-center">
                         <div className="flex flex-col items-center gap-1">
@@ -198,6 +207,17 @@ function SuperAdminPanel() {
                       <TableCell className="text-xs">{fmtDate(t.created_at)}</TableCell>
                       <TableCell className="text-left">
                         <div className="flex gap-1 justify-end">
+                          {!t.activation_confirmed && (
+                            <Button size="sm" variant="outline" className="text-blue-600 border-blue-300" onClick={async () => {
+                              if (!confirm(`تأكيد أن المكتب "${t.name}" قد دفع القسط الأول؟\n\n${t.referred_by ? '⚠️ سيحصل المُحيل على +50 قيد مجاني تلقائياً.' : 'لا يوجد مكتب مُحيل مرتبط.'}`)) return
+                              try {
+                                const r = await api(`/admin/tenants/${t.id}/confirm-payment`, { method: 'POST' })
+                                if (r.referrer_bonus) toast.success(`✅ تم التأكيد + منح ${r.referrer_bonus.bonus_added} قيد مكافأة إلى "${r.referrer_bonus.referrer_name}"`)
+                                else toast.success('✅ تم تأكيد الدفع')
+                                load()
+                              } catch (e) { toast.error(e.message) }
+                            }}>💳 تأكيد دفع</Button>
+                          )}
                           <Button size="sm" variant="outline" className="text-emerald-600" onClick={async () => {
                             const amt = prompt(`إضافة رصيد قيود للمكتب "${t.name}" (عدد القيود):`, '500')
                             if (!amt) return
@@ -224,7 +244,7 @@ function SuperAdminPanel() {
                   )
                 })}
                 {(!data?.tenants || data.tenants.length === 0) && (
-                  <TableRow><TableCell colSpan={7} className="text-center py-8 text-slate-400">لا توجد مكاتب. أنشئ المكتب الأول من الأعلى.</TableCell></TableRow>
+                  <TableRow><TableCell colSpan={8} className="text-center py-8 text-slate-400">لا توجد مكاتب. أنشئ المكتب الأول من الأعلى.</TableCell></TableRow>
                 )}
               </TableBody>
             </Table>
@@ -254,11 +274,11 @@ function StatCard({ icon: Icon, label, value, grad }) {
 }
 
 function NewTenantDialog({ open, onOpenChange, onSaved }) {
-  const [f, setF] = useState({ name: '', owner_name: '', owner_email: '', owner_password: '', max_users: 2, max_branches: 1, subscription: 'trial' })
+  const [f, setF] = useState({ name: '', owner_name: '', owner_email: '', owner_password: '', max_users: 2, max_branches: 1, subscription: 'trial', referral_code: '' })
   const [saving, setSaving] = useState(false)
   const submit = async () => {
     if (!f.name || !f.owner_email || !f.owner_password) return toast.error('املأ جميع الحقول المطلوبة')
-    try { setSaving(true); await api('/admin/tenants', { method: 'POST', body: f }); toast.success('تم إنشاء المكتب'); onSaved(); setF({ name: '', owner_name: '', owner_email: '', owner_password: '', max_users: 2, max_branches: 1, subscription: 'trial' }) }
+    try { setSaving(true); await api('/admin/tenants', { method: 'POST', body: f }); toast.success('تم إنشاء المكتب' + (f.referral_code ? ' + منح +15 قيد للمُحيل' : '')); onSaved(); setF({ name: '', owner_name: '', owner_email: '', owner_password: '', max_users: 2, max_branches: 1, subscription: 'trial', referral_code: '' }) }
     catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
   return (
@@ -278,6 +298,7 @@ function NewTenantDialog({ open, onOpenChange, onSaved }) {
           <Field label="كلمة المرور" required><Input dir="ltr" type="text" value={f.owner_password} onChange={e => setF({ ...f, owner_password: e.target.value })} placeholder="اختر كلمة مرور قوية" /></Field>
           <Field label="حد المستخدمين"><Input type="number" min={1} value={f.max_users} onChange={e => setF({ ...f, max_users: e.target.value })} /></Field>
           <Field label="عدد الفروع"><Input type="number" min={1} value={f.max_branches} onChange={e => setF({ ...f, max_branches: e.target.value })} /></Field>
+          <Field label="🎁 رمز الإحالة (اختياري)"><Input dir="ltr" value={f.referral_code} onChange={e => setF({ ...f, referral_code: e.target.value.toUpperCase() })} placeholder="مثال: ABCD1234" /></Field>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
@@ -418,13 +439,26 @@ function TopBar({ title, subtitle, right }) {
 // ================================================================
 function Dashboard({ setTab }) {
   const [data, setData] = useState(null)
+  const [tomorrow, setTomorrow] = useState([])
   const [loading, setLoading] = useState(true)
   const load = useCallback(async () => {
-    try { setLoading(true); const d = await api('/dashboard'); setData(d) }
-    catch (e) { toast.error(e.message) } finally { setLoading(false) }
+    try {
+      setLoading(true)
+      const [d, tw] = await Promise.all([api('/dashboard'), api('/dashboard/tomorrow-travelers').catch(() => [])])
+      setData(d); setTomorrow(tw || [])
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
   }, [])
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t) }, [load])
   const pieColors = ['#3b82f6', '#10b981', '#f59e0b', '#a855f7', '#ef4444', '#64748b']
+
+  const sendWhatsApp = (r) => {
+    const dateStr = r.travel_date ? new Date(r.travel_date).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : ''
+    const msg = `السلام عليكم\nتذكيراً برحلة السفر ${r.passenger_name ? `للأخ/ة ${r.passenger_name}` : ''}\n${r.route ? `📍 المسار: ${r.route}\n` : ''}${r.pnr ? `🎫 رقم الحجز: ${r.pnr}\n` : ''}📅 التاريخ: ${dateStr}\nنتمنى لكم رحلة سعيدة 🌸\nمكتب الرحّال`
+    let phone = (r.client_phone || '').replace(/[^0-9+]/g, '')
+    if (phone.startsWith('+')) phone = phone.slice(1)
+    const url = phone ? `https://wa.me/${phone}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`
+    window.open(url, '_blank', 'noopener')
+  }
 
   return (
     <div className="space-y-6">
@@ -447,6 +481,50 @@ function Dashboard({ setTab }) {
           bigValue={new Date().toLocaleDateString('ar-EG', { day: 'numeric', month: 'long' })}
           details={[{ label: '', value: new Date().toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric' }) }]} loading={loading} />
       </div>
+
+      {/* Tomorrow's Travelers Widget */}
+      {tomorrow.length > 0 && (
+        <Card className="border-emerald-200 bg-gradient-to-l from-emerald-50 to-white">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-emerald-800">
+              <Plane className="w-5 h-5 -rotate-45" /> رحلات الغد ({tomorrow.length} مسافر)
+              <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 mr-2">اضغط 📲 لإرسال تذكير عبر الواتساب</Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader><TableRow>
+                  <TableHead>المسافر</TableHead>
+                  <TableHead>PNR</TableHead>
+                  <TableHead>المسار</TableHead>
+                  <TableHead>الجواز</TableHead>
+                  <TableHead>العميل / الهاتف</TableHead>
+                  <TableHead>تاريخ الرحلة</TableHead>
+                  <TableHead className="text-center">إجراء</TableHead>
+                </TableRow></TableHeader>
+                <TableBody>
+                  {tomorrow.map(r => (
+                    <TableRow key={r.id}>
+                      <TableCell className="font-semibold">{r.passenger_name || '—'}</TableCell>
+                      <TableCell className="font-mono text-xs"><Badge variant="outline">{r.pnr || '—'}</Badge></TableCell>
+                      <TableCell className="text-xs">{r.route || '—'}</TableCell>
+                      <TableCell className="font-mono text-xs">{r.passport_no || '—'}</TableCell>
+                      <TableCell className="text-xs">{r.client_name}<br /><span className="text-slate-500">{r.client_phone || 'لا يوجد رقم'}</span></TableCell>
+                      <TableCell className="text-xs">{new Date(r.travel_date).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' })}</TableCell>
+                      <TableCell className="text-center">
+                        <Button size="sm" onClick={() => sendWhatsApp(r)} className="bg-emerald-500 hover:bg-emerald-600 text-white gap-1 h-8">
+                          <span>📲</span> إرسال واتساب
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2 border-slate-200">
           <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-slate-800"><TrendingUp className="w-5 h-5 text-blue-600" /> حركة المبيعات والأرباح — آخر 30 يوم (بمعادل الدولار)</CardTitle></CardHeader>
@@ -1178,32 +1256,44 @@ function BulkImportDialog({ open, onOpenChange, kind, onDone }) {
     finally { setLoading(false) }
   }
 
-  const buildNormalized = () => {
+  const buildNormalized = (autoFix = false) => {
     return rawRows.map(r => {
       const out = {}
       for (const f of fields) {
         const col = mapping[f.key]
         let val = col ? r[col] : ''
         if (val instanceof Date) val = val.toISOString().slice(0, 10)
+        // Auto-fix: trim whitespace on strings
+        if (autoFix && typeof val === 'string') val = val.trim().replace(/\s+/g, ' ')
         out[f.key] = val === undefined ? '' : val
       }
       if (!out.currency) out.currency = defaultCurrency
       else if (typeof out.currency === 'string') out.currency = out.currency.toUpperCase().trim()
+      // Auto-fix: default missing date to today
+      if (autoFix && (!out.date || out.date === '')) out.date = todayISO()
+      if (autoFix && (!out.travel_date || out.travel_date === '')) out.travel_date = todayISO()
       out.cost = Number(out.cost) || 0
       out.sale_price = Number(out.sale_price) || 0
       return out
+    }).filter(r => {
+      // Auto-fix: skip completely blank rows (all string fields empty AND cost=0 AND sale=0)
+      if (!autoFix) return true
+      const hasAny = r.client_name || r.supplier_name || r.passenger_name || r.pnr || r.passport_no || r.cost || r.sale_price
+      return !!hasAny
     })
   }
 
-  const doPreview = async () => {
+  const doPreview = async (autoFix = false) => {
     if (!mapping.client_name || !mapping.supplier_name || !mapping.cost || !mapping.sale_price) return toast.error('يجب تعيين حقول: العميل، المورد، التكلفة، البيع')
     try {
       setLoading(true)
-      const rows = buildNormalized()
+      const rows = buildNormalized(autoFix)
       const r = await api(`/import/${kind}/preview`, { method: 'POST', body: { rows } })
       setPreview(r); setStep(3)
+      if (autoFix) toast.success('🔧 تم تطبيق الإصلاح التلقائي على الصفوف')
     } catch (e) { toast.error(e.message) } finally { setLoading(false) }
   }
+  const doAutoFix = () => doPreview(true)
 
   const doImport = async () => {
     try {
@@ -1315,7 +1405,46 @@ function BulkImportDialog({ open, onOpenChange, kind, onDone }) {
             <div className="flex items-center gap-3 p-3 rounded-lg bg-amber-50 border border-amber-200">
               <Switch checked={skipDup} onCheckedChange={setSkipDup} />
               <div className="text-sm">تخطي الصفوف المكررة (بناءً على {kind === 'tickets' ? 'رقم PNR' : 'رقم الجواز'})</div>
+              {(preview.rows.filter(r => r.__errors.length).length > 0 || preview.rows.filter(r => !r.date).length > 0) && (
+                <Button size="sm" variant="outline" onClick={doAutoFix} disabled={loading} className="mr-auto gap-1 border-amber-400 text-amber-700 hover:bg-amber-100">
+                  🔧 إصلاح تلقائي
+                </Button>
+              )}
             </div>
+
+            {/* Error breakdown */}
+            {preview.rows.filter(r => r.__errors.length).length > 0 && (
+              <details className="rounded-lg bg-rose-50 border border-rose-200" open>
+                <summary className="cursor-pointer p-3 font-bold text-rose-700 flex items-center gap-2">
+                  <XCircle className="w-4 h-4" /> تفاصيل الأخطاء ({preview.rows.filter(r => r.__errors.length).length} صف)
+                  <span className="text-xs font-normal text-rose-600 mr-2">— انقر للطي / التوسيع</span>
+                </summary>
+                <div className="p-3 pt-0 max-h-56 overflow-y-auto">
+                  <Table>
+                    <TableHeader><TableRow>
+                      <TableHead className="w-16">#الصف</TableHead>
+                      <TableHead>سبب الرفض</TableHead>
+                      <TableHead>بيانات الصف</TableHead>
+                    </TableRow></TableHeader>
+                    <TableBody>
+                      {preview.rows.filter(r => r.__errors.length).map(r => (
+                        <TableRow key={r.__row}>
+                          <TableCell className="font-mono text-rose-700 font-bold">صف {r.__row}</TableCell>
+                          <TableCell className="text-xs">
+                            {r.__errors.map((e, i) => <div key={i} className="flex items-center gap-1"><XCircle className="w-3 h-3 text-rose-500" />{e}</div>)}
+                          </TableCell>
+                          <TableCell className="text-xs text-slate-600">
+                            {kind === 'tickets' ? `PNR: ${r.pnr || '—'} | ` : `جواز: ${r.passport_no || '—'} | `}
+                            عميل: {r.client_name || '—'} | مورد: {r.supplier_name || '—'} | تكلفة: {r.cost || '—'} | بيع: {r.sale_price || '—'}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </details>
+            )}
+
             <div className="border rounded-lg overflow-x-auto max-h-96 overflow-y-auto">
               <Table>
                 <TableHeader className="sticky top-0 bg-white z-10">
@@ -2010,8 +2139,9 @@ function ProfitsReport() {
 }
 
 function StatementReport() {
-  const [type, setType] = useState('client'); const [id, setId] = useState('')
-  const [clients, setClients] = useState([]); const [suppliers, setSuppliers] = useState([]); const [data, setData] = useState(null)
+  const [accounts, setAccounts] = useState([])
+  const [id, setId] = useState('')
+  const [data, setData] = useState(null)
   const [q, setQ] = useState('')
   const [currencyMode, setCurrencyMode] = useState('all_detail')
   const [period, setPeriod] = useState('all')
@@ -2019,24 +2149,41 @@ function StatementReport() {
   const [month, setMonth] = useState(todayISO().slice(0, 7))
   const [from, setFrom] = useState(new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10))
   const [to, setTo] = useState(todayISO())
-  useEffect(() => { api('/clients').then(setClients); api('/suppliers').then(setSuppliers) }, [])
-  const list = (type === 'client' ? clients : suppliers).filter(x => !q || x.name.includes(q) || (x.phone || '').includes(q))
+  useEffect(() => { api('/accounts/all').then(setAccounts).catch(() => {}) }, [])
+  const selected = accounts.find(a => a.id === id)
+  const list = accounts.filter(x => !q || x.name.includes(q) || (x.code || '').includes(q))
   const load = async () => {
-    if (!id) return
-    const p = new URLSearchParams({ party_type: type, party_id: id, currency_mode: currencyMode, period })
+    if (!selected) return
+    const p = new URLSearchParams({ party_type: selected.kind, party_id: selected.id, currency_mode: currencyMode, period })
     if (period === 'day') p.set('day', day)
     if (period === 'month') p.set('month', month)
     if (period === 'range' || period === 'up_to_date') { p.set('from', from); p.set('to', to) }
     try { setData(await api(`/reports/statement?${p}`)) } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load() }, [type, id, currencyMode, period, day, month, from, to])
+  useEffect(() => { load() }, [id, currencyMode, period, day, month, from, to])
 
   return (
     <Card><CardContent className="p-4 space-y-4">
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 p-3 bg-slate-50 rounded-lg">
-        <Field label="نوع الحساب"><Select value={type} onValueChange={v => { setType(v); setId(''); setData(null) }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="client">عميل (مدين)</SelectItem><SelectItem value="supplier">مورد / وكيل</SelectItem></SelectContent></Select></Field>
-        <Field label="بحث بالاسم / الهاتف"><Input value={q} onChange={e => setQ(e.target.value)} placeholder="اكتب اسم صاحب الحساب..." /></Field>
-        <div className="md:col-span-2"><Field label="اختر الحساب"><Select value={id} onValueChange={setId}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{list.map(x => <SelectItem key={x.id} value={x.id}>{x.name} {x.phone && `• ${x.phone}`}</SelectItem>)}</SelectContent></Select></Field></div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 p-3 bg-slate-50 rounded-lg">
+        <Field label="بحث بالاسم / الرمز"><Input value={q} onChange={e => setQ(e.target.value)} placeholder="اكتب اسم أو رمز الحساب..." /></Field>
+        <div className="md:col-span-2">
+          <Field label="اختر الحساب (كافة أنواع الحسابات)">
+            <Select value={id} onValueChange={setId}>
+              <SelectTrigger><SelectValue placeholder={`— اختر من ${accounts.length} حساب —`} /></SelectTrigger>
+              <SelectContent>
+                {list.map(x => (
+                  <SelectItem key={`${x.kind}-${x.id}`} value={x.id}>
+                    <span className="inline-flex items-center gap-2">
+                      <Badge variant="outline" className="text-[10px] px-1.5 py-0">{x.group}</Badge>
+                      <span className="font-mono text-xs text-slate-500">{x.code}</span>
+                      <span>{x.name}</span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -2171,6 +2318,91 @@ function IncomeStatement() {
 // ================================================================
 // OFFICE SETTINGS (White-Labeling)
 // ================================================================
+function ReferralsTab() {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  useEffect(() => {
+    api('/referrals').then(setData).catch(e => toast.error(e.message)).finally(() => setLoading(false))
+  }, [])
+  if (loading) return <div className="text-center py-10 text-slate-400"><Loader2 className="w-6 h-6 animate-spin mx-auto" /> جاري التحميل...</div>
+  if (!data) return null
+  const publicBase = typeof window !== 'undefined' ? window.location.origin : ''
+  const fullLink = `${publicBase}/signup?ref=${data.code}`
+  const copy = (text) => { navigator.clipboard.writeText(text); toast.success('📋 تم النسخ') }
+  const shareWhatsApp = () => {
+    const msg = `🎁 انضم إلى منصة رحّال (Rahaal ERP) للمكاتب السياحية!\nسجّل الآن بحسابك التجريبي المجاني عبر رابط الإحالة الخاص بي:\n${fullLink}\n\n✅ 500 قيد يومي مجاناً في التسجيل\n✅ محاسبة متعددة العملات (YER / USD / SAR)\n✅ إدارة تذاكر / تأشيرات / صرافة`
+    window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
+  }
+  return (
+    <div className="space-y-4">
+      <Card className="bg-gradient-to-l from-emerald-50 to-blue-50 border-emerald-200">
+        <CardHeader><CardTitle className="flex items-center gap-2">🎁 برنامج الإحالة والمكافآت</CardTitle><CardDescription>ادعُ مكاتب سياحية أخرى وأكسب قيوداً مجانية عند تسجيلهم وعند دفعهم</CardDescription></CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <StatCard icon={Users} label="مكاتب مسجّلة عبرك" value={data.stats.signups} grad="grad-brand" />
+            <StatCard icon={CheckCircle2} label="مكاتب فعّلت الاشتراك" value={data.stats.activations} grad="grad-green" />
+            <StatCard icon={Sparkles} label="قيود مجانية اكتسبتها" value={data.stats.bonus_earned} grad="grad-gold" />
+          </div>
+          <Card>
+            <CardContent className="p-4 space-y-3">
+              <div className="text-sm font-bold text-slate-700">رمز الإحالة الخاص بك</div>
+              <div className="flex items-center gap-2 p-3 rounded-lg bg-white border-2 border-emerald-300">
+                <code className="text-2xl font-extrabold text-emerald-700 tracking-wider">{data.code}</code>
+                <Button size="sm" variant="outline" onClick={() => copy(data.code)} className="mr-auto">📋 نسخ الرمز</Button>
+              </div>
+              <div className="text-sm font-bold text-slate-700 mt-3">رابط التسجيل بالإحالة</div>
+              <div className="flex items-center gap-2 p-3 rounded-lg bg-white border" dir="ltr">
+                <code className="text-sm text-blue-700 flex-1 truncate">{fullLink}</code>
+                <Button size="sm" variant="outline" onClick={() => copy(fullLink)}>📋 نسخ</Button>
+                <Button size="sm" onClick={shareWhatsApp} className="bg-emerald-500 hover:bg-emerald-600 text-white gap-1">📲 مشاركة</Button>
+              </div>
+              <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                <div className="font-bold mb-1">💡 كيف تعمل المكافآت؟</div>
+                <ul className="list-disc list-inside space-y-1">
+                  <li>عند تسجيل مكتب جديد عبر رابطك → <b>+15 قيد مجاني</b> يُضاف إلى حصتك تلقائياً.</li>
+                  <li>عند تفعيل المكتب المُحال لاشتراكه المدفوع (يؤكده الإدارة العامة) → <b>+50 قيد مجاني</b> إضافي.</li>
+                </ul>
+              </div>
+            </CardContent>
+          </Card>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Users className="w-5 h-5 text-blue-600" /> المكاتب المسجّلة عبر إحالتك ({data.invitees.length})</CardTitle></CardHeader>
+        <CardContent>
+          {data.invitees.length === 0 ? (
+            <div className="text-center py-8 text-slate-400">لم يسجّل أي مكتب عبر رابطك بعد — شارك الرابط الآن!</div>
+          ) : (
+            <Table>
+              <TableHeader><TableRow>
+                <TableHead>اسم المكتب</TableHead>
+                <TableHead>تاريخ التسجيل</TableHead>
+                <TableHead>الاشتراك</TableHead>
+                <TableHead>حالة المكافأة</TableHead>
+              </TableRow></TableHeader>
+              <TableBody>
+                {data.invitees.map(v => (
+                  <TableRow key={v.id}>
+                    <TableCell className="font-semibold">{v.name}</TableCell>
+                    <TableCell className="text-xs">{fmtDate(v.created_at)}</TableCell>
+                    <TableCell><Badge variant={v.subscription === 'paid' ? 'default' : 'secondary'}>{v.subscription === 'paid' ? 'مدفوع' : 'تجريبي'}</Badge></TableCell>
+                    <TableCell>
+                      {v.activation_confirmed
+                        ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">✅ +50 مكافأة نشطة</Badge>
+                        : <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">🎁 +15 مكافأة تسجيل — بانتظار دفع الاشتراك</Badge>}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
 function OfficeSettings() {
   const { settings, refreshMe, user, tenant } = useAuth()
   const [f, setF] = useState({
@@ -2229,6 +2461,7 @@ function OfficeSettings() {
           <TabsTrigger value="brand"><ImageIcon className="w-4 h-4 ml-1" /> الهوية والعلامة</TabsTrigger>
           <TabsTrigger value="users"><Users className="w-4 h-4 ml-1" /> المستخدمون</TabsTrigger>
           <TabsTrigger value="rates"><ArrowUpRight className="w-4 h-4 ml-1" /> أسعار الصرف</TabsTrigger>
+          <TabsTrigger value="referrals">🎁 نظام الإحالة</TabsTrigger>
           <TabsTrigger value="print"><Printer className="w-4 h-4 ml-1" /> معاينة الطباعة</TabsTrigger>
         </TabsList>
 
@@ -2368,6 +2601,10 @@ function OfficeSettings() {
             </CardContent>
             <div className="p-4"><Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ أسعار العملات'}</Button></div>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="referrals" className="mt-4">
+          <ReferralsTab />
         </TabsContent>
 
         <TabsContent value="print" className="mt-4">
@@ -2593,11 +2830,13 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
     date: todayISO(), currency: 'USD', amount: '', exchange_rate: '',
     counter_currency: 'SAR', payment_method: 'cash',
     box_currency_id: '', box_counter_id: '',
+    account_currency_id: '', account_counter_id: '',  // For 'account' mode; encoded as `${kind}:${id}`
     customer_name: '', customer_phone: '', id_type: 'هوية وطنية', id_number: '',
     source_of_funds: '', purpose: '', remarks: '',
   }
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
+  const [allAccounts, setAllAccounts] = useState([])
   useEffect(() => {
     if (!open) return
     if (record) {
@@ -2609,6 +2848,8 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
         payment_method: record.payment_method || 'cash',
         box_currency_id: record.box_currency_id || '',
         box_counter_id: record.box_counter_id || '',
+        account_currency_id: record.currency_ref ? `${record.currency_ref.kind}:${record.currency_ref.id}` : '',
+        account_counter_id: record.counter_ref ? `${record.counter_ref.kind}:${record.counter_ref.id}` : '',
         customer_name: record.customer_name || '', customer_phone: record.customer_phone || '',
         id_type: record.id_type || 'هوية وطنية', id_number: record.id_number || '',
         source_of_funds: record.source_of_funds || '', purpose: record.purpose || '',
@@ -2623,18 +2864,36 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
       setForm(f => ({ ...f, box_currency_id: boxes[0].id, box_counter_id: boxes[1]?.id || boxes[0].id }))
     }
   }, [boxes])
+  // Load full chart of accounts when switching to 'account' mode
+  useEffect(() => {
+    if (open && form.payment_method === 'account' && allAccounts.length === 0) {
+      api('/accounts/all').then(setAllAccounts).catch(() => {})
+    }
+  }, [open, form.payment_method])
   const counter_amount = (Number(form.amount) || 0) * (Number(form.exchange_rate) || 0)
+  const parseRef = (v) => { if (!v) return null; const [kind, id] = v.split(':'); return { kind, id } }
   const submit = async () => {
     if (!form.amount || !form.exchange_rate) return toast.error('أدخل المبلغ وسعر الصرف')
     if (form.currency === form.counter_currency) return toast.error('اختر عملتين مختلفتين')
-    if (!form.box_currency_id || !form.box_counter_id) return toast.error('اختر الصناديق')
+    const body = { type, ...form }
+    if (form.payment_method === 'account') {
+      if (!form.account_currency_id || !form.account_counter_id) return toast.error('اختر الحسابين للطرفين')
+      body.currency_ref = parseRef(form.account_currency_id)
+      body.counter_ref = parseRef(form.account_counter_id)
+    } else {
+      if (!form.box_currency_id || !form.box_counter_id) return toast.error('اختر الصناديق')
+    }
     try {
       setSaving(true)
-      if (isEdit) await api(`/fx/${record.id}`, { method: 'PUT', body: { type, ...form } })
-      else await api('/fx', { method: 'POST', body: { type, ...form } })
+      if (isEdit) await api(`/fx/${record.id}`, { method: 'PUT', body })
+      else await api('/fx', { method: 'POST', body })
       onOpenChange(false); onSaved(); setForm(f => ({ ...f, amount: '', exchange_rate: '', customer_name: '', customer_phone: '', id_number: '', source_of_funds: '', purpose: '', remarks: '' }))
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
+  const isCash = form.payment_method === 'cash'
+  // For "cash" mode: only cash boxes and banks (kind='box') from allAccounts, or fallback to boxes prop
+  const cashOptions = boxes  // already only boxes
+  const accountOptions = allAccounts  // full COA
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto" dir="rtl">
@@ -2645,6 +2904,18 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
           </DialogTitle>
           <DialogDescription>{isEdit ? 'سيتم عكس القيد المحاسبي القديم وإعادة الترحيل بالقيم الجديدة تلقائياً' : cfg.desc}</DialogDescription>
         </DialogHeader>
+
+        {/* Payment method selector */}
+        <div className="p-3 rounded-lg border border-slate-200 bg-slate-50">
+          <div className="text-xs font-bold text-slate-600 mb-2">طريقة الدفع / التسوية</div>
+          <div className="flex gap-2">
+            <button onClick={() => setForm({ ...form, payment_method: 'cash' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition ${isCash ? 'bg-emerald-500 text-white border-emerald-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-emerald-400'}`}>💵 نقد (صناديق / بنوك)</button>
+            <button onClick={() => setForm({ ...form, payment_method: 'account' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition ${!isCash ? 'bg-blue-500 text-white border-blue-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-blue-400'}`}>📒 حساب (الدليل المحاسبي كامل)</button>
+          </div>
+          {!isCash && (
+            <div className="text-[11px] text-blue-700 mt-2">✨ يتم تسوية العملية على حسابات من الدليل المحاسبي (عملاء، موردين، مصروفات، إيرادات، أصول، خصوم...) دون تحريك نقدي</div>
+          )}
+        </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-2">
           <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
@@ -2658,8 +2929,39 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
               {fmt(counter_amount, form.counter_currency)}
             </div>
           </Field>
-          <Field label={`صندوق ${form.currency}`} required><Select value={form.box_currency_id} onValueChange={v => setForm({ ...form, box_currency_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></Field>
-          <Field label={`صندوق ${form.counter_currency}`} required><Select value={form.box_counter_id} onValueChange={v => setForm({ ...form, box_counter_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></Field>
+          {isCash ? (
+            <>
+              <Field label={`صندوق ${form.currency}`} required><Select value={form.box_currency_id} onValueChange={v => setForm({ ...form, box_currency_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{cashOptions.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></Field>
+              <Field label={`صندوق ${form.counter_currency}`} required><Select value={form.box_counter_id} onValueChange={v => setForm({ ...form, box_counter_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{cashOptions.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></Field>
+            </>
+          ) : (
+            <>
+              <Field label={`حساب ${form.currency}`} required>
+                <Select value={form.account_currency_id} onValueChange={v => setForm({ ...form, account_currency_id: v })}>
+                  <SelectTrigger><SelectValue placeholder={`اختر من ${accountOptions.length}`} /></SelectTrigger>
+                  <SelectContent className="max-h-64">
+                    {accountOptions.map(a => (
+                      <SelectItem key={`${a.kind}:${a.id}`} value={`${a.kind}:${a.id}`}>
+                        <span className="inline-flex items-center gap-2"><Badge variant="outline" className="text-[10px] px-1 py-0">{a.group}</Badge><span>{a.name}</span></span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label={`حساب ${form.counter_currency}`} required>
+                <Select value={form.account_counter_id} onValueChange={v => setForm({ ...form, account_counter_id: v })}>
+                  <SelectTrigger><SelectValue placeholder={`اختر من ${accountOptions.length}`} /></SelectTrigger>
+                  <SelectContent className="max-h-64">
+                    {accountOptions.map(a => (
+                      <SelectItem key={`${a.kind}:${a.id}`} value={`${a.kind}:${a.id}`}>
+                        <span className="inline-flex items-center gap-2"><Badge variant="outline" className="text-[10px] px-1 py-0">{a.group}</Badge><span>{a.name}</span></span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+            </>
+          )}
         </div>
 
         <Separator className="my-2" />

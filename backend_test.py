@@ -1,1253 +1,951 @@
 #!/usr/bin/env python3
 """
-Rahaal ERP v2.5 Edit Mode Engine Backend Test Suite
-Tests PUT endpoints for tickets, visas, vouchers, fx, and journal-entries
-with balance reversal + JE reversal + quota preservation
+v2.6 Rahaal ERP Backend Testing Suite
+Tests: Referral System, Unified Chart of Accounts, Tomorrow Travelers, FX Account Mode, Statement Report
 """
 
 import requests
 import json
 from datetime import datetime, timedelta
+import random
+import string
 
-# Configuration
+# Base URL from .env
 BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
-OWNER_EMAIL = "owner@demo.com"
-OWNER_PASSWORD = "Demo@2025"
 
-# Global session
-session = requests.Session()
+# Credentials
+SUPER_ADMIN = {"email": "admin@targetmedia.com", "password": "Target@2025"}
+TENANT_OWNER = {"email": "owner@demo.com", "password": "Demo@2025"}
 
-def print_test(msg):
-    print(f"\n{'='*80}")
-    print(f"TEST: {msg}")
-    print('='*80)
+# Test state
+test_results = []
+cleanup_ids = {
+    "tickets": [],
+    "fx": [],
+    "tenants": [],
+    "clients": [],
+    "suppliers": [],
+}
 
-def print_result(passed, msg):
+def log_test(name, passed, details=""):
+    """Log test result"""
     status = "✅ PASS" if passed else "❌ FAIL"
-    print(f"{status}: {msg}")
+    print(f"{status} - {name}")
+    if details:
+        print(f"  {details}")
+    test_results.append({"name": name, "passed": passed, "details": details})
 
-def print_error(msg):
-    print(f"❌ ERROR: {msg}")
-
-# ============ SETUP ============
-def test_login():
-    """Login as tenant owner and establish session"""
-    print_test("Login as tenant owner")
+def login(email, password):
+    """Login and return session cookie"""
     try:
-        resp = session.post(f"{BASE_URL}/auth/login", json={
-            "email": OWNER_EMAIL,
-            "password": OWNER_PASSWORD
-        })
-        print(f"Status: {resp.status_code}")
+        resp = requests.post(f"{BASE_URL}/auth/login", json={"email": email, "password": password})
         if resp.status_code == 200:
-            data = resp.json()
-            print(f"User: {data.get('user', {}).get('email')}")
-            print(f"Tenant: {data.get('tenant', {}).get('name')}")
-            print_result(True, "Login successful")
-            return True
+            cookie = resp.cookies.get("rahaal_session")
+            return cookie
         else:
-            print_error(f"Login failed: {resp.text}")
-            return False
-    except Exception as e:
-        print_error(f"Login exception: {e}")
-        return False
-
-def get_quota():
-    """Get current journal quota"""
-    try:
-        resp = session.get(f"{BASE_URL}/auth/me")
-        if resp.status_code == 200:
-            data = resp.json()
-            quota = data.get('tenant', {}).get('journal_quota', {})
-            used = quota.get('used', 0)
-            limit = quota.get('limit', 0)
-            print(f"Quota: {used}/{limit}")
-            return used
-        else:
-            print_error(f"Failed to get quota: {resp.text}")
+            print(f"Login failed for {email}: {resp.status_code} - {resp.text}")
             return None
     except Exception as e:
-        print_error(f"Get quota exception: {e}")
+        print(f"Login exception for {email}: {e}")
         return None
 
-def setup_parties():
-    """Setup client, supplier, and boxes for testing"""
-    print_test("Setup: Create/Get Client, Supplier, and Boxes")
-    
-    # Get existing clients
-    resp = session.get(f"{BASE_URL}/clients")
-    clients = resp.json() if resp.status_code == 200 else []
-    
-    if len(clients) > 0:
-        client_id = clients[0]['id']
-        print(f"Using existing client: {clients[0]['name']} ({client_id})")
-    else:
-        # Create client
-        resp = session.post(f"{BASE_URL}/clients", json={"name": "E2E Test Client"})
-        if resp.status_code == 200:
-            client_id = resp.json()['id']
-            print(f"Created client: {client_id}")
-        else:
-            print_error(f"Failed to create client: {resp.text}")
-            return None, None, None, None
-    
-    # Get existing suppliers
-    resp = session.get(f"{BASE_URL}/suppliers")
-    suppliers = resp.json() if resp.status_code == 200 else []
-    
-    if len(suppliers) > 0:
-        supplier_id = suppliers[0]['id']
-        print(f"Using existing supplier: {suppliers[0]['name']} ({supplier_id})")
-    else:
-        # Create supplier
-        resp = session.post(f"{BASE_URL}/suppliers", json={"name": "E2E Test Supplier"})
-        if resp.status_code == 200:
-            supplier_id = resp.json()['id']
-            print(f"Created supplier: {supplier_id}")
-        else:
-            print_error(f"Failed to create supplier: {resp.text}")
-            return None, None, None, None
-    
-    # Get boxes
-    resp = session.get(f"{BASE_URL}/boxes")
-    boxes = resp.json() if resp.status_code == 200 else []
-    
-    if len(boxes) >= 2:
-        box1_id = boxes[0]['id']
-        box2_id = boxes[1]['id']
-        print(f"Using boxes: {boxes[0]['name_ar']} ({box1_id}), {boxes[1]['name_ar']} ({box2_id})")
-    elif len(boxes) == 1:
-        box1_id = boxes[0]['id']
-        # Create second box
-        resp = session.post(f"{BASE_URL}/boxes", json={"name_ar": "صندوق USD", "type": "cash"})
-        if resp.status_code == 200:
-            box2_id = resp.json()['id']
-            print(f"Created second box: {box2_id}")
-        else:
-            print_error(f"Failed to create second box: {resp.text}")
-            return None, None, None, None
-    else:
-        print_error("No boxes found")
-        return None, None, None, None
-    
-    print_result(True, f"Setup complete: client={client_id}, supplier={supplier_id}, box1={box1_id}, box2={box2_id}")
-    return client_id, supplier_id, box1_id, box2_id
+def get_with_auth(endpoint, cookie):
+    """GET request with auth cookie"""
+    return requests.get(f"{BASE_URL}{endpoint}", cookies={"rahaal_session": cookie})
 
-def get_balance(entity_type, entity_id, currency):
-    """Get balance for client, supplier, or box"""
-    try:
-        resp = session.get(f"{BASE_URL}/{entity_type}")
-        if resp.status_code == 200:
-            entities = resp.json()
-            for e in entities:
-                if e['id'] == entity_id:
-                    return e.get('balances', {}).get(currency, 0)
-        return None
-    except Exception as e:
-        print_error(f"Get balance exception: {e}")
-        return None
+def post_with_auth(endpoint, cookie, data):
+    """POST request with auth cookie"""
+    return requests.post(f"{BASE_URL}{endpoint}", json=data, cookies={"rahaal_session": cookie})
 
-# ============ TEST 1: TICKET EDIT ============
-def test_ticket_edit(client_id, supplier_id, box_id):
-    """Test PUT /tickets/:id with balance reversal and quota preservation"""
-    print_test("1. Ticket Edit - PUT /tickets/:id")
+def put_with_auth(endpoint, cookie, data):
+    """PUT request with auth cookie"""
+    return requests.put(f"{BASE_URL}{endpoint}", json=data, cookies={"rahaal_session": cookie})
+
+def delete_with_auth(endpoint, cookie):
+    """DELETE request with auth cookie"""
+    return requests.delete(f"{BASE_URL}{endpoint}", cookies={"rahaal_session": cookie})
+
+def gen_unique_email():
+    """Generate unique email for testing"""
+    rand = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    return f"e2e_ref_{rand}@office.com"
+
+def get_tomorrow_date():
+    """Get tomorrow's date in YYYY-MM-DD format"""
+    tomorrow = datetime.now() + timedelta(days=1)
+    return tomorrow.strftime("%Y-%m-%d")
+
+def get_future_date(days=3):
+    """Get future date in YYYY-MM-DD format"""
+    future = datetime.now() + timedelta(days=days)
+    return future.strftime("%Y-%m-%d")
+
+print("=" * 80)
+print("v2.6 RAHAAL ERP BACKEND TESTING")
+print("=" * 80)
+
+# ============================================================================
+# TEST 1: REFERRAL SYSTEM - END-TO-END
+# ============================================================================
+print("\n### TEST 1: REFERRAL SYSTEM - END-TO-END ###\n")
+
+# Step 1: Login as owner@demo.com and get referral code
+owner_cookie = login(TENANT_OWNER["email"], TENANT_OWNER["password"])
+if not owner_cookie:
+    log_test("1.1 Login owner@demo.com", False, "Login failed")
+else:
+    log_test("1.1 Login owner@demo.com", True)
     
-    # Get baseline quota
-    q0 = get_quota()
-    if q0 is None:
-        print_error("Failed to get baseline quota")
-        return False
-    
-    # Get baseline balances
-    client_bal_before = get_balance('clients', client_id, 'USD')
-    supplier_bal_before = get_balance('suppliers', supplier_id, 'USD')
-    print(f"Baseline - Client USD: {client_bal_before}, Supplier USD: {supplier_bal_before}, Quota: {q0}")
-    
-    # Create ticket
-    ticket_data = {
-        "date": "2025-06-10",
-        "currency": "USD",
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "pnr": "E2ET-1",
-        "cost": 100,
-        "sale_price": 150,
-        "payment_method": "credit"
-    }
-    
-    resp = session.post(f"{BASE_URL}/tickets", json=ticket_data)
-    if resp.status_code != 200:
-        print_error(f"Failed to create ticket: {resp.text}")
-        return False
-    
-    ticket = resp.json()
-    ticket_id = ticket['id']
-    print(f"Created ticket: {ticket_id}, PNR: {ticket['pnr']}, Commission: {ticket['commission']}")
-    
-    # Verify balances after create
-    client_bal_after_create = get_balance('clients', client_id, 'USD')
-    supplier_bal_after_create = get_balance('suppliers', supplier_id, 'USD')
-    q1 = get_quota()
-    print(f"After create - Client USD: {client_bal_after_create}, Supplier USD: {supplier_bal_after_create}, Quota: {q1}")
-    
-    # Verify quota incremented
-    if q1 != q0 + 1:
-        print_error(f"Quota not incremented correctly: expected {q0+1}, got {q1}")
-        return False
-    
-    # Edit ticket
-    edit_data = {
-        "date": "2025-06-10",
-        "currency": "USD",
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "pnr": "E2ET-1-EDIT",
-        "cost": 120,
-        "sale_price": 200,
-        "payment_method": "credit"
-    }
-    
-    resp = session.put(f"{BASE_URL}/tickets/{ticket_id}", json=edit_data)
-    print(f"PUT Status: {resp.status_code}")
-    
-    if resp.status_code != 200:
-        print_error(f"Failed to edit ticket: {resp.text}")
-        # Cleanup
-        session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-        return False
-    
-    edited_ticket = resp.json()
-    print(f"Edited ticket: ID={edited_ticket['id']}, PNR={edited_ticket['pnr']}, Commission={edited_ticket['commission']}")
-    
-    # Verify response
-    if edited_ticket['id'] != ticket_id:
-        print_error(f"ID changed after edit: {ticket_id} -> {edited_ticket['id']}")
-        session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-        return False
-    
-    if edited_ticket['pnr'] != "E2ET-1-EDIT":
-        print_error(f"PNR not updated: expected 'E2ET-1-EDIT', got '{edited_ticket['pnr']}'")
-        session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-        return False
-    
-    if edited_ticket['commission'] != 80:
-        print_error(f"Commission incorrect: expected 80, got {edited_ticket['commission']}")
-        session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-        return False
-    
-    # Verify balances after edit
-    client_bal_after_edit = get_balance('clients', client_id, 'USD')
-    supplier_bal_after_edit = get_balance('suppliers', supplier_id, 'USD')
-    q2 = get_quota()
-    print(f"After edit - Client USD: {client_bal_after_edit}, Supplier USD: {supplier_bal_after_edit}, Quota: {q2}")
-    
-    # CRITICAL: Quota must be unchanged
-    if q2 != q1:
-        print_error(f"❌ CRITICAL: Quota changed after edit: {q1} -> {q2}")
-        session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-        return False
-    
-    # Verify balance changes
-    expected_client = client_bal_before + 200  # Net effect: +200 (not +150 then +200)
-    expected_supplier = supplier_bal_before + 120  # Net effect: +120 (not +100 then +120)
-    
-    if abs(client_bal_after_edit - expected_client) > 0.01:
-        print_error(f"Client balance incorrect: expected {expected_client}, got {client_bal_after_edit}")
-        session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-        return False
-    
-    if abs(supplier_bal_after_edit - expected_supplier) > 0.01:
-        print_error(f"Supplier balance incorrect: expected {expected_supplier}, got {supplier_bal_after_edit}")
-        session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-        return False
-    
-    # Verify journal entry
-    resp = session.get(f"{BASE_URL}/journal-entries")
+    # Get referral code and baseline stats
+    resp = get_with_auth("/referrals", owner_cookie)
     if resp.status_code == 200:
-        jes = resp.json()
-        ticket_jes = [je for je in jes if je.get('ref_id') == ticket_id]
-        if len(ticket_jes) == 1:
-            je = ticket_jes[0]
-            if 'تعديل' in je.get('description', ''):
-                print(f"✅ Journal entry has 'تعديل' in description")
+        data = resp.json()
+        referral_code = data.get("code")
+        baseline_stats = data.get("stats", {})
+        baseline_signups = baseline_stats.get("signups", 0)
+        baseline_activations = baseline_stats.get("activations", 0)
+        baseline_bonus = baseline_stats.get("bonus_earned", 0)
+        
+        log_test("1.2 GET /referrals", True, f"Code: {referral_code}, Signups: {baseline_signups}, Activations: {baseline_activations}, Bonus: {baseline_bonus}")
+        
+        # Verify code is exactly 8 alphanumeric chars
+        if len(referral_code) == 8 and referral_code.isalnum():
+            log_test("1.3 Referral code format", True, f"Code is 8 alphanumeric: {referral_code}")
+        else:
+            log_test("1.3 Referral code format", False, f"Code is not 8 alphanumeric: {referral_code}")
+        
+        # Get baseline quota
+        resp_me = get_with_auth("/auth/me", owner_cookie)
+        if resp_me.status_code == 200:
+            baseline_quota = resp_me.json().get("tenant", {}).get("journal_quota", {}).get("limit", 0)
+            log_test("1.4 Baseline quota captured", True, f"Limit: {baseline_quota}")
+        else:
+            baseline_quota = 0
+            log_test("1.4 Baseline quota captured", False, "Failed to get /auth/me")
+        
+        # Step 2: Public signup with referral code
+        unique_email = gen_unique_email()
+        signup_data = {
+            "name": "E2E Referral Office",
+            "owner_name": "Test Owner",
+            "owner_email": unique_email,
+            "owner_password": "Pass@1234",
+            "referral_code": referral_code
+        }
+        
+        resp = requests.post(f"{BASE_URL}/public/signup", json=signup_data)
+        if resp.status_code == 200:
+            signup_result = resp.json()
+            referral_applied = signup_result.get("referral_applied")
+            new_tenant = signup_result.get("tenant", {})
+            new_tenant_id = new_tenant.get("id")
+            new_tenant_code = new_tenant.get("referral_code")
+            new_tenant_referred_by = new_tenant.get("referred_by")
+            
+            # Verify session cookie is set
+            session_cookie = resp.cookies.get("rahaal_session")
+            
+            if referral_applied and new_tenant_id and session_cookie:
+                log_test("1.5 Public signup with referral", True, f"Tenant ID: {new_tenant_id}, Code: {new_tenant_code}, Referred by: {new_tenant_referred_by}, Session: {session_cookie[:10]}...")
+                cleanup_ids["tenants"].append(new_tenant_id)
             else:
-                print(f"⚠️  Journal entry missing 'تعديل' marker")
+                log_test("1.5 Public signup with referral", False, f"referral_applied={referral_applied}, tenant_id={new_tenant_id}, session={session_cookie}")
+            
+            # Step 3: Re-login as owner@demo.com and verify stats
+            owner_cookie = login(TENANT_OWNER["email"], TENANT_OWNER["password"])
+            resp = get_with_auth("/referrals", owner_cookie)
+            if resp.status_code == 200:
+                data = resp.json()
+                new_stats = data.get("stats", {})
+                new_signups = new_stats.get("signups", 0)
+                new_bonus = new_stats.get("bonus_earned", 0)
+                invitees = data.get("invitees", [])
+                
+                # Verify signups incremented by 1
+                if new_signups == baseline_signups + 1:
+                    log_test("1.6 Signups incremented", True, f"{baseline_signups} → {new_signups}")
+                else:
+                    log_test("1.6 Signups incremented", False, f"Expected {baseline_signups + 1}, got {new_signups}")
+                
+                # Verify bonus_earned incremented by 15
+                if new_bonus == baseline_bonus + 15:
+                    log_test("1.7 Bonus earned +15", True, f"{baseline_bonus} → {new_bonus}")
+                else:
+                    log_test("1.7 Bonus earned +15", False, f"Expected {baseline_bonus + 15}, got {new_bonus}")
+                
+                # Verify new tenant in invitees
+                new_invitee = next((inv for inv in invitees if inv.get("id") == new_tenant_id), None)
+                if new_invitee:
+                    activation_confirmed = new_invitee.get("activation_confirmed")
+                    bonus_status = new_invitee.get("bonus_status")
+                    
+                    if not activation_confirmed and bonus_status == "signup_+15":
+                        log_test("1.8 New tenant in invitees", True, f"activation_confirmed=False, bonus_status={bonus_status}")
+                    else:
+                        log_test("1.8 New tenant in invitees", False, f"activation_confirmed={activation_confirmed}, bonus_status={bonus_status}")
+                else:
+                    log_test("1.8 New tenant in invitees", False, "New tenant not found in invitees")
+                
+                # Verify quota limit increased by 15
+                resp_me = get_with_auth("/auth/me", owner_cookie)
+                if resp_me.status_code == 200:
+                    new_quota = resp_me.json().get("tenant", {}).get("journal_quota", {}).get("limit", 0)
+                    if new_quota == baseline_quota + 15:
+                        log_test("1.9 Quota limit +15", True, f"{baseline_quota} → {new_quota}")
+                    else:
+                        log_test("1.9 Quota limit +15", False, f"Expected {baseline_quota + 15}, got {new_quota}")
+                else:
+                    log_test("1.9 Quota limit +15", False, "Failed to get /auth/me")
+            else:
+                log_test("1.6-1.9 Referral stats after signup", False, f"GET /referrals failed: {resp.status_code}")
+            
+            # Step 4: Super admin confirm payment
+            admin_cookie = login(SUPER_ADMIN["email"], SUPER_ADMIN["password"])
+            if admin_cookie:
+                # First, verify tenant exists in admin list
+                resp = get_with_auth("/admin/tenants", admin_cookie)
+                if resp.status_code == 200:
+                    tenants_data = resp.json()
+                    # Handle both list and dict responses
+                    tenants = tenants_data if isinstance(tenants_data, list) else tenants_data.get("tenants", [])
+                    found_tenant = next((t for t in tenants if t.get("id") == new_tenant_id), None)
+                    if found_tenant:
+                        log_test("1.10 New tenant in admin list", True, f"Name: {found_tenant.get('name')}")
+                    else:
+                        log_test("1.10 New tenant in admin list", False, "Tenant not found")
+                
+                # Confirm payment
+                resp = post_with_auth(f"/admin/tenants/{new_tenant_id}/confirm-payment", admin_cookie, {})
+                if resp.status_code == 200:
+                    confirm_result = resp.json()
+                    referrer_bonus = confirm_result.get("referrer_bonus", {})
+                    bonus_added = referrer_bonus.get("bonus_added")
+                    referrer_name = referrer_bonus.get("referrer_name")
+                    
+                    if bonus_added == 50:
+                        log_test("1.11 Confirm payment", True, f"Bonus: {bonus_added}, Referrer: {referrer_name}")
+                    else:
+                        log_test("1.11 Confirm payment", False, f"Expected bonus_added=50, got {bonus_added}")
+                    
+                    # Try to confirm again (should fail with 400)
+                    resp2 = post_with_auth(f"/admin/tenants/{new_tenant_id}/confirm-payment", admin_cookie, {})
+                    if resp2.status_code == 400:
+                        log_test("1.12 Duplicate confirm rejected", True, f"Status: {resp2.status_code}")
+                    else:
+                        log_test("1.12 Duplicate confirm rejected", False, f"Expected 400, got {resp2.status_code}")
+                else:
+                    log_test("1.11 Confirm payment", False, f"Status: {resp.status_code}, Body: {resp.text}")
+                
+                # Step 5: Re-login as owner@demo.com and verify final stats
+                owner_cookie = login(TENANT_OWNER["email"], TENANT_OWNER["password"])
+                resp = get_with_auth("/referrals", owner_cookie)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    final_stats = data.get("stats", {})
+                    final_activations = final_stats.get("activations", 0)
+                    final_bonus = final_stats.get("bonus_earned", 0)
+                    invitees = data.get("invitees", [])
+                    
+                    # Verify activations incremented
+                    if final_activations >= baseline_activations + 1:
+                        log_test("1.13 Activations incremented", True, f"{baseline_activations} → {final_activations}")
+                    else:
+                        log_test("1.13 Activations incremented", False, f"Expected >= {baseline_activations + 1}, got {final_activations}")
+                    
+                    # Verify total bonus is +65 from baseline
+                    if final_bonus == baseline_bonus + 65:
+                        log_test("1.14 Total bonus +65", True, f"{baseline_bonus} → {final_bonus}")
+                    else:
+                        log_test("1.14 Total bonus +65", False, f"Expected {baseline_bonus + 65}, got {final_bonus}")
+                    
+                    # Verify invitee status updated
+                    updated_invitee = next((inv for inv in invitees if inv.get("id") == new_tenant_id), None)
+                    if updated_invitee:
+                        activation_confirmed = updated_invitee.get("activation_confirmed")
+                        bonus_status = updated_invitee.get("bonus_status")
+                        
+                        if activation_confirmed and bonus_status == "activated_+50":
+                            log_test("1.15 Invitee status updated", True, f"activation_confirmed=True, bonus_status={bonus_status}")
+                        else:
+                            log_test("1.15 Invitee status updated", False, f"activation_confirmed={activation_confirmed}, bonus_status={bonus_status}")
+                    
+                    # Verify quota limit increased by ANOTHER 50 (total +65)
+                    resp_me = get_with_auth("/auth/me", owner_cookie)
+                    if resp_me.status_code == 200:
+                        final_quota = resp_me.json().get("tenant", {}).get("journal_quota", {}).get("limit", 0)
+                        if final_quota == baseline_quota + 65:
+                            log_test("1.16 Quota limit +65 total", True, f"{baseline_quota} → {final_quota}")
+                        else:
+                            log_test("1.16 Quota limit +65 total", False, f"Expected {baseline_quota + 65}, got {final_quota}")
+                else:
+                    log_test("1.13-1.16 Final referral stats", False, f"GET /referrals failed: {resp.status_code}")
+            else:
+                log_test("1.10-1.16 Super admin tests", False, "Admin login failed")
         else:
-            print_error(f"Expected 1 JE for ticket, found {len(ticket_jes)}")
-    
-    # Cleanup
-    resp = session.delete(f"{BASE_URL}/tickets/{ticket_id}")
+            log_test("1.5 Public signup with referral", False, f"Status: {resp.status_code}, Body: {resp.text}")
+    else:
+        log_test("1.2 GET /referrals", False, f"Status: {resp.status_code}")
+
+# Test public signup validation
+print("\n### TEST 1B: PUBLIC SIGNUP VALIDATION ###\n")
+
+# Missing fields
+resp = requests.post(f"{BASE_URL}/public/signup", json={"name": "Test"})
+if resp.status_code == 400:
+    log_test("1.17 Missing fields validation", True, f"Status: {resp.status_code}")
+else:
+    log_test("1.17 Missing fields validation", False, f"Expected 400, got {resp.status_code}")
+
+# Invalid referral code (should still create tenant but referral_applied=false)
+resp = requests.post(f"{BASE_URL}/public/signup", json={
+    "name": "Test Office Invalid Ref",
+    "owner_name": "Test",
+    "owner_email": gen_unique_email(),
+    "owner_password": "Pass@1234",
+    "referral_code": "INVALID123"
+})
+if resp.status_code == 200:
+    result = resp.json()
+    if not result.get("referral_applied"):
+        log_test("1.18 Invalid referral code", True, "Tenant created, referral_applied=false")
+        cleanup_ids["tenants"].append(result.get("tenant", {}).get("id"))
+    else:
+        log_test("1.18 Invalid referral code", False, "referral_applied should be false")
+else:
+    log_test("1.18 Invalid referral code", False, f"Expected 200, got {resp.status_code}")
+
+# Duplicate email
+resp = requests.post(f"{BASE_URL}/public/signup", json={
+    "name": "Duplicate",
+    "owner_name": "Test",
+    "owner_email": TENANT_OWNER["email"],  # Use existing email
+    "owner_password": "Pass@1234"
+})
+if resp.status_code == 400:
+    log_test("1.19 Duplicate email validation", True, f"Status: {resp.status_code}")
+else:
+    log_test("1.19 Duplicate email validation", False, f"Expected 400, got {resp.status_code}")
+
+# ============================================================================
+# TEST 2: UNIFIED CHART OF ACCOUNTS - /accounts/all
+# ============================================================================
+print("\n### TEST 2: UNIFIED CHART OF ACCOUNTS ###\n")
+
+owner_cookie = login(TENANT_OWNER["email"], TENANT_OWNER["password"])
+if owner_cookie:
+    resp = get_with_auth("/accounts/all", owner_cookie)
     if resp.status_code == 200:
-        print("Cleanup: Ticket deleted")
-    
-    print_result(True, "Ticket edit test passed - quota preserved, balances correct")
-    return True
-
-# ============ TEST 2: VISA EDIT ============
-def test_visa_edit(client_id, supplier_id, box_id):
-    """Test PUT /visas/:id"""
-    print_test("2. Visa Edit - PUT /visas/:id")
-    
-    q0 = get_quota()
-    client_bal_before = get_balance('clients', client_id, 'SAR')
-    supplier_bal_before = get_balance('suppliers', supplier_id, 'SAR')
-    
-    # Create visa
-    visa_data = {
-        "date": "2025-06-10",
-        "service_type": "تأشيرة عمرة",
-        "currency": "SAR",
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "passenger_name": "E2E Passenger",
-        "passport_no": "P123",
-        "cost": 50,
-        "sale_price": 80,
-        "payment_method": "credit"
-    }
-    
-    resp = session.post(f"{BASE_URL}/visas", json=visa_data)
-    if resp.status_code != 200:
-        print_error(f"Failed to create visa: {resp.text}")
-        return False
-    
-    visa = resp.json()
-    visa_id = visa['id']
-    print(f"Created visa: {visa_id}, Commission: {visa['commission']}")
-    
-    q1 = get_quota()
-    
-    # Edit visa
-    edit_data = {
-        "date": "2025-06-10",
-        "service_type": "تأشيرة سياحية",
-        "currency": "SAR",
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "passenger_name": "E2E Edited",
-        "passport_no": "P123",
-        "cost": 60,
-        "sale_price": 100,
-        "payment_method": "credit"
-    }
-    
-    resp = session.put(f"{BASE_URL}/visas/{visa_id}", json=edit_data)
-    print(f"PUT Status: {resp.status_code}")
-    
-    if resp.status_code != 200:
-        print_error(f"Failed to edit visa: {resp.text}")
-        session.delete(f"{BASE_URL}/visas/{visa_id}")
-        return False
-    
-    edited_visa = resp.json()
-    print(f"Edited visa: ID={edited_visa['id']}, Commission={edited_visa['commission']}")
-    
-    # Verify
-    if edited_visa['id'] != visa_id:
-        print_error(f"ID changed after edit")
-        session.delete(f"{BASE_URL}/visas/{visa_id}")
-        return False
-    
-    if edited_visa['commission'] != 40:
-        print_error(f"Commission incorrect: expected 40, got {edited_visa['commission']}")
-        session.delete(f"{BASE_URL}/visas/{visa_id}")
-        return False
-    
-    q2 = get_quota()
-    if q2 != q1:
-        print_error(f"❌ CRITICAL: Quota changed after edit: {q1} -> {q2}")
-        session.delete(f"{BASE_URL}/visas/{visa_id}")
-        return False
-    
-    # Verify balances
-    client_bal_after = get_balance('clients', client_id, 'SAR')
-    supplier_bal_after = get_balance('suppliers', supplier_id, 'SAR')
-    
-    expected_client = client_bal_before + 100
-    expected_supplier = supplier_bal_before + 60
-    
-    if abs(client_bal_after - expected_client) > 0.01:
-        print_error(f"Client balance incorrect: expected {expected_client}, got {client_bal_after}")
-        session.delete(f"{BASE_URL}/visas/{visa_id}")
-        return False
-    
-    if abs(supplier_bal_after - expected_supplier) > 0.01:
-        print_error(f"Supplier balance incorrect: expected {expected_supplier}, got {supplier_bal_after}")
-        session.delete(f"{BASE_URL}/visas/{visa_id}")
-        return False
-    
-    # Cleanup
-    session.delete(f"{BASE_URL}/visas/{visa_id}")
-    
-    print_result(True, "Visa edit test passed - quota preserved, balances correct")
-    return True
-
-# ============ TEST 3: VOUCHER EDIT (RECEIPT) ============
-def test_voucher_receipt_edit(client_id, box_id):
-    """Test PUT /vouchers/:id for receipt"""
-    print_test("3. Voucher Receipt Edit - PUT /vouchers/:id")
-    
-    q0 = get_quota()
-    client_bal_before = get_balance('clients', client_id, 'SAR')
-    box_bal_before = get_balance('boxes', box_id, 'SAR')
-    
-    # Create receipt
-    voucher_data = {
-        "type": "receipt",
-        "date": "2025-06-10",
-        "currency": "SAR",
-        "amount": 100,
-        "party_type": "client",
-        "party_id": client_id,
-        "box_id": box_id
-    }
-    
-    resp = session.post(f"{BASE_URL}/vouchers", json=voucher_data)
-    if resp.status_code != 200:
-        print_error(f"Failed to create receipt: {resp.text}")
-        return False
-    
-    voucher = resp.json()
-    voucher_id = voucher['id']
-    print(f"Created receipt: {voucher_id}, Amount: {voucher['amount']}")
-    
-    q1 = get_quota()
-    
-    # Edit receipt
-    edit_data = {
-        "type": "receipt",
-        "date": "2025-06-10",
-        "currency": "SAR",
-        "amount": 150,
-        "party_type": "client",
-        "party_id": client_id,
-        "box_id": box_id
-    }
-    
-    resp = session.put(f"{BASE_URL}/vouchers/{voucher_id}", json=edit_data)
-    print(f"PUT Status: {resp.status_code}")
-    
-    if resp.status_code != 200:
-        print_error(f"Failed to edit receipt: {resp.text}")
-        session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-        return False
-    
-    edited_voucher = resp.json()
-    print(f"Edited receipt: ID={edited_voucher['id']}, Amount={edited_voucher['amount']}")
-    
-    # Verify
-    if edited_voucher['id'] != voucher_id:
-        print_error(f"ID changed after edit")
-        session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-        return False
-    
-    if edited_voucher['amount'] != 150:
-        print_error(f"Amount incorrect: expected 150, got {edited_voucher['amount']}")
-        session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-        return False
-    
-    q2 = get_quota()
-    if q2 != q1:
-        print_error(f"❌ CRITICAL: Quota changed after edit: {q1} -> {q2}")
-        session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-        return False
-    
-    # Verify balances
-    client_bal_after = get_balance('clients', client_id, 'SAR')
-    box_bal_after = get_balance('boxes', box_id, 'SAR')
-    
-    expected_client = client_bal_before - 150  # Receipt reduces client balance
-    expected_box = box_bal_before + 150  # Receipt increases box balance
-    
-    if abs(client_bal_after - expected_client) > 0.01:
-        print_error(f"Client balance incorrect: expected {expected_client}, got {client_bal_after}")
-        session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-        return False
-    
-    if abs(box_bal_after - expected_box) > 0.01:
-        print_error(f"Box balance incorrect: expected {expected_box}, got {box_bal_after}")
-        session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-        return False
-    
-    # Cleanup
-    session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-    
-    print_result(True, "Voucher receipt edit test passed - quota preserved, balances correct")
-    return True
-
-# ============ TEST 4: VOUCHER EDIT (PAYMENT) ============
-def test_voucher_payment_edit(supplier_id, box_id):
-    """Test PUT /vouchers/:id for payment"""
-    print_test("4. Voucher Payment Edit - PUT /vouchers/:id")
-    
-    q0 = get_quota()
-    supplier_bal_before = get_balance('suppliers', supplier_id, 'SAR')
-    box_bal_before = get_balance('boxes', box_id, 'SAR')
-    
-    # Create payment
-    voucher_data = {
-        "type": "payment",
-        "date": "2025-06-10",
-        "currency": "SAR",
-        "amount": 80,
-        "party_type": "supplier",
-        "party_id": supplier_id,
-        "box_id": box_id
-    }
-    
-    resp = session.post(f"{BASE_URL}/vouchers", json=voucher_data)
-    if resp.status_code != 200:
-        print_error(f"Failed to create payment: {resp.text}")
-        return False
-    
-    voucher = resp.json()
-    voucher_id = voucher['id']
-    print(f"Created payment: {voucher_id}, Amount: {voucher['amount']}")
-    
-    q1 = get_quota()
-    
-    # Edit payment
-    edit_data = {
-        "type": "payment",
-        "date": "2025-06-10",
-        "currency": "SAR",
-        "amount": 120,
-        "party_type": "supplier",
-        "party_id": supplier_id,
-        "box_id": box_id
-    }
-    
-    resp = session.put(f"{BASE_URL}/vouchers/{voucher_id}", json=edit_data)
-    print(f"PUT Status: {resp.status_code}")
-    
-    if resp.status_code != 200:
-        print_error(f"Failed to edit payment: {resp.text}")
-        session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-        return False
-    
-    edited_voucher = resp.json()
-    print(f"Edited payment: ID={edited_voucher['id']}, Amount={edited_voucher['amount']}")
-    
-    # Verify
-    if edited_voucher['id'] != voucher_id:
-        print_error(f"ID changed after edit")
-        session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-        return False
-    
-    if edited_voucher['amount'] != 120:
-        print_error(f"Amount incorrect: expected 120, got {edited_voucher['amount']}")
-        session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-        return False
-    
-    q2 = get_quota()
-    if q2 != q1:
-        print_error(f"❌ CRITICAL: Quota changed after edit: {q1} -> {q2}")
-        session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-        return False
-    
-    # Verify balances
-    supplier_bal_after = get_balance('suppliers', supplier_id, 'SAR')
-    box_bal_after = get_balance('boxes', box_id, 'SAR')
-    
-    expected_supplier = supplier_bal_before - 120  # Payment reduces supplier balance
-    expected_box = box_bal_before - 120  # Payment reduces box balance
-    
-    if abs(supplier_bal_after - expected_supplier) > 0.01:
-        print_error(f"Supplier balance incorrect: expected {expected_supplier}, got {supplier_bal_after}")
-        session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-        return False
-    
-    if abs(box_bal_after - expected_box) > 0.01:
-        print_error(f"Box balance incorrect: expected {expected_box}, got {box_bal_after}")
-        session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-        return False
-    
-    # Cleanup
-    session.delete(f"{BASE_URL}/vouchers/{voucher_id}")
-    
-    print_result(True, "Voucher payment edit test passed - quota preserved, balances correct")
-    return True
-
-# ============ TEST 5: FX EDIT (BUY) ============
-def test_fx_buy_edit(box1_id, box2_id):
-    """Test PUT /fx/:id for buy"""
-    print_test("5. FX Buy Edit - PUT /fx/:id")
-    
-    q0 = get_quota()
-    box1_bal_before = get_balance('boxes', box1_id, 'USD')
-    box2_bal_before = get_balance('boxes', box2_id, 'SAR')
-    
-    # Create FX buy
-    fx_data = {
-        "type": "buy",
-        "date": "2025-06-10",
-        "currency": "USD",
-        "counter_currency": "SAR",
-        "amount": 100,
-        "exchange_rate": 3.75,
-        "box_currency_id": box1_id,
-        "box_counter_id": box2_id,
-        "customer_name": "E2E FX",
-        "id_type": "هوية وطنية",
-        "id_number": "1234"
-    }
-    
-    resp = session.post(f"{BASE_URL}/fx", json=fx_data)
-    if resp.status_code != 200:
-        print_error(f"Failed to create FX buy: {resp.text}")
-        return False
-    
-    fx = resp.json()
-    fx_id = fx['id']
-    print(f"Created FX buy: {fx_id}, Amount: {fx['amount']}, Counter: {fx['counter_amount']}")
-    
-    q1 = get_quota()
-    
-    # Edit FX buy
-    edit_data = {
-        "type": "buy",
-        "date": "2025-06-10",
-        "currency": "USD",
-        "counter_currency": "SAR",
-        "amount": 120,
-        "exchange_rate": 3.80,
-        "box_currency_id": box1_id,
-        "box_counter_id": box2_id,
-        "customer_name": "E2E FX",
-        "id_type": "هوية وطنية",
-        "id_number": "1234"
-    }
-    
-    resp = session.put(f"{BASE_URL}/fx/{fx_id}", json=edit_data)
-    print(f"PUT Status: {resp.status_code}")
-    
-    if resp.status_code != 200:
-        print_error(f"Failed to edit FX buy: {resp.text}")
-        session.delete(f"{BASE_URL}/fx/{fx_id}")
-        return False
-    
-    edited_fx = resp.json()
-    print(f"Edited FX buy: ID={edited_fx['id']}, Amount={edited_fx['amount']}, Counter={edited_fx['counter_amount']}")
-    
-    # Verify
-    if edited_fx['id'] != fx_id:
-        print_error(f"ID changed after edit")
-        session.delete(f"{BASE_URL}/fx/{fx_id}")
-        return False
-    
-    expected_counter = 120 * 3.80
-    if abs(edited_fx['counter_amount'] - expected_counter) > 0.01:
-        print_error(f"Counter amount incorrect: expected {expected_counter}, got {edited_fx['counter_amount']}")
-        session.delete(f"{BASE_URL}/fx/{fx_id}")
-        return False
-    
-    q2 = get_quota()
-    if q2 != q1:
-        print_error(f"❌ CRITICAL: Quota changed after edit: {q1} -> {q2}")
-        session.delete(f"{BASE_URL}/fx/{fx_id}")
-        return False
-    
-    # Verify balances
-    box1_bal_after = get_balance('boxes', box1_id, 'USD')
-    box2_bal_after = get_balance('boxes', box2_id, 'SAR')
-    
-    expected_box1 = box1_bal_before + 120  # Buy increases USD box
-    expected_box2 = box2_bal_before - 456  # Buy decreases SAR box (120 * 3.80)
-    
-    if abs(box1_bal_after - expected_box1) > 0.01:
-        print_error(f"Box1 USD balance incorrect: expected {expected_box1}, got {box1_bal_after}")
-        session.delete(f"{BASE_URL}/fx/{fx_id}")
-        return False
-    
-    if abs(box2_bal_after - expected_box2) > 0.01:
-        print_error(f"Box2 SAR balance incorrect: expected {expected_box2}, got {box2_bal_after}")
-        session.delete(f"{BASE_URL}/fx/{fx_id}")
-        return False
-    
-    # Cleanup
-    session.delete(f"{BASE_URL}/fx/{fx_id}")
-    
-    print_result(True, "FX buy edit test passed - quota preserved, balances correct")
-    return True
-
-# ============ TEST 6: FX EDIT (SELL) ============
-def test_fx_sell_edit(box1_id, box2_id):
-    """Test PUT /fx/:id for sell"""
-    print_test("6. FX Sell Edit - PUT /fx/:id")
-    
-    q0 = get_quota()
-    box1_bal_before = get_balance('boxes', box1_id, 'USD')
-    box2_bal_before = get_balance('boxes', box2_id, 'SAR')
-    
-    # Create FX sell
-    fx_data = {
-        "type": "sell",
-        "date": "2025-06-10",
-        "currency": "USD",
-        "counter_currency": "SAR",
-        "amount": 50,
-        "exchange_rate": 3.75,
-        "box_currency_id": box1_id,
-        "box_counter_id": box2_id,
-        "customer_name": "E2E FX Sell",
-        "id_type": "هوية وطنية",
-        "id_number": "5678"
-    }
-    
-    resp = session.post(f"{BASE_URL}/fx", json=fx_data)
-    if resp.status_code != 200:
-        print_error(f"Failed to create FX sell: {resp.text}")
-        return False
-    
-    fx = resp.json()
-    fx_id = fx['id']
-    print(f"Created FX sell: {fx_id}, Amount: {fx['amount']}, Counter: {fx['counter_amount']}")
-    
-    q1 = get_quota()
-    
-    # Edit FX sell
-    edit_data = {
-        "type": "sell",
-        "date": "2025-06-10",
-        "currency": "USD",
-        "counter_currency": "SAR",
-        "amount": 60,
-        "exchange_rate": 3.80,
-        "box_currency_id": box1_id,
-        "box_counter_id": box2_id,
-        "customer_name": "E2E FX Sell",
-        "id_type": "هوية وطنية",
-        "id_number": "5678"
-    }
-    
-    resp = session.put(f"{BASE_URL}/fx/{fx_id}", json=edit_data)
-    print(f"PUT Status: {resp.status_code}")
-    
-    if resp.status_code != 200:
-        print_error(f"Failed to edit FX sell: {resp.text}")
-        session.delete(f"{BASE_URL}/fx/{fx_id}")
-        return False
-    
-    edited_fx = resp.json()
-    print(f"Edited FX sell: ID={edited_fx['id']}, Amount={edited_fx['amount']}, Counter={edited_fx['counter_amount']}")
-    
-    # Verify
-    if edited_fx['id'] != fx_id:
-        print_error(f"ID changed after edit")
-        session.delete(f"{BASE_URL}/fx/{fx_id}")
-        return False
-    
-    q2 = get_quota()
-    if q2 != q1:
-        print_error(f"❌ CRITICAL: Quota changed after edit: {q1} -> {q2}")
-        session.delete(f"{BASE_URL}/fx/{fx_id}")
-        return False
-    
-    # Verify balances
-    box1_bal_after = get_balance('boxes', box1_id, 'USD')
-    box2_bal_after = get_balance('boxes', box2_id, 'SAR')
-    
-    expected_box1 = box1_bal_before - 60  # Sell decreases USD box
-    expected_box2 = box2_bal_before + 228  # Sell increases SAR box (60 * 3.80)
-    
-    if abs(box1_bal_after - expected_box1) > 0.01:
-        print_error(f"Box1 USD balance incorrect: expected {expected_box1}, got {box1_bal_after}")
-        session.delete(f"{BASE_URL}/fx/{fx_id}")
-        return False
-    
-    if abs(box2_bal_after - expected_box2) > 0.01:
-        print_error(f"Box2 SAR balance incorrect: expected {expected_box2}, got {box2_bal_after}")
-        session.delete(f"{BASE_URL}/fx/{fx_id}")
-        return False
-    
-    # Cleanup
-    session.delete(f"{BASE_URL}/fx/{fx_id}")
-    
-    print_result(True, "FX sell edit test passed - quota preserved, balances correct")
-    return True
-
-# ============ TEST 7: MANUAL JE EDIT (SINGLE CURRENCY) ============
-def test_manual_je_single_edit(client_id, supplier_id):
-    """Test PUT /journal-entries/:id for manual single-currency JE"""
-    print_test("7. Manual JE Single Currency Edit - PUT /journal-entries/:id")
-    
-    q0 = get_quota()
-    client_bal_before = get_balance('clients', client_id, 'SAR')
-    supplier_bal_before = get_balance('suppliers', supplier_id, 'SAR')
-    
-    # Create manual JE
-    je_data = {
-        "date": "2025-06-10",
-        "currency": "SAR",
-        "description": "E2E manual",
-        "lines": [
-            {
-                "account_code": "1301",
-                "account_name": "العملاء",
-                "party_type": "client",
-                "party_id": client_id,
-                "debit": 200,
-                "credit": 0
-            },
-            {
-                "account_code": "2101",
-                "account_name": "الموردون",
-                "party_type": "supplier",
-                "party_id": supplier_id,
-                "debit": 0,
-                "credit": 200
-            }
-        ]
-    }
-    
-    resp = session.post(f"{BASE_URL}/journal-entries", json=je_data)
-    if resp.status_code != 200:
-        print_error(f"Failed to create manual JE: {resp.text}")
-        return False
-    
-    je = resp.json()
-    je_id = je['id']
-    print(f"Created manual JE: {je_id}")
-    
-    q1 = get_quota()
-    
-    # Edit manual JE
-    edit_data = {
-        "date": "2025-06-10",
-        "currency": "SAR",
-        "description": "E2E manual edited",
-        "lines": [
-            {
-                "account_code": "1301",
-                "account_name": "العملاء",
-                "party_type": "client",
-                "party_id": client_id,
-                "debit": 300,
-                "credit": 0
-            },
-            {
-                "account_code": "2101",
-                "account_name": "الموردون",
-                "party_type": "supplier",
-                "party_id": supplier_id,
-                "debit": 0,
-                "credit": 300
-            }
-        ]
-    }
-    
-    resp = session.put(f"{BASE_URL}/journal-entries/{je_id}", json=edit_data)
-    print(f"PUT Status: {resp.status_code}")
-    
-    if resp.status_code != 200:
-        print_error(f"Failed to edit manual JE: {resp.text}")
-        return False
-    
-    edited_je = resp.json()
-    print(f"Edited manual JE: ID={edited_je['id']}")
-    
-    # Verify
-    if edited_je['id'] != je_id:
-        print_error(f"ID changed after edit")
-        return False
-    
-    q2 = get_quota()
-    if q2 != q1:
-        print_error(f"❌ CRITICAL: Quota changed after edit: {q1} -> {q2}")
-        return False
-    
-    # Verify balances
-    client_bal_after = get_balance('clients', client_id, 'SAR')
-    supplier_bal_after = get_balance('suppliers', supplier_id, 'SAR')
-    
-    expected_client = client_bal_before + 300  # Debit increases client balance
-    expected_supplier = supplier_bal_before + 300  # Credit increases supplier balance
-    
-    if abs(client_bal_after - expected_client) > 0.01:
-        print_error(f"Client balance incorrect: expected {expected_client}, got {client_bal_after}")
-        return False
-    
-    if abs(supplier_bal_after - expected_supplier) > 0.01:
-        print_error(f"Supplier balance incorrect: expected {expected_supplier}, got {supplier_bal_after}")
-        return False
-    
-    print_result(True, "Manual JE single currency edit test passed - quota preserved, balances correct")
-    return True
-
-# ============ TEST 8: MANUAL JE EDIT (DUAL CURRENCY) ============
-def test_manual_je_dual_edit(box1_id, box2_id):
-    """Test PUT /journal-entries/:id for manual dual-currency JE"""
-    print_test("8. Manual JE Dual Currency Edit - PUT /journal-entries/:id")
-    
-    q0 = get_quota()
-    box1_bal_before = get_balance('boxes', box1_id, 'USD')
-    box2_bal_before = get_balance('boxes', box2_id, 'SAR')
-    
-    # Create manual dual JE
-    je_data = {
-        "dual": True,
-        "date": "2025-06-10",
-        "description": "E2E dual",
-        "debit_account_code": "1101",
-        "debit_account_name": "صندوق دولار",
-        "debit_currency": "USD",
-        "debit_amount": 100,
-        "debit_party_type": "box",
-        "debit_party_id": box1_id,
-        "credit_account_code": "1102",
-        "credit_account_name": "صندوق ريال",
-        "credit_currency": "SAR",
-        "credit_amount": 375,
-        "credit_party_type": "box",
-        "credit_party_id": box2_id
-    }
-    
-    resp = session.post(f"{BASE_URL}/journal-entries", json=je_data)
-    if resp.status_code != 200:
-        print_error(f"Failed to create manual dual JE: {resp.text}")
-        return False
-    
-    je = resp.json()
-    je_id = je['id']
-    print(f"Created manual dual JE: {je_id}")
-    
-    q1 = get_quota()
-    
-    # Edit manual dual JE
-    edit_data = {
-        "dual": True,
-        "date": "2025-06-10",
-        "description": "E2E dual edited",
-        "debit_account_code": "1101",
-        "debit_account_name": "صندوق دولار",
-        "debit_currency": "USD",
-        "debit_amount": 120,
-        "debit_party_type": "box",
-        "debit_party_id": box1_id,
-        "credit_account_code": "1102",
-        "credit_account_name": "صندوق ريال",
-        "credit_currency": "SAR",
-        "credit_amount": 456,
-        "credit_party_type": "box",
-        "credit_party_id": box2_id
-    }
-    
-    resp = session.put(f"{BASE_URL}/journal-entries/{je_id}", json=edit_data)
-    print(f"PUT Status: {resp.status_code}")
-    
-    if resp.status_code != 200:
-        print_error(f"Failed to edit manual dual JE: {resp.text}")
-        return False
-    
-    edited_je = resp.json()
-    print(f"Edited manual dual JE: ID={edited_je['id']}")
-    
-    # Verify
-    if edited_je['id'] != je_id:
-        print_error(f"ID changed after edit")
-        return False
-    
-    q2 = get_quota()
-    if q2 != q1:
-        print_error(f"❌ CRITICAL: Quota changed after edit: {q1} -> {q2}")
-        return False
-    
-    # Verify balances
-    box1_bal_after = get_balance('boxes', box1_id, 'USD')
-    box2_bal_after = get_balance('boxes', box2_id, 'SAR')
-    
-    expected_box1 = box1_bal_before + 120  # Debit increases box balance
-    expected_box2 = box2_bal_before - 456  # Credit decreases box balance
-    
-    if abs(box1_bal_after - expected_box1) > 0.01:
-        print_error(f"Box1 USD balance incorrect: expected {expected_box1}, got {box1_bal_after}")
-        return False
-    
-    if abs(box2_bal_after - expected_box2) > 0.01:
-        print_error(f"Box2 SAR balance incorrect: expected {expected_box2}, got {box2_bal_after}")
-        return False
-    
-    print_result(True, "Manual JE dual currency edit test passed - quota preserved, balances correct")
-    return True
-
-# ============ TEST 9: NON-EDITABLE JE RETURNS 400 ============
-def test_non_editable_je(client_id, supplier_id, box_id):
-    """Test that editing non-manual JE returns 400"""
-    print_test("9. Non-Editable JE Returns 400")
-    
-    # Create a ticket (which creates a non-editable JE)
-    ticket_data = {
-        "date": "2025-06-10",
-        "currency": "SAR",
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "pnr": "NON-EDIT",
-        "cost": 100,
-        "sale_price": 150,
-        "payment_method": "credit"
-    }
-    
-    resp = session.post(f"{BASE_URL}/tickets", json=ticket_data)
-    if resp.status_code != 200:
-        print_error(f"Failed to create ticket: {resp.text}")
-        return False
-    
-    ticket = resp.json()
-    ticket_id = ticket['id']
-    
-    # Get the JE for this ticket
-    resp = session.get(f"{BASE_URL}/journal-entries")
-    if resp.status_code != 200:
-        print_error(f"Failed to get journal entries: {resp.text}")
-        session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-        return False
-    
-    jes = resp.json()
-    ticket_je = None
-    for je in jes:
-        if je.get('ref_id') == ticket_id and je.get('ref_type') == 'ticket':
-            ticket_je = je
-            break
-    
-    if not ticket_je:
-        print_error(f"Could not find JE for ticket {ticket_id}")
-        session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-        return False
-    
-    je_id = ticket_je['id']
-    print(f"Found ticket JE: {je_id}")
-    
-    # Try to edit this JE (should return 400)
-    edit_data = {
-        "date": "2025-06-10",
-        "currency": "SAR",
-        "description": "Trying to edit non-manual JE",
-        "lines": [
-            {"account_code": "1301", "account_name": "العملاء", "debit": 100, "credit": 0},
-            {"account_code": "2101", "account_name": "الموردون", "debit": 0, "credit": 100}
-        ]
-    }
-    
-    resp = session.put(f"{BASE_URL}/journal-entries/{je_id}", json=edit_data)
-    print(f"PUT Status: {resp.status_code}")
-    
-    if resp.status_code == 400:
-        error_msg = resp.json().get('error', '')
-        print(f"Error message: {error_msg}")
-        if 'تعديل' in error_msg or 'مباشرة' in error_msg:
-            print_result(True, "Non-editable JE correctly returns 400 with Arabic message")
-            session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-            return True
+        accounts = resp.json()
+        
+        # Verify structure
+        if isinstance(accounts, list) and len(accounts) > 0:
+            log_test("2.1 GET /accounts/all", True, f"Returned {len(accounts)} accounts")
+            
+            # Verify each item has required fields
+            sample = accounts[0]
+            required_fields = ["kind", "id", "code", "name", "group"]
+            if all(field in sample for field in required_fields):
+                log_test("2.2 Account structure", True, f"Fields: {list(sample.keys())}")
+            else:
+                log_test("2.2 Account structure", False, f"Missing fields in: {sample}")
+            
+            # Count by kind
+            clients = [a for a in accounts if a.get("kind") == "client"]
+            suppliers = [a for a in accounts if a.get("kind") == "supplier"]
+            boxes = [a for a in accounts if a.get("kind") == "box"]
+            coa = [a for a in accounts if a.get("kind") == "account"]
+            
+            log_test("2.3 Clients present", len(clients) > 0, f"Count: {len(clients)}, Code: {clients[0].get('code') if clients else 'N/A'}")
+            log_test("2.4 Suppliers present", len(suppliers) > 0, f"Count: {len(suppliers)}, Code: {suppliers[0].get('code') if suppliers else 'N/A'}")
+            log_test("2.5 Boxes present", len(boxes) > 0, f"Count: {len(boxes)}, Codes: {[b.get('code') for b in boxes]}")
+            log_test("2.6 COA accounts present", len(coa) > 0, f"Count: {len(coa)}")
+            
+            # Verify specific codes
+            if clients and clients[0].get("code") == "1301":
+                log_test("2.7 Client code correct", True, "Code: 1301")
+            else:
+                log_test("2.7 Client code correct", False, f"Expected 1301, got {clients[0].get('code') if clients else 'N/A'}")
+            
+            if suppliers and suppliers[0].get("code") == "2101":
+                log_test("2.8 Supplier code correct", True, "Code: 2101")
+            else:
+                log_test("2.8 Supplier code correct", False, f"Expected 2101, got {suppliers[0].get('code') if suppliers else 'N/A'}")
+            
+            # Verify box codes (1101 for cash, 1201 for bank)
+            box_codes = [b.get("code") for b in boxes]
+            if "1101" in box_codes or "1201" in box_codes:
+                log_test("2.9 Box codes correct", True, f"Codes: {box_codes}")
+            else:
+                log_test("2.9 Box codes correct", False, f"Expected 1101/1201, got {box_codes}")
+            
+            # Cross-check counts
+            resp_clients = get_with_auth("/clients", owner_cookie)
+            resp_suppliers = get_with_auth("/suppliers", owner_cookie)
+            resp_boxes = get_with_auth("/boxes", owner_cookie)
+            resp_coa = get_with_auth("/accounts", owner_cookie)
+            
+            if all(r.status_code == 200 for r in [resp_clients, resp_suppliers, resp_boxes, resp_coa]):
+                total_expected = len(resp_clients.json()) + len(resp_suppliers.json()) + len(resp_boxes.json()) + len(resp_coa.json())
+                if len(accounts) == total_expected:
+                    log_test("2.10 Total count matches", True, f"{len(accounts)} == {total_expected}")
+                else:
+                    log_test("2.10 Total count matches", False, f"{len(accounts)} != {total_expected}")
+            else:
+                log_test("2.10 Total count matches", False, "Failed to fetch individual collections")
         else:
-            print_error(f"400 returned but message doesn't contain expected Arabic text")
-            session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-            return False
+            log_test("2.1 GET /accounts/all", False, f"Invalid response: {accounts}")
     else:
-        print_error(f"Expected 400, got {resp.status_code}")
-        session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-        return False
+        log_test("2.1 GET /accounts/all", False, f"Status: {resp.status_code}")
+else:
+    log_test("2.1-2.10 Unified Chart of Accounts", False, "Login failed")
 
-# ============ TEST 10: 404 CHECKS ============
-def test_404_checks():
-    """Test that PUT on non-existent IDs returns 404"""
-    print_test("10. 404 Checks for Non-Existent IDs")
-    
-    results = []
-    
-    # Test tickets
-    resp = session.put(f"{BASE_URL}/tickets/nonexistent-id", json={"date": "2025-06-10"})
-    if resp.status_code == 404:
-        print_result(True, "PUT /tickets/nonexistent-id returns 404")
-        results.append(True)
-    else:
-        print_error(f"PUT /tickets/nonexistent-id returned {resp.status_code}, expected 404")
-        results.append(False)
-    
-    # Test visas
-    resp = session.put(f"{BASE_URL}/visas/nonexistent-id", json={"date": "2025-06-10"})
-    if resp.status_code == 404:
-        print_result(True, "PUT /visas/nonexistent-id returns 404")
-        results.append(True)
-    else:
-        print_error(f"PUT /visas/nonexistent-id returned {resp.status_code}, expected 404")
-        results.append(False)
-    
-    # Test vouchers
-    resp = session.put(f"{BASE_URL}/vouchers/nonexistent-id", json={"date": "2025-06-10"})
-    if resp.status_code == 404:
-        print_result(True, "PUT /vouchers/nonexistent-id returns 404")
-        results.append(True)
-    else:
-        print_error(f"PUT /vouchers/nonexistent-id returned {resp.status_code}, expected 404")
-        results.append(False)
-    
-    # Test fx
-    resp = session.put(f"{BASE_URL}/fx/nonexistent-id", json={"date": "2025-06-10"})
-    if resp.status_code == 404:
-        print_result(True, "PUT /fx/nonexistent-id returns 404")
-        results.append(True)
-    else:
-        print_error(f"PUT /fx/nonexistent-id returned {resp.status_code}, expected 404")
-        results.append(False)
-    
-    # Test journal-entries
-    resp = session.put(f"{BASE_URL}/journal-entries/nonexistent-id", json={"date": "2025-06-10"})
-    if resp.status_code == 404:
-        print_result(True, "PUT /journal-entries/nonexistent-id returns 404")
-        results.append(True)
-    else:
-        print_error(f"PUT /journal-entries/nonexistent-id returned {resp.status_code}, expected 404")
-        results.append(False)
-    
-    return all(results)
+# ============================================================================
+# TEST 3: TOMORROW TRAVELERS
+# ============================================================================
+print("\n### TEST 3: TOMORROW TRAVELERS ###\n")
 
-# ============ TEST 11: REGRESSION - POST STILL WORKS ============
-def test_regression_post(client_id, supplier_id):
-    """Test that POST endpoints still work and increment quota"""
-    print_test("11. Regression - POST Endpoints Still Work")
+owner_cookie = login(TENANT_OWNER["email"], TENANT_OWNER["password"])
+if owner_cookie:
+    # Get clients and suppliers for ticket creation
+    resp_clients = get_with_auth("/clients", owner_cookie)
+    resp_suppliers = get_with_auth("/suppliers", owner_cookie)
     
-    q0 = get_quota()
-    
-    # Test POST ticket
-    ticket_data = {
-        "date": "2025-06-10",
-        "currency": "SAR",
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "pnr": "REGRESSION-1",
-        "cost": 100,
-        "sale_price": 150,
-        "payment_method": "credit"
-    }
-    
-    resp = session.post(f"{BASE_URL}/tickets", json=ticket_data)
-    if resp.status_code != 200:
-        print_error(f"POST /tickets failed: {resp.text}")
-        return False
-    
-    ticket = resp.json()
-    ticket_id = ticket['id']
-    print(f"✅ POST /tickets works: {ticket_id}")
-    
-    q1 = get_quota()
-    if q1 != q0 + 1:
-        print_error(f"Quota not incremented after POST: expected {q0+1}, got {q1}")
-        session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-        return False
-    
-    print_result(True, f"POST /tickets increments quota correctly: {q0} -> {q1}")
-    
-    # Cleanup
-    session.delete(f"{BASE_URL}/tickets/{ticket_id}")
-    
-    return True
-
-# ============ MAIN ============
-def main():
-    print("\n" + "="*80)
-    print("RAHAAL ERP v2.5 EDIT MODE ENGINE - BACKEND TEST SUITE")
-    print("="*80)
-    
-    # Login
-    if not test_login():
-        print("\n❌ FATAL: Login failed. Aborting tests.")
-        return
-    
-    # Setup
-    client_id, supplier_id, box1_id, box2_id = setup_parties()
-    if not all([client_id, supplier_id, box1_id, box2_id]):
-        print("\n❌ FATAL: Setup failed. Aborting tests.")
-        return
-    
-    # Run tests
-    results = {}
-    
-    try:
-        results['ticket_edit'] = test_ticket_edit(client_id, supplier_id, box1_id)
-    except Exception as e:
-        print_error(f"Ticket edit test exception: {e}")
-        results['ticket_edit'] = False
-    
-    try:
-        results['visa_edit'] = test_visa_edit(client_id, supplier_id, box1_id)
-    except Exception as e:
-        print_error(f"Visa edit test exception: {e}")
-        results['visa_edit'] = False
-    
-    try:
-        results['voucher_receipt_edit'] = test_voucher_receipt_edit(client_id, box1_id)
-    except Exception as e:
-        print_error(f"Voucher receipt edit test exception: {e}")
-        results['voucher_receipt_edit'] = False
-    
-    try:
-        results['voucher_payment_edit'] = test_voucher_payment_edit(supplier_id, box1_id)
-    except Exception as e:
-        print_error(f"Voucher payment edit test exception: {e}")
-        results['voucher_payment_edit'] = False
-    
-    try:
-        results['fx_buy_edit'] = test_fx_buy_edit(box1_id, box2_id)
-    except Exception as e:
-        print_error(f"FX buy edit test exception: {e}")
-        results['fx_buy_edit'] = False
-    
-    try:
-        results['fx_sell_edit'] = test_fx_sell_edit(box1_id, box2_id)
-    except Exception as e:
-        print_error(f"FX sell edit test exception: {e}")
-        results['fx_sell_edit'] = False
-    
-    try:
-        results['manual_je_single_edit'] = test_manual_je_single_edit(client_id, supplier_id)
-    except Exception as e:
-        print_error(f"Manual JE single edit test exception: {e}")
-        results['manual_je_single_edit'] = False
-    
-    try:
-        results['manual_je_dual_edit'] = test_manual_je_dual_edit(box1_id, box2_id)
-    except Exception as e:
-        print_error(f"Manual JE dual edit test exception: {e}")
-        results['manual_je_dual_edit'] = False
-    
-    try:
-        results['non_editable_je'] = test_non_editable_je(client_id, supplier_id, box1_id)
-    except Exception as e:
-        print_error(f"Non-editable JE test exception: {e}")
-        results['non_editable_je'] = False
-    
-    try:
-        results['404_checks'] = test_404_checks()
-    except Exception as e:
-        print_error(f"404 checks test exception: {e}")
-        results['404_checks'] = False
-    
-    try:
-        results['regression_post'] = test_regression_post(client_id, supplier_id)
-    except Exception as e:
-        print_error(f"Regression POST test exception: {e}")
-        results['regression_post'] = False
-    
-    # Summary
-    print("\n" + "="*80)
-    print("TEST SUMMARY")
-    print("="*80)
-    
-    passed = sum(1 for v in results.values() if v)
-    total = len(results)
-    
-    for test_name, result in results.items():
-        status = "✅ PASS" if result else "❌ FAIL"
-        print(f"{status}: {test_name}")
-    
-    print("\n" + "="*80)
-    print(f"TOTAL: {passed}/{total} tests passed")
-    print("="*80)
-    
-    if passed == total:
-        print("\n🎉 ALL TESTS PASSED! v2.5 Edit Mode Engine is working correctly.")
+    if resp_clients.status_code == 200 and resp_suppliers.status_code == 200:
+        clients = resp_clients.json()
+        suppliers = resp_suppliers.json()
+        
+        if clients and suppliers:
+            client_id = clients[0]["id"]
+            supplier_id = suppliers[0]["id"]
+            
+            # Create ticket with travel_date = tomorrow
+            tomorrow = get_tomorrow_date()
+            ticket_data = {
+                "pnr": f"TMR-{random.randint(1000, 9999)}",
+                "client_id": client_id,
+                "client_name": clients[0]["name"],
+                "supplier_id": supplier_id,
+                "supplier_name": suppliers[0]["name"],
+                "passenger_name": "Tomorrow Traveler",
+                "passport_no": "TMR123456",
+                "route": "JED-CAI",
+                "travel_date": tomorrow,
+                "currency": "SAR",
+                "cost": 500,
+                "sale_price": 600,
+                "payment_method": "credit"
+            }
+            
+            resp = post_with_auth("/tickets", owner_cookie, ticket_data)
+            if resp.status_code == 200:
+                ticket = resp.json()
+                ticket_id = ticket.get("id")
+                cleanup_ids["tickets"].append(ticket_id)
+                log_test("3.1 Create ticket with tomorrow date", True, f"ID: {ticket_id}, Date: {tomorrow}")
+                
+                # Get tomorrow travelers
+                resp = get_with_auth("/dashboard/tomorrow-travelers", owner_cookie)
+                if resp.status_code == 200:
+                    travelers = resp.json()
+                    
+                    # Verify our ticket is in the list
+                    found = next((t for t in travelers if t.get("id") == ticket_id), None)
+                    if found:
+                        required_fields = ["id", "pnr", "passenger_name", "passport_no", "travel_date", "client_name", "client_phone", "currency", "sale_price"]
+                        if all(field in found for field in required_fields):
+                            log_test("3.2 Tomorrow travelers includes ticket", True, f"Fields: {list(found.keys())}")
+                        else:
+                            log_test("3.2 Tomorrow travelers includes ticket", False, f"Missing fields: {[f for f in required_fields if f not in found]}")
+                    else:
+                        log_test("3.2 Tomorrow travelers includes ticket", False, "Ticket not found in travelers list")
+                else:
+                    log_test("3.2 GET /dashboard/tomorrow-travelers", False, f"Status: {resp.status_code}")
+                
+                # Negative test: Create ticket with travel_date = 3 days from now
+                future_date = get_future_date(3)
+                ticket_data2 = {
+                    "pnr": f"FUT-{random.randint(1000, 9999)}",
+                    "client_id": client_id,
+                    "client_name": clients[0]["name"],
+                    "supplier_id": supplier_id,
+                    "supplier_name": suppliers[0]["name"],
+                    "passenger_name": "Future Traveler",
+                    "passport_no": "FUT123456",
+                    "route": "JED-DXB",
+                    "travel_date": future_date,
+                    "currency": "SAR",
+                    "cost": 400,
+                    "sale_price": 500,
+                    "payment_method": "credit"
+                }
+                
+                resp = post_with_auth("/tickets", owner_cookie, ticket_data2)
+                if resp.status_code == 200:
+                    ticket2 = resp.json()
+                    ticket2_id = ticket2.get("id")
+                    cleanup_ids["tickets"].append(ticket2_id)
+                    
+                    # Verify it does NOT appear in tomorrow travelers
+                    resp = get_with_auth("/dashboard/tomorrow-travelers", owner_cookie)
+                    if resp.status_code == 200:
+                        travelers = resp.json()
+                        found = next((t for t in travelers if t.get("id") == ticket2_id), None)
+                        if not found:
+                            log_test("3.3 Future ticket NOT in tomorrow travelers", True, f"Date: {future_date}")
+                        else:
+                            log_test("3.3 Future ticket NOT in tomorrow travelers", False, "Future ticket should not appear")
+                    else:
+                        log_test("3.3 Future ticket NOT in tomorrow travelers", False, f"Status: {resp.status_code}")
+            else:
+                log_test("3.1 Create ticket with tomorrow date", False, f"Status: {resp.status_code}")
+        else:
+            log_test("3.1-3.3 Tomorrow Travelers", False, "No clients or suppliers available")
     else:
-        print(f"\n⚠️  {total - passed} test(s) failed. Please review the output above.")
+        log_test("3.1-3.3 Tomorrow Travelers", False, "Failed to fetch clients/suppliers")
+else:
+    log_test("3.1-3.3 Tomorrow Travelers", False, "Login failed")
 
-if __name__ == "__main__":
-    main()
+# ============================================================================
+# TEST 4: FX ACCOUNT MODE
+# ============================================================================
+print("\n### TEST 4: FX ACCOUNT MODE ###\n")
+
+owner_cookie = login(TENANT_OWNER["email"], TENANT_OWNER["password"])
+if owner_cookie:
+    # Get clients, suppliers, boxes, and COA accounts
+    resp_clients = get_with_auth("/clients", owner_cookie)
+    resp_suppliers = get_with_auth("/suppliers", owner_cookie)
+    resp_boxes = get_with_auth("/boxes", owner_cookie)
+    resp_accounts = get_with_auth("/accounts", owner_cookie)
+    
+    if all(r.status_code == 200 for r in [resp_clients, resp_suppliers, resp_boxes, resp_accounts]):
+        clients = resp_clients.json()
+        suppliers = resp_suppliers.json()
+        boxes = resp_boxes.json()
+        coa_accounts = resp_accounts.json()
+        
+        if clients and suppliers and len(boxes) >= 2 and coa_accounts:
+            client = clients[0]
+            supplier = suppliers[0]
+            box1 = boxes[0]
+            box2 = boxes[1] if len(boxes) > 1 else boxes[0]
+            # Find an expense account (code starts with 5)
+            expense_account = next((a for a in coa_accounts if a.get("code", "").startswith("5")), coa_accounts[0])
+            
+            # Get baseline balances
+            resp_client = get_with_auth(f"/clients", owner_cookie)
+            baseline_client = next((c for c in resp_client.json() if c["id"] == client["id"]), {})
+            baseline_client_usd = baseline_client.get("balances", {}).get("USD", 0)
+            
+            resp_box = get_with_auth(f"/boxes", owner_cookie)
+            baseline_box = next((b for b in resp_box.json() if b["id"] == box1["id"]), {})
+            baseline_box_sar = baseline_box.get("balances", {}).get("SAR", 0)
+            
+            log_test("4.1 Baseline balances captured", True, f"Client USD: {baseline_client_usd}, Box SAR: {baseline_box_sar}")
+            
+            # Test 4.2: FX with payment_method='account' using client and box
+            fx_data = {
+                "type": "buy",
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "currency": "USD",
+                "amount": 100,
+                "exchange_rate": 3.75,
+                "counter_currency": "SAR",
+                "payment_method": "account",
+                "currency_ref": {"kind": "client", "id": client["id"]},
+                "counter_ref": {"kind": "box", "id": box1["id"]},
+                "customer_name": "FX Account Test"
+            }
+            
+            resp = post_with_auth("/fx", owner_cookie, fx_data)
+            if resp.status_code == 200:
+                fx = resp.json()
+                fx_id = fx.get("id")
+                cleanup_ids["fx"].append(fx_id)
+                
+                # Verify response structure
+                if fx.get("payment_method") == "account" and fx.get("currency_ref") and fx.get("counter_ref"):
+                    log_test("4.2 FX account mode created", True, f"ID: {fx_id}, counter_amount: {fx.get('counter_amount')}")
+                else:
+                    log_test("4.2 FX account mode created", False, f"Missing fields: {fx}")
+                
+                # Verify balance updates
+                resp_client = get_with_auth(f"/clients", owner_cookie)
+                updated_client = next((c for c in resp_client.json() if c["id"] == client["id"]), {})
+                updated_client_usd = updated_client.get("balances", {}).get("USD", 0)
+                
+                resp_box = get_with_auth(f"/boxes", owner_cookie)
+                updated_box = next((b for b in resp_box.json() if b["id"] == box1["id"]), {})
+                updated_box_sar = updated_box.get("balances", {}).get("SAR", 0)
+                
+                # Client should have +100 USD (debit), Box should have -375 SAR (credit)
+                if updated_client_usd == baseline_client_usd + 100:
+                    log_test("4.3 Client balance updated", True, f"{baseline_client_usd} → {updated_client_usd} (+100 USD)")
+                else:
+                    log_test("4.3 Client balance updated", False, f"Expected {baseline_client_usd + 100}, got {updated_client_usd}")
+                
+                if updated_box_sar == baseline_box_sar - 375:
+                    log_test("4.4 Box balance updated", True, f"{baseline_box_sar} → {updated_box_sar} (-375 SAR)")
+                else:
+                    log_test("4.4 Box balance updated", False, f"Expected {baseline_box_sar - 375}, got {updated_box_sar}")
+                
+                # Verify journal entry
+                resp_je = get_with_auth("/journal-entries", owner_cookie)
+                if resp_je.status_code == 200:
+                    jes = resp_je.json()
+                    fx_je = next((je for je in jes if je.get("ref_id") == fx_id), None)
+                    
+                    if fx_je:
+                        lines = fx_je.get("lines", [])
+                        # Should have at least 2 lines (currency + counter) + possibly FX gain/loss
+                        if len(lines) >= 2:
+                            # Find client line (1301) and box line (1101 or 1201)
+                            client_line = next((l for l in lines if l.get("account_code") == "1301"), None)
+                            box_line = next((l for l in lines if l.get("account_code") in ["1101", "1201"]), None)
+                            
+                            if client_line and box_line:
+                                # Verify client line: debit=100, currency=USD, party_type=client
+                                if (client_line.get("debit") == 100 and 
+                                    client_line.get("currency") == "USD" and 
+                                    client_line.get("party_type") == "client"):
+                                    log_test("4.5 JE client line correct", True, f"Debit: 100 USD, party_type: client")
+                                else:
+                                    log_test("4.5 JE client line correct", False, f"Client line: {client_line}")
+                                
+                                # Verify box line: credit=375, currency=SAR, party_type=box
+                                if (box_line.get("credit") == 375 and 
+                                    box_line.get("currency") == "SAR" and 
+                                    box_line.get("party_type") == "box"):
+                                    log_test("4.6 JE box line correct", True, f"Credit: 375 SAR, party_type: box")
+                                else:
+                                    log_test("4.6 JE box line correct", False, f"Box line: {box_line}")
+                            else:
+                                log_test("4.5-4.6 JE lines", False, f"Client or box line not found: {lines}")
+                        else:
+                            log_test("4.5-4.6 JE lines", False, f"Expected >= 2 lines, got {len(lines)}")
+                    else:
+                        log_test("4.5-4.6 JE lines", False, "FX journal entry not found")
+                else:
+                    log_test("4.5-4.6 JE lines", False, f"Failed to fetch journal entries: {resp_je.status_code}")
+                
+                # Test 4.7: PUT /fx/:id (edit mode) with account mode
+                fx_edit_data = {
+                    "type": "buy",
+                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "currency": "USD",
+                    "amount": 150,  # Changed from 100
+                    "exchange_rate": 3.80,  # Changed from 3.75
+                    "counter_currency": "SAR",
+                    "payment_method": "account",
+                    "currency_ref": {"kind": "client", "id": client["id"]},
+                    "counter_ref": {"kind": "box", "id": box1["id"]},
+                    "customer_name": "FX Account Test Edited"
+                }
+                
+                resp = put_with_auth(f"/fx/{fx_id}", owner_cookie, fx_edit_data)
+                if resp.status_code == 200:
+                    # Verify balances net to +150/-570 vs baseline
+                    resp_client = get_with_auth(f"/clients", owner_cookie)
+                    edited_client = next((c for c in resp_client.json() if c["id"] == client["id"]), {})
+                    edited_client_usd = edited_client.get("balances", {}).get("USD", 0)
+                    
+                    resp_box = get_with_auth(f"/boxes", owner_cookie)
+                    edited_box = next((b for b in resp_box.json() if b["id"] == box1["id"]), {})
+                    edited_box_sar = edited_box.get("balances", {}).get("SAR", 0)
+                    
+                    if edited_client_usd == baseline_client_usd + 150:
+                        log_test("4.7 PUT /fx preserves account mode", True, f"Client: {edited_client_usd} (+150 from baseline)")
+                    else:
+                        log_test("4.7 PUT /fx preserves account mode", False, f"Expected {baseline_client_usd + 150}, got {edited_client_usd}")
+                    
+                    if edited_box_sar == baseline_box_sar - 570:
+                        log_test("4.8 Box balance after edit", True, f"Box: {edited_box_sar} (-570 from baseline)")
+                    else:
+                        log_test("4.8 Box balance after edit", False, f"Expected {baseline_box_sar - 570}, got {edited_box_sar}")
+                else:
+                    log_test("4.7-4.8 PUT /fx account mode", False, f"Status: {resp.status_code}")
+                
+            else:
+                log_test("4.2 FX account mode created", False, f"Status: {resp.status_code}, Body: {resp.text}")
+            
+            # Test 4.9: FX with COA account (no balance update)
+            fx_coa_data = {
+                "type": "buy",
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "currency": "USD",
+                "amount": 50,
+                "exchange_rate": 3.75,
+                "counter_currency": "SAR",
+                "payment_method": "account",
+                "currency_ref": {"kind": "account", "id": expense_account["id"]},
+                "counter_ref": {"kind": "box", "id": box2["id"]},
+                "customer_name": "FX COA Test"
+            }
+            
+            resp = post_with_auth("/fx", owner_cookie, fx_coa_data)
+            if resp.status_code == 200:
+                fx_coa = resp.json()
+                fx_coa_id = fx_coa.get("id")
+                cleanup_ids["fx"].append(fx_coa_id)
+                
+                # Verify COA account has NO balance change (accounts collection doesn't track balances)
+                resp_coa = get_with_auth("/accounts", owner_cookie)
+                coa_after = next((a for a in resp_coa.json() if a["id"] == expense_account["id"]), {})
+                
+                # COA accounts don't have balances field
+                if "balances" not in coa_after or not coa_after.get("balances"):
+                    log_test("4.9 COA account no balance update", True, "COA account has no balances field")
+                else:
+                    log_test("4.9 COA account no balance update", False, f"COA should not have balances: {coa_after}")
+                
+                # Verify JE line has correct party_type='account' and account_code
+                resp_je = get_with_auth("/journal-entries", owner_cookie)
+                if resp_je.status_code == 200:
+                    jes = resp_je.json()
+                    fx_coa_je = next((je for je in jes if je.get("ref_id") == fx_coa_id), None)
+                    
+                    if fx_coa_je:
+                        lines = fx_coa_je.get("lines", [])
+                        coa_line = next((l for l in lines if l.get("party_type") == "account"), None)
+                        
+                        if coa_line and coa_line.get("account_code") == expense_account["code"]:
+                            log_test("4.10 JE COA line correct", True, f"party_type: account, code: {expense_account['code']}")
+                        else:
+                            log_test("4.10 JE COA line correct", False, f"COA line: {coa_line}")
+                    else:
+                        log_test("4.10 JE COA line correct", False, "FX COA journal entry not found")
+            else:
+                log_test("4.9-4.10 FX with COA account", False, f"Status: {resp.status_code}")
+        else:
+            log_test("4.1-4.10 FX Account Mode", False, "Insufficient test data (need clients, suppliers, 2 boxes, COA accounts)")
+    else:
+        log_test("4.1-4.10 FX Account Mode", False, "Failed to fetch test data")
+else:
+    log_test("4.1-4.10 FX Account Mode", False, "Login failed")
+
+# ============================================================================
+# TEST 5: STATEMENT REPORT - BOX & ACCOUNT
+# ============================================================================
+print("\n### TEST 5: STATEMENT REPORT - BOX & ACCOUNT ###\n")
+
+owner_cookie = login(TENANT_OWNER["email"], TENANT_OWNER["password"])
+if owner_cookie:
+    # Get boxes and COA accounts
+    resp_boxes = get_with_auth("/boxes", owner_cookie)
+    resp_accounts = get_with_auth("/accounts", owner_cookie)
+    
+    if resp_boxes.status_code == 200 and resp_accounts.status_code == 200:
+        boxes = resp_boxes.json()
+        coa_accounts = resp_accounts.json()
+        
+        if boxes and coa_accounts:
+            box = boxes[0]
+            coa = coa_accounts[0]
+            
+            # Test 5.1: Statement for box
+            resp = get_with_auth(f"/reports/statement?party_type=box&party_id={box['id']}&currency_mode=all_detail&period=all", owner_cookie)
+            if resp.status_code == 200:
+                statement = resp.json()
+                party = statement.get("party", {})
+                rows = statement.get("rows", [])
+                
+                # Verify party.name matches box name
+                if party.get("name") == box.get("name_ar"):
+                    log_test("5.1 Statement box party name", True, f"Name: {party.get('name')}")
+                else:
+                    log_test("5.1 Statement box party name", False, f"Expected {box.get('name_ar')}, got {party.get('name')}")
+                
+                # Verify party.balances present
+                if "balances" in party:
+                    log_test("5.2 Statement box balances", True, f"Balances: {party.get('balances')}")
+                else:
+                    log_test("5.2 Statement box balances", False, "Balances field missing")
+                
+                # Verify rows contain transactions (if box has been used in FX tests above)
+                if len(rows) > 0:
+                    log_test("5.3 Statement box rows", True, f"Rows: {len(rows)}")
+                    
+                    # Verify balance column runs correctly
+                    sample_row = rows[0]
+                    if "balance" in sample_row:
+                        log_test("5.4 Statement box balance column", True, f"Balance: {sample_row.get('balance')}")
+                    else:
+                        log_test("5.4 Statement box balance column", False, "Balance field missing in row")
+                else:
+                    log_test("5.3-5.4 Statement box rows", True, "No transactions for this box (expected if new)")
+            else:
+                log_test("5.1-5.4 Statement for box", False, f"Status: {resp.status_code}")
+            
+            # Test 5.5: Statement for COA account
+            resp = get_with_auth(f"/reports/statement?party_type=account&party_id={coa['id']}&currency_mode=all_detail&period=all", owner_cookie)
+            if resp.status_code == 200:
+                statement = resp.json()
+                party = statement.get("party", {})
+                
+                # Verify party.name includes code + name
+                expected_name = f"{coa['code']} — {coa.get('name_ar') or coa.get('name')}"
+                if party.get("name") == expected_name:
+                    log_test("5.5 Statement account party name", True, f"Name: {party.get('name')}")
+                else:
+                    log_test("5.5 Statement account party name", False, f"Expected '{expected_name}', got '{party.get('name')}'")
+            else:
+                log_test("5.5 Statement for account", False, f"Status: {resp.status_code}")
+        else:
+            log_test("5.1-5.5 Statement Report", False, "No boxes or COA accounts available")
+    else:
+        log_test("5.1-5.5 Statement Report", False, "Failed to fetch boxes/accounts")
+else:
+    log_test("5.1-5.5 Statement Report", False, "Login failed")
+
+# ============================================================================
+# TEST 6: REGRESSION - v2.5 ENDPOINTS STILL WORK
+# ============================================================================
+print("\n### TEST 6: REGRESSION - v2.5 ENDPOINTS ###\n")
+
+owner_cookie = login(TENANT_OWNER["email"], TENANT_OWNER["password"])
+if owner_cookie:
+    # Get baseline quota
+    resp_me = get_with_auth("/auth/me", owner_cookie)
+    if resp_me.status_code == 200:
+        baseline_quota = resp_me.json().get("tenant", {}).get("journal_quota", {}).get("used", 0)
+        
+        # Get test data
+        resp_clients = get_with_auth("/clients", owner_cookie)
+        resp_suppliers = get_with_auth("/suppliers", owner_cookie)
+        resp_boxes = get_with_auth("/boxes", owner_cookie)
+        
+        if all(r.status_code == 200 for r in [resp_clients, resp_suppliers, resp_boxes]):
+            clients = resp_clients.json()
+            suppliers = resp_suppliers.json()
+            boxes = resp_boxes.json()
+            
+            if clients and suppliers and boxes:
+                # Test POST /tickets (should increment quota)
+                ticket_data = {
+                    "pnr": f"REG-{random.randint(1000, 9999)}",
+                    "client_id": clients[0]["id"],
+                    "client_name": clients[0]["name"],
+                    "supplier_id": suppliers[0]["id"],
+                    "supplier_name": suppliers[0]["name"],
+                    "passenger_name": "Regression Test",
+                    "route": "JED-RUH",
+                    "travel_date": datetime.now().strftime("%Y-%m-%d"),
+                    "currency": "SAR",
+                    "cost": 100,
+                    "sale_price": 150,
+                    "payment_method": "credit"
+                }
+                
+                resp = post_with_auth("/tickets", owner_cookie, ticket_data)
+                if resp.status_code == 200:
+                    ticket = resp.json()
+                    ticket_id = ticket.get("id")
+                    cleanup_ids["tickets"].append(ticket_id)
+                    
+                    # Verify quota incremented
+                    resp_me = get_with_auth("/auth/me", owner_cookie)
+                    new_quota = resp_me.json().get("tenant", {}).get("journal_quota", {}).get("used", 0)
+                    
+                    if new_quota == baseline_quota + 1:
+                        log_test("6.1 POST /tickets increments quota", True, f"{baseline_quota} → {new_quota}")
+                    else:
+                        log_test("6.1 POST /tickets increments quota", False, f"Expected {baseline_quota + 1}, got {new_quota}")
+                    
+                    # Test PUT /tickets (should NOT increment quota)
+                    ticket_edit = {**ticket_data, "sale_price": 200}
+                    resp = put_with_auth(f"/tickets/{ticket_id}", owner_cookie, ticket_edit)
+                    if resp.status_code == 200:
+                        resp_me = get_with_auth("/auth/me", owner_cookie)
+                        quota_after_edit = resp_me.json().get("tenant", {}).get("journal_quota", {}).get("used", 0)
+                        
+                        if quota_after_edit == new_quota:
+                            log_test("6.2 PUT /tickets preserves quota", True, f"Quota unchanged: {quota_after_edit}")
+                        else:
+                            log_test("6.2 PUT /tickets preserves quota", False, f"Expected {new_quota}, got {quota_after_edit}")
+                    else:
+                        log_test("6.2 PUT /tickets preserves quota", False, f"Status: {resp.status_code}")
+                else:
+                    log_test("6.1-6.2 Regression tickets", False, f"POST /tickets failed: {resp.status_code}")
+                
+                # Test POST /fx with cash mode (existing behavior)
+                fx_cash_data = {
+                    "type": "buy",
+                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "currency": "USD",
+                    "amount": 50,
+                    "exchange_rate": 3.75,
+                    "counter_currency": "SAR",
+                    "payment_method": "cash",
+                    "box_currency_id": boxes[0]["id"],
+                    "box_counter_id": boxes[1]["id"] if len(boxes) > 1 else boxes[0]["id"],
+                    "customer_name": "Regression FX Cash"
+                }
+                
+                resp = post_with_auth("/fx", owner_cookie, fx_cash_data)
+                if resp.status_code == 200:
+                    fx = resp.json()
+                    fx_id = fx.get("id")
+                    cleanup_ids["fx"].append(fx_id)
+                    log_test("6.3 POST /fx cash mode still works", True, f"ID: {fx_id}")
+                else:
+                    log_test("6.3 POST /fx cash mode still works", False, f"Status: {resp.status_code}")
+            else:
+                log_test("6.1-6.3 Regression tests", False, "Insufficient test data")
+        else:
+            log_test("6.1-6.3 Regression tests", False, "Failed to fetch test data")
+    else:
+        log_test("6.1-6.3 Regression tests", False, "Failed to get baseline quota")
+else:
+    log_test("6.1-6.3 Regression tests", False, "Login failed")
+
+# ============================================================================
+# CLEANUP
+# ============================================================================
+print("\n### CLEANUP ###\n")
+
+owner_cookie = login(TENANT_OWNER["email"], TENANT_OWNER["password"])
+if owner_cookie:
+    # Delete tickets
+    for ticket_id in cleanup_ids["tickets"]:
+        resp = delete_with_auth(f"/tickets/{ticket_id}", owner_cookie)
+        if resp.status_code == 200:
+            print(f"✓ Deleted ticket {ticket_id}")
+        else:
+            print(f"✗ Failed to delete ticket {ticket_id}: {resp.status_code}")
+    
+    # Delete FX transactions
+    for fx_id in cleanup_ids["fx"]:
+        resp = delete_with_auth(f"/fx/{fx_id}", owner_cookie)
+        if resp.status_code == 200:
+            print(f"✓ Deleted FX {fx_id}")
+        else:
+            print(f"✗ Failed to delete FX {fx_id}: {resp.status_code}")
+
+# Note: We don't delete tenants created via public signup as they may be needed for verification
+# Super admin can clean them up manually if needed
+
+# ============================================================================
+# SUMMARY
+# ============================================================================
+print("\n" + "=" * 80)
+print("TEST SUMMARY")
+print("=" * 80)
+
+total_tests = len(test_results)
+passed_tests = sum(1 for t in test_results if t["passed"])
+failed_tests = total_tests - passed_tests
+
+print(f"\nTotal Tests: {total_tests}")
+print(f"Passed: {passed_tests} ✅")
+print(f"Failed: {failed_tests} ❌")
+print(f"Success Rate: {(passed_tests/total_tests*100):.1f}%\n")
+
+if failed_tests > 0:
+    print("FAILED TESTS:")
+    for t in test_results:
+        if not t["passed"]:
+            print(f"  ❌ {t['name']}")
+            if t["details"]:
+                print(f"     {t['details']}")
+
+print("\n" + "=" * 80)
