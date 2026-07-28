@@ -2002,3 +2002,59 @@ agent_communication:
       
       **RECOMMENDATION:**
       Main agent should summarize and finish. The v2.7 implementation is complete and working. Only minor manual verification needed for print voucher popup.
+
+  - agent: "main"
+    message: |
+      ✅ v2.7 FULLY VERIFIED — Ticket Extended Fields + 3-Coupon Print + Health Endpoint + Carrier Column
+      
+      ## ADDITIONAL FINISHING TOUCHES
+      
+      ### 1) GET /api/health (Uptime Monitor Endpoint)
+      - Public endpoint, no auth required.
+      - Response: `{ status:"ok", timestamp:<ISO>, uptime_sec:<int>, service:"rahaal-erp", version:"2.7", db:"connected" }`.
+      - Pings MongoDB via `db.command({ ping: 1 })` — returns 503 if DB is down.
+      - Ready for UptimeRobot / Cron-jobs.org keep-alive pings every 4-5 minutes.
+      
+      ### 2) Tickets Grid — "🚌 الشركة الناقلة" Column
+      - New column between "المسافر" and "العميل".
+      - Amber badge with rounded border and 🚌 icon when carrier_name is set.
+      - Shows "—" for pre-v2.7 rows without carrier.
+      - colSpan on empty state updated from 12 to 13.
+      
+      ### 3) Frontend Automated Testing (Playwright)
+      - Flow 1 (Dialog sections) ✅ — All 3 new sections rendered with correct fields and dropdowns.
+      - Flow 2 (Grid column) ✅ — "🚌 الشركة الناقلة" column visible; new ticket displays carrier in amber badge; pre-v2.7 tickets show "—".
+      - Flow 3 (Print Voucher) ✅ — All 7 keywords found: نسخة الراكب, نسخة الترحيل, نسخة الفرع, شركة البركة للنقل, 262054673, 26205054, الشركة الناقلة.
+      - Flow 4 (Edit) ✅ — Dialog title "✏️ تعديل تذكرة", all v2.7 fields prefilled.
+      - Flow 5 (Cleanup DELETE) ✅.
+      - Flow 6 (Health endpoint) ✅ — 200 OK with correct payload.
+      
+      ### Visual Confirmations (Screenshots)
+      - Print popup shows the full 3-coupon layout matching the user's sample: blue-bordered Passenger Copy at top (with amber carrier banner, blue passenger panel, green flight panel, dashed-red terms box, blue-gradient price footer), green-dashed Dispatch Copy, purple-dashed Branch Copy. All 3 cut-lines with ✂️ icon.
+      - Tickets grid shows the new "🚌 الشركة الناقلة" column with the amber-badged value "🚌 شركة البركة للنقل الجماعي (الرويشان)" on new tickets and "—" on old ones.
+
+backend:
+  - task: "v2.7 Ticket Extended Fields — carrier_name + traveler + flight info (text-only, non-financial)"
+    working: true
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "5/5 tests passed. All 13 fields persisted on POST/PUT. JE remains 3 lines. Quota preserved on edit. Backward compatible with pre-v2.7 records."
+  - task: "v2.7 Health Endpoint — GET /api/health"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Verified via curl + Playwright: 200 with all fields (status, timestamp, uptime_sec, service, version, db). Pings MongoDB for DB liveness check. Returns 503 on DB failure."
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
