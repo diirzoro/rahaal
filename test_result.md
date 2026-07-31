@@ -3518,3 +3518,30 @@ test_plan:
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+# ============================================================
+# v3.4 Deployment Fix — DB_NAME fallback removed (2026-07-31)
+# ============================================================
+backend:
+  - task: "v3.4 Deployment: remove hardcoded DB_NAME fallback"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Removed `db = client.db(process.env.DB_NAME || 'rahaal_erp')` fallback.
+          Now throws explicit error if DB_NAME env is missing:
+            if (!process.env.DB_NAME) throw new Error('DB_NAME environment variable is required')
+            db = client.db(process.env.DB_NAME)
+          deployment_agent re-run: status changed from FAIL(BLOCKER) → WARN (deployment-ready).
+          Remaining WARN items are non-blockers:
+            - Seeded demo credentials (intentional)
+            - Missing .gitignore/.dockerignore (optional optimization)
+
+metadata:
+  version: "3.4"
