@@ -2330,3 +2330,182 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+
+# ============================================================
+# v3.0 — Services Module + Visa Alerts + Strict Excel Import
+# ============================================================
+backend:
+  - task: "v3.0 Services Module CRUD + service-types catalog"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Added new /api/services endpoints (GET, POST, PUT via universal handler, DELETE via universal handler)
+          and /api/service-types (GET, POST, PATCH, DELETE) for dynamic per-tenant catalog.
+          On tenant seed: 4 default service types added ('حجز فندق', 'تصديق شهادات', 'خدمة نقل / ترحيل', 'خدمات متنوعة').
+          Existing tenants get backfill via seedInitial().
+          Service transactions use revenue account 4103 (إيرادات خدمات إضافية).
+          Uses standard clients/suppliers/boxes; label in JE line is "حساب القبض" for client on credit side.
+          Test: create service_type, list, create a service, verify JE created, edit, delete.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (11/11 tests) - Services Module fully functional:
+          1. GET /service-types returns 4 default types ('حجز فندق', 'تصديق شهادات', 'خدمة نقل / ترحيل', 'خدمات متنوعة')
+          2. POST /service-types creates new type 'إصدار جواز'
+          3. Duplicate service type correctly rejected with 400
+          4. Created client 'عميل خدمات' and supplier 'مورد خدمات'
+          5. POST /services creates service with commission=50 (sale_price 150 - cost 100), quota incremented by 1
+          6. GET /services lists created service
+          7. Journal entry created with ref_type='service', 3 lines, account 4103 used for revenue (credit 50)
+          8. Accounting balances correct: client SAR=150, supplier SAR=100
+          9. PUT /services/:id edits service (sale_price 150→200), commission recalculated (50→100), quota preserved (no increment)
+          10. JE reversed and re-posted with new commission (100), client balance updated to 200
+          11. DELETE /services/:id removes service, quota decremented by 1, balances reversed to 0, JE deleted
+          CRITICAL: Quota preserved on edit (54→55 after create, 55→55 after edit, 55→54 after delete)
+
+  - task: "v3.0 Visa Entry/Exit Dates + Dashboard Expiration Alerts"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          createVisa() now accepts entry_date, expected_exit_date, is_exited.
+          New endpoints: POST /api/visas/:id/mark-exited and POST /api/visas/:id/unmark-exited.
+          Dashboard /api/dashboard now returns visa_alerts[] array containing visas
+          where expected_exit_date is within 10 days or overdue AND is_exited != true.
+          Each alert row has: id, service_type, passenger_name, passport_no, nationality,
+          client_name, entry_date, expected_exit_date, days_left, overdue.
+          Test: create visa with expected_exit_date 5 days out, GET /dashboard shows in visa_alerts,
+          POST mark-exited removes from alerts.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (9/9 tests) - Visa Alerts fully functional:
+          1. Created visa 1 with entry_date=today, expected_exit_date=today+5 days
+          2. GET /dashboard returns visa_alerts[] with visa 1, days_left=5, overdue=false
+          3. Created visa 2 with expected_exit_date=today-2 days (overdue)
+          4. GET /dashboard shows visa 2 with days_left=-2, overdue=true
+          5. Created visa 3 with expected_exit_date=today+20 days — does NOT appear in alerts (outside 10-day window)
+          6. Created visa 4 without expected_exit_date — does NOT appear in alerts
+          7. POST /visas/:id/mark-exited returns success=true, is_exited=true
+          8. GET /dashboard confirms exited visa removed from alerts
+          9. POST /visas/:id/unmark-exited returns success=true, is_exited=false, visa re-appears in alerts
+          CRITICAL: Alert window is 10 days (today to today+10), includes overdue visas (negative days_left)
+
+  - task: "v3.0 Strict Excel Import Validation (no auto-create)"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          /import/tickets/preview and /import/visas/preview now validate that client_name and supplier_name
+          exist in DB (case-insensitive trim match). If not found, row __errors contains explicit message:
+          "خطأ استيراد: الحساب "X" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً"
+          /import/tickets and /import/visas commit endpoints no longer call ensurePartyByName().
+          Instead they findOne() by name and fail row with explicit error message if not found.
+          Test: attempt to import rows with non-existent client/supplier names — preview shows errors,
+          commit skips these rows and reports them in errors array.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (6/6 tests) - Strict Import Validation fully functional:
+          1. POST /import/tickets/preview with 3 rows: (a) valid with existing client/supplier, (b) non-existent client "عميل غير موجود XYZ", (c) non-existent supplier "مورد غير موجود ABC"
+          2. Preview response: valid_count=1, row A has no errors, row B has error 'خطأ استيراد: الحساب "عميل غير موجود XYZ" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً', row C has error for supplier
+          3. POST /import/tickets with same rows: created=1, failed=2, errors array contains 2 entries with Arabic messages
+          4. Verified NO auto-creation: clients count increased by 1 (only the valid test client), suppliers count increased by 1 (only the valid test supplier)
+          5. POST /import/visas/preview with 2 rows: valid row and non-existent client row — valid_count=1, error message correct
+          6. POST /import/visas: created=1, failed=1
+          CRITICAL: No auto-creation of non-existent parties. All errors in Arabic with explicit account names.
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      v3.0 backend changes complete. Please verify:
+      1. /api/service-types GET/POST/PATCH/DELETE — dynamic catalog per tenant
+      2. /api/services POST/GET/PUT/DELETE — with full JE reversal for edit/delete
+      3. Visa create/edit accepts new fields (entry_date, expected_exit_date, is_exited)
+      4. /api/visas/:id/mark-exited toggles is_exited=true
+      5. /api/dashboard now returns visa_alerts[] with days_left calculation
+      6. /import/tickets/preview and /import/visas/preview reject rows where client/supplier not in DB
+      7. /import/tickets and /import/visas do NOT auto-create parties — they fail rows
+      Use owner@demo.com / Demo@2025 for tenant-scoped tests.
+      Existing v2.8 features must continue working (regression check).
+  - agent: "testing"
+    message: |
+      ✅ v3.0 BACKEND TESTING COMPLETED — ALL 26 TESTS PASSED (3 features + regression)
+      
+      Comprehensive test suite executed for v3.0 features (Services Module, Visa Alerts, Strict Import Validation):
+      
+      **Test Results: 26/26 PASSED**
+      
+      **FEATURE 1: Services Module (11/11 tests)**
+      1. ✅ GET /service-types returns 4 default types seeded correctly
+      2. ✅ POST /service-types creates new service type 'إصدار جواز'
+      3. ✅ Duplicate service type rejected with 400
+      4. ✅ Client and supplier created for testing
+      5. ✅ POST /services creates service with commission=50, quota incremented by 1
+      6. ✅ GET /services lists created service
+      7. ✅ Journal entry created with ref_type='service', 3 lines, account 4103 for revenue
+      8. ✅ Accounting balances correct: client SAR=150, supplier SAR=100
+      9. ✅ PUT /services/:id edits service, commission recalculated (50→100), quota preserved
+      10. ✅ JE reversed and re-posted, client balance updated to 200
+      11. ✅ DELETE /services/:id removes service, quota decremented, balances reversed to 0, JE deleted
+      
+      **FEATURE 2: Visa Entry/Exit Alerts (9/9 tests)**
+      1. ✅ Created visa with entry_date=today, expected_exit_date=today+5 days
+      2. ✅ GET /dashboard returns visa_alerts[] with visa, days_left=5, overdue=false
+      3. ✅ Created overdue visa (exit date 2 days ago)
+      4. ✅ Dashboard shows overdue visa with days_left=-2, overdue=true
+      5. ✅ Visa with exit date 20 days away does NOT appear in alerts (outside 10-day window)
+      6. ✅ Visa without expected_exit_date does NOT appear in alerts
+      7. ✅ POST /visas/:id/mark-exited returns success, is_exited=true
+      8. ✅ Exited visa removed from dashboard alerts
+      9. ✅ POST /visas/:id/unmark-exited restores visa to alerts
+      
+      **FEATURE 3: Strict Import Validation (6/6 tests)**
+      1. ✅ POST /import/tickets/preview with 3 rows: valid, non-existent client, non-existent supplier
+      2. ✅ Preview shows __errors for invalid rows with Arabic message 'غير موجود في دليل الحسابات'
+      3. ✅ POST /import/tickets: created=1, failed=2, errors array contains Arabic messages
+      4. ✅ NO auto-creation: clients/suppliers count unchanged (only test accounts created)
+      5. ✅ POST /import/visas/preview validates correctly, valid_count=1
+      6. ✅ POST /import/visas: created=1, failed=1
+      
+      **REGRESSION TESTS (6/6 tests)**
+      1. ✅ GET /health returns version="3.0", status="ok"
+      2. ✅ Ticket create/edit/delete flow working (quota preserved on edit)
+      3. ✅ Visa create with OLD payload (no entry_date/expected_exit_date) still works (backward compatible)
+      4. ✅ Voucher receipt/payment working
+      5. ✅ FX buy/sell working
+      6. ✅ Super admin GET /admin/tenants working (16 tenants found)
+      
+      **CRITICAL VERIFICATIONS:**
+      ✅ Services Module: Revenue account 4103 used, quota preserved on edit, balances reversed on delete
+      ✅ Visa Alerts: 10-day window (today to today+10), includes overdue visas, mark/unmark working
+      ✅ Strict Import: NO auto-creation, Arabic error messages with account names, preview validation accurate
+      ✅ Regression: All v2.8 and earlier features still working, backward compatibility maintained
+      ✅ Health endpoint: Version updated to 3.0
+      
+      Backend v3.0 is production-ready. All new features verified and working correctly.

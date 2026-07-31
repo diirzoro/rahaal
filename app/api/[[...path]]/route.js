@@ -59,6 +59,13 @@ async function seedTenantDefaults(db, tenantId) {
     { id: uuidv4(), tenant_id: t, code: '5101', name_ar: 'مصاريف تشغيلية', type: 'expense', parent: '5', is_group: true, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '5201', name_ar: 'فروق عملة وتسويات', type: 'expense', parent: '5', is_group: false, created_at: now },
   ])
+  // v3.0 — Seed default dynamic service catalog for the Services module
+  await db.collection('service_types').insertMany([
+    { id: uuidv4(), tenant_id: t, name: 'حجز فندق', active: true, created_at: now },
+    { id: uuidv4(), tenant_id: t, name: 'تصديق شهادات', active: true, created_at: now },
+    { id: uuidv4(), tenant_id: t, name: 'خدمة نقل / ترحيل', active: true, created_at: now },
+    { id: uuidv4(), tenant_id: t, name: 'خدمات متنوعة', active: true, created_at: now },
+  ])
   await db.collection('boxes').insertMany([
     { id: uuidv4(), tenant_id: t, name_ar: 'الصندوق الرئيسي', type: 'cash', balances: emptyBalances(), created_at: new Date() },
     { id: uuidv4(), tenant_id: t, name_ar: 'حساب بنكي / محفظة', type: 'bank', balances: emptyBalances(), created_at: new Date() },
@@ -120,6 +127,17 @@ async function seedInitial(db) {
     if (!tn.journal_quota) {
       const usedCount = await db.collection('journal_entries').countDocuments({ tenant_id: tn.id })
       await db.collection('tenants').updateOne({ id: tn.id }, { $set: { journal_quota: { used: usedCount, limit: 500, top_ups: [] } } })
+    }
+    // v3.0 — Backfill default service_types for existing tenants
+    const stCount = await db.collection('service_types').countDocuments({ tenant_id: tn.id })
+    if (stCount === 0) {
+      const now = new Date()
+      await db.collection('service_types').insertMany([
+        { id: uuidv4(), tenant_id: tn.id, name: 'حجز فندق', active: true, created_at: now },
+        { id: uuidv4(), tenant_id: tn.id, name: 'تصديق شهادات', active: true, created_at: now },
+        { id: uuidv4(), tenant_id: tn.id, name: 'خدمة نقل / ترحيل', active: true, created_at: now },
+        { id: uuidv4(), tenant_id: tn.id, name: 'خدمات متنوعة', active: true, created_at: now },
+      ])
     }
   }
 
@@ -249,7 +267,7 @@ async function createJournalEntry(db, tenantId, { date, description, ref_type, r
 // ============ EDIT/REVERSAL ENGINE ============
 // Reverses balance updates for a transactional record. Used before re-applying edited values or deleting.
 async function reverseTransactionEffects(db, T, kind, doc) {
-  if (kind === 'tickets' || kind === 'visas') {
+  if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
     if (doc.payment_method === 'cash' && doc.box_id) {
       await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
     } else {
@@ -346,7 +364,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '2.7',
+          version: '3.0',
           db: 'connected',
         })
       } catch (e) {
@@ -576,7 +594,7 @@ async function handleRoute(request, { params }) {
         }
         if (method === 'DELETE') {
           await db.collection('tenants').deleteOne({ id: tid })
-          for (const c of ['users', 'accounts', 'boxes', 'clients', 'suppliers', 'tickets', 'visas', 'vouchers', 'journal_entries', 'tenant_settings', 'currency_exchanges']) {
+          for (const c of ['users', 'accounts', 'boxes', 'clients', 'suppliers', 'tickets', 'visas', 'services', 'service_types', 'vouchers', 'journal_entries', 'tenant_settings', 'currency_exchanges']) {
             await db.collection(c).deleteMany({ tenant_id: tid })
           }
           return ok({ success: true })
@@ -874,6 +892,67 @@ async function handleRoute(request, { params }) {
       return ok(result.doc)
     }
 
+    // v3.0 — Mark visa as exited (removes alert, no accounting effect)
+    const markExitedMatch = route.match(/^\/visas\/([^/]+)\/mark-exited$/)
+    if (markExitedMatch && method === 'POST') {
+      const visaId = markExitedMatch[1]
+      const v = await db.collection('visas').findOne({ id: visaId, tenant_id: T })
+      if (!v) return bad('التأشيرة غير موجودة', 404)
+      await db.collection('visas').updateOne(
+        { id: visaId, tenant_id: T },
+        { $set: { is_exited: true, exited_at: new Date(), exited_by: sess.user.email } }
+      )
+      return ok({ success: true, id: visaId, is_exited: true })
+    }
+
+    // v3.0 — Unmark visa (in case of error)
+    const unmarkExitedMatch = route.match(/^\/visas\/([^/]+)\/unmark-exited$/)
+    if (unmarkExitedMatch && method === 'POST') {
+      const visaId = unmarkExitedMatch[1]
+      await db.collection('visas').updateOne(
+        { id: visaId, tenant_id: T },
+        { $set: { is_exited: false }, $unset: { exited_at: '', exited_by: '' } }
+      )
+      return ok({ success: true, id: visaId, is_exited: false })
+    }
+
+    // ============ SERVICES (v3.0 — dedicated dynamic-catalog services module) ============
+    if (route === '/service-types' && method === 'GET') {
+      const list = await db.collection('service_types').find(tf).sort({ created_at: 1 }).toArray()
+      return ok(list.map(x => ({ ...x, _id: undefined })))
+    }
+    if (route === '/service-types' && method === 'POST') {
+      const b = await request.json()
+      const name = String(b.name || '').trim()
+      if (!name) return bad('اسم نوع الخدمة مطلوب')
+      const exists = await db.collection('service_types').findOne({ tenant_id: T, name })
+      if (exists) return bad('نوع الخدمة موجود بالفعل')
+      const doc = { id: uuidv4(), tenant_id: T, name, active: true, created_at: new Date() }
+      await db.collection('service_types').insertOne(doc)
+      const { _id, ...rest } = doc; return ok(rest)
+    }
+    const stIdMatch = route.match(/^\/service-types\/([^/]+)$/)
+    if (stIdMatch && method === 'DELETE') {
+      await db.collection('service_types').deleteOne({ id: stIdMatch[1], tenant_id: T })
+      return ok({ success: true })
+    }
+    if (stIdMatch && method === 'PATCH') {
+      const b = await request.json()
+      const upd = {}
+      if (b.name) upd.name = String(b.name).trim()
+      if (b.active !== undefined) upd.active = !!b.active
+      await db.collection('service_types').updateOne({ id: stIdMatch[1], tenant_id: T }, { $set: upd })
+      return ok({ success: true })
+    }
+
+    if (route === '/services' && method === 'GET') return ok(clean(await db.collection('services').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+    if (route === '/services' && method === 'POST') {
+      const b = await request.json()
+      const result = await createService(db, T, b)
+      if (result.error) return bad(result.error)
+      return ok(result.doc)
+    }
+
     // ============ BULK IMPORT ============
     if (route === '/import/tickets/preview' && method === 'POST') {
       const b = await request.json()  // { rows: [normalized rows], skip_duplicates:true }
@@ -881,6 +960,11 @@ async function handleRoute(request, { params }) {
       const pnrs = rows.map(r => r.pnr).filter(Boolean)
       const existing = await db.collection('tickets').find({ tenant_id: T, pnr: { $in: pnrs } }).project({ pnr: 1 }).toArray()
       const existingSet = new Set(existing.map(x => x.pnr))
+      // v3.0 — Strict validation: mapped accounts MUST exist in Chart of Accounts (clients & suppliers)
+      const allClients = await db.collection('clients').find({ tenant_id: T }).project({ name: 1 }).toArray()
+      const allSuppliers = await db.collection('suppliers').find({ tenant_id: T }).project({ name: 1 }).toArray()
+      const clientSet = new Set(allClients.map(x => String(x.name).trim().toLowerCase()))
+      const supplierSet = new Set(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
       const seenInBatch = new Set()
       const validated = rows.map((r, i) => {
         const errors = []
@@ -888,7 +972,9 @@ async function handleRoute(request, { params }) {
         if (r.cost === undefined || r.cost === '' || isNaN(Number(r.cost))) errors.push('التكلفة مطلوبة')
         if (r.sale_price === undefined || r.sale_price === '' || isNaN(Number(r.sale_price))) errors.push('سعر البيع مطلوب')
         if (!r.client_name) errors.push('اسم العميل مطلوب')
+        else if (!clientSet.has(String(r.client_name).trim().toLowerCase())) errors.push(`خطأ استيراد: الحساب "${r.client_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
         if (!r.supplier_name) errors.push('اسم المورد مطلوب')
+        else if (!supplierSet.has(String(r.supplier_name).trim().toLowerCase())) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
         let dup = false
         if (r.pnr && existingSet.has(r.pnr)) dup = 'موجود مسبقاً في قاعدة البيانات'
         if (r.pnr && seenInBatch.has(r.pnr)) dup = 'مكرر داخل نفس الملف'
@@ -912,9 +998,11 @@ async function handleRoute(request, { params }) {
       for (const r of rows) {
         if (skip && r.__dup) { skipped++; continue }
         if (r.__errors && r.__errors.length) { failed++; errors.push({ row: r.__row, errors: r.__errors }); continue }
-        const cli = await ensurePartyByName(db, T, 'clients', r.client_name)
-        const sup = await ensurePartyByName(db, T, 'suppliers', r.supplier_name)
-        if (!cli || !sup) { failed++; continue }
+        // v3.0 — STRICT: no auto-creation. Look up by name; fail row if not found.
+        const cli = r.client_name ? await db.collection('clients').findOne({ tenant_id: T, name: String(r.client_name).trim() }) : null
+        const sup = r.supplier_name ? await db.collection('suppliers').findOne({ tenant_id: T, name: String(r.supplier_name).trim() }) : null
+        if (!cli) { failed++; errors.push({ row: r.__row, errors: [`الحساب "${r.client_name}" غير موجود في دليل الحسابات`] }); continue }
+        if (!sup) { failed++; errors.push({ row: r.__row, errors: [`المورد "${r.supplier_name}" غير موجود في دليل الحسابات`] }); continue }
         const result = await createTicket(db, T, { ...r, client_id: cli.id, supplier_id: sup.id })
         if (result.error) { failed++; errors.push({ row: r.__row, errors: [result.error] }) } else created++
       }
@@ -926,6 +1014,11 @@ async function handleRoute(request, { params }) {
       const passports = rows.map(r => r.passport_no).filter(Boolean)
       const existing = await db.collection('visas').find({ tenant_id: T, passport_no: { $in: passports } }).project({ passport_no: 1 }).toArray()
       const existingSet = new Set(existing.map(x => x.passport_no))
+      // v3.0 — Strict validation
+      const allClients = await db.collection('clients').find({ tenant_id: T }).project({ name: 1 }).toArray()
+      const allSuppliers = await db.collection('suppliers').find({ tenant_id: T }).project({ name: 1 }).toArray()
+      const clientSet = new Set(allClients.map(x => String(x.name).trim().toLowerCase()))
+      const supplierSet = new Set(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
       const seenInBatch = new Set()
       const validated = rows.map((r, i) => {
         const errors = []
@@ -933,7 +1026,9 @@ async function handleRoute(request, { params }) {
         if (r.cost === undefined || r.cost === '' || isNaN(Number(r.cost))) errors.push('التكلفة مطلوبة')
         if (r.sale_price === undefined || r.sale_price === '' || isNaN(Number(r.sale_price))) errors.push('سعر البيع مطلوب')
         if (!r.client_name) errors.push('اسم العميل مطلوب')
+        else if (!clientSet.has(String(r.client_name).trim().toLowerCase())) errors.push(`خطأ استيراد: الحساب "${r.client_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
         if (!r.supplier_name) errors.push('اسم المورد مطلوب')
+        else if (!supplierSet.has(String(r.supplier_name).trim().toLowerCase())) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
         let dup = false
         if (r.passport_no && existingSet.has(r.passport_no)) dup = 'رقم الجواز موجود مسبقاً'
         if (r.passport_no && seenInBatch.has(r.passport_no)) dup = 'مكرر داخل الملف'
@@ -956,10 +1051,12 @@ async function handleRoute(request, { params }) {
       const errors = []
       for (const r of rows) {
         if (skip && r.__dup) { skipped++; continue }
-        if (r.__errors && r.__errors.length) { failed++; continue }
-        const cli = await ensurePartyByName(db, T, 'clients', r.client_name)
-        const sup = await ensurePartyByName(db, T, 'suppliers', r.supplier_name)
-        if (!cli || !sup) { failed++; continue }
+        if (r.__errors && r.__errors.length) { failed++; errors.push({ row: r.__row, errors: r.__errors }); continue }
+        // v3.0 — STRICT: no auto-creation
+        const cli = r.client_name ? await db.collection('clients').findOne({ tenant_id: T, name: String(r.client_name).trim() }) : null
+        const sup = r.supplier_name ? await db.collection('suppliers').findOne({ tenant_id: T, name: String(r.supplier_name).trim() }) : null
+        if (!cli) { failed++; errors.push({ row: r.__row, errors: [`الحساب "${r.client_name}" غير موجود في دليل الحسابات`] }); continue }
+        if (!sup) { failed++; errors.push({ row: r.__row, errors: [`المورد "${r.supplier_name}" غير موجود في دليل الحسابات`] }); continue }
         const result = await createVisa(db, T, { ...r, client_id: cli.id, supplier_id: sup.id })
         if (result.error) { failed++; errors.push({ row: r.__row, errors: [result.error] }) } else created++
       }
@@ -982,7 +1079,7 @@ async function handleRoute(request, { params }) {
     if (route === '/journal-entries' && method === 'GET') return ok(clean(await db.collection('journal_entries').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
 
     // Universal DELETE for transactional records (reverses JE + balances + decrements quota)
-    const delMatch = route.match(/^\/(tickets|visas|vouchers|fx)\/([^/]+)$/)
+    const delMatch = route.match(/^\/(tickets|visas|services|vouchers|fx)\/([^/]+)$/)
     if (delMatch && method === 'DELETE') {
       const [_, kind, docId] = delMatch
       const coll = kind === 'fx' ? 'currency_exchanges' : kind
@@ -990,7 +1087,7 @@ async function handleRoute(request, { params }) {
       if (!doc) return bad('العنصر غير موجود', 404)
       // Reverse balance updates & delete linked journal entry
       const je = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
-      if (kind === 'tickets' || kind === 'visas') {
+      if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
         if (doc.payment_method === 'cash' && doc.box_id) {
           await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
         } else {
@@ -1025,7 +1122,7 @@ async function handleRoute(request, { params }) {
     }
 
     // ============ PUT /:kind/:id — EDIT MODE (reverse old JE, keep quota, re-post new) ============
-    const putMatch = route.match(/^\/(tickets|visas|vouchers|fx)\/([^/]+)$/)
+    const putMatch = route.match(/^\/(tickets|visas|services|vouchers|fx)\/([^/]+)$/)
     if (putMatch && method === 'PUT') {
       const [_, kind, docId] = putMatch
       const coll = kind === 'fx' ? 'currency_exchanges' : kind
@@ -1044,6 +1141,7 @@ async function handleRoute(request, { params }) {
       const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at }
       if (kind === 'tickets') result = await createTicket(db, T, b, opts)
       else if (kind === 'visas') result = await createVisa(db, T, b, opts)
+      else if (kind === 'services') result = await createService(db, T, b, opts)
       else if (kind === 'vouchers') result = await createVoucher(db, T, { ...b, type: b.type || oldDoc.type }, opts)
       else if (kind === 'fx') result = await createFx(db, T, { ...b, type: b.type || oldDoc.type }, opts)
       if (result.error) {
@@ -1193,6 +1291,10 @@ async function createVisa(db, T, b, opts = {}) {
     client_id: cli.id, client_name: cli.name, supplier_id: sup.id, supplier_name: sup.name,
     passenger_name: b.passenger_name || '', passport_no: b.passport_no || '',
     nationality: b.nationality || '', attachment_url: b.attachment_url || '',
+    // v3.0 — Entry/Exit tracking for expiration alerts
+    entry_date: b.entry_date ? new Date(b.entry_date) : null,
+    expected_exit_date: b.expected_exit_date ? new Date(b.expected_exit_date) : null,
+    is_exited: !!b.is_exited,
     cost, sale_price: sale, commission,
     payment_method: paymentMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
     created_at: opts.createdAt || new Date(),
@@ -1213,6 +1315,55 @@ async function createVisa(db, T, b, opts = {}) {
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.passenger_name || cli.name}`,
     ref_type: 'visa', ref_id: doc.id, currency: b.currency, lines,
+  }, { skipQuota: !!opts.skipQuota })
+  const { _id, ...rest } = doc; return { doc: rest }
+}
+
+// v3.0 — Services: Dedicated dynamic-catalog service transactions (Hotels, Attestations, Transfers, etc.)
+// Uses revenue account 4103 (إيرادات خدمات إضافية). Party label = "حساب القبض" but stored the same way.
+async function createService(db, T, b, opts = {}) {
+  if (!b.client_id || !b.supplier_id) return { error: 'حساب القبض والمورد/المزود مطلوبان' }
+  if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
+  const cost = Number(b.cost) || 0, sale = Number(b.sale_price) || 0
+  const commission = +(sale - cost).toFixed(2)
+  const cli = await db.collection('clients').findOne({ id: b.client_id, tenant_id: T })
+  const sup = await db.collection('suppliers').findOne({ id: b.supplier_id, tenant_id: T })
+  if (!cli || !sup) return { error: 'حساب القبض أو المورد غير موجود' }
+  const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+  let box = null
+  if (paymentMethod === 'cash') {
+    if (!b.box_id) return { error: 'اختر الصندوق/البنك للدفع النقدي' }
+    box = await db.collection('boxes').findOne({ id: b.box_id, tenant_id: T })
+    if (!box) return { error: 'الصندوق غير موجود' }
+  }
+  const doc = {
+    id: opts.existingId || uuidv4(), tenant_id: T, date: new Date(b.date || Date.now()),
+    service_type: b.service_type || 'خدمات متنوعة',
+    description: b.description || '',
+    currency: b.currency, exchange_rate: Number(b.exchange_rate) || 1,
+    client_id: cli.id, client_name: cli.name, supplier_id: sup.id, supplier_name: sup.name,
+    beneficiary_name: b.beneficiary_name || '', reference_no: b.reference_no || '',
+    notes: b.notes || '',
+    cost, sale_price: sale, commission,
+    payment_method: paymentMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
+    created_at: opts.createdAt || new Date(),
+    ...(opts.existingId ? { updated_at: new Date() } : {}),
+  }
+  await db.collection('services').insertOne(doc)
+  await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
+  const lines = []
+  if (paymentMethod === 'cash') {
+    await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
+    lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
+  } else {
+    await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
+    lines.push({ account_code: '1301', account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
+  }
+  lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
+  lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيرادات ${doc.service_type}`, debit: 0, credit: commission })
+  await createJournalEntry(db, T, {
+    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.beneficiary_name || cli.name}`,
+    ref_type: 'service', ref_id: doc.id, currency: b.currency, lines,
   }, { skipQuota: !!opts.skipQuota })
   const { _id, ...rest } = doc; return { doc: rest }
 }
@@ -1439,25 +1590,27 @@ async function computeDashboard(db, T) {
   const tf = { tenant_id: T }
   const rates = (await db.collection('tenant_settings').findOne(tf))?.rates || DEFAULT_RATES
 
-  const [ticketsToday, visasToday, ticketsMonth, visasMonth] = await Promise.all([
+  const [ticketsToday, visasToday, servicesToday, ticketsMonth, visasMonth, servicesMonth] = await Promise.all([
     db.collection('tickets').find({ ...tf, date: { $gte: todayStart } }).toArray(),
     db.collection('visas').find({ ...tf, date: { $gte: todayStart } }).toArray(),
+    db.collection('services').find({ ...tf, date: { $gte: todayStart } }).toArray(),
     db.collection('tickets').find({ ...tf, date: { $gte: monthAgo } }).toArray(),
     db.collection('visas').find({ ...tf, date: { $gte: monthAgo } }).toArray(),
+    db.collection('services').find({ ...tf, date: { $gte: monthAgo } }).toArray(),
   ])
   const kpiSales = { USD: 0, SAR: 0, YER: 0 }, kpiProfit = { USD: 0, SAR: 0, YER: 0 }
-  for (const t of [...ticketsToday, ...visasToday]) { kpiSales[t.currency] += t.sale_price || 0; kpiProfit[t.currency] += t.commission || 0 }
+  for (const t of [...ticketsToday, ...visasToday, ...servicesToday]) { kpiSales[t.currency] += t.sale_price || 0; kpiProfit[t.currency] += t.commission || 0 }
   const dayMap = {}
   for (let i = 29; i >= 0; i--) {
     const d = new Date(now); d.setDate(d.getDate() - i); d.setHours(0,0,0,0)
     const key = d.toISOString().slice(0, 10); dayMap[key] = { date: key, sales: 0, profit: 0 }
   }
-  for (const t of [...ticketsMonth, ...visasMonth]) {
+  for (const t of [...ticketsMonth, ...visasMonth, ...servicesMonth]) {
     const key = new Date(t.date).toISOString().slice(0, 10)
     if (dayMap[key]) { const r = getTransferRate(rates, t.currency); dayMap[key].sales += (t.sale_price||0)*r; dayMap[key].profit += (t.commission||0)*r }
   }
   for (const k of Object.keys(dayMap)) { dayMap[k].sales = +dayMap[k].sales.toFixed(2); dayMap[k].profit = +dayMap[k].profit.toFixed(2) }
-  const pieMap = { 'تذاكر': 0, 'تأشيرات عمرة': 0, 'تأشيرات سياحية/عمل': 0, 'موافقات أمنية': 0, 'حجز فنادق': 0, 'أخرى': 0 }
+  const pieMap = { 'تذاكر': 0, 'تأشيرات عمرة': 0, 'تأشيرات سياحية/عمل': 0, 'موافقات أمنية': 0, 'حجز فنادق': 0, 'خدمات إضافية': 0, 'أخرى': 0 }
   for (const t of ticketsMonth) pieMap['تذاكر'] += (t.commission||0)*getTransferRate(rates, t.currency)
   for (const v of visasMonth) {
     const st = v.service_type || 'أخرى'
@@ -1468,19 +1621,57 @@ async function computeDashboard(db, T) {
     else if (st.includes('سياح') || st.includes('عمل')) key = 'تأشيرات سياحية/عمل'
     pieMap[key] += (v.commission||0)*getTransferRate(rates, v.currency)
   }
+  for (const s of servicesMonth) {
+    const st = s.service_type || 'خدمات إضافية'
+    let key = 'خدمات إضافية'
+    if (st.includes('فندق')) key = 'حجز فنادق'
+    pieMap[key] += (s.commission||0)*getTransferRate(rates, s.currency)
+  }
+
+  // v3.0 — Visa expiration alerts: visas within 10 days of expected exit, not yet exited
+  const in10Days = new Date(now); in10Days.setDate(in10Days.getDate() + 10)
+  const visaAlerts = await db.collection('visas').find({
+    tenant_id: T,
+    is_exited: { $ne: true },
+    expected_exit_date: { $ne: null, $gte: todayStart, $lte: in10Days },
+  }).sort({ expected_exit_date: 1 }).limit(50).toArray()
+  // Also flag visas that have already passed expected exit
+  const overdue = await db.collection('visas').find({
+    tenant_id: T,
+    is_exited: { $ne: true },
+    expected_exit_date: { $ne: null, $lt: todayStart },
+  }).sort({ expected_exit_date: 1 }).limit(50).toArray()
+  const alertRows = [...overdue, ...visaAlerts].map(v => {
+    const exit = new Date(v.expected_exit_date)
+    const daysLeft = Math.ceil((exit - now) / 86400000)
+    return {
+      id: v.id, service_type: v.service_type, passenger_name: v.passenger_name || v.client_name || '—',
+      passport_no: v.passport_no || '', nationality: v.nationality || '',
+      client_name: v.client_name, entry_date: v.entry_date, expected_exit_date: v.expected_exit_date,
+      days_left: daysLeft, overdue: daysLeft < 0,
+    }
+  })
+
   const recentTickets = await db.collection('tickets').find(tf).sort({ created_at: -1 }).limit(5).toArray()
   const recentVisas   = await db.collection('visas').find(tf).sort({ created_at: -1 }).limit(5).toArray()
+  const recentServices= await db.collection('services').find(tf).sort({ created_at: -1 }).limit(5).toArray()
   const recentVouchers= await db.collection('vouchers').find(tf).sort({ created_at: -1 }).limit(5).toArray()
   const activity = [
     ...recentTickets.map(t => ({ kind: 'ticket', id: t.id, when: t.created_at, title: `تذكرة ${t.pnr || ''} — ${t.client_name}`, subtitle: `${t.route || ''} • ${t.currency} ${t.sale_price}`, amount: t.commission, currency: t.currency })),
     ...recentVisas.map(v => ({ kind: 'visa', id: v.id, when: v.created_at, title: `${v.service_type} — ${v.passenger_name || v.client_name}`, subtitle: `${v.currency} ${v.sale_price}`, amount: v.commission, currency: v.currency })),
+    ...recentServices.map(s => ({ kind: 'service', id: s.id, when: s.created_at, title: `${s.service_type} — ${s.beneficiary_name || s.client_name}`, subtitle: `${s.currency} ${s.sale_price}`, amount: s.commission, currency: s.currency })),
     ...recentVouchers.map(x => ({ kind: x.type, id: x.id, when: x.created_at, title: `${x.type === 'receipt' ? 'سند قبض' : 'سند صرف'} — ${x.party_name}`, subtitle: `${x.currency} ${x.amount}`, amount: x.amount, currency: x.currency })),
   ].sort((a, b) => new Date(b.when) - new Date(a.when)).slice(0, 12)
   return {
-    kpi: { sales_today: kpiSales, profit_today: kpiProfit, count_today: ticketsToday.length + visasToday.length, tickets_today: ticketsToday.length, visas_today: visasToday.length },
+    kpi: {
+      sales_today: kpiSales, profit_today: kpiProfit,
+      count_today: ticketsToday.length + visasToday.length + servicesToday.length,
+      tickets_today: ticketsToday.length, visas_today: visasToday.length, services_today: servicesToday.length,
+    },
     line: Object.values(dayMap),
     pie: Object.entries(pieMap).map(([name, value]) => ({ name, value: +value.toFixed(2) })).filter(x => x.value > 0),
     activity,
+    visa_alerts: alertRows,
   }
 }
 
@@ -1488,13 +1679,15 @@ async function reportProfits(db, T, q) {
   const from = q.from ? new Date(q.from) : new Date(0)
   const to = q.to ? new Date(q.to) : new Date(); to.setHours(23,59,59,999)
   const tf = { tenant_id: T, date: { $gte: from, $lte: to } }
-  const [tickets, visas] = await Promise.all([
+  const [tickets, visas, services] = await Promise.all([
     db.collection('tickets').find(tf).sort({ date: 1 }).toArray(),
     db.collection('visas').find(tf).sort({ date: 1 }).toArray(),
+    db.collection('services').find(tf).sort({ date: 1 }).toArray(),
   ])
   const rows = [
     ...tickets.map(t => ({ id: t.id, kind: 'تذكرة', date: t.date, client: t.client_name, supplier: t.supplier_name, ref: t.pnr || t.route, currency: t.currency, cost: t.cost, sale: t.sale_price, profit: t.commission })),
     ...visas.map(v => ({ id: v.id, kind: v.service_type, date: v.date, client: v.client_name, supplier: v.supplier_name, ref: v.passenger_name || v.passport_no, currency: v.currency, cost: v.cost, sale: v.sale_price, profit: v.commission })),
+    ...services.map(s => ({ id: s.id, kind: s.service_type, date: s.date, client: s.client_name, supplier: s.supplier_name, ref: s.beneficiary_name || s.reference_no, currency: s.currency, cost: s.cost, sale: s.sale_price, profit: s.commission })),
   ].sort((a, b) => new Date(a.date) - new Date(b.date))
   const totals = { USD: 0, SAR: 0, YER: 0 }, totalSales = { USD: 0, SAR: 0, YER: 0 }
   for (const r of rows) { totals[r.currency] += r.profit; totalSales[r.currency] += r.sale }
@@ -1593,15 +1786,17 @@ async function reportIncome(db, T, q) {
   const to = q.to ? new Date(q.to) : new Date(); to.setHours(23,59,59,999)
   const tf = { tenant_id: T, date: { $gte: from, $lte: to } }
   const rates = (await db.collection('tenant_settings').findOne({ tenant_id: T }))?.rates || DEFAULT_RATES
-  const [tickets, visas, vouchers, jes] = await Promise.all([
+  const [tickets, visas, services, vouchers, jes] = await Promise.all([
     db.collection('tickets').find(tf).toArray(),
     db.collection('visas').find(tf).toArray(),
+    db.collection('services').find(tf).toArray(),
     db.collection('vouchers').find({ ...tf, type: 'payment', party_type: 'expense' }).toArray(),
     db.collection('journal_entries').find(tf).toArray(),
   ])
-  const rev = { tickets: {USD:0,SAR:0,YER:0}, visas: {USD:0,SAR:0,YER:0}, other: {USD:0,SAR:0,YER:0} }
+  const rev = { tickets: {USD:0,SAR:0,YER:0}, visas: {USD:0,SAR:0,YER:0}, services: {USD:0,SAR:0,YER:0}, other: {USD:0,SAR:0,YER:0} }
   for (const t of tickets) rev.tickets[t.currency] += t.commission || 0
   for (const v of visas) rev.visas[v.currency] += v.commission || 0
+  for (const s of services) rev.services[s.currency] += s.commission || 0
   const exp = { USD:0, SAR:0, YER:0 }
   for (const p of vouchers) exp[p.currency] += p.amount || 0
   // FX gain/loss from account 4104 (already stored in BASE currency = YER)

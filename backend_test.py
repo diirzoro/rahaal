@@ -1,882 +1,795 @@
 #!/usr/bin/env python3
 """
-v2.8 Backend Testing Suite — Rahaal ERP
-Tests: Referral Simplification, Announcements, Suspend/Impersonate, Plans, Quota-Exceeded Flag
+v3.0 Backend Testing Suite for Rahaal ERP
+Tests: Services Module, Visa Alerts, Strict Excel Import Validation, Regression
 """
 
 import requests
 import json
-import time
 from datetime import datetime, timedelta
 
-# Base URL from .env
 BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
 
-# Auth credentials
+# Credentials
+TENANT_OWNER = {"email": "owner@demo.com", "password": "Demo@2025"}
 SUPER_ADMIN = {"email": "admin@targetmedia.com", "password": "Target@2025"}
-DEMO_OWNER = {"email": "owner@demo.com", "password": "Demo@2025"}
 
-# Session storage
-sessions = {}
+session = requests.Session()
 
-def login(creds, label):
+def login(creds):
     """Login and store session cookie"""
-    print(f"\n🔐 Logging in as {label}...")
-    r = requests.post(f"{BASE_URL}/auth/login", json=creds)
-    if r.status_code != 200:
-        print(f"❌ Login failed: {r.status_code} {r.text}")
-        return None
-    cookie = r.cookies.get("rahaal_session")
-    if not cookie:
-        print(f"❌ No session cookie returned")
-        return None
-    sessions[label] = cookie
-    print(f"✅ Logged in as {label}")
-    return cookie
+    resp = session.post(f"{BASE_URL}/auth/login", json=creds)
+    print(f"✓ Login as {creds['email']}: {resp.status_code}")
+    assert resp.status_code == 200, f"Login failed: {resp.text}"
+    return resp.json()
 
-def get_headers(label):
-    """Get headers with session cookie"""
-    cookie = sessions.get(label)
-    if not cookie:
-        print(f"❌ No session for {label}")
-        return None
-    return {"Cookie": f"rahaal_session={cookie}"}
+def test_health():
+    """Test health endpoint returns version 3.0"""
+    print("\n=== TEST: Health Endpoint ===")
+    resp = session.get(f"{BASE_URL}/health")
+    print(f"GET /health: {resp.status_code}")
+    assert resp.status_code == 200, f"Health check failed: {resp.text}"
+    data = resp.json()
+    print(f"Response: {json.dumps(data, indent=2)}")
+    assert data.get("status") == "ok", "Health status not ok"
+    assert data.get("version") == "3.0", f"Expected version 3.0, got {data.get('version')}"
+    print("✅ PASSED - Health endpoint returns version 3.0")
 
-def get_me(label):
-    """Get current user info"""
-    h = get_headers(label)
-    if not h:
-        return None
-    r = requests.get(f"{BASE_URL}/auth/me", headers=h)
-    if r.status_code != 200:
-        print(f"❌ GET /auth/me failed: {r.status_code}")
-        return None
-    return r.json()
+def test_services_module():
+    """Test v3.0.1 Services Module CRUD + service-types catalog"""
+    print("\n=== TEST: v3.0.1 Services Module ===")
+    
+    # Login as tenant owner
+    login(TENANT_OWNER)
+    
+    # 1. GET /api/service-types — should return at least 4 default types
+    print("\n1. GET /service-types")
+    resp = session.get(f"{BASE_URL}/service-types")
+    assert resp.status_code == 200, f"Failed to get service types: {resp.text}"
+    types = resp.json()
+    print(f"Service types count: {len(types)}")
+    assert len(types) >= 4, f"Expected at least 4 default service types, got {len(types)}"
+    default_names = [t['name'] for t in types]
+    print(f"Default service types: {default_names}")
+    assert 'حجز فندق' in default_names, "Missing 'حجز فندق'"
+    assert 'تصديق شهادات' in default_names, "Missing 'تصديق شهادات'"
+    assert 'خدمة نقل / ترحيل' in default_names, "Missing 'خدمة نقل / ترحيل'"
+    assert 'خدمات متنوعة' in default_names, "Missing 'خدمات متنوعة'"
+    print("✅ PASSED - Default service types seeded correctly")
+    
+    # 2. POST /api/service-types with body { name: 'إصدار جواز' }
+    print("\n2. POST /service-types - Create new service type")
+    resp = session.post(f"{BASE_URL}/service-types", json={"name": "إصدار جواز"})
+    assert resp.status_code == 200, f"Failed to create service type: {resp.text}"
+    new_type = resp.json()
+    new_type_id = new_type['id']
+    print(f"Created service type: {new_type['name']} (ID: {new_type_id})")
+    print("✅ PASSED - Service type created")
+    
+    # 3. Test duplicate name should return 400
+    print("\n3. POST /service-types - Duplicate name should fail")
+    resp = session.post(f"{BASE_URL}/service-types", json={"name": "إصدار جواز"})
+    assert resp.status_code == 400, f"Expected 400 for duplicate, got {resp.status_code}"
+    print(f"Duplicate rejected with 400: {resp.json().get('error')}")
+    print("✅ PASSED - Duplicate service type rejected")
+    
+    # 4. Create a client and supplier for services
+    print("\n4. Create client and supplier")
+    resp = session.post(f"{BASE_URL}/clients", json={"name": "عميل خدمات", "phone": "123456"})
+    assert resp.status_code == 200, f"Failed to create client: {resp.text}"
+    client = resp.json()
+    client_id = client['id']
+    print(f"Created client: {client['name']} (ID: {client_id})")
+    
+    resp = session.post(f"{BASE_URL}/suppliers", json={"name": "مورد خدمات", "phone": "789012"})
+    assert resp.status_code == 200, f"Failed to create supplier: {resp.text}"
+    supplier = resp.json()
+    supplier_id = supplier['id']
+    print(f"Created supplier: {supplier['name']} (ID: {supplier_id})")
+    print("✅ PASSED - Client and supplier created")
+    
+    # Get quota before creating service
+    resp = session.get(f"{BASE_URL}/auth/me")
+    quota_before = resp.json()['tenant']['journal_quota']['used']
+    print(f"\nQuota before service creation: {quota_before}")
+    
+    # 5. POST /api/services with all required fields
+    print("\n5. POST /services - Create service transaction")
+    service_data = {
+        "date": datetime.now().isoformat(),
+        "service_type": "حجز فندق",
+        "currency": "SAR",
+        "client_id": client_id,
+        "supplier_id": supplier_id,
+        "cost": 100,
+        "sale_price": 150,
+        "payment_method": "credit",
+        "beneficiary_name": "أحمد",
+        "reference_no": "REF-001",
+        "description": "حجز فندق 5 نجوم"
+    }
+    resp = session.post(f"{BASE_URL}/services", json=service_data)
+    assert resp.status_code == 200, f"Failed to create service: {resp.text}"
+    service = resp.json()
+    service_id = service['id']
+    print(f"Created service: {service['service_type']} (ID: {service_id})")
+    assert service['commission'] == 50, f"Expected commission 50, got {service['commission']}"
+    print(f"Commission calculated correctly: {service['commission']}")
+    print("✅ PASSED - Service created with correct commission")
+    
+    # Verify quota incremented
+    resp = session.get(f"{BASE_URL}/auth/me")
+    quota_after_create = resp.json()['tenant']['journal_quota']['used']
+    print(f"Quota after service creation: {quota_after_create}")
+    assert quota_after_create == quota_before + 1, f"Quota should increment by 1, was {quota_before}, now {quota_after_create}"
+    print("✅ PASSED - Quota incremented by 1")
+    
+    # 6. GET /api/services — should list the created one
+    print("\n6. GET /services - List services")
+    resp = session.get(f"{BASE_URL}/services")
+    assert resp.status_code == 200, f"Failed to get services: {resp.text}"
+    services = resp.json()
+    assert len(services) > 0, "No services found"
+    found = any(s['id'] == service_id for s in services)
+    assert found, f"Created service {service_id} not found in list"
+    print(f"Found {len(services)} services, including our new service")
+    print("✅ PASSED - Service appears in list")
+    
+    # 7. Verify /api/journal-entries lists the JE with ref_type='service'
+    print("\n7. GET /journal-entries - Verify JE created")
+    resp = session.get(f"{BASE_URL}/journal-entries")
+    assert resp.status_code == 200, f"Failed to get journal entries: {resp.text}"
+    jes = resp.json()
+    service_je = next((je for je in jes if je['ref_type'] == 'service' and je['ref_id'] == service_id), None)
+    assert service_je is not None, "Journal entry with ref_type='service' not found"
+    print(f"Journal entry found: {service_je['description']}")
+    assert len(service_je['lines']) == 3, f"Expected 3 lines, got {len(service_je['lines'])}"
+    print(f"JE has 3 lines: {[l['account_code'] for l in service_je['lines']]}")
+    # Verify account 4103 is used for revenue
+    revenue_line = next((l for l in service_je['lines'] if l['account_code'] == '4103'), None)
+    assert revenue_line is not None, "Revenue line with account 4103 not found"
+    assert revenue_line['credit'] == 50, f"Expected revenue credit 50, got {revenue_line['credit']}"
+    print("✅ PASSED - Journal entry created with account 4103 for revenue")
+    
+    # 8. Verify accounting: supplier balance and client balance
+    print("\n8. Verify accounting balances")
+    resp = session.get(f"{BASE_URL}/clients")
+    clients = resp.json()
+    client_data = next((c for c in clients if c['id'] == client_id), None)
+    assert client_data is not None, "Client not found"
+    print(f"Client balance SAR: {client_data['balances']['SAR']}")
+    assert client_data['balances']['SAR'] == 150, f"Expected client balance 150, got {client_data['balances']['SAR']}"
+    
+    resp = session.get(f"{BASE_URL}/suppliers")
+    suppliers = resp.json()
+    supplier_data = next((s for s in suppliers if s['id'] == supplier_id), None)
+    assert supplier_data is not None, "Supplier not found"
+    print(f"Supplier balance SAR: {supplier_data['balances']['SAR']}")
+    assert supplier_data['balances']['SAR'] == 100, f"Expected supplier balance 100, got {supplier_data['balances']['SAR']}"
+    print("✅ PASSED - Accounting balances correct")
+    
+    # 9. PUT /api/services/:id — modify sale_price to 200
+    print("\n9. PUT /services/:id - Edit service")
+    quota_before_edit = quota_after_create
+    edit_data = {**service_data, "sale_price": 200}
+    resp = session.put(f"{BASE_URL}/services/{service_id}", json=edit_data)
+    assert resp.status_code == 200, f"Failed to edit service: {resp.text}"
+    edited_service = resp.json()
+    print(f"Edited service sale_price: {edited_service['sale_price']}")
+    assert edited_service['sale_price'] == 200, f"Expected sale_price 200, got {edited_service['sale_price']}"
+    assert edited_service['commission'] == 100, f"Expected commission 100, got {edited_service['commission']}"
+    print(f"Commission recalculated correctly: {edited_service['commission']}")
+    
+    # Verify quota NOT incremented (edit should preserve quota)
+    resp = session.get(f"{BASE_URL}/auth/me")
+    quota_after_edit = resp.json()['tenant']['journal_quota']['used']
+    print(f"Quota after edit: {quota_after_edit}")
+    assert quota_after_edit == quota_before_edit, f"Quota should NOT change on edit, was {quota_before_edit}, now {quota_after_edit}"
+    print("✅ PASSED - Service edited, commission recalculated, quota preserved")
+    
+    # Verify JE was reversed and re-posted
+    resp = session.get(f"{BASE_URL}/journal-entries")
+    jes = resp.json()
+    service_jes = [je for je in jes if je['ref_type'] == 'service' and je['ref_id'] == service_id]
+    assert len(service_jes) == 1, f"Expected 1 JE for service, found {len(service_jes)}"
+    latest_je = service_jes[0]
+    revenue_line = next((l for l in latest_je['lines'] if l['account_code'] == '4103'), None)
+    assert revenue_line['credit'] == 100, f"Expected revenue credit 100 after edit, got {revenue_line['credit']}"
+    print("✅ PASSED - JE reversed and re-posted with new commission")
+    
+    # Verify client balance updated correctly (net effect should be +200 SAR)
+    resp = session.get(f"{BASE_URL}/clients")
+    clients = resp.json()
+    client_data = next((c for c in clients if c['id'] == client_id), None)
+    print(f"Client balance SAR after edit: {client_data['balances']['SAR']}")
+    assert client_data['balances']['SAR'] == 200, f"Expected client balance 200 after edit, got {client_data['balances']['SAR']}"
+    print("✅ PASSED - Client balance updated correctly after edit")
+    
+    # 10. DELETE /api/services/:id
+    print("\n10. DELETE /services/:id - Delete service")
+    quota_before_delete = quota_after_edit
+    resp = session.delete(f"{BASE_URL}/services/{service_id}")
+    assert resp.status_code == 200, f"Failed to delete service: {resp.text}"
+    print(f"Service deleted: {service_id}")
+    
+    # Verify quota decremented
+    resp = session.get(f"{BASE_URL}/auth/me")
+    quota_after_delete = resp.json()['tenant']['journal_quota']['used']
+    print(f"Quota after delete: {quota_after_delete}")
+    assert quota_after_delete == quota_before_delete - 1, f"Quota should decrement by 1, was {quota_before_delete}, now {quota_after_delete}"
+    print("✅ PASSED - Quota decremented by 1")
+    
+    # Verify balances reversed
+    resp = session.get(f"{BASE_URL}/clients")
+    clients = resp.json()
+    client_data = next((c for c in clients if c['id'] == client_id), None)
+    print(f"Client balance SAR after delete: {client_data['balances']['SAR']}")
+    assert client_data['balances']['SAR'] == 0, f"Expected client balance 0 after delete, got {client_data['balances']['SAR']}"
+    
+    resp = session.get(f"{BASE_URL}/suppliers")
+    suppliers = resp.json()
+    supplier_data = next((s for s in suppliers if s['id'] == supplier_id), None)
+    print(f"Supplier balance SAR after delete: {supplier_data['balances']['SAR']}")
+    assert supplier_data['balances']['SAR'] == 0, f"Expected supplier balance 0 after delete, got {supplier_data['balances']['SAR']}"
+    print("✅ PASSED - Balances reversed correctly after delete")
+    
+    # Verify JE deleted
+    resp = session.get(f"{BASE_URL}/journal-entries")
+    jes = resp.json()
+    service_jes = [je for je in jes if je['ref_type'] == 'service' and je['ref_id'] == service_id]
+    assert len(service_jes) == 0, f"Expected 0 JEs for deleted service, found {len(service_jes)}"
+    print("✅ PASSED - Journal entry deleted")
+    
+    # 11. DELETE service type
+    print("\n11. DELETE /service-types/:id")
+    resp = session.delete(f"{BASE_URL}/service-types/{new_type_id}")
+    assert resp.status_code == 200, f"Failed to delete service type: {resp.text}"
+    print(f"Service type deleted: {new_type_id}")
+    print("✅ PASSED - Service type deleted")
+    
+    print("\n✅✅✅ ALL SERVICES MODULE TESTS PASSED ✅✅✅")
 
-# ============================================================
-# TASK 1: Referral Simplification (30 signup quota + 50 immediate)
-# ============================================================
-def test_task1_referral_simplification():
-    print("\n" + "="*80)
-    print("TASK 1: Referral Simplification — 30 signup quota + 50 immediate referrer bonus")
-    print("="*80)
+def test_visa_alerts():
+    """Test v3.0.2 Visa Entry/Exit Date + Dashboard Alerts"""
+    print("\n=== TEST: v3.0.2 Visa Entry/Exit Date + Dashboard Alerts ===")
     
-    # Login as super admin
-    login(SUPER_ADMIN, "admin")
+    # Login as tenant owner
+    login(TENANT_OWNER)
     
-    # Login as demo owner to get referral code
-    login(DEMO_OWNER, "demo")
-    demo_me = get_me("demo")
-    if not demo_me or not demo_me.get("tenant"):
-        print("❌ Failed to get demo tenant info")
-        return False
+    # Get or create client and supplier
+    resp = session.get(f"{BASE_URL}/clients")
+    clients = resp.json()
+    if len(clients) == 0:
+        resp = session.post(f"{BASE_URL}/clients", json={"name": "عميل تأشيرات", "phone": "111222"})
+        client = resp.json()
+        client_id = client['id']
+    else:
+        client_id = clients[0]['id']
     
-    demo_tenant_id = demo_me["tenant"]["id"]
+    resp = session.get(f"{BASE_URL}/suppliers")
+    suppliers = resp.json()
+    if len(suppliers) == 0:
+        resp = session.post(f"{BASE_URL}/suppliers", json={"name": "مورد تأشيرات", "phone": "333444"})
+        supplier = resp.json()
+        supplier_id = supplier['id']
+    else:
+        supplier_id = suppliers[0]['id']
     
-    # Get demo's referral code
-    print("\n📋 Getting demo tenant's referral code...")
-    r = requests.get(f"{BASE_URL}/referrals", headers=get_headers("demo"))
-    if r.status_code != 200:
-        print(f"❌ GET /referrals failed: {r.status_code}")
-        return False
-    
-    ref_data = r.json()
-    referral_code = ref_data.get("code")
-    print(f"✅ Demo referral code: {referral_code}")
-    
-    # Get demo's current quota before signup
-    demo_quota_before = demo_me["tenant"]["journal_quota"]["limit"]
-    demo_bonus_before = demo_me["tenant"]["journal_quota"].get("top_ups", [])
-    demo_stats_before = ref_data.get("stats", {})
-    print(f"📊 Demo quota before: {demo_quota_before}")
-    print(f"📊 Demo referral stats before: {demo_stats_before}")
-    
-    # Test 1.1: Public signup WITH referral code
-    print("\n🧪 Test 1.1: Public signup WITH referral code")
-    signup_data = {
-        "name": f"Test Office {int(time.time())}",
-        "owner_name": "Test Owner",
-        "owner_email": f"test{int(time.time())}@example.com",
-        "owner_password": "Test@2025",
-        "referral_code": referral_code
+    # 1. Create a visa with entry_date: today, expected_exit_date: today+5 days
+    print("\n1. Create visa with expected_exit_date in 5 days")
+    today = datetime.now()
+    exit_5_days = today + timedelta(days=5)
+    visa_data_1 = {
+        "date": today.isoformat(),
+        "service_type": "تأشيرة عمرة",
+        "currency": "SAR",
+        "client_id": client_id,
+        "supplier_id": supplier_id,
+        "cost": 50,
+        "sale_price": 80,
+        "payment_method": "credit",
+        "passenger_name": "محمد أحمد",
+        "passport_no": "A12345678",
+        "nationality": "يمني",
+        "entry_date": today.isoformat(),
+        "expected_exit_date": exit_5_days.isoformat()
     }
-    r = requests.post(f"{BASE_URL}/public/signup", json=signup_data)
-    if r.status_code != 200:
-        print(f"❌ Public signup failed: {r.status_code} {r.text}")
-        return False
+    resp = session.post(f"{BASE_URL}/visas", json=visa_data_1)
+    assert resp.status_code == 200, f"Failed to create visa: {resp.text}"
+    visa_1 = resp.json()
+    visa_1_id = visa_1['id']
+    print(f"Created visa 1: {visa_1['passenger_name']} (ID: {visa_1_id})")
+    print(f"Entry date: {visa_1.get('entry_date')}, Expected exit: {visa_1.get('expected_exit_date')}")
+    print("✅ PASSED - Visa 1 created with entry/exit dates")
     
-    signup_result = r.json()
-    new_tenant = signup_result.get("tenant")
-    if not new_tenant:
-        print(f"❌ No tenant in signup response")
-        return False
+    # 2. GET /api/dashboard — should have visa_alerts[] with the visa
+    print("\n2. GET /dashboard - Check visa_alerts")
+    resp = session.get(f"{BASE_URL}/dashboard")
+    assert resp.status_code == 200, f"Failed to get dashboard: {resp.text}"
+    dashboard = resp.json()
+    assert 'visa_alerts' in dashboard, "visa_alerts not in dashboard response"
+    alerts = dashboard['visa_alerts']
+    print(f"Visa alerts count: {len(alerts)}")
     
-    # Verify new tenant has quota limit = 30
-    new_quota = new_tenant.get("journal_quota", {}).get("limit")
-    if new_quota != 30:
-        print(f"❌ New tenant quota should be 30, got {new_quota}")
-        return False
-    print(f"✅ New tenant has quota limit = 30")
+    alert_1 = next((a for a in alerts if a['id'] == visa_1_id), None)
+    assert alert_1 is not None, f"Visa 1 not found in alerts"
+    print(f"Alert 1: {alert_1['passenger_name']}, days_left={alert_1['days_left']}, overdue={alert_1['overdue']}")
+    assert alert_1['days_left'] in [4, 5], f"Expected days_left 4 or 5, got {alert_1['days_left']}"
+    assert alert_1['overdue'] == False, f"Expected overdue=False, got {alert_1['overdue']}"
+    print("✅ PASSED - Visa 1 appears in alerts with correct days_left and overdue=False")
     
-    # Auto-login should work (session cookie set)
-    new_session = r.cookies.get("rahaal_session")
-    if not new_session:
-        print(f"❌ No auto-login session cookie")
-        return False
-    print(f"✅ Auto-login session created")
-    
-    # Verify demo tenant's quota increased by +50
-    time.sleep(1)  # Give DB time to update
-    demo_me_after = get_me("demo")
-    if not demo_me_after:
-        print(f"❌ Failed to get demo tenant info after signup")
-        return False
-    
-    demo_quota_after = demo_me_after["tenant"]["journal_quota"]["limit"]
-    quota_increase = demo_quota_after - demo_quota_before
-    if quota_increase != 50:
-        print(f"❌ Demo quota should increase by +50, got +{quota_increase} (before: {demo_quota_before}, after: {demo_quota_after})")
-        return False
-    print(f"✅ Demo quota increased by exactly +50 (from {demo_quota_before} to {demo_quota_after})")
-    
-    # Verify referral_stats updated
-    r = requests.get(f"{BASE_URL}/referrals", headers=get_headers("demo"))
-    ref_data_after = r.json()
-    stats_after = ref_data_after.get("stats", {})
-    
-    if stats_after.get("signups", 0) != demo_stats_before.get("signups", 0) + 1:
-        print(f"❌ Referral signups should increment by 1")
-        return False
-    
-    if stats_after.get("bonus_earned", 0) != demo_stats_before.get("bonus_earned", 0) + 50:
-        print(f"❌ Referral bonus_earned should increment by 50")
-        return False
-    
-    print(f"✅ Referral stats updated: signups +1, bonus_earned +50")
-    
-    # Verify NO activation_confirmed step needed (bonus applied immediately)
-    top_ups = demo_me_after["tenant"]["journal_quota"].get("top_ups", [])
-    latest_topup = top_ups[-1] if top_ups else None
-    if not latest_topup or latest_topup.get("amount") != 50:
-        print(f"❌ Latest top-up should be 50, got {latest_topup}")
-        return False
-    if latest_topup.get("by") != "referral_signup":
-        print(f"❌ Top-up should be by 'referral_signup', got {latest_topup.get('by')}")
-        return False
-    print(f"✅ Bonus applied immediately (no activation_confirmed step)")
-    
-    # Test 1.2: Public signup WITHOUT referral code
-    print("\n🧪 Test 1.2: Public signup WITHOUT referral code")
-    signup_data2 = {
-        "name": f"Test Office No Ref {int(time.time())}",
-        "owner_name": "Test Owner 2",
-        "owner_email": f"test2{int(time.time())}@example.com",
-        "owner_password": "Test@2025"
+    # 3. Create another visa with expected_exit_date = today - 2 days (overdue)
+    print("\n3. Create overdue visa (exit date 2 days ago)")
+    exit_overdue = today - timedelta(days=2)
+    visa_data_2 = {
+        "date": (today - timedelta(days=10)).isoformat(),
+        "service_type": "تأشيرة عمرة",
+        "currency": "SAR",
+        "client_id": client_id,
+        "supplier_id": supplier_id,
+        "cost": 60,
+        "sale_price": 90,
+        "payment_method": "credit",
+        "passenger_name": "فاطمة علي",
+        "passport_no": "B98765432",
+        "nationality": "سعودي",
+        "entry_date": (today - timedelta(days=10)).isoformat(),
+        "expected_exit_date": exit_overdue.isoformat()
     }
-    r = requests.post(f"{BASE_URL}/public/signup", json=signup_data2)
-    if r.status_code != 200:
-        print(f"❌ Public signup without ref failed: {r.status_code} {r.text}")
-        return False
+    resp = session.post(f"{BASE_URL}/visas", json=visa_data_2)
+    assert resp.status_code == 200, f"Failed to create visa 2: {resp.text}"
+    visa_2 = resp.json()
+    visa_2_id = visa_2['id']
+    print(f"Created visa 2: {visa_2['passenger_name']} (ID: {visa_2_id})")
+    print("✅ PASSED - Overdue visa created")
     
-    signup_result2 = r.json()
-    new_tenant2 = signup_result2.get("tenant")
-    new_quota2 = new_tenant2.get("journal_quota", {}).get("limit")
-    if new_quota2 != 30:
-        print(f"❌ New tenant without ref should have quota 30, got {new_quota2}")
-        return False
-    print(f"✅ New tenant without ref has quota limit = 30")
+    # 4. GET /api/dashboard — should show overdue=true
+    print("\n4. GET /dashboard - Check overdue visa in alerts")
+    resp = session.get(f"{BASE_URL}/dashboard")
+    dashboard = resp.json()
+    alerts = dashboard['visa_alerts']
     
-    # Verify demo quota did NOT increase again
-    demo_me_after2 = get_me("demo")
-    demo_quota_after2 = demo_me_after2["tenant"]["journal_quota"]["limit"]
-    if demo_quota_after2 != demo_quota_after:
-        print(f"❌ Demo quota should not change for signup without ref")
-        return False
-    print(f"✅ Demo quota unchanged (no referrer bonus applied)")
+    alert_2 = next((a for a in alerts if a['id'] == visa_2_id), None)
+    assert alert_2 is not None, f"Visa 2 not found in alerts"
+    print(f"Alert 2: {alert_2['passenger_name']}, days_left={alert_2['days_left']}, overdue={alert_2['overdue']}")
+    assert alert_2['days_left'] < 0, f"Expected negative days_left, got {alert_2['days_left']}"
+    assert alert_2['overdue'] == True, f"Expected overdue=True, got {alert_2['overdue']}"
+    print("✅ PASSED - Overdue visa appears in alerts with overdue=True")
     
-    # Test 1.3: Admin route with referral_code
-    print("\n🧪 Test 1.3: Admin route POST /admin/tenants with referral_code")
-    admin_tenant_data = {
-        "name": f"Admin Created Tenant {int(time.time())}",
-        "owner_name": "Admin Owner",
-        "owner_email": f"admin{int(time.time())}@example.com",
-        "owner_password": "Admin@2025",
-        "referral_code": referral_code,
-        "quota_limit": 30
+    # 5. Create a visa with expected_exit_date = today + 20 days — should NOT appear
+    print("\n5. Create visa with exit date 20 days away (outside 10-day window)")
+    exit_20_days = today + timedelta(days=20)
+    visa_data_3 = {
+        "date": today.isoformat(),
+        "service_type": "تأشيرة عمرة",
+        "currency": "SAR",
+        "client_id": client_id,
+        "supplier_id": supplier_id,
+        "cost": 70,
+        "sale_price": 100,
+        "payment_method": "credit",
+        "passenger_name": "عبدالله حسن",
+        "passport_no": "C11223344",
+        "nationality": "مصري",
+        "entry_date": today.isoformat(),
+        "expected_exit_date": exit_20_days.isoformat()
     }
-    r = requests.post(f"{BASE_URL}/admin/tenants", json=admin_tenant_data, headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ Admin tenant creation failed: {r.status_code} {r.text}")
-        return False
+    resp = session.post(f"{BASE_URL}/visas", json=visa_data_3)
+    assert resp.status_code == 200, f"Failed to create visa 3: {resp.text}"
+    visa_3 = resp.json()
+    visa_3_id = visa_3['id']
+    print(f"Created visa 3: {visa_3['passenger_name']} (ID: {visa_3_id})")
     
-    admin_tenant = r.json()
-    admin_quota = admin_tenant.get("journal_quota", {}).get("limit")
-    if admin_quota != 30:
-        print(f"❌ Admin-created tenant should have quota 30, got {admin_quota}")
-        return False
-    print(f"✅ Admin-created tenant has quota limit = 30")
+    resp = session.get(f"{BASE_URL}/dashboard")
+    dashboard = resp.json()
+    alerts = dashboard['visa_alerts']
+    alert_3 = next((a for a in alerts if a['id'] == visa_3_id), None)
+    assert alert_3 is None, f"Visa 3 should NOT appear in alerts (20 days away)"
+    print("✅ PASSED - Visa with exit date 20 days away does NOT appear in alerts")
     
-    # Verify demo quota increased by another +50
-    time.sleep(1)
-    demo_me_after3 = get_me("demo")
-    demo_quota_after3 = demo_me_after3["tenant"]["journal_quota"]["limit"]
-    if demo_quota_after3 != demo_quota_after2 + 50:
-        print(f"❌ Demo quota should increase by +50 again, got {demo_quota_after3 - demo_quota_after2}")
-        return False
-    print(f"✅ Demo quota increased by +50 again (admin route)")
+    # 6. Create a visa WITHOUT expected_exit_date — should NOT appear
+    print("\n6. Create visa without expected_exit_date")
+    visa_data_4 = {
+        "date": today.isoformat(),
+        "service_type": "تأشيرة عمرة",
+        "currency": "SAR",
+        "client_id": client_id,
+        "supplier_id": supplier_id,
+        "cost": 40,
+        "sale_price": 70,
+        "payment_method": "credit",
+        "passenger_name": "سارة محمود",
+        "passport_no": "D55667788",
+        "nationality": "أردني"
+    }
+    resp = session.post(f"{BASE_URL}/visas", json=visa_data_4)
+    assert resp.status_code == 200, f"Failed to create visa 4: {resp.text}"
+    visa_4 = resp.json()
+    visa_4_id = visa_4['id']
+    print(f"Created visa 4: {visa_4['passenger_name']} (ID: {visa_4_id})")
     
-    print("\n✅ TASK 1 PASSED: Referral simplification working correctly")
-    return True
+    resp = session.get(f"{BASE_URL}/dashboard")
+    dashboard = resp.json()
+    alerts = dashboard['visa_alerts']
+    alert_4 = next((a for a in alerts if a['id'] == visa_4_id), None)
+    assert alert_4 is None, f"Visa 4 should NOT appear in alerts (no expected_exit_date)"
+    print("✅ PASSED - Visa without expected_exit_date does NOT appear in alerts")
+    
+    # 7. POST /api/visas/:id/mark-exited
+    print("\n7. POST /visas/:id/mark-exited")
+    resp = session.post(f"{BASE_URL}/visas/{visa_1_id}/mark-exited")
+    assert resp.status_code == 200, f"Failed to mark visa as exited: {resp.text}"
+    result = resp.json()
+    assert result['success'] == True, "mark-exited did not return success"
+    assert result['is_exited'] == True, "is_exited not set to True"
+    print(f"Visa 1 marked as exited: {result}")
+    print("✅ PASSED - Visa marked as exited")
+    
+    # 8. GET /api/dashboard — visa 1 should no longer appear in alerts
+    print("\n8. GET /dashboard - Verify exited visa removed from alerts")
+    resp = session.get(f"{BASE_URL}/dashboard")
+    dashboard = resp.json()
+    alerts = dashboard['visa_alerts']
+    alert_1_after = next((a for a in alerts if a['id'] == visa_1_id), None)
+    assert alert_1_after is None, f"Visa 1 should NOT appear in alerts after marking as exited"
+    print("✅ PASSED - Exited visa removed from alerts")
+    
+    # 9. POST /api/visas/:id/unmark-exited
+    print("\n9. POST /visas/:id/unmark-exited")
+    resp = session.post(f"{BASE_URL}/visas/{visa_1_id}/unmark-exited")
+    assert resp.status_code == 200, f"Failed to unmark visa: {resp.text}"
+    result = resp.json()
+    assert result['success'] == True, "unmark-exited did not return success"
+    assert result['is_exited'] == False, "is_exited not set to False"
+    print(f"Visa 1 unmarked: {result}")
+    
+    resp = session.get(f"{BASE_URL}/dashboard")
+    dashboard = resp.json()
+    alerts = dashboard['visa_alerts']
+    alert_1_restored = next((a for a in alerts if a['id'] == visa_1_id), None)
+    assert alert_1_restored is not None, f"Visa 1 should re-appear in alerts after unmarking"
+    print("✅ PASSED - Unmarked visa re-appears in alerts")
+    
+    print("\n✅✅✅ ALL VISA ALERTS TESTS PASSED ✅✅✅")
 
-# ============================================================
-# TASK 2: Announcements CRUD + Active endpoint
-# ============================================================
-def test_task2_announcements():
-    print("\n" + "="*80)
-    print("TASK 2: Announcements CRUD + Active endpoint")
-    print("="*80)
+def test_strict_import_validation():
+    """Test v3.0.3 Strict Excel Import Validation (no auto-create)"""
+    print("\n=== TEST: v3.0.3 Strict Excel Import Validation ===")
     
-    # Test 2.1: Create popup announcement
-    print("\n🧪 Test 2.1: POST /admin/announcements (popup)")
-    popup_data = {
-        "type": "popup",
-        "title": "اختبار نافذة منبثقة",
-        "body": "محتوى الإعلان المنبثق",
-        "active": True
-    }
-    r = requests.post(f"{BASE_URL}/admin/announcements", json=popup_data, headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ Create popup announcement failed: {r.status_code} {r.text}")
-        return False
+    # Login as tenant owner
+    login(TENANT_OWNER)
     
-    popup = r.json()
-    popup_id = popup.get("id")
-    if not popup_id:
-        print(f"❌ No id in popup response")
-        return False
-    print(f"✅ Popup announcement created with id: {popup_id}")
+    # Get existing clients and suppliers count
+    resp = session.get(f"{BASE_URL}/clients")
+    clients_before = len(resp.json())
+    resp = session.get(f"{BASE_URL}/suppliers")
+    suppliers_before = len(resp.json())
+    print(f"Clients before: {clients_before}, Suppliers before: {suppliers_before}")
     
-    # Test 2.2: Create banner announcement
-    print("\n🧪 Test 2.2: POST /admin/announcements (banner)")
-    banner_data = {
-        "type": "banner",
-        "title": "شريط إعلاني",
-        "body": "محتوى الشريط الإعلاني",
-        "active": True
-    }
-    r = requests.post(f"{BASE_URL}/admin/announcements", json=banner_data, headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ Create banner announcement failed: {r.status_code} {r.text}")
-        return False
+    # Create one valid client and supplier for row (a)
+    resp = session.post(f"{BASE_URL}/clients", json={"name": "عميل استيراد صحيح", "phone": "555666"})
+    valid_client = resp.json()
+    resp = session.post(f"{BASE_URL}/suppliers", json={"name": "مورد استيراد صحيح", "phone": "777888"})
+    valid_supplier = resp.json()
     
-    banner = r.json()
-    banner_id = banner.get("id")
-    print(f"✅ Banner announcement created with id: {banner_id}")
+    # 1. POST /api/import/tickets/preview with 3 rows
+    print("\n1. POST /import/tickets/preview - Test validation")
+    rows = [
+        {  # (a) Valid row
+            "pnr": "VALID001",
+            "route": "صنعاء - جدة",
+            "passenger_name": "أحمد محمد",
+            "client_name": "عميل استيراد صحيح",
+            "supplier_name": "مورد استيراد صحيح",
+            "currency": "SAR",
+            "cost": 500,
+            "sale_price": 600
+        },
+        {  # (b) Non-existent client
+            "pnr": "INVALID001",
+            "route": "عدن - الرياض",
+            "passenger_name": "فاطمة علي",
+            "client_name": "عميل غير موجود XYZ",
+            "supplier_name": "مورد استيراد صحيح",
+            "currency": "SAR",
+            "cost": 400,
+            "sale_price": 500
+        },
+        {  # (c) Non-existent supplier
+            "pnr": "INVALID002",
+            "route": "تعز - دبي",
+            "passenger_name": "خالد حسن",
+            "client_name": "عميل استيراد صحيح",
+            "supplier_name": "مورد غير موجود ABC",
+            "currency": "SAR",
+            "cost": 600,
+            "sale_price": 700
+        }
+    ]
     
-    # Test 2.3: GET /admin/announcements (list all)
-    print("\n🧪 Test 2.3: GET /admin/announcements")
-    r = requests.get(f"{BASE_URL}/admin/announcements", headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ GET /admin/announcements failed: {r.status_code}")
-        return False
+    resp = session.post(f"{BASE_URL}/import/tickets/preview", json={"rows": rows, "skip_duplicates": True})
+    assert resp.status_code == 200, f"Failed to preview import: {resp.text}"
+    preview = resp.json()
+    print(f"Preview response: valid_count={preview.get('valid_count')}")
     
-    announcements = r.json()
-    if not isinstance(announcements, list):
-        print(f"❌ Expected list, got {type(announcements)}")
-        return False
+    # 2. Response should show __errors for rows (b) and (c)
+    print("\n2. Verify __errors for invalid rows")
+    validated_rows = preview['rows']
+    assert len(validated_rows) == 3, f"Expected 3 rows, got {len(validated_rows)}"
     
-    if len(announcements) < 2:
-        print(f"❌ Expected at least 2 announcements, got {len(announcements)}")
-        return False
-    print(f"✅ GET /admin/announcements returned {len(announcements)} announcements")
+    row_a = validated_rows[0]
+    row_b = validated_rows[1]
+    row_c = validated_rows[2]
     
-    # Test 2.4: PUT /admin/announcements/:id (toggle active)
-    print("\n🧪 Test 2.4: PUT /admin/announcements/:id (toggle active to false)")
-    r = requests.put(f"{BASE_URL}/admin/announcements/{popup_id}", json={"active": False}, headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ PUT announcement failed: {r.status_code} {r.text}")
-        return False
-    print(f"✅ Popup announcement toggled to inactive")
+    print(f"Row A errors: {row_a.get('__errors')}")
+    assert len(row_a['__errors']) == 0, f"Row A should have no errors, got {row_a['__errors']}"
+    print("✅ Row A (valid) has no errors")
     
-    # Test 2.5: GET /announcements/active (tenant view)
-    print("\n🧪 Test 2.5: GET /announcements/active (tenant view)")
-    r = requests.get(f"{BASE_URL}/announcements/active", headers=get_headers("demo"))
-    if r.status_code != 200:
-        print(f"❌ GET /announcements/active failed: {r.status_code}")
-        return False
+    print(f"Row B errors: {row_b.get('__errors')}")
+    assert len(row_b['__errors']) > 0, "Row B should have errors"
+    error_text_b = ' '.join(row_b['__errors'])
+    assert 'غير موجود في دليل الحسابات' in error_text_b, f"Expected Arabic error message in row B, got: {error_text_b}"
+    assert 'عميل غير موجود XYZ' in error_text_b, f"Expected client name in error, got: {error_text_b}"
+    print("✅ Row B (non-existent client) has correct error message")
     
-    active_announcements = r.json()
-    if not isinstance(active_announcements, list):
-        print(f"❌ Expected list, got {type(active_announcements)}")
-        return False
+    print(f"Row C errors: {row_c.get('__errors')}")
+    assert len(row_c['__errors']) > 0, "Row C should have errors"
+    error_text_c = ' '.join(row_c['__errors'])
+    assert 'غير موجود في دليل الحسابات' in error_text_c, f"Expected Arabic error message in row C, got: {error_text_c}"
+    assert 'مورد غير موجود ABC' in error_text_c, f"Expected supplier name in error, got: {error_text_c}"
+    print("✅ Row C (non-existent supplier) has correct error message")
     
-    # Should only return the banner (popup is inactive)
-    active_ids = [a.get("id") for a in active_announcements]
-    if popup_id in active_ids:
-        print(f"❌ Inactive popup should NOT appear in /announcements/active")
-        return False
-    if banner_id not in active_ids:
-        print(f"❌ Active banner should appear in /announcements/active")
-        return False
-    print(f"✅ /announcements/active returns only active announcements (banner visible, popup hidden)")
+    assert preview['valid_count'] == 1, f"Expected valid_count=1, got {preview['valid_count']}"
+    print("✅ PASSED - Preview validation correct")
     
-    # Test 2.6: Date window filtering
-    print("\n🧪 Test 2.6: Date window filtering (starts_at = tomorrow)")
-    tomorrow = (datetime.now() + timedelta(days=1)).isoformat()
-    future_data = {
-        "type": "popup",
-        "title": "Future announcement",
-        "body": "This should not appear yet",
-        "active": True,
-        "starts_at": tomorrow
-    }
-    r = requests.post(f"{BASE_URL}/admin/announcements", json=future_data, headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ Create future announcement failed: {r.status_code}")
-        return False
-    future_id = r.json().get("id")
+    # 3. POST /api/import/tickets with same rows
+    print("\n3. POST /import/tickets - Attempt import")
+    resp = session.post(f"{BASE_URL}/import/tickets", json={"rows": rows, "skip_duplicates": True})
+    assert resp.status_code == 200, f"Failed to import: {resp.text}"
+    import_result = resp.json()
+    print(f"Import result: created={import_result['created']}, failed={import_result['failed']}, skipped={import_result['skipped']}")
     
-    # Should NOT appear in /announcements/active
-    r = requests.get(f"{BASE_URL}/announcements/active", headers=get_headers("demo"))
-    active_announcements = r.json()
-    active_ids = [a.get("id") for a in active_announcements]
-    if future_id in active_ids:
-        print(f"❌ Future announcement should NOT appear in /announcements/active")
-        return False
-    print(f"✅ Future announcement (starts_at = tomorrow) does NOT appear in /active")
+    assert import_result['created'] == 1, f"Expected 1 created, got {import_result['created']}"
+    assert import_result['failed'] == 2, f"Expected 2 failed, got {import_result['failed']}"
+    assert len(import_result['errors']) == 2, f"Expected 2 error entries, got {len(import_result['errors'])}"
     
-    # Test 2.7: Date window filtering (ends_at = yesterday)
-    print("\n🧪 Test 2.7: Date window filtering (ends_at = yesterday)")
-    yesterday = (datetime.now() - timedelta(days=1)).isoformat()
-    past_data = {
-        "type": "banner",
-        "title": "Past announcement",
-        "body": "This should not appear anymore",
-        "active": True,
-        "ends_at": yesterday
-    }
-    r = requests.post(f"{BASE_URL}/admin/announcements", json=past_data, headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ Create past announcement failed: {r.status_code}")
-        return False
-    past_id = r.json().get("id")
+    # Verify error messages contain Arabic text
+    for err in import_result['errors']:
+        error_msg = ' '.join(err['errors'])
+        assert 'غير موجود في دليل الحسابات' in error_msg, f"Expected Arabic error in import errors, got: {error_msg}"
+    print("✅ PASSED - Import created 1, failed 2 with correct error messages")
     
-    # Should NOT appear in /announcements/active
-    r = requests.get(f"{BASE_URL}/announcements/active", headers=get_headers("demo"))
-    active_announcements = r.json()
-    active_ids = [a.get("id") for a in active_announcements]
-    if past_id in active_ids:
-        print(f"❌ Past announcement should NOT appear in /announcements/active")
-        return False
-    print(f"✅ Past announcement (ends_at = yesterday) does NOT appear in /active")
+    # 4. Verify NO new client/supplier documents were auto-created
+    print("\n4. Verify no auto-creation of clients/suppliers")
+    resp = session.get(f"{BASE_URL}/clients")
+    clients_after = len(resp.json())
+    resp = session.get(f"{BASE_URL}/suppliers")
+    suppliers_after = len(resp.json())
+    print(f"Clients after: {clients_after}, Suppliers after: {suppliers_after}")
     
-    # Test 2.8: DELETE /admin/announcements/:id
-    print("\n🧪 Test 2.8: DELETE /admin/announcements/:id")
-    r = requests.delete(f"{BASE_URL}/admin/announcements/{popup_id}", headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ DELETE announcement failed: {r.status_code}")
-        return False
+    # We created 1 valid client for testing, so clients_after should be clients_before + 1
+    assert clients_after == clients_before + 1, f"Clients count changed unexpectedly: before={clients_before}, after={clients_after}"
+    assert suppliers_after == suppliers_before + 1, f"Suppliers count changed unexpectedly: before={suppliers_before}, after={suppliers_after}"
+    print("✅ PASSED - No auto-creation of non-existent clients/suppliers")
     
-    # Verify it's gone
-    r = requests.get(f"{BASE_URL}/admin/announcements", headers=get_headers("admin"))
-    announcements = r.json()
-    remaining_ids = [a.get("id") for a in announcements]
-    if popup_id in remaining_ids:
-        print(f"❌ Deleted announcement still appears in list")
-        return False
-    print(f"✅ Announcement deleted successfully")
+    # 5. Repeat for visas
+    print("\n5. POST /import/visas/preview - Test validation")
+    visa_rows = [
+        {  # Valid
+            "passport_no": "V12345678",
+            "passenger_name": "محمد أحمد",
+            "service_type": "تأشيرة عمرة",
+            "client_name": "عميل استيراد صحيح",
+            "supplier_name": "مورد استيراد صحيح",
+            "currency": "SAR",
+            "cost": 300,
+            "sale_price": 400
+        },
+        {  # Non-existent client
+            "passport_no": "V87654321",
+            "passenger_name": "فاطمة علي",
+            "service_type": "تأشيرة عمرة",
+            "client_name": "عميل تأشيرات غير موجود",
+            "supplier_name": "مورد استيراد صحيح",
+            "currency": "SAR",
+            "cost": 250,
+            "sale_price": 350
+        }
+    ]
     
-    print("\n✅ TASK 2 PASSED: Announcements CRUD + Active endpoint working correctly")
-    return True
+    resp = session.post(f"{BASE_URL}/import/visas/preview", json={"rows": visa_rows, "skip_duplicates": True})
+    assert resp.status_code == 200, f"Failed to preview visa import: {resp.text}"
+    preview = resp.json()
+    print(f"Visa preview: valid_count={preview.get('valid_count')}")
+    
+    validated_rows = preview['rows']
+    assert len(validated_rows) == 2, f"Expected 2 rows, got {len(validated_rows)}"
+    assert len(validated_rows[0]['__errors']) == 0, "First visa row should be valid"
+    assert len(validated_rows[1]['__errors']) > 0, "Second visa row should have errors"
+    error_text = ' '.join(validated_rows[1]['__errors'])
+    assert 'غير موجود في دليل الحسابات' in error_text, f"Expected Arabic error in visa preview, got: {error_text}"
+    print("✅ PASSED - Visa preview validation correct")
+    
+    print("\n6. POST /import/visas - Attempt import")
+    resp = session.post(f"{BASE_URL}/import/visas", json={"rows": visa_rows, "skip_duplicates": True})
+    assert resp.status_code == 200, f"Failed to import visas: {resp.text}"
+    import_result = resp.json()
+    print(f"Visa import result: created={import_result['created']}, failed={import_result['failed']}")
+    
+    assert import_result['created'] == 1, f"Expected 1 visa created, got {import_result['created']}"
+    assert import_result['failed'] == 1, f"Expected 1 visa failed, got {import_result['failed']}"
+    print("✅ PASSED - Visa import created 1, failed 1")
+    
+    print("\n✅✅✅ ALL STRICT IMPORT VALIDATION TESTS PASSED ✅✅✅")
 
-# ============================================================
-# TASK 3: Suspend/Activate + Impersonate + Plan Tier Gate
-# ============================================================
-def test_task3_suspend_impersonate_tier():
-    print("\n" + "="*80)
-    print("TASK 3: Suspend/Activate + Impersonate + Plan Tier Gate")
-    print("="*80)
+def test_regression():
+    """Test regression - ensure existing features still work"""
+    print("\n=== TEST: Regression Tests ===")
     
-    # Get demo tenant ID
-    demo_me = get_me("demo")
-    demo_tenant_id = demo_me["tenant"]["id"]
+    # 1. Health endpoint
+    print("\n1. GET /health")
+    resp = session.get(f"{BASE_URL}/health")
+    assert resp.status_code == 200, f"Health check failed: {resp.text}"
+    data = resp.json()
+    assert data.get("status") == "ok", "Health status not ok"
+    print("✅ PASSED - Health endpoint working")
     
-    # Test 3.1: Suspend tenant
-    print("\n🧪 Test 3.1: POST /admin/tenants/:id/toggle-status (suspend)")
-    r = requests.post(f"{BASE_URL}/admin/tenants/{demo_tenant_id}/toggle-status", headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ Toggle status failed: {r.status_code} {r.text}")
-        return False
+    # Login as tenant owner
+    login(TENANT_OWNER)
     
-    result = r.json()
-    if result.get("status") != "suspended":
-        print(f"❌ Expected status 'suspended', got {result.get('status')}")
-        return False
-    print(f"✅ Demo tenant suspended")
+    # 2. Standard ticket create/edit/delete flow
+    print("\n2. Ticket create/edit/delete flow")
+    resp = session.get(f"{BASE_URL}/clients")
+    clients = resp.json()
+    client_id = clients[0]['id'] if len(clients) > 0 else None
+    resp = session.get(f"{BASE_URL}/suppliers")
+    suppliers = resp.json()
+    supplier_id = suppliers[0]['id'] if len(suppliers) > 0 else None
     
-    # Test 3.2: Verify demo owner is blocked
-    print("\n🧪 Test 3.2: Verify suspended tenant owner cannot access")
-    r = requests.get(f"{BASE_URL}/auth/me", headers=get_headers("demo"))
-    if r.status_code != 200:
-        print(f"❌ GET /auth/me failed: {r.status_code}")
-        return False
-    
-    me_data = r.json()
-    if me_data.get("user") is not None:
-        print(f"❌ Suspended tenant user should be null")
-        return False
-    if me_data.get("error") != "suspended":
-        print(f"❌ Expected error 'suspended', got {me_data.get('error')}")
-        return False
-    print(f"✅ Suspended tenant owner blocked (user=null, error='suspended')")
-    
-    # Test 3.3: Reactivate tenant
-    print("\n🧪 Test 3.3: POST /admin/tenants/:id/toggle-status (reactivate)")
-    r = requests.post(f"{BASE_URL}/admin/tenants/{demo_tenant_id}/toggle-status", headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ Toggle status failed: {r.status_code}")
-        return False
-    
-    result = r.json()
-    if result.get("status") != "active":
-        print(f"❌ Expected status 'active', got {result.get('status')}")
-        return False
-    print(f"✅ Demo tenant reactivated")
-    
-    # Test 3.4: Verify demo owner can access again
-    print("\n🧪 Test 3.4: Verify reactivated tenant owner can access")
-    r = requests.get(f"{BASE_URL}/auth/me", headers=get_headers("demo"))
-    if r.status_code != 200:
-        print(f"❌ GET /auth/me failed: {r.status_code}")
-        return False
-    
-    me_data = r.json()
-    if me_data.get("user") is None:
-        print(f"❌ Reactivated tenant user should not be null")
-        return False
-    print(f"✅ Reactivated tenant owner can access")
-    
-    # Test 3.5: Impersonate
-    print("\n🧪 Test 3.5: POST /admin/tenants/:id/impersonate")
-    r = requests.post(f"{BASE_URL}/admin/tenants/{demo_tenant_id}/impersonate", headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ Impersonate failed: {r.status_code} {r.text}")
-        return False
-    
-    impersonate_result = r.json()
-    session_id = impersonate_result.get("session_id")
-    if not session_id:
-        print(f"❌ No session_id in impersonate response")
-        return False
-    print(f"✅ Impersonation session created: {session_id}")
-    
-    # Test 3.6: Verify impersonation session
-    print("\n🧪 Test 3.6: Verify impersonation session shows impersonation=true")
-    impersonate_headers = {"Cookie": f"rahaal_session={session_id}"}
-    r = requests.get(f"{BASE_URL}/auth/me", headers=impersonate_headers)
-    if r.status_code != 200:
-        print(f"❌ GET /auth/me with impersonate session failed: {r.status_code}")
-        return False
-    
-    me_data = r.json()
-    if not me_data.get("impersonation"):
-        print(f"❌ impersonation should be true")
-        return False
-    if me_data.get("impersonated_by") != SUPER_ADMIN["email"]:
-        print(f"❌ impersonated_by should be {SUPER_ADMIN['email']}, got {me_data.get('impersonated_by')}")
-        return False
-    print(f"✅ Impersonation session verified (impersonation=true, impersonated_by={SUPER_ADMIN['email']})")
-    
-    # Test 3.7: Plan Tier Gate - Standard plan cannot create users
-    print("\n🧪 Test 3.7: Plan Tier Gate - Standard plan cannot create users")
-    # Verify demo tenant is standard plan
-    demo_me = get_me("demo")
-    plan_tier = demo_me["tenant"].get("plan_tier", "standard")
-    if plan_tier != "standard":
-        print(f"⚠️ Demo tenant is not standard plan ({plan_tier}), setting to standard...")
-        r = requests.patch(f"{BASE_URL}/admin/tenants/{demo_tenant_id}", 
-                          json={"plan_tier": "standard"}, 
-                          headers=get_headers("admin"))
-        if r.status_code != 200:
-            print(f"❌ Failed to set plan_tier to standard: {r.status_code}")
-            return False
-    
-    # Try to create user as demo owner (standard plan)
-    user_data = {
-        "name": "Test User",
-        "email": f"testuser{int(time.time())}@example.com",
-        "password": "Test@2025",
-        "role": "staff"
-    }
-    r = requests.post(f"{BASE_URL}/tenant/users", json=user_data, headers=get_headers("demo"))
-    if r.status_code != 403:
-        print(f"❌ Expected 403, got {r.status_code}")
-        return False
-    
-    error_msg = r.json().get("error", "")
-    if "Gold" not in error_msg:
-        print(f"❌ Error message should mention Gold plan, got: {error_msg}")
-        return False
-    print(f"✅ Standard plan blocked from creating users (403 with Arabic error about Gold plan)")
-    
-    # Test 3.8: Upgrade to Gold and retry
-    print("\n🧪 Test 3.8: Upgrade to Gold plan and retry user creation")
-    r = requests.patch(f"{BASE_URL}/admin/tenants/{demo_tenant_id}", 
-                      json={"plan_tier": "gold", "max_users": 10}, 
-                      headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ Failed to upgrade to gold: {r.status_code}")
-        return False
-    print(f"✅ Demo tenant upgraded to Gold plan")
-    
-    # Retry user creation
-    user_data2 = {
-        "name": "Test User Gold",
-        "email": f"testusergold{int(time.time())}@example.com",
-        "password": "Test@2025",
-        "role": "staff"
-    }
-    r = requests.post(f"{BASE_URL}/tenant/users", json=user_data2, headers=get_headers("demo"))
-    if r.status_code != 200:
-        print(f"❌ User creation failed on Gold plan: {r.status_code} {r.text}")
-        return False
-    print(f"✅ User creation succeeded on Gold plan")
-    
-    # Test 3.9: Downgrade back to standard for cleanup
-    print("\n🧪 Test 3.9: Downgrade back to standard for cleanup")
-    r = requests.patch(f"{BASE_URL}/admin/tenants/{demo_tenant_id}", 
-                      json={"plan_tier": "standard"}, 
-                      headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ Failed to downgrade to standard: {r.status_code}")
-        return False
-    print(f"✅ Demo tenant downgraded back to standard")
-    
-    print("\n✅ TASK 3 PASSED: Suspend/Activate + Impersonate + Plan Tier Gate working correctly")
-    return True
-
-# ============================================================
-# TASK 4: Subscription Plans + Quota-Exceeded Flag
-# ============================================================
-def test_task4_plans_quota_exceeded():
-    print("\n" + "="*80)
-    print("TASK 4: Subscription Plans + Quota-Exceeded Flag")
-    print("="*80)
-    
-    # Test 4.1: GET /plans (tenant view)
-    print("\n🧪 Test 4.1: GET /plans (tenant view)")
-    r = requests.get(f"{BASE_URL}/plans", headers=get_headers("demo"))
-    if r.status_code != 200:
-        print(f"❌ GET /plans failed: {r.status_code}")
-        return False
-    
-    plans = r.json()
-    if not isinstance(plans, list):
-        print(f"❌ Expected list, got {type(plans)}")
-        return False
-    
-    if len(plans) != 3:
-        print(f"❌ Expected 3 plans, got {len(plans)}")
-        return False
-    
-    plan_ids = [p.get("id") for p in plans]
-    expected_ids = ["voucher_pack_500", "gold_monthly", "gold_annual"]
-    for expected_id in expected_ids:
-        if expected_id not in plan_ids:
-            print(f"❌ Expected plan {expected_id} not found")
-            return False
-    
-    # Verify prices
-    voucher_pack = next((p for p in plans if p.get("id") == "voucher_pack_500"), None)
-    if not voucher_pack or voucher_pack.get("price_usd") != 50:
-        print(f"❌ voucher_pack_500 should have price_usd=50")
-        return False
-    
-    print(f"✅ GET /plans returns 3 active plans with correct IDs and prices")
-    
-    # Test 4.2: GET /admin/plans
-    print("\n🧪 Test 4.2: GET /admin/plans")
-    r = requests.get(f"{BASE_URL}/admin/plans", headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ GET /admin/plans failed: {r.status_code}")
-        return False
-    
-    admin_plans = r.json()
-    if len(admin_plans) != 3:
-        print(f"❌ Expected 3 plans, got {len(admin_plans)}")
-        return False
-    print(f"✅ GET /admin/plans returns 3 plans")
-    
-    # Test 4.3: PUT /admin/plans (update price)
-    print("\n🧪 Test 4.3: PUT /admin/plans (update voucher_pack_500 price to 60)")
-    update_data = {
-        "id": "voucher_pack_500",
-        "price_usd": 60
-    }
-    r = requests.put(f"{BASE_URL}/admin/plans", json=update_data, headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ PUT /admin/plans failed: {r.status_code} {r.text}")
-        return False
-    print(f"✅ Plan price updated")
-    
-    # Verify update
-    r = requests.get(f"{BASE_URL}/admin/plans", headers=get_headers("admin"))
-    plans = r.json()
-    voucher_pack = next((p for p in plans if p.get("id") == "voucher_pack_500"), None)
-    if not voucher_pack or voucher_pack.get("price_usd") != 60:
-        print(f"❌ Price should be 60, got {voucher_pack.get('price_usd')}")
-        return False
-    print(f"✅ Price verified as 60")
-    
-    # Test 4.4: Restore price back to 50
-    print("\n🧪 Test 4.4: Restore price back to 50")
-    restore_data = {
-        "id": "voucher_pack_500",
-        "price_usd": 50
-    }
-    r = requests.put(f"{BASE_URL}/admin/plans", json=restore_data, headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ PUT /admin/plans failed: {r.status_code}")
-        return False
-    print(f"✅ Price restored to 50")
-    
-    # Test 4.5: Quota exceeded response flag
-    print("\n🧪 Test 4.5: Quota exceeded response flag test")
-    
-    # Create a temp tenant with quota_limit = 2
-    print("  Creating temp tenant with quota_limit=2...")
-    temp_tenant_data = {
-        "name": f"Temp Quota Test {int(time.time())}",
-        "owner_name": "Temp Owner",
-        "owner_email": f"temp{int(time.time())}@example.com",
-        "owner_password": "Temp@2025",
-        "quota_limit": 2
-    }
-    r = requests.post(f"{BASE_URL}/admin/tenants", json=temp_tenant_data, headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"❌ Failed to create temp tenant: {r.status_code}")
-        return False
-    
-    temp_tenant = r.json()
-    temp_tenant_id = temp_tenant.get("id")
-    print(f"  ✅ Temp tenant created: {temp_tenant_id}")
-    
-    # Login as temp tenant owner
-    temp_creds = {
-        "email": temp_tenant_data["owner_email"],
-        "password": temp_tenant_data["owner_password"]
-    }
-    login(temp_creds, "temp")
-    
-    # Create 2 tickets to consume quota
-    print("  Creating 2 tickets to consume quota...")
-    
-    # First, create client and supplier
-    client_data = {"name": "Temp Client", "phone": "123"}
-    r = requests.post(f"{BASE_URL}/clients", json=client_data, headers=get_headers("temp"))
-    if r.status_code != 200:
-        print(f"❌ Failed to create client: {r.status_code}")
-        return False
-    temp_client_id = r.json().get("id")
-    
-    supplier_data = {"name": "Temp Supplier", "phone": "456"}
-    r = requests.post(f"{BASE_URL}/suppliers", json=supplier_data, headers=get_headers("temp"))
-    if r.status_code != 200:
-        print(f"❌ Failed to create supplier: {r.status_code}")
-        return False
-    temp_supplier_id = r.json().get("id")
-    
-    # Create 2 tickets
-    for i in range(2):
+    if not client_id or not supplier_id:
+        print("⚠️ SKIPPED - No clients/suppliers available")
+    else:
         ticket_data = {
-            "client_id": temp_client_id,
-            "supplier_id": temp_supplier_id,
+            "date": datetime.now().isoformat(),
+            "pnr": "REG001",
+            "route": "صنعاء - القاهرة",
+            "passenger_name": "اختبار",
             "currency": "USD",
+            "client_id": client_id,
+            "supplier_id": supplier_id,
             "cost": 100,
             "sale_price": 150,
-            "pnr": f"TEMP{i+1}",
-            "route": "Test Route"
+            "payment_method": "credit"
         }
-        r = requests.post(f"{BASE_URL}/tickets", json=ticket_data, headers=get_headers("temp"))
-        if r.status_code != 200:
-            print(f"❌ Failed to create ticket {i+1}: {r.status_code}")
-            return False
-    print(f"  ✅ Created 2 tickets (quota consumed)")
+        resp = session.post(f"{BASE_URL}/tickets", json=ticket_data)
+        assert resp.status_code == 200, f"Failed to create ticket: {resp.text}"
+        ticket = resp.json()
+        ticket_id = ticket['id']
+        print(f"Created ticket: {ticket_id}")
+        
+        # Edit
+        resp = session.put(f"{BASE_URL}/tickets/{ticket_id}", json={**ticket_data, "sale_price": 180})
+        assert resp.status_code == 200, f"Failed to edit ticket: {resp.text}"
+        print(f"Edited ticket: {ticket_id}")
+        
+        # Delete
+        resp = session.delete(f"{BASE_URL}/tickets/{ticket_id}")
+        assert resp.status_code == 200, f"Failed to delete ticket: {resp.text}"
+        print(f"Deleted ticket: {ticket_id}")
+        print("✅ PASSED - Ticket CRUD working")
     
-    # Attempt to create 3rd ticket (should fail with 402)
-    print("  Attempting to create 3rd ticket (should fail with 402)...")
-    ticket_data3 = {
-        "client_id": temp_client_id,
-        "supplier_id": temp_supplier_id,
-        "currency": "USD",
-        "cost": 100,
-        "sale_price": 150,
-        "pnr": "TEMP3",
-        "route": "Test Route"
-    }
-    r = requests.post(f"{BASE_URL}/tickets", json=ticket_data3, headers=get_headers("temp"))
-    if r.status_code != 402:
-        print(f"❌ Expected 402, got {r.status_code}")
-        return False
-    
-    error_response = r.json()
-    if not error_response.get("quota_exceeded"):
-        print(f"❌ Response should have quota_exceeded=true")
-        return False
-    if error_response.get("code") != "QUOTA_EXCEEDED":
-        print(f"❌ Response should have code='QUOTA_EXCEEDED'")
-        return False
-    if not error_response.get("error"):
-        print(f"❌ Response should have error message")
-        return False
-    
-    print(f"✅ 3rd ticket blocked with 402, quota_exceeded=true, code='QUOTA_EXCEEDED', Arabic error message")
-    
-    # Cleanup: Delete temp tenant
-    print("  Cleaning up temp tenant...")
-    r = requests.delete(f"{BASE_URL}/admin/tenants/{temp_tenant_id}", headers=get_headers("admin"))
-    if r.status_code != 200:
-        print(f"⚠️ Failed to delete temp tenant: {r.status_code}")
+    # 3. Visa create with OLD payload (no entry_date/expected_exit_date)
+    print("\n3. Visa create with old payload (backward compatibility)")
+    if not client_id or not supplier_id:
+        print("⚠️ SKIPPED - No clients/suppliers available")
     else:
-        print(f"  ✅ Temp tenant deleted")
+        visa_data = {
+            "date": datetime.now().isoformat(),
+            "service_type": "تأشيرة عمرة",
+            "passenger_name": "اختبار قديم",
+            "passport_no": "OLD123456",
+            "currency": "SAR",
+            "client_id": client_id,
+            "supplier_id": supplier_id,
+            "cost": 200,
+            "sale_price": 300,
+            "payment_method": "credit"
+        }
+        resp = session.post(f"{BASE_URL}/visas", json=visa_data)
+        assert resp.status_code == 200, f"Failed to create visa with old payload: {resp.text}"
+        visa = resp.json()
+        print(f"Created visa with old payload: {visa['id']}")
+        print("✅ PASSED - Visa backward compatibility working")
     
-    print("\n✅ TASK 4 PASSED: Subscription Plans + Quota-Exceeded Flag working correctly")
-    return True
+    # 4. Voucher receipt/payment
+    print("\n4. Voucher receipt/payment")
+    resp = session.get(f"{BASE_URL}/boxes")
+    boxes = resp.json()
+    if len(boxes) == 0:
+        print("⚠️ SKIPPED - No boxes available")
+    else:
+        box_id = boxes[0]['id']
+        if client_id:
+            voucher_data = {
+                "type": "receipt",
+                "date": datetime.now().isoformat(),
+                "currency": "SAR",
+                "amount": 100,
+                "party_type": "client",
+                "party_id": client_id,
+                "box_id": box_id,
+                "description": "اختبار سند قبض"
+            }
+            resp = session.post(f"{BASE_URL}/vouchers", json=voucher_data)
+            assert resp.status_code == 200, f"Failed to create receipt voucher: {resp.text}"
+            print(f"Created receipt voucher")
+            print("✅ PASSED - Voucher working")
+        else:
+            print("⚠️ SKIPPED - No client available")
+    
+    # 5. FX buy/sell
+    print("\n5. FX buy/sell")
+    resp = session.get(f"{BASE_URL}/boxes")
+    boxes = resp.json()
+    if len(boxes) < 2:
+        print("⚠️ SKIPPED - Need at least 2 boxes for FX")
+    else:
+        fx_data = {
+            "type": "buy",
+            "date": datetime.now().isoformat(),
+            "currency": "USD",
+            "amount": 100,
+            "counter_currency": "SAR",
+            "exchange_rate": 3.75,
+            "payment_method": "cash",
+            "box_currency_id": boxes[0]['id'],
+            "box_counter_id": boxes[1]['id']
+        }
+        resp = session.post(f"{BASE_URL}/fx", json=fx_data)
+        assert resp.status_code == 200, f"Failed to create FX: {resp.text}"
+        print(f"Created FX transaction")
+        print("✅ PASSED - FX working")
+    
+    # 6. Super admin: GET /api/admin/tenants
+    print("\n6. Super admin: GET /admin/tenants")
+    login(SUPER_ADMIN)
+    resp = session.get(f"{BASE_URL}/admin/tenants")
+    assert resp.status_code == 200, f"Failed to get tenants: {resp.text}"
+    tenants = resp.json()
+    assert 'tenants' in tenants, "tenants key not in response"
+    print(f"Found {len(tenants['tenants'])} tenants")
+    print("✅ PASSED - Super admin endpoints working")
+    
+    print("\n✅✅✅ ALL REGRESSION TESTS PASSED ✅✅✅")
 
-# ============================================================
-# REGRESSION TESTS
-# ============================================================
-def test_regression():
-    print("\n" + "="*80)
-    print("REGRESSION TESTS (ensure v2.7 and earlier still work)")
-    print("="*80)
-    
-    # Test health endpoint
-    print("\n🧪 Regression: GET /health")
-    r = requests.get(f"{BASE_URL}/health")
-    if r.status_code != 200:
-        print(f"❌ Health check failed: {r.status_code}")
-        return False
-    
-    health = r.json()
-    if health.get("status") != "ok":
-        print(f"❌ Health status should be 'ok', got {health.get('status')}")
-        return False
-    
-    version = health.get("version")
-    if not version or version < "2.7":
-        print(f"⚠️ Version should be 2.7 or newer, got {version}")
-    
-    print(f"✅ Health endpoint working (status=ok, version={version})")
-    
-    # Test ticket creation (basic flow)
-    print("\n🧪 Regression: Create/edit ticket flow")
-    
-    # Get clients and suppliers
-    r = requests.get(f"{BASE_URL}/clients", headers=get_headers("demo"))
-    clients = r.json()
-    if not clients:
-        print(f"❌ No clients found")
-        return False
-    client_id = clients[0].get("id")
-    
-    r = requests.get(f"{BASE_URL}/suppliers", headers=get_headers("demo"))
-    suppliers = r.json()
-    if not suppliers:
-        print(f"❌ No suppliers found")
-        return False
-    supplier_id = suppliers[0].get("id")
-    
-    # Create ticket
-    ticket_data = {
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "currency": "USD",
-        "cost": 100,
-        "sale_price": 150,
-        "pnr": f"REG{int(time.time())}",
-        "route": "Regression Test"
-    }
-    r = requests.post(f"{BASE_URL}/tickets", json=ticket_data, headers=get_headers("demo"))
-    if r.status_code != 200:
-        print(f"❌ Ticket creation failed: {r.status_code}")
-        return False
-    
-    ticket = r.json()
-    ticket_id = ticket.get("id")
-    print(f"✅ Ticket created successfully")
-    
-    # Edit ticket
-    edit_data = {
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "currency": "USD",
-        "cost": 120,
-        "sale_price": 180,
-        "pnr": ticket.get("pnr"),
-        "route": "Regression Test Edited"
-    }
-    r = requests.put(f"{BASE_URL}/tickets/{ticket_id}", json=edit_data, headers=get_headers("demo"))
-    if r.status_code != 200:
-        print(f"❌ Ticket edit failed: {r.status_code}")
-        return False
-    print(f"✅ Ticket edited successfully")
-    
-    # Cleanup
-    r = requests.delete(f"{BASE_URL}/tickets/{ticket_id}", headers=get_headers("demo"))
-    if r.status_code != 200:
-        print(f"⚠️ Ticket cleanup failed: {r.status_code}")
-    
-    print("\n✅ REGRESSION TESTS PASSED")
-    return True
-
-# ============================================================
-# MAIN TEST RUNNER
-# ============================================================
 def main():
-    print("\n" + "="*80)
-    print("🚀 v2.8 BACKEND TESTING SUITE — Rahaal ERP")
-    print("="*80)
-    print(f"Base URL: {BASE_URL}")
-    print(f"Super Admin: {SUPER_ADMIN['email']}")
-    print(f"Demo Owner: {DEMO_OWNER['email']}")
-    
-    results = {}
+    """Run all tests"""
+    print("=" * 80)
+    print("RAHAAL ERP v3.0 BACKEND TESTING SUITE")
+    print("=" * 80)
     
     try:
-        # Run all tests
-        results["Task 1: Referral Simplification"] = test_task1_referral_simplification()
-        results["Task 2: Announcements CRUD"] = test_task2_announcements()
-        results["Task 3: Suspend/Impersonate/Tier"] = test_task3_suspend_impersonate_tier()
-        results["Task 4: Plans + Quota-Exceeded"] = test_task4_plans_quota_exceeded()
-        results["Regression Tests"] = test_regression()
+        # Test health first
+        test_health()
         
+        # Test v3.0 features
+        test_services_module()
+        test_visa_alerts()
+        test_strict_import_validation()
+        
+        # Test regression
+        test_regression()
+        
+        print("\n" + "=" * 80)
+        print("🎉🎉🎉 ALL TESTS PASSED SUCCESSFULLY 🎉🎉🎉")
+        print("=" * 80)
+        
+    except AssertionError as e:
+        print(f"\n❌ TEST FAILED: {e}")
+        raise
     except Exception as e:
-        print(f"\n❌ FATAL ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-    
-    # Print summary
-    print("\n" + "="*80)
-    print("📊 TEST SUMMARY")
-    print("="*80)
-    
-    for test_name, passed in results.items():
-        status = "✅ PASSED" if passed else "❌ FAILED"
-        print(f"{status} - {test_name}")
-    
-    all_passed = all(results.values())
-    
-    print("\n" + "="*80)
-    if all_passed:
-        print("🎉 ALL TESTS PASSED")
-    else:
-        print("❌ SOME TESTS FAILED")
-    print("="*80)
-    
-    return all_passed
+        print(f"\n❌ ERROR: {e}")
+        raise
 
 if __name__ == "__main__":
-    success = main()
-    exit(0 if success else 1)
+    main()
