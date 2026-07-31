@@ -401,7 +401,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.6',
+          version: '3.7',
           db: 'connected',
         })
       } catch (e) {
@@ -1105,6 +1105,56 @@ async function handleRoute(request, { params }) {
         return { ...p, _id: undefined, components_count: comps, bookings_count: books }
       }))
       return ok(enriched)
+    }
+    // v3.7 — Packages profitability comparison (leaderboard) with optional period filter
+    if (route === '/packages/comparison' && method === 'GET') {
+      const period = (q.period || 'all').toLowerCase() // 'all' | 'month' | 'year'
+      const now = new Date()
+      let startFilter = null
+      if (period === 'month') { startFilter = new Date(now.getFullYear(), now.getMonth(), 1) }
+      else if (period === 'year') { startFilter = new Date(now.getFullYear(), 0, 1) }
+      const pkgs = await db.collection('packages').find(tf).toArray()
+      const bookingsQ = { tenant_id: T }
+      if (startFilter) bookingsQ.created_at = { $gte: startFilter }
+      const allBookings = await db.collection('package_bookings').find(bookingsQ).toArray()
+      const byPkg = {}
+      for (const b of allBookings) {
+        byPkg[b.package_id] = byPkg[b.package_id] || { revenue: 0, cost: 0, profit: 0, pax: 0, bookings: 0 }
+        byPkg[b.package_id].revenue += b.total_sale || 0
+        byPkg[b.package_id].cost += b.total_cost || 0
+        byPkg[b.package_id].profit += b.commission || 0
+        byPkg[b.package_id].pax += b.pax_count || 0
+        byPkg[b.package_id].bookings += 1
+      }
+      const rows = pkgs.map(p => {
+        const s = byPkg[p.id] || { revenue: 0, cost: 0, profit: 0, pax: 0, bookings: 0 }
+        const margin_pct = s.revenue > 0 ? +((s.profit / s.revenue) * 100).toFixed(2) : 0
+        return {
+          package_id: p.id,
+          name: p.name,
+          package_type: p.package_type,
+          currency: p.currency,
+          status: p.status,
+          start_date: p.start_date,
+          end_date: p.end_date,
+          revenue: +s.revenue.toFixed(2),
+          cost: +s.cost.toFixed(2),
+          profit: +s.profit.toFixed(2),
+          margin_pct,
+          pax: s.pax,
+          bookings: s.bookings,
+        }
+      }).sort((a, b) => b.profit - a.profit)
+      const top = rows.find(r => r.bookings > 0) || null
+      const totals = rows.reduce((acc, r) => ({
+        revenue: acc.revenue + r.revenue,
+        cost: acc.cost + r.cost,
+        profit: acc.profit + r.profit,
+        bookings: acc.bookings + r.bookings,
+        pax: acc.pax + r.pax,
+      }), { revenue: 0, cost: 0, profit: 0, bookings: 0, pax: 0 })
+      totals.margin_pct = totals.revenue > 0 ? +((totals.profit / totals.revenue) * 100).toFixed(2) : 0
+      return ok({ period, top, rows, totals })
     }
     if (route === '/packages' && method === 'POST') {
       const b = await request.json()

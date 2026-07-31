@@ -4258,11 +4258,17 @@ const COMPONENT_TYPES = [
 
 function PackagesScreen() {
   const [packages, setPackages] = useState([])
+  const [leaderboard, setLeaderboard] = useState(null)
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [detailsPkg, setDetailsPkg] = useState(null)
   const [reportPkg, setReportPkg] = useState(null)
-  const load = () => api('/packages').then(setPackages).catch(e => toast.error(e.message))
+  const [comparePeriod, setComparePeriod] = useState(null) // null | 'all' | 'month' | 'year'
+  const [extendPkg, setExtendPkg] = useState(null)
+  const load = () => {
+    api('/packages').then(setPackages).catch(e => toast.error(e.message))
+    api('/packages/comparison?period=month').then(setLeaderboard).catch(() => {})
+  }
   useEffect(() => { load() }, [])
   const closePkg = async (p) => {
     if (!confirm(`إغلاق الباكج "${p.name}"؟ (لن يمكن إضافة تسجيلات جديدة)`)) return
@@ -4280,14 +4286,52 @@ function PackagesScreen() {
   }
   const openPackages = packages.filter(p => p.status !== 'closed')
   const closedPackages = packages.filter(p => p.status === 'closed')
+  const top = leaderboard?.top
   return (
     <div className="space-y-4">
       <TopBar title="الباكجات والبرامج السياحية" subtitle={`${openPackages.length} باكج نشط • ${closedPackages.length} أرشيف`}
-        right={<Button onClick={() => { setEditing(null); setOpen(true) }} className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> باكج جديد</Button>} />
+        right={<div className="flex gap-2">
+          <Button variant="outline" onClick={() => setComparePeriod('all')} className="gap-2 border-blue-200 text-blue-700 hover:bg-blue-50"><BarChart3 className="w-4 h-4" /> مقارنة الربحية</Button>
+          <Button onClick={() => { setEditing(null); setOpen(true) }} className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> باكج جديد</Button>
+        </div>} />
+      {/* v3.7 — Top Profitable Package KPI (current month) */}
+      {top && top.bookings > 0 && (
+        <Card className="overflow-hidden border-0 shadow-md bg-gradient-to-l from-emerald-500 via-teal-500 to-cyan-500 text-white">
+          <CardContent className="p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-xl bg-white/20 flex items-center justify-center text-2xl">🏆</div>
+                <div>
+                  <div className="text-xs uppercase tracking-wider opacity-90">الباكج الأكثر ربحية هذا الشهر</div>
+                  <div className="text-lg font-extrabold">{top.name}</div>
+                  <div className="text-xs opacity-90">👥 {top.pax} مسافر • 🧾 {top.bookings} حجز • {PACKAGE_TYPES.find(t => t.v === top.package_type)?.l || top.package_type}</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-4 text-center">
+                <div>
+                  <div className="text-[10px] opacity-90">صافي الربح</div>
+                  <div className="text-xl font-black">{top.profit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                  <div className="text-[10px] opacity-90">{top.currency}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] opacity-90">الإيرادات</div>
+                  <div className="text-xl font-black">{top.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                  <div className="text-[10px] opacity-90">{top.currency}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] opacity-90">هامش الربح</div>
+                  <div className="text-xl font-black">{top.margin_pct}%</div>
+                  <div className="text-[10px] opacity-90">Margin</div>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
       <div>
         <div className="text-sm font-bold text-slate-700 mb-2">🟢 الباكجات المفتوحة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {openPackages.map(p => <PkgCard key={p.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} />)}
+          {openPackages.map(p => <PkgCard key={p.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} onExtend={() => setExtendPkg(p)} />)}
           {openPackages.length === 0 && <div className="col-span-full text-center text-slate-400 py-8 text-sm">لا توجد باكجات مفتوحة — أنشئ باكج جديد</div>}
         </div>
       </div>
@@ -4300,11 +4344,173 @@ function PackagesScreen() {
       <PackageDialog open={open} onOpenChange={v => { setOpen(v); if (!v) setEditing(null) }} record={editing} onSaved={load} />
       {detailsPkg && <PackageDetailsDialog pkg={detailsPkg} onClose={() => setDetailsPkg(null)} onChanged={load} />}
       {reportPkg && <PackageReportDialog pkg={reportPkg} onClose={() => setReportPkg(null)} />}
+      {comparePeriod && <PackageCompareDialog initialPeriod={comparePeriod} onClose={() => setComparePeriod(null)} />}
+      {extendPkg && <ExtendPackageDateDialog pkg={extendPkg} onClose={() => setExtendPkg(null)} onSaved={load} />}
     </div>
   )
 }
 
-function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, closed }) {
+// v3.7 — Extend Package End-Date (quick dialog)
+function ExtendPackageDateDialog({ pkg, onClose, onSaved }) {
+  const currentEnd = pkg.end_date ? new Date(pkg.end_date).toISOString().slice(0, 10) : ''
+  const [newDate, setNewDate] = useState(currentEnd)
+  const [saving, setSaving] = useState(false)
+  const save = async () => {
+    if (!newDate) return toast.error('اختر تاريخاً جديداً')
+    if (pkg.end_date && new Date(newDate) <= new Date(pkg.end_date)) {
+      if (!confirm('التاريخ الجديد ليس بعد التاريخ الحالي — هل تريد المتابعة؟')) return
+    }
+    try {
+      setSaving(true)
+      await api(`/packages/${pkg.id}`, { method: 'PATCH', body: { end_date: newDate } })
+      toast.success('✅ تم تمديد تاريخ نهاية الباكج')
+      onSaved(); onClose()
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent dir="rtl" className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Calendar className="w-5 h-5 text-teal-600" /> تمديد تاريخ نهاية الباكج</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="bg-slate-50 rounded-lg p-3 text-sm">
+            <div className="font-bold text-slate-700">{pkg.name}</div>
+            <div className="text-xs text-slate-500 mt-1">{PACKAGE_TYPES.find(t => t.v === pkg.package_type)?.l}</div>
+            <div className="text-xs text-slate-600 mt-2">التاريخ الحالي: <span className="font-mono">{currentEnd || '—'}</span></div>
+          </div>
+          <Field label="تاريخ النهاية الجديد" required>
+            <Input type="date" value={newDate} onChange={e => setNewDate(e.target.value)} />
+          </Field>
+          <div className="text-xs text-amber-700 bg-amber-50 rounded p-2 flex gap-2">
+            <span>💡</span>
+            <span>مدّد التاريخ لتسجيل معتمرين أو مسافرين متأخرين دون الحاجة لإغلاق الباكج وإعادة فتحه.</span>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>إلغاء</Button>
+          <Button onClick={save} disabled={saving} className="bg-teal-600 hover:bg-teal-700 text-white gap-2"><Calendar className="w-4 h-4" /> {saving ? 'جارٍ الحفظ...' : 'تمديد التاريخ'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// v3.7 — Packages Profitability Comparison Report
+function PackageCompareDialog({ initialPeriod = 'all', onClose }) {
+  const [period, setPeriod] = useState(initialPeriod)
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const load = () => {
+    setLoading(true)
+    api(`/packages/comparison?period=${period}`).then(d => { setData(d); setLoading(false) }).catch(e => { toast.error(e.message); setLoading(false) })
+  }
+  useEffect(() => { load() }, [period])
+  const rows = data?.rows || []
+  const totals = data?.totals || { revenue: 0, cost: 0, profit: 0, margin_pct: 0, bookings: 0, pax: 0 }
+  const periodLabel = { all: 'كل الفترات', month: 'الشهر الحالي', year: 'السنة الحالية' }[period]
+  const printReport = () => window.print()
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent dir="rtl" className="max-w-5xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><BarChart3 className="w-5 h-5 text-blue-600" /> تقرير مقارنة ربحية الباكجات</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 print:hidden">
+            <div className="flex gap-1">
+              {['all', 'month', 'year'].map(p => (
+                <Button key={p} size="sm" variant={period === p ? 'default' : 'outline'} onClick={() => setPeriod(p)} className={period === p ? 'bg-blue-600 text-white' : ''}>
+                  {p === 'all' ? 'الكل' : p === 'month' ? 'هذا الشهر' : 'هذه السنة'}
+                </Button>
+              ))}
+            </div>
+            <Button size="sm" variant="outline" onClick={printReport} className="gap-1"><ReceiptText className="w-3 h-3" /> طباعة</Button>
+          </div>
+          <div className="text-xs text-slate-500">الفترة: <b className="text-slate-700">{periodLabel}</b> • {rows.filter(r => r.bookings > 0).length} باكج نشط من أصل {rows.length}</div>
+          {/* Summary KPIs */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <div className="rounded-lg border p-2 bg-white">
+              <div className="text-[10px] text-slate-500">إجمالي الإيرادات</div>
+              <div className="text-lg font-black text-emerald-600">{totals.revenue.toLocaleString('en-US', { maximumFractionDigits: 2 })}</div>
+            </div>
+            <div className="rounded-lg border p-2 bg-white">
+              <div className="text-[10px] text-slate-500">إجمالي التكاليف</div>
+              <div className="text-lg font-black text-orange-600">{totals.cost.toLocaleString('en-US', { maximumFractionDigits: 2 })}</div>
+            </div>
+            <div className="rounded-lg border p-2 bg-white">
+              <div className="text-[10px] text-slate-500">صافي الربح</div>
+              <div className="text-lg font-black text-blue-600">{totals.profit.toLocaleString('en-US', { maximumFractionDigits: 2 })}</div>
+            </div>
+            <div className="rounded-lg border p-2 bg-white">
+              <div className="text-[10px] text-slate-500">متوسط الهامش</div>
+              <div className="text-lg font-black text-fuchsia-600">{totals.margin_pct}%</div>
+            </div>
+          </div>
+          {/* Comparison table */}
+          {loading ? (
+            <div className="text-center py-8 text-sm text-slate-400">جارٍ التحميل...</div>
+          ) : rows.length === 0 ? (
+            <div className="text-center py-8 text-sm text-slate-400">لا توجد باكجات</div>
+          ) : (
+            <div className="overflow-x-auto rounded-lg border">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-100 text-xs">
+                  <tr>
+                    <th className="p-2 text-right">#</th>
+                    <th className="p-2 text-right">الباكج</th>
+                    <th className="p-2 text-right">النوع</th>
+                    <th className="p-2 text-center">الحالة</th>
+                    <th className="p-2 text-center">الحجوزات</th>
+                    <th className="p-2 text-center">المسافرون</th>
+                    <th className="p-2 text-left">الإيرادات</th>
+                    <th className="p-2 text-left">التكاليف</th>
+                    <th className="p-2 text-left">صافي الربح</th>
+                    <th className="p-2 text-center">الهامش %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, idx) => (
+                    <tr key={r.package_id} className={`border-t hover:bg-slate-50 ${idx === 0 && r.bookings > 0 ? 'bg-emerald-50/70 font-semibold' : ''}`}>
+                      <td className="p-2 text-slate-400">{idx === 0 && r.bookings > 0 ? '🏆' : idx + 1}</td>
+                      <td className="p-2">{r.name}</td>
+                      <td className="p-2 text-xs text-slate-500">{PACKAGE_TYPES.find(t => t.v === r.package_type)?.l || r.package_type}</td>
+                      <td className="p-2 text-center">
+                        <Badge className={r.status === 'closed' ? 'bg-slate-200 text-slate-600' : 'bg-emerald-100 text-emerald-700'}>{r.status === 'closed' ? 'مغلق' : 'مفتوح'}</Badge>
+                      </td>
+                      <td className="p-2 text-center">{r.bookings}</td>
+                      <td className="p-2 text-center">{r.pax}</td>
+                      <td className="p-2 text-left font-mono text-emerald-700">{r.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      <td className="p-2 text-left font-mono text-orange-700">{r.cost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      <td className={`p-2 text-left font-mono font-bold ${r.profit >= 0 ? 'text-blue-700' : 'text-rose-700'}`}>{r.profit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      <td className="p-2 text-center font-mono">
+                        <span className={`px-2 py-0.5 rounded ${r.margin_pct >= 20 ? 'bg-emerald-100 text-emerald-700' : r.margin_pct >= 10 ? 'bg-amber-100 text-amber-700' : r.margin_pct > 0 ? 'bg-slate-100 text-slate-600' : 'bg-rose-100 text-rose-600'}`}>{r.margin_pct}%</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot className="bg-slate-50 font-bold text-xs">
+                  <tr>
+                    <td colSpan={4} className="p-2 text-left">الإجمالي</td>
+                    <td className="p-2 text-center">{totals.bookings}</td>
+                    <td className="p-2 text-center">{totals.pax}</td>
+                    <td className="p-2 text-left font-mono">{totals.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    <td className="p-2 text-left font-mono">{totals.cost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    <td className="p-2 text-left font-mono">{totals.profit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    <td className="p-2 text-center font-mono">{totals.margin_pct}%</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          )}
+        </div>
+        <DialogFooter className="print:hidden"><Button variant="ghost" onClick={onClose}>إغلاق</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onExtend, closed }) {
   const typeL = PACKAGE_TYPES.find(t => t.v === p.package_type)?.l || p.package_type
   return (
     <Card className={`overflow-hidden hover:shadow-md transition ${closed ? 'opacity-70' : ''}`}>
@@ -4324,6 +4530,7 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, clo
         <div className="flex flex-wrap gap-1 pt-2 border-t">
           <Button size="sm" variant="outline" onClick={onOpen} className="h-7 px-2 text-xs gap-1"><FileBadge2 className="w-3 h-3" /> المكونات والتسجيل</Button>
           <Button size="sm" variant="outline" onClick={onReport} className="h-7 px-2 text-xs gap-1 text-blue-600"><ReceiptText className="w-3 h-3" /> التقرير</Button>
+          {!closed && onExtend && <Button size="sm" variant="outline" onClick={onExtend} className="h-7 px-2 text-xs gap-1 text-teal-600 border-teal-200 hover:bg-teal-50"><Calendar className="w-3 h-3" /> تمديد التاريخ</Button>}
           {!closed && onEdit && <Button size="sm" variant="ghost" onClick={onEdit} className="h-7 px-2 text-xs"><Pencil className="w-3 h-3" /></Button>}
           {!closed && onClose && <Button size="sm" variant="ghost" onClick={onClose} className="h-7 px-2 text-xs text-orange-600">إغلاق</Button>}
           {closed && onReopen && <Button size="sm" variant="ghost" onClick={onReopen} className="h-7 px-2 text-xs text-emerald-600">فتح</Button>}
