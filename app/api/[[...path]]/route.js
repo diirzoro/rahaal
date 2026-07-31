@@ -56,7 +56,7 @@ async function seedTenantDefaults(db, tenantId) {
     { id: uuidv4(), tenant_id: t, code: '4101', name_ar: 'إيرادات عمولات التذاكر', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '4102', name_ar: 'إيرادات عمولات التأشيرات والموافقات', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '4103', name_ar: 'إيرادات خدمات إضافية', type: 'revenue', parent: '4', is_group: false, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '4104', name_ar: 'رسوم إلغاء واسترداد', type: 'revenue', parent: '4', is_group: false, created_at: now },
+    { id: uuidv4(), tenant_id: t, code: '4105', name_ar: 'رسوم إلغاء واسترداد', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '4104', name_ar: 'أرباح وخسائر فروق العملات (مصارفة)', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '5', name_ar: 'المصروفات', type: 'expense', parent: null, is_group: true, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '5101', name_ar: 'مصاريف تشغيلية', type: 'expense', parent: '5', is_group: true, created_at: now },
@@ -149,6 +149,15 @@ async function seedInitial(db) {
       await db.collection('accounts').insertOne({
         id: uuidv4(), tenant_id: tn.id, code: '4104',
         name_ar: 'أرباح وخسائر فروق العملات (مصارفة)',
+        type: 'revenue', parent: '4', is_group: false, created_at: new Date(),
+      })
+    }
+    // v3.5 — Backfill 4105 (refund fees) if missing
+    const hasRefund = await db.collection('accounts').findOne({ tenant_id: tn.id, code: '4105' })
+    if (!hasRefund) {
+      await db.collection('accounts').insertOne({
+        id: uuidv4(), tenant_id: tn.id, code: '4105',
+        name_ar: 'رسوم إلغاء واسترداد',
         type: 'revenue', parent: '4', is_group: false, created_at: new Date(),
       })
     }
@@ -1041,7 +1050,7 @@ async function handleRoute(request, { params }) {
       // Supplier: they keep supplier_penalty — Credit supplier
       if (supplierPenalty > 0) refundJeLines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: orig.supplier_id, party_name: orig.supplier_name, debit: 0, credit: supplierPenalty })
       // Office fee: revenue 4104
-      if (officeFee > 0) refundJeLines.push({ account_code: '4104', account_name: 'رسوم إلغاء واسترداد', party_type: 'revenue', party_id: null, party_name: 'رسوم استرداد', debit: 0, credit: officeFee })
+      if (officeFee > 0) refundJeLines.push({ account_code: '4105', account_name: 'رسوم إلغاء واسترداد', party_type: 'revenue', party_id: null, party_name: 'رسوم استرداد', debit: 0, credit: officeFee })
       // For non-cash refunds, we need a balancing line since debit=clientRetained, credit=supplierPenalty+officeFee=clientRetained (already balanced!) ✓
       // For cash refunds: debit clientRetained, credit refundToClient+supplierPenalty+officeFee = refundToClient + clientRetained = sale ✓ hmm — need also to debit revenue 4101 for reversal
       // Actually simpler: on cash refunds, add a debit line reversing sale
