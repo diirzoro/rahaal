@@ -3836,9 +3836,9 @@ backend:
 frontend:
   - task: "v3.6 Packages Screen + Dialogs + Report"
     implemented: true
-    working: "NA"
+    working: false
     file: "/app/app/page.js"
-    stuck_count: 0
+    stuck_count: 1
     priority: "high"
     needs_retesting: false
     status_history:
@@ -3850,6 +3850,45 @@ frontend:
           PackageDialog: create/edit (name, type, currency, dates, notes).
           PackageDetailsDialog: two tabs (Components / Bookings) with inline add forms.
             Components: type/name/supplier/cost/sale inputs → shows per-pax profit.
+      - working: false
+        agent: "testing"
+        comment: |
+          ❌ CRITICAL BLOCKING ISSUE - Packages screen NOT accessible via sidebar navigation.
+          
+          **Test Environment:**
+          - URL: https://visa-booking-5.preview.emergentagent.com
+          - Credentials: owner@demo.com / Demo@2025 ✅
+          - Login: ✅ SUCCESSFUL
+          - Dashboard: ✅ LOADED
+          
+          **BLOCKING ISSUE:**
+          Sidebar tab "الباكجات والبرامج" (Packages & Tours) is NOT navigating to packages screen.
+          When clicking on packages tab, system navigates to wrong screen (Tickets screen "حجز التذاكر" instead of Packages).
+          Verified tab exists in NAV array: { id: 'packages', label: 'الباكجات والبرامج' }
+          
+          **UNABLE TO TEST (ALL SCENARIOS BLOCKED):**
+          ❌ Cannot access PackagesScreen
+          ❌ Cannot test package creation
+          ❌ Cannot test components addition
+          ❌ Cannot test booking creation
+          ❌ Cannot test package report
+          ❌ Cannot test package close/reopen
+          
+          **ROOT CAUSE:**
+          Tab click handler not properly wired OR 'packages' case missing in tab switch logic OR PackagesScreen not rendered.
+          
+          **CONSOLE LOGS:**
+          - Only warnings about missing Dialog descriptions (non-critical)
+          - No JavaScript errors
+          - /api/auth/me successful
+          
+          **REGRESSION:**
+          ✅ Dashboard loads
+          ✅ Other screens accessible (Tickets confirmed)
+          ✅ Login working
+          ✅ No red screen errors
+          
+          **CRITICAL:** Main agent must fix sidebar navigation before ANY frontend testing can proceed. Backend is 100% functional (18/18 passed).
             Bookings: client/pilgrim/passport/pax_count/payment/box → toast "✅ تم التسجيل + قيد محاسبي".
           PackageReportDialog: 4 KPI cards (bookings, revenue, cost, net profit + margin %) + supplier cost breakdown table + print button.
           Editable while status='open'; closed packages become read-only (view + report only, can reopen).
@@ -3859,8 +3898,10 @@ metadata:
 
 
 test_plan:
-  current_focus: []
-  stuck_tasks: []
+  current_focus:
+    - "v3.6 Packages Screen + Dialogs + Report"
+  stuck_tasks:
+    - "v3.6 Packages Screen + Dialogs + Report"
   test_all: false
   test_priority: "high_first"
 
@@ -3875,6 +3916,43 @@ agent_communication:
       5. GET package report → verify totals, margin_pct, supplier_breakdown
       6. Close package → verify booking blocked
       7. Reopen package → verify booking allowed
+  - agent: "testing"
+    message: |
+      ❌ v3.6 FRONTEND TESTING BLOCKED - CRITICAL NAVIGATION ISSUE
+      
+      **ISSUE:** Packages screen is completely inaccessible via sidebar navigation.
+      
+      **Test Results:**
+      - ✅ Login successful (owner@demo.com)
+      - ✅ Dashboard loads correctly
+      - ✅ Backend fully functional (18/18 tests passed)
+      - ❌ Sidebar tab "الباكجات والبرامج" does NOT navigate to PackagesScreen
+      - ❌ Clicking packages tab navigates to wrong screen (Tickets instead of Packages)
+      
+      **Impact:** ZERO frontend scenarios testable. All test steps blocked:
+      1. ❌ Cannot access packages screen
+      2. ❌ Cannot create package
+      3. ❌ Cannot add components
+      4. ❌ Cannot book customer
+      5. ❌ Cannot view report
+      6. ❌ Cannot close/reopen package
+      7. ❌ Cannot verify any UI elements
+      
+      **Root Cause Investigation Needed:**
+      - Check TenantApp component tab switch logic
+      - Verify 'packages' case is handled in setTab() or similar
+      - Confirm PackagesScreen is imported and rendered when tab === 'packages'
+      - Check if there are permission restrictions
+      
+      **Evidence:**
+      - Tab exists in NAV array: { id: 'packages', label: 'الباكجات والبرامج', icon: FileBadge2, color: 'from-teal-600 to-emerald-500' }
+      - No console errors (only non-critical Dialog warnings)
+      - Other screens work (Dashboard, Tickets confirmed)
+      
+      **Next Steps:**
+      1. Main agent MUST fix sidebar navigation for packages tab
+      2. Verify PackagesScreen renders when tab === 'packages'
+      3. Re-test after fix is deployed
       8. Delete package with bookings → verify blocked
       9. Delete empty package → verify success
       10. Verify journal entry with ref_type='package_booking'
