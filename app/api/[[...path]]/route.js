@@ -9,7 +9,9 @@ async function connectToMongo() {
   if (!client) {
     client = new MongoClient(process.env.MONGO_URL)
     await client.connect()
-    db = client.db(process.env.DB_NAME || 'rahaal_erp')
+    // v3.4 deployment fix — remove hardcoded DB_NAME fallback so we fail-fast if env is missing
+    if (!process.env.DB_NAME) throw new Error('DB_NAME environment variable is required')
+    db = client.db(process.env.DB_NAME)
     await seedInitial(db)
   }
   return db
