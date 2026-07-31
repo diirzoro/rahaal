@@ -1,753 +1,780 @@
 #!/usr/bin/env python3
 """
-Backend Test Suite for Rahaal ERP v3.5
-Tests refunds and bulk statement generation features
+Backend Test Suite for Rahaal ERP v3.6 — Packages Module
+Tests all package endpoints, bookings, components, reports, and regressions
 """
 
 import requests
 import json
+import os
 from datetime import datetime, timedelta
 
 # Configuration
-BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
-CREDENTIALS = {
-    "email": "owner@demo.com",
-    "password": "Demo@2025"
+BASE_URL = os.getenv('NEXT_PUBLIC_BASE_URL', 'https://visa-booking-5.preview.emergentagent.com')
+API_URL = f"{BASE_URL}/api"
+
+# Test credentials
+OWNER_EMAIL = "owner@demo.com"
+OWNER_PASSWORD = "Demo@2025"
+
+# Global session
+session = requests.Session()
+session.headers.update({'Content-Type': 'application/json'})
+
+# Test data storage
+test_data = {
+    'supplier1_id': None,
+    'supplier2_id': None,
+    'client_id': None,
+    'package_id': None,
+    'booking_id': None,
+    'empty_package_id': None
 }
 
-class TestSession:
-    def __init__(self):
-        self.session = requests.Session()
-        self.cookies = None
-        
-    def login(self):
-        """Login and get session cookie"""
-        print("\n=== LOGIN ===")
-        try:
-            resp = self.session.post(f"{BASE_URL}/auth/login", json=CREDENTIALS)
-            print(f"Login status: {resp.status_code}")
-            if resp.status_code == 200:
-                self.cookies = self.session.cookies
-                print("✅ Login successful")
-                return True
-            else:
-                print(f"❌ Login failed: {resp.text}")
-                return False
-        except Exception as e:
-            print(f"❌ Login error: {e}")
-            return False
-    
-    def get(self, endpoint):
-        """GET request"""
-        return self.session.get(f"{BASE_URL}{endpoint}")
-    
-    def post(self, endpoint, data):
-        """POST request"""
-        return self.session.post(f"{BASE_URL}{endpoint}", json=data)
-    
-    def put(self, endpoint, data):
-        """PUT request"""
-        return self.session.put(f"{BASE_URL}{endpoint}", json=data)
-    
-    def delete(self, endpoint):
-        """DELETE request"""
-        return self.session.delete(f"{BASE_URL}{endpoint}")
+def print_test(msg):
+    """Print test step"""
+    print(f"\n{'='*80}")
+    print(f"TEST: {msg}")
+    print('='*80)
 
-def test_health_check(session):
-    """Test 1: GET /api/health → verify version:3.5"""
-    print("\n=== TEST 1: Health Check ===")
+def print_result(success, msg):
+    """Print test result"""
+    status = "✅ PASSED" if success else "❌ FAILED"
+    print(f"{status}: {msg}")
+
+def login():
+    """Login and get session cookie"""
+    print_test("Login as owner@demo.com")
     try:
-        resp = session.get("/health")
-        print(f"Status: {resp.status_code}")
+        resp = session.post(f"{API_URL}/auth/login", json={
+            'email': OWNER_EMAIL,
+            'password': OWNER_PASSWORD
+        })
+        if resp.status_code == 200:
+            print_result(True, f"Login successful, session cookie set")
+            return True
+        else:
+            print_result(False, f"Login failed: {resp.status_code} - {resp.text}")
+            return False
+    except Exception as e:
+        print_result(False, f"Login exception: {str(e)}")
+        return False
+
+def test_health():
+    """Test 1: GET /api/health → verify version:3.6"""
+    print_test("1. GET /api/health → verify version:3.6")
+    try:
+        resp = session.get(f"{API_URL}/health")
         if resp.status_code == 200:
             data = resp.json()
-            print(f"Response: {json.dumps(data, indent=2)}")
-            if data.get('version') == '3.5':
-                print("✅ PASSED - Version 3.5 confirmed")
+            if data.get('version') == '3.6':
+                print_result(True, f"Health check passed, version=3.6")
                 return True
             else:
-                print(f"❌ FAILED - Expected version 3.5, got {data.get('version')}")
+                print_result(False, f"Version mismatch: expected 3.6, got {data.get('version')}")
                 return False
         else:
-            print(f"❌ FAILED - Status {resp.status_code}")
+            print_result(False, f"Health check failed: {resp.status_code}")
             return False
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print_result(False, f"Health check exception: {str(e)}")
         return False
 
-def test_account_4104_exists(session):
-    """Test 2: GET /api/accounts → verify account 4104 exists"""
-    print("\n=== TEST 2: Account 4104 Exists ===")
+def test_create_suppliers_and_client():
+    """Test 2: Create suppliers and client for testing"""
+    print_test("2. Create suppliers and client for testing")
+    
+    # Create supplier 1 (visa supplier)
     try:
-        resp = session.get("/accounts")
-        print(f"Status: {resp.status_code}")
+        resp = session.post(f"{API_URL}/suppliers", json={
+            'name': 'مورد تأشيرات باكج'
+        })
         if resp.status_code == 200:
-            accounts = resp.json()
-            account_4104 = [a for a in accounts if a.get('code') == '4104']
-            print(f"Found {len(account_4104)} account(s) with code 4104")
-            if len(account_4104) > 0:
-                for acc in account_4104:
-                    print(f"  - {acc.get('name_ar')} (code: {acc.get('code')})")
-                # Check for refund fees account specifically
-                refund_account = [a for a in account_4104 if 'إلغاء' in a.get('name_ar', '') or 'استرداد' in a.get('name_ar', '')]
-                if refund_account:
-                    print("✅ PASSED - Account 4104 (رسوم إلغاء واسترداد) exists")
+            data = resp.json()
+            test_data['supplier1_id'] = data.get('id')
+            print_result(True, f"Supplier 1 created: {test_data['supplier1_id']}")
+        else:
+            print_result(False, f"Supplier 1 creation failed: {resp.status_code} - {resp.text}")
+            return False
+    except Exception as e:
+        print_result(False, f"Supplier 1 exception: {str(e)}")
+        return False
+    
+    # Create supplier 2 (hotel supplier)
+    try:
+        resp = session.post(f"{API_URL}/suppliers", json={
+            'name': 'فندق باكج'
+        })
+        if resp.status_code == 200:
+            data = resp.json()
+            test_data['supplier2_id'] = data.get('id')
+            print_result(True, f"Supplier 2 created: {test_data['supplier2_id']}")
+        else:
+            print_result(False, f"Supplier 2 creation failed: {resp.status_code} - {resp.text}")
+            return False
+    except Exception as e:
+        print_result(False, f"Supplier 2 exception: {str(e)}")
+        return False
+    
+    # Create client
+    try:
+        resp = session.post(f"{API_URL}/clients", json={
+            'name': 'عميل باكج اختبار',
+            'phone': '777500500'
+        })
+        if resp.status_code == 200:
+            data = resp.json()
+            test_data['client_id'] = data.get('id')
+            print_result(True, f"Client created: {test_data['client_id']}")
+            return True
+        else:
+            print_result(False, f"Client creation failed: {resp.status_code} - {resp.text}")
+            return False
+    except Exception as e:
+        print_result(False, f"Client exception: {str(e)}")
+        return False
+
+def test_create_package():
+    """Test 3: POST /api/packages"""
+    print_test("3. POST /api/packages - Create package")
+    try:
+        resp = session.post(f"{API_URL}/packages", json={
+            'name': 'عمرة رجب اختبار',
+            'package_type': 'umrah',
+            'currency': 'SAR',
+            'start_date': '2025-01-01',
+            'end_date': '2025-01-15',
+            'notes': 'باقة اقتصادية'
+        })
+        if resp.status_code == 200:
+            data = resp.json()
+            test_data['package_id'] = data.get('id')
+            status = data.get('status')
+            if status == 'open':
+                print_result(True, f"Package created: {test_data['package_id']}, status={status}")
+                return True
+            else:
+                print_result(False, f"Package status incorrect: expected 'open', got '{status}'")
+                return False
+        else:
+            print_result(False, f"Package creation failed: {resp.status_code} - {resp.text}")
+            return False
+    except Exception as e:
+        print_result(False, f"Package creation exception: {str(e)}")
+        return False
+
+def test_get_packages():
+    """Test 4: GET /api/packages → verify returned list"""
+    print_test("4. GET /api/packages → verify returned list")
+    try:
+        resp = session.get(f"{API_URL}/packages")
+        if resp.status_code == 200:
+            data = resp.json()
+            packages = data if isinstance(data, list) else data.get('packages', [])
+            
+            # Find our package
+            our_package = None
+            for pkg in packages:
+                if pkg.get('id') == test_data['package_id']:
+                    our_package = pkg
+                    break
+            
+            if our_package:
+                components_count = our_package.get('components_count', 0)
+                bookings_count = our_package.get('bookings_count', 0)
+                if components_count == 0 and bookings_count == 0:
+                    print_result(True, f"Package found with components_count=0, bookings_count=0")
                     return True
                 else:
-                    print("⚠️ WARNING - Account 4104 exists but may not be the refund fees account")
-                    return True
+                    print_result(False, f"Package counts incorrect: components={components_count}, bookings={bookings_count}")
+                    return False
             else:
-                print("❌ FAILED - Account 4104 not found")
+                print_result(False, f"Package {test_data['package_id']} not found in list")
                 return False
         else:
-            print(f"❌ FAILED - Status {resp.status_code}")
+            print_result(False, f"GET packages failed: {resp.status_code} - {resp.text}")
             return False
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print_result(False, f"GET packages exception: {str(e)}")
         return False
 
-def test_create_fresh_ticket(session):
-    """Test 3: Create a fresh ticket for refund testing"""
-    print("\n=== TEST 3: Create Fresh Ticket ===")
+def test_add_components():
+    """Test 5: POST /api/packages/{package_id}/components"""
+    print_test("5. POST /api/packages/{package_id}/components - Add 2 components")
     
-    # Step 1: Create client
-    print("\n--- Step 3.1: Create Client ---")
+    # Add visa component
     try:
-        client_data = {
-            "name": "عميل استرداد اختبار",
-            "phone": "777112233"
-        }
-        resp = session.post("/clients", client_data)
-        print(f"Status: {resp.status_code}")
+        resp = session.post(f"{API_URL}/packages/{test_data['package_id']}/components", json={
+            'name': 'تأشيرة عمرة',
+            'component_type': 'visa',
+            'supplier_id': test_data['supplier1_id'],
+            'cost_per_pax': 200,
+            'sale_per_pax': 300
+        })
         if resp.status_code == 200:
-            client = resp.json()
-            client_id = client.get('id')
-            print(f"✅ Client created: {client.get('name')} (ID: {client_id})")
+            print_result(True, f"Visa component added successfully")
         else:
-            print(f"❌ Failed to create client: {resp.text}")
-            return None
+            print_result(False, f"Visa component failed: {resp.status_code} - {resp.text}")
+            return False
     except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return None
+        print_result(False, f"Visa component exception: {str(e)}")
+        return False
     
-    # Step 2: Create supplier
-    print("\n--- Step 3.2: Create Supplier ---")
+    # Add hotel component
     try:
-        supplier_data = {
-            "name": "مورد استرداد اختبار"
-        }
-        resp = session.post("/suppliers", supplier_data)
-        print(f"Status: {resp.status_code}")
+        resp = session.post(f"{API_URL}/packages/{test_data['package_id']}/components", json={
+            'name': 'فندق 3 ليال',
+            'component_type': 'hotel',
+            'supplier_id': test_data['supplier2_id'],
+            'cost_per_pax': 400,
+            'sale_per_pax': 600
+        })
         if resp.status_code == 200:
-            supplier = resp.json()
-            supplier_id = supplier.get('id')
-            print(f"✅ Supplier created: {supplier.get('name')} (ID: {supplier_id})")
+            print_result(True, f"Hotel component added successfully")
+            return True
         else:
-            print(f"❌ Failed to create supplier: {resp.text}")
-            return None
+            print_result(False, f"Hotel component failed: {resp.status_code} - {resp.text}")
+            return False
     except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return None
-    
-    # Step 3: Create ticket
-    print("\n--- Step 3.3: Create Ticket ---")
-    try:
-        ticket_data = {
-            "date": datetime.now().isoformat(),
-            "currency": "SAR",
-            "client_id": client_id,
-            "supplier_id": supplier_id,
-            "cost": 100,
-            "sale_price": 150,
-            "payment_method": "credit",
-            "pnr": "REFUND-TEST-1",
-            "route": "CAI-JED",
-            "passenger_name": "مسافر تجريبي"
-        }
-        resp = session.post("/tickets", ticket_data)
-        print(f"Status: {resp.status_code}")
-        if resp.status_code == 200:
-            ticket = resp.json()
-            ticket_id = ticket.get('id')
-            print(f"✅ Ticket created: {ticket.get('pnr')} (ID: {ticket_id})")
-            print(f"   Cost: {ticket.get('cost')}, Sale: {ticket.get('sale_price')}, Commission: {ticket.get('commission')}")
-            
-            # Verify balances
-            print("\n--- Step 3.4: Verify Balances ---")
-            client_resp = session.get(f"/clients")
-            if client_resp.status_code == 200:
-                clients = client_resp.json()
-                test_client = [c for c in clients if c.get('id') == client_id]
-                if test_client:
-                    client_balance = test_client[0].get('balances', {}).get('SAR', 0)
-                    print(f"   Client balance SAR: {client_balance}")
-                    if abs(client_balance - 150) < 0.01:
-                        print("   ✅ Client balance correct (150 SAR)")
-                    else:
-                        print(f"   ⚠️ Client balance unexpected: {client_balance}")
-            
-            supplier_resp = session.get(f"/suppliers")
-            if supplier_resp.status_code == 200:
-                suppliers = supplier_resp.json()
-                test_supplier = [s for s in suppliers if s.get('id') == supplier_id]
-                if test_supplier:
-                    supplier_balance = test_supplier[0].get('balances', {}).get('SAR', 0)
-                    print(f"   Supplier balance SAR: {supplier_balance}")
-                    if abs(supplier_balance - 100) < 0.01:
-                        print("   ✅ Supplier balance correct (100 SAR)")
-                    else:
-                        print(f"   ⚠️ Supplier balance unexpected: {supplier_balance}")
-            
-            print("\n✅ PASSED - Fresh ticket created successfully")
-            return {
-                'ticket_id': ticket_id,
-                'client_id': client_id,
-                'supplier_id': supplier_id,
-                'pnr': ticket.get('pnr')
-            }
-        else:
-            print(f"❌ Failed to create ticket: {resp.text}")
-            return None
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return None
+        print_result(False, f"Hotel component exception: {str(e)}")
+        return False
 
-def test_refund_ticket(session, ticket_info):
-    """Test 4: POST /api/refunds with valid data"""
-    print("\n=== TEST 4: Create Refund ===")
-    if not ticket_info:
-        print("❌ SKIPPED - No ticket info available")
-        return None
-    
+def test_get_components():
+    """Test 6: GET /api/packages/{package_id}/components → verify 2 components"""
+    print_test("6. GET /api/packages/{package_id}/components → verify 2 components")
     try:
-        refund_data = {
-            "ref_type": "ticket",
-            "ref_id": ticket_info['ticket_id'],
-            "supplier_penalty": 20,
-            "office_fee": 10,
-            "reason": "طلب العميل"
-        }
-        resp = session.post("/refunds", refund_data)
-        print(f"Status: {resp.status_code}")
-        print(f"Response: {resp.text[:500]}")
-        
+        resp = session.get(f"{API_URL}/packages/{test_data['package_id']}/components")
         if resp.status_code == 200:
-            refund = resp.json()
-            print(f"\n✅ Refund created successfully")
-            print(f"   Refund ID: {refund.get('id')}")
-            print(f"   Original Sale: {refund.get('original_sale')}")
-            print(f"   Original Cost: {refund.get('original_cost')}")
-            print(f"   Supplier Penalty: {refund.get('supplier_penalty')}")
-            print(f"   Office Fee: {refund.get('office_fee')}")
-            print(f"   Refund to Client: {refund.get('refund_to_client')}")
+            data = resp.json()
+            components = data if isinstance(data, list) else data.get('components', [])
+            if len(components) == 2:
+                print_result(True, f"2 components returned: {[c.get('name') for c in components]}")
+                return True
+            else:
+                print_result(False, f"Expected 2 components, got {len(components)}")
+                return False
+        else:
+            print_result(False, f"GET components failed: {resp.status_code} - {resp.text}")
+            return False
+    except Exception as e:
+        print_result(False, f"GET components exception: {str(e)}")
+        return False
+
+def test_create_booking():
+    """Test 7: POST /api/packages/{package_id}/bookings"""
+    print_test("7. POST /api/packages/{package_id}/bookings - Create booking with 2 pax")
+    try:
+        resp = session.post(f"{API_URL}/packages/{test_data['package_id']}/bookings", json={
+            'client_id': test_data['client_id'],
+            'pilgrim_name': 'معتمر أول',
+            'passport_no': 'YE123',
+            'pax_count': 2,
+            'payment_method': 'credit'
+        })
+        if resp.status_code == 200:
+            data = resp.json()
+            test_data['booking_id'] = data.get('id')
             
             # Verify calculations
-            expected_refund = 150 - 20 - 10  # sale - supplier_penalty - office_fee
-            actual_refund = refund.get('refund_to_client')
-            if abs(actual_refund - expected_refund) < 0.01:
-                print(f"   ✅ Refund calculation correct: {actual_refund} SAR")
-            else:
-                print(f"   ⚠️ Refund calculation unexpected: expected {expected_refund}, got {actual_refund}")
+            total_cost = data.get('total_cost')
+            total_sale = data.get('total_sale')
+            commission = data.get('commission')
+            component_snapshots = data.get('component_snapshots', [])
             
-            print("\n✅ PASSED - Refund created with correct calculations")
-            return refund
-        else:
-            print(f"❌ FAILED - Status {resp.status_code}: {resp.text}")
-            return None
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return None
-
-def test_verify_balances_after_refund(session, ticket_info):
-    """Test 5: Verify client and supplier balances after refund"""
-    print("\n=== TEST 5: Verify Balances After Refund ===")
-    if not ticket_info:
-        print("❌ SKIPPED - No ticket info available")
-        return False
-    
-    try:
-        # Check client balance
-        print("\n--- Step 5.1: Check Client Balance ---")
-        client_resp = session.get(f"/clients")
-        if client_resp.status_code == 200:
-            clients = client_resp.json()
-            test_client = [c for c in clients if c.get('id') == ticket_info['client_id']]
-            if test_client:
-                client_balance = test_client[0].get('balances', {}).get('SAR', 0)
-                print(f"   Client balance SAR: {client_balance}")
-                # Expected: 30 SAR (supplier_penalty 20 + office_fee 10)
-                if abs(client_balance - 30) < 0.01:
-                    print("   ✅ Client balance correct (30 SAR = fees retained)")
-                else:
-                    print(f"   ⚠️ Client balance unexpected: expected 30, got {client_balance}")
-        
-        # Check supplier balance
-        print("\n--- Step 5.2: Check Supplier Balance ---")
-        supplier_resp = session.get(f"/suppliers")
-        if supplier_resp.status_code == 200:
-            suppliers = supplier_resp.json()
-            test_supplier = [s for s in suppliers if s.get('id') == ticket_info['supplier_id']]
-            if test_supplier:
-                supplier_balance = test_supplier[0].get('balances', {}).get('SAR', 0)
-                print(f"   Supplier balance SAR: {supplier_balance}")
-                # Expected: 20 SAR (supplier_penalty only)
-                if abs(supplier_balance - 20) < 0.01:
-                    print("   ✅ Supplier balance correct (20 SAR = penalty only)")
-                else:
-                    print(f"   ⚠️ Supplier balance unexpected: expected 20, got {supplier_balance}")
-        
-        print("\n✅ PASSED - Balances verified after refund")
-        return True
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return False
-
-def test_verify_ticket_refunded_flag(session, ticket_info):
-    """Test 6: Verify ticket has is_refunded flag"""
-    print("\n=== TEST 6: Verify Ticket Refunded Flag ===")
-    if not ticket_info:
-        print("❌ SKIPPED - No ticket info available")
-        return False
-    
-    try:
-        resp = session.get("/tickets")
-        print(f"Status: {resp.status_code}")
-        if resp.status_code == 200:
-            tickets = resp.json()
-            test_ticket = [t for t in tickets if t.get('id') == ticket_info['ticket_id']]
-            if test_ticket:
-                ticket = test_ticket[0]
-                print(f"\nTicket {ticket.get('pnr')}:")
-                print(f"   is_refunded: {ticket.get('is_refunded')}")
-                print(f"   refund_supplier_penalty: {ticket.get('refund_supplier_penalty')}")
-                print(f"   refund_office_fee: {ticket.get('refund_office_fee')}")
-                print(f"   refund_to_client: {ticket.get('refund_to_client')}")
-                
-                if ticket.get('is_refunded') == True:
-                    if ticket.get('refund_supplier_penalty') == 20 and ticket.get('refund_office_fee') == 10 and ticket.get('refund_to_client') == 120:
-                        print("\n✅ PASSED - Ticket marked as refunded with correct values")
-                        return True
-                    else:
-                        print("\n⚠️ Ticket marked as refunded but values incorrect")
-                        return False
-                else:
-                    print("\n❌ FAILED - Ticket not marked as refunded")
-                    return False
+            expected_cost = (200 + 400) * 2  # 1200
+            expected_sale = (300 + 600) * 2  # 1800
+            expected_commission = expected_sale - expected_cost  # 600
+            
+            checks = []
+            checks.append(('total_cost', total_cost == expected_cost, f"{total_cost} == {expected_cost}"))
+            checks.append(('total_sale', total_sale == expected_sale, f"{total_sale} == {expected_sale}"))
+            checks.append(('commission', commission == expected_commission, f"{commission} == {expected_commission}"))
+            checks.append(('component_snapshots', len(component_snapshots) == 2, f"len={len(component_snapshots)} == 2"))
+            
+            # Verify component snapshots have cost_total
+            if len(component_snapshots) == 2:
+                for snap in component_snapshots:
+                    cost_total = snap.get('cost_total')
+                    cost_per_pax = snap.get('cost_per_pax')
+                    expected_total = cost_per_pax * 2
+                    checks.append((f"component {snap.get('name')} cost_total", cost_total == expected_total, f"{cost_total} == {expected_total}"))
+            
+            all_passed = all(check[1] for check in checks)
+            if all_passed:
+                print_result(True, f"Booking created: {test_data['booking_id']}, all calculations correct")
+                for name, passed, msg in checks:
+                    print(f"  ✓ {name}: {msg}")
+                return True
             else:
-                print("❌ FAILED - Ticket not found")
+                print_result(False, f"Booking calculations incorrect")
+                for name, passed, msg in checks:
+                    status = "✓" if passed else "✗"
+                    print(f"  {status} {name}: {msg}")
                 return False
         else:
-            print(f"❌ FAILED - Status {resp.status_code}")
+            print_result(False, f"Booking creation failed: {resp.status_code} - {resp.text}")
             return False
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print_result(False, f"Booking creation exception: {str(e)}")
         return False
 
-def test_get_refunds_list(session):
-    """Test 7: GET /api/refunds → should list the refund"""
-    print("\n=== TEST 7: Get Refunds List ===")
-    try:
-        resp = session.get("/refunds")
-        print(f"Status: {resp.status_code}")
-        if resp.status_code == 200:
-            refunds = resp.json()
-            print(f"Found {len(refunds)} refund(s)")
-            if len(refunds) > 0:
-                latest_refund = refunds[0]
-                print(f"\nLatest refund:")
-                print(f"   ID: {latest_refund.get('id')}")
-                print(f"   Ref Type: {latest_refund.get('ref_type')}")
-                print(f"   Passenger: {latest_refund.get('passenger_name')}")
-                print(f"   Supplier Penalty: {latest_refund.get('supplier_penalty')}")
-                print(f"   Office Fee: {latest_refund.get('office_fee')}")
-                print(f"   Refund to Client: {latest_refund.get('refund_to_client')}")
-                print(f"   Reason: {latest_refund.get('reason')}")
-                print("\n✅ PASSED - Refunds list retrieved successfully")
-                return True
-            else:
-                print("⚠️ No refunds found in list")
-                return False
-        else:
-            print(f"❌ FAILED - Status {resp.status_code}")
-            return False
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return False
-
-def test_duplicate_refund_error(session, ticket_info):
-    """Test 8: Attempt refund again on same ticket → should return 400"""
-    print("\n=== TEST 8: Duplicate Refund Error ===")
-    if not ticket_info:
-        print("❌ SKIPPED - No ticket info available")
-        return False
+def test_verify_balances():
+    """Test 8: Verify balances after booking"""
+    print_test("8. Verify balances - Client and Suppliers")
     
+    # Get client balance
     try:
-        refund_data = {
-            "ref_type": "ticket",
-            "ref_id": ticket_info['ticket_id'],
-            "supplier_penalty": 10,
-            "office_fee": 5,
-            "reason": "محاولة ثانية"
-        }
-        resp = session.post("/refunds", refund_data)
-        print(f"Status: {resp.status_code}")
-        print(f"Response: {resp.text}")
-        
-        if resp.status_code == 400:
-            if 'تم استرداده مسبقاً' in resp.text or 'استرداده' in resp.text:
-                print("\n✅ PASSED - Duplicate refund correctly rejected with Arabic message")
-                return True
-            else:
-                print("\n⚠️ 400 error returned but message may not match expected")
-                return True
-        else:
-            print(f"\n❌ FAILED - Expected 400, got {resp.status_code}")
-            return False
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return False
-
-def test_refund_fees_exceed_sale(session):
-    """Test 9: Test edge case - fees exceeding sale_price"""
-    print("\n=== TEST 9: Refund Fees Exceed Sale Price ===")
-    
-    # Create a fresh ticket for this test
-    print("\n--- Step 9.1: Create Fresh Ticket ---")
-    try:
-        # Create client
-        client_data = {"name": "عميل اختبار رسوم", "phone": "777999888"}
-        client_resp = session.post("/clients", client_data)
-        if client_resp.status_code != 200:
-            print(f"❌ Failed to create client: {client_resp.text}")
-            return False
-        client_id = client_resp.json().get('id')
-        
-        # Create supplier
-        supplier_data = {"name": "مورد اختبار رسوم"}
-        supplier_resp = session.post("/suppliers", supplier_data)
-        if supplier_resp.status_code != 200:
-            print(f"❌ Failed to create supplier: {supplier_resp.text}")
-            return False
-        supplier_id = supplier_resp.json().get('id')
-        
-        # Create ticket
-        ticket_data = {
-            "date": datetime.now().isoformat(),
-            "currency": "SAR",
-            "client_id": client_id,
-            "supplier_id": supplier_id,
-            "cost": 100,
-            "sale_price": 150,
-            "payment_method": "credit",
-            "pnr": "REFUND-TEST-FEES",
-            "route": "RUH-CAI",
-            "passenger_name": "مسافر رسوم"
-        }
-        ticket_resp = session.post("/tickets", ticket_data)
-        if ticket_resp.status_code != 200:
-            print(f"❌ Failed to create ticket: {ticket_resp.text}")
-            return False
-        ticket_id = ticket_resp.json().get('id')
-        print(f"✅ Ticket created: {ticket_id}")
-        
-        # Attempt refund with excessive fees
-        print("\n--- Step 9.2: Attempt Refund with Excessive Fees ---")
-        refund_data = {
-            "ref_type": "ticket",
-            "ref_id": ticket_id,
-            "supplier_penalty": 200,
-            "office_fee": 50,
-            "reason": "اختبار رسوم زائدة"
-        }
-        resp = session.post("/refunds", refund_data)
-        print(f"Status: {resp.status_code}")
-        print(f"Response: {resp.text}")
-        
-        if resp.status_code == 400:
-            if 'أكبر من' in resp.text or 'قيمة البيع' in resp.text:
-                print("\n✅ PASSED - Excessive fees correctly rejected with Arabic message")
-                return True
-            else:
-                print("\n⚠️ 400 error returned but message may not match expected")
-                return True
-        else:
-            print(f"\n❌ FAILED - Expected 400, got {resp.status_code}")
-            return False
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return False
-
-def test_invalid_ref_type(session):
-    """Test 10: Test invalid ref_type → 400"""
-    print("\n=== TEST 10: Invalid Ref Type ===")
-    try:
-        refund_data = {
-            "ref_type": "invalid_type",
-            "ref_id": "some-id",
-            "supplier_penalty": 10,
-            "office_fee": 5,
-            "reason": "اختبار نوع خاطئ"
-        }
-        resp = session.post("/refunds", refund_data)
-        print(f"Status: {resp.status_code}")
-        print(f"Response: {resp.text}")
-        
-        if resp.status_code == 400:
-            print("\n✅ PASSED - Invalid ref_type correctly rejected")
-            return True
-        else:
-            print(f"\n❌ FAILED - Expected 400, got {resp.status_code}")
-            return False
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return False
-
-def test_bulk_statement_clients(session):
-    """Test 11: POST /api/bulk-statement/generate with kind:clients"""
-    print("\n=== TEST 11: Bulk Statement - Clients ===")
-    try:
-        data = {
-            "kind": "clients",
-            "period": "month"
-        }
-        resp = session.post("/bulk-statement/generate", data)
-        print(f"Status: {resp.status_code}")
-        
-        if resp.status_code == 200:
-            result = resp.json()
-            print(f"\nResponse structure:")
-            print(f"   Count: {result.get('count')}")
-            print(f"   Items: {len(result.get('items', []))}")
-            
-            if result.get('count') > 0:
-                items = result.get('items', [])
-                print(f"\n✅ Found {len(items)} client(s) with balance and phone")
-                
-                # Check first item structure
-                if items:
-                    first_item = items[0]
-                    print(f"\nFirst item structure:")
-                    print(f"   ID: {first_item.get('id')}")
-                    print(f"   Name: {first_item.get('name')}")
-                    print(f"   Phone: {first_item.get('phone')}")
-                    print(f"   WhatsApp: {first_item.get('whatsapp')}")
-                    print(f"   Balances: {first_item.get('balances')}")
-                    print(f"   Message preview: {first_item.get('message', '')[:100]}...")
-                    print(f"   WA Link: {first_item.get('wa_link', '')[:80]}...")
-                    
-                    # Verify message contains required elements
-                    message = first_item.get('message', '')
-                    has_greeting = 'عزيزنا العميل' in message or 'عزيزنا المورد' in message
-                    has_name = first_item.get('name', '') in message
-                    has_balances = 'الأرصدة الحالية' in message or 'أرصدة' in message
-                    has_wa_link = first_item.get('wa_link', '').startswith('https://wa.me/')
-                    
-                    print(f"\nMessage validation:")
-                    print(f"   Has greeting: {has_greeting}")
-                    print(f"   Has name: {has_name}")
-                    print(f"   Has balances section: {has_balances}")
-                    print(f"   Has valid WA link: {has_wa_link}")
-                    
-                    if has_greeting and has_balances and has_wa_link:
-                        print("\n✅ PASSED - Bulk statement for clients generated correctly")
-                        return True
-                    else:
-                        print("\n⚠️ Message structure incomplete")
-                        return False
-            else:
-                print("\n⚠️ No clients with balance and phone found")
-                print("   This may be expected if no clients meet criteria")
-                return True
-        else:
-            print(f"❌ FAILED - Status {resp.status_code}: {resp.text}")
-            return False
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return False
-
-def test_bulk_statement_suppliers(session):
-    """Test 12: POST /api/bulk-statement/generate with kind:suppliers"""
-    print("\n=== TEST 12: Bulk Statement - Suppliers ===")
-    try:
-        data = {
-            "kind": "suppliers",
-            "period": "month"
-        }
-        resp = session.post("/bulk-statement/generate", data)
-        print(f"Status: {resp.status_code}")
-        
-        if resp.status_code == 200:
-            result = resp.json()
-            print(f"\nResponse structure:")
-            print(f"   Count: {result.get('count')}")
-            print(f"   Items: {len(result.get('items', []))}")
-            
-            if result.get('count') > 0:
-                items = result.get('items', [])
-                print(f"\n✅ Found {len(items)} supplier(s) with balance and phone")
-                
-                # Check first item
-                if items:
-                    first_item = items[0]
-                    print(f"\nFirst supplier:")
-                    print(f"   Name: {first_item.get('name')}")
-                    print(f"   Balances: {first_item.get('balances')}")
-                    message = first_item.get('message', '')
-                    has_supplier_greeting = 'عزيزنا المورد' in message
-                    print(f"   Has supplier greeting: {has_supplier_greeting}")
-                    
-                    if has_supplier_greeting:
-                        print("\n✅ PASSED - Bulk statement for suppliers generated correctly")
-                        return True
-                    else:
-                        print("\n⚠️ Supplier message may not have correct greeting")
-                        return False
-            else:
-                print("\n⚠️ No suppliers with balance and phone found")
-                print("   This may be expected if no suppliers meet criteria")
-                return True
-        else:
-            print(f"❌ FAILED - Status {resp.status_code}: {resp.text}")
-            return False
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return False
-
-def test_regression_v34_affiliate(session):
-    """Test 13: Regression - v3.4 affiliate endpoints still work"""
-    print("\n=== TEST 13: Regression - v3.4 Affiliate ===")
-    try:
-        resp = session.get("/affiliate/link")
-        print(f"GET /affiliate/link status: {resp.status_code}")
-        
+        resp = session.get(f"{API_URL}/clients")
         if resp.status_code == 200:
             data = resp.json()
-            print(f"   Affiliate link: {data.get('link', '')[:50]}...")
-            print("✅ PASSED - v3.4 affiliate endpoint still works")
-            return True
-        else:
-            print(f"⚠️ Status {resp.status_code} - May need investigation")
-            return False
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        return False
-
-def test_regression_v33_statement(session):
-    """Test 14: Regression - v3.3 statement report still works"""
-    print("\n=== TEST 14: Regression - v3.3 Statement Report ===")
-    try:
-        # Get a client ID first
-        clients_resp = session.get("/clients")
-        if clients_resp.status_code == 200:
-            clients = clients_resp.json()
-            if clients:
-                client_id = clients[0].get('id')
-                resp = session.get(f"/reports/statement?party_type=client&party_id={client_id}")
-                print(f"GET /reports/statement status: {resp.status_code}")
-                
-                if resp.status_code == 200:
-                    data = resp.json()
-                    print(f"   Statement has {len(data.get('rows', []))} rows")
-                    print("✅ PASSED - v3.3 statement report still works")
-                    return True
+            clients = data if isinstance(data, list) else data.get('clients', [])
+            client = next((c for c in clients if c.get('id') == test_data['client_id']), None)
+            if client:
+                balances = client.get('balances', {})
+                balance_sar = balances.get('SAR', 0)
+                # Client should have 1800 SAR balance (or delta of 1800 from initial)
+                print(f"  Client balance SAR: {balance_sar}")
+                # We'll check if it's >= 1800 since there might be previous transactions
+                if balance_sar >= 1800:
+                    print_result(True, f"Client balance SAR >= 1800 (actual: {balance_sar})")
                 else:
-                    print(f"⚠️ Status {resp.status_code}")
+                    print_result(False, f"Client balance SAR < 1800 (actual: {balance_sar})")
                     return False
             else:
-                print("⚠️ No clients found to test statement")
-                return True
+                print_result(False, f"Client not found")
+                return False
         else:
-            print(f"⚠️ Could not get clients list")
+            print_result(False, f"GET clients failed: {resp.status_code}")
             return False
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print_result(False, f"GET clients exception: {str(e)}")
+        return False
+    
+    # Get suppliers balances
+    try:
+        resp = session.get(f"{API_URL}/suppliers")
+        if resp.status_code == 200:
+            data = resp.json()
+            suppliers = data if isinstance(data, list) else data.get('suppliers', [])
+            
+            supplier1 = next((s for s in suppliers if s.get('id') == test_data['supplier1_id']), None)
+            supplier2 = next((s for s in suppliers if s.get('id') == test_data['supplier2_id']), None)
+            
+            if supplier1 and supplier2:
+                balances1 = supplier1.get('balances', {})
+                balances2 = supplier2.get('balances', {})
+                balance1_sar = balances1.get('SAR', 0)
+                balance2_sar = balances2.get('SAR', 0)
+                
+                print(f"  Supplier1 (visa) balance SAR: {balance1_sar}")
+                print(f"  Supplier2 (hotel) balance SAR: {balance2_sar}")
+                
+                # Supplier1 should have 400 SAR (200*2), Supplier2 should have 800 SAR (400*2)
+                checks = []
+                checks.append(balance1_sar >= 400)
+                checks.append(balance2_sar >= 800)
+                
+                if all(checks):
+                    print_result(True, f"Supplier balances correct: supplier1={balance1_sar}, supplier2={balance2_sar}")
+                    return True
+                else:
+                    print_result(False, f"Supplier balances incorrect")
+                    return False
+            else:
+                print_result(False, f"Suppliers not found")
+                return False
+        else:
+            print_result(False, f"GET suppliers failed: {resp.status_code}")
+            return False
+    except Exception as e:
+        print_result(False, f"GET suppliers exception: {str(e)}")
         return False
 
-def test_regression_tickets_crud(session):
-    """Test 15: Regression - Existing tickets CRUD still works"""
-    print("\n=== TEST 15: Regression - Tickets CRUD ===")
+def test_get_bookings():
+    """Test 9: GET /api/packages/{package_id}/bookings → verify 1 booking"""
+    print_test("9. GET /api/packages/{package_id}/bookings → verify 1 booking")
     try:
-        resp = session.get("/tickets")
-        print(f"GET /tickets status: {resp.status_code}")
-        
+        resp = session.get(f"{API_URL}/packages/{test_data['package_id']}/bookings")
         if resp.status_code == 200:
-            tickets = resp.json()
-            print(f"   Found {len(tickets)} ticket(s)")
-            print("✅ PASSED - Tickets CRUD still works")
-            return True
+            data = resp.json()
+            bookings = data if isinstance(data, list) else data.get('bookings', [])
+            if len(bookings) >= 1:
+                print_result(True, f"{len(bookings)} booking(s) returned")
+                return True
+            else:
+                print_result(False, f"Expected at least 1 booking, got {len(bookings)}")
+                return False
         else:
-            print(f"❌ FAILED - Status {resp.status_code}")
+            print_result(False, f"GET bookings failed: {resp.status_code} - {resp.text}")
             return False
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print_result(False, f"GET bookings exception: {str(e)}")
+        return False
+
+def test_package_report():
+    """Test 10: GET /api/packages/{package_id}/report"""
+    print_test("10. GET /api/packages/{package_id}/report - Verify totals and breakdown")
+    try:
+        resp = session.get(f"{API_URL}/packages/{test_data['package_id']}/report")
+        if resp.status_code == 200:
+            data = resp.json()
+            
+            totals = data.get('totals', {})
+            margin_pct = data.get('margin_pct', 0)
+            supplier_breakdown = data.get('supplier_breakdown', [])
+            
+            # Verify totals
+            checks = []
+            checks.append(('bookings', totals.get('bookings') >= 1, f"{totals.get('bookings')} >= 1"))
+            checks.append(('pax', totals.get('pax') >= 2, f"{totals.get('pax')} >= 2"))
+            checks.append(('revenue', totals.get('revenue') >= 1800, f"{totals.get('revenue')} >= 1800"))
+            checks.append(('cost', totals.get('cost') >= 1200, f"{totals.get('cost')} >= 1200"))
+            checks.append(('profit', totals.get('profit') >= 600, f"{totals.get('profit')} >= 600"))
+            
+            # Verify margin_pct (should be around 33.33%)
+            expected_margin = (600 / 1800) * 100  # 33.33
+            margin_ok = abs(margin_pct - expected_margin) < 1  # Allow 1% tolerance
+            checks.append(('margin_pct', margin_ok, f"{margin_pct:.2f} ≈ {expected_margin:.2f}"))
+            
+            # Verify supplier_breakdown has 2 rows
+            checks.append(('supplier_breakdown count', len(supplier_breakdown) == 2, f"len={len(supplier_breakdown)} == 2"))
+            
+            # Verify sorted desc by cost (hotel 800, visa 400)
+            if len(supplier_breakdown) == 2:
+                first_cost = supplier_breakdown[0].get('cost', 0)
+                second_cost = supplier_breakdown[1].get('cost', 0)
+                checks.append(('sorted desc', first_cost >= second_cost, f"{first_cost} >= {second_cost}"))
+            
+            all_passed = all(check[1] for check in checks)
+            if all_passed:
+                print_result(True, f"Package report correct")
+                for name, passed, msg in checks:
+                    print(f"  ✓ {name}: {msg}")
+                return True
+            else:
+                print_result(False, f"Package report incorrect")
+                for name, passed, msg in checks:
+                    status = "✓" if passed else "✗"
+                    print(f"  {status} {name}: {msg}")
+                return False
+        else:
+            print_result(False, f"GET report failed: {resp.status_code} - {resp.text}")
+            return False
+    except Exception as e:
+        print_result(False, f"GET report exception: {str(e)}")
+        return False
+
+def test_close_package():
+    """Test 11: PATCH /api/packages/{package_id} with status:closed"""
+    print_test("11. PATCH /api/packages/{package_id} - Close package")
+    try:
+        resp = session.patch(f"{API_URL}/packages/{test_data['package_id']}", json={
+            'status': 'closed'
+        })
+        if resp.status_code == 200:
+            print_result(True, f"Package closed successfully")
+            return True
+        else:
+            print_result(False, f"Close package failed: {resp.status_code} - {resp.text}")
+            return False
+    except Exception as e:
+        print_result(False, f"Close package exception: {str(e)}")
+        return False
+
+def test_booking_on_closed_package():
+    """Test 12: POST /api/packages/{package_id}/bookings on closed package → expect 400"""
+    print_test("12. POST booking on closed package → expect 400 'الباكج مغلق'")
+    try:
+        resp = session.post(f"{API_URL}/packages/{test_data['package_id']}/bookings", json={
+            'client_id': test_data['client_id'],
+            'pilgrim_name': 'معتمر ثاني',
+            'passport_no': 'YE456',
+            'pax_count': 1,
+            'payment_method': 'credit'
+        })
+        if resp.status_code == 400:
+            error_msg = resp.text
+            if 'مغلق' in error_msg or 'closed' in error_msg.lower():
+                print_result(True, f"Booking on closed package correctly rejected: {error_msg}")
+                return True
+            else:
+                print_result(False, f"Wrong error message: {error_msg}")
+                return False
+        else:
+            print_result(False, f"Expected 400, got {resp.status_code}")
+            return False
+    except Exception as e:
+        print_result(False, f"Booking on closed package exception: {str(e)}")
+        return False
+
+def test_reopen_package():
+    """Test 13: PATCH /api/packages/{package_id} with status:open"""
+    print_test("13. PATCH /api/packages/{package_id} - Reopen package")
+    try:
+        resp = session.patch(f"{API_URL}/packages/{test_data['package_id']}", json={
+            'status': 'open'
+        })
+        if resp.status_code == 200:
+            print_result(True, f"Package reopened successfully")
+            return True
+        else:
+            print_result(False, f"Reopen package failed: {resp.status_code} - {resp.text}")
+            return False
+    except Exception as e:
+        print_result(False, f"Reopen package exception: {str(e)}")
+        return False
+
+def test_delete_package_with_bookings():
+    """Test 14: DELETE /api/packages/{package_id} with bookings → expect 400"""
+    print_test("14. DELETE package with bookings → expect 400 'لا يمكن حذف باكج به تسجيلات'")
+    try:
+        resp = session.delete(f"{API_URL}/packages/{test_data['package_id']}")
+        if resp.status_code == 400:
+            error_msg = resp.text
+            if 'تسجيلات' in error_msg or 'bookings' in error_msg.lower():
+                print_result(True, f"Delete package with bookings correctly rejected: {error_msg}")
+                return True
+            else:
+                print_result(False, f"Wrong error message: {error_msg}")
+                return False
+        else:
+            print_result(False, f"Expected 400, got {resp.status_code}")
+            return False
+    except Exception as e:
+        print_result(False, f"Delete package with bookings exception: {str(e)}")
+        return False
+
+def test_create_and_delete_empty_package():
+    """Test 15: Create empty package and delete it → success"""
+    print_test("15. Create empty package and delete it → success")
+    
+    # Create empty package
+    try:
+        resp = session.post(f"{API_URL}/packages", json={
+            'name': 'باكج فارغ للحذف',
+            'package_type': 'hajj',
+            'currency': 'SAR',
+            'start_date': '2025-02-01',
+            'end_date': '2025-02-15'
+        })
+        if resp.status_code == 200:
+            data = resp.json()
+            test_data['empty_package_id'] = data.get('id')
+            print(f"  Empty package created: {test_data['empty_package_id']}")
+        else:
+            print_result(False, f"Empty package creation failed: {resp.status_code}")
+            return False
+    except Exception as e:
+        print_result(False, f"Empty package creation exception: {str(e)}")
+        return False
+    
+    # Delete empty package
+    try:
+        resp = session.delete(f"{API_URL}/packages/{test_data['empty_package_id']}")
+        if resp.status_code == 200:
+            print_result(True, f"Empty package deleted successfully")
+            return True
+        else:
+            print_result(False, f"Empty package deletion failed: {resp.status_code} - {resp.text}")
+            return False
+    except Exception as e:
+        print_result(False, f"Empty package deletion exception: {str(e)}")
+        return False
+
+def test_journal_entry():
+    """Test 16: Verify journal entry for package booking"""
+    print_test("16. Verify journal entry - ref_type='package_booking'")
+    try:
+        resp = session.get(f"{API_URL}/journal-entries")
+        if resp.status_code == 200:
+            data = resp.json()
+            entries = data if isinstance(data, list) else data.get('entries', [])
+            
+            # Find journal entry for our booking
+            booking_je = None
+            for entry in entries:
+                if entry.get('ref_type') == 'package_booking' and entry.get('ref_id') == test_data['booking_id']:
+                    booking_je = entry
+                    break
+            
+            if booking_je:
+                lines = booking_je.get('lines', [])
+                
+                # Verify structure: should have lines for client debit, supplier credits, commission credit
+                # Expected: client debit 1800, supplier1 credit 400, supplier2 credit 800, commission credit 600
+                # Total debits should equal total credits
+                
+                total_debit = sum(line.get('debit', 0) for line in lines)
+                total_credit = sum(line.get('credit', 0) for line in lines)
+                
+                checks = []
+                checks.append(('ref_type', booking_je.get('ref_type') == 'package_booking', f"ref_type={booking_je.get('ref_type')}"))
+                checks.append(('ref_id', booking_je.get('ref_id') == test_data['booking_id'], f"ref_id matches"))
+                checks.append(('balanced', abs(total_debit - total_credit) < 0.01, f"debit={total_debit}, credit={total_credit}"))
+                checks.append(('lines count', len(lines) >= 3, f"lines={len(lines)} >= 3"))
+                
+                all_passed = all(check[1] for check in checks)
+                if all_passed:
+                    print_result(True, f"Journal entry correct")
+                    for name, passed, msg in checks:
+                        print(f"  ✓ {name}: {msg}")
+                    return True
+                else:
+                    print_result(False, f"Journal entry incorrect")
+                    for name, passed, msg in checks:
+                        status = "✓" if passed else "✗"
+                        print(f"  {status} {name}: {msg}")
+                    return False
+            else:
+                print_result(False, f"Journal entry for booking {test_data['booking_id']} not found")
+                return False
+        else:
+            print_result(False, f"GET journal entries failed: {resp.status_code}")
+            return False
+    except Exception as e:
+        print_result(False, f"GET journal entries exception: {str(e)}")
+        return False
+
+def test_regression_refunds():
+    """Test 17: Regression - v3.5 refunds still work"""
+    print_test("17. REGRESSION - v3.5 refunds still work")
+    
+    # Create a ticket first
+    try:
+        # Get a client and supplier
+        resp = session.get(f"{API_URL}/clients")
+        clients = resp.json() if resp.status_code == 200 else []
+        if isinstance(clients, dict):
+            clients = clients.get('clients', [])
+        
+        resp = session.get(f"{API_URL}/suppliers")
+        suppliers = resp.json() if resp.status_code == 200 else []
+        if isinstance(suppliers, dict):
+            suppliers = suppliers.get('suppliers', [])
+        
+        if not clients or not suppliers:
+            print_result(False, f"No clients or suppliers available for regression test")
+            return False
+        
+        client_id = clients[0].get('id')
+        supplier_id = suppliers[0].get('id')
+        
+        # Create ticket
+        resp = session.post(f"{API_URL}/tickets", json={
+            'pnr': f'REGR-{datetime.now().strftime("%H%M%S")}',
+            'client_id': client_id,
+            'supplier_id': supplier_id,
+            'passenger_name': 'مسافر اختبار',
+            'passport_no': 'YE-REGR-1',
+            'currency': 'SAR',
+            'cost': 100,
+            'sale_price': 150,
+            'payment_method': 'credit'
+        })
+        
+        if resp.status_code != 200:
+            print_result(False, f"Ticket creation failed: {resp.status_code}")
+            return False
+        
+        ticket_data = resp.json()
+        ticket_id = ticket_data.get('id')
+        
+        # Create refund using v3.5 endpoint: POST /refunds
+        resp = session.post(f"{API_URL}/refunds", json={
+            'ref_type': 'ticket',
+            'ref_id': ticket_id,
+            'supplier_penalty': 20,
+            'office_fee': 10,
+            'reason': 'اختبار استرجاع'
+        })
+        
+        if resp.status_code == 200:
+            print_result(True, f"v3.5 refunds still working")
+            return True
+        else:
+            print_result(False, f"Refund failed: {resp.status_code} - {resp.text}")
+            return False
+            
+    except Exception as e:
+        print_result(False, f"Regression refunds exception: {str(e)}")
+        return False
+
+def test_regression_permissions():
+    """Test 18: Regression - v3.4 permissions/affiliate still work"""
+    print_test("18. REGRESSION - v3.4 permissions/affiliate still work")
+    
+    # Just verify we can access auth/me and it has expected structure
+    try:
+        resp = session.get(f"{API_URL}/auth/me")
+        if resp.status_code == 200:
+            data = resp.json()
+            user = data.get('user')
+            if user and user.get('role'):
+                print_result(True, f"v3.4 permissions still working, role={user.get('role')}")
+                return True
+            else:
+                print_result(False, f"User structure incorrect")
+                return False
+        else:
+            print_result(False, f"Auth/me failed: {resp.status_code}")
+            return False
+    except Exception as e:
+        print_result(False, f"Regression permissions exception: {str(e)}")
         return False
 
 def main():
-    """Main test runner"""
-    print("=" * 60)
-    print("RAHAAL ERP v3.5 BACKEND TEST SUITE")
-    print("Testing: Refunds + Bulk Statement")
-    print("=" * 60)
+    """Run all tests"""
+    print("\n" + "="*80)
+    print("RAHAAL ERP v3.6 — PACKAGES MODULE BACKEND TEST SUITE")
+    print("="*80)
     
-    session = TestSession()
-    
-    # Login
-    if not session.login():
+    # Login first
+    if not login():
         print("\n❌ LOGIN FAILED - Cannot proceed with tests")
         return
     
-    # Track results
-    results = {}
+    # Run all tests
+    results = []
     
-    # Run tests
-    results['health'] = test_health_check(session)
-    results['account_4104'] = test_account_4104_exists(session)
-    
-    # Create fresh ticket and test refunds
-    ticket_info = test_create_fresh_ticket(session)
-    results['create_ticket'] = ticket_info is not None
-    
-    refund = test_refund_ticket(session, ticket_info)
-    results['create_refund'] = refund is not None
-    
-    results['verify_balances'] = test_verify_balances_after_refund(session, ticket_info)
-    results['verify_ticket_flag'] = test_verify_ticket_refunded_flag(session, ticket_info)
-    results['get_refunds'] = test_get_refunds_list(session)
-    results['duplicate_refund'] = test_duplicate_refund_error(session, ticket_info)
-    results['fees_exceed_sale'] = test_refund_fees_exceed_sale(session)
-    results['invalid_ref_type'] = test_invalid_ref_type(session)
-    
-    # Bulk statement tests
-    results['bulk_clients'] = test_bulk_statement_clients(session)
-    results['bulk_suppliers'] = test_bulk_statement_suppliers(session)
-    
-    # Regression tests
-    results['regression_affiliate'] = test_regression_v34_affiliate(session)
-    results['regression_statement'] = test_regression_v33_statement(session)
-    results['regression_tickets'] = test_regression_tickets_crud(session)
+    results.append(("Health Check v3.6", test_health()))
+    results.append(("Create Suppliers and Client", test_create_suppliers_and_client()))
+    results.append(("Create Package", test_create_package()))
+    results.append(("Get Packages List", test_get_packages()))
+    results.append(("Add Components", test_add_components()))
+    results.append(("Get Components", test_get_components()))
+    results.append(("Create Booking", test_create_booking()))
+    results.append(("Verify Balances", test_verify_balances()))
+    results.append(("Get Bookings", test_get_bookings()))
+    results.append(("Package Report", test_package_report()))
+    results.append(("Close Package", test_close_package()))
+    results.append(("Booking on Closed Package", test_booking_on_closed_package()))
+    results.append(("Reopen Package", test_reopen_package()))
+    results.append(("Delete Package with Bookings", test_delete_package_with_bookings()))
+    results.append(("Create and Delete Empty Package", test_create_and_delete_empty_package()))
+    results.append(("Verify Journal Entry", test_journal_entry()))
+    results.append(("Regression - Refunds", test_regression_refunds()))
+    results.append(("Regression - Permissions", test_regression_permissions()))
     
     # Summary
-    print("\n" + "=" * 60)
+    print("\n" + "="*80)
     print("TEST SUMMARY")
-    print("=" * 60)
+    print("="*80)
     
-    passed = sum(1 for v in results.values() if v)
+    passed = sum(1 for _, result in results if result)
     total = len(results)
     
-    print(f"\nTotal: {passed}/{total} tests passed\n")
+    for name, result in results:
+        status = "✅ PASSED" if result else "❌ FAILED"
+        print(f"{status}: {name}")
     
-    for test_name, result in results.items():
-        status = "✅ PASS" if result else "❌ FAIL"
-        print(f"{status} - {test_name}")
-    
-    print("\n" + "=" * 60)
+    print("\n" + "="*80)
+    print(f"TOTAL: {passed}/{total} tests passed")
+    print("="*80)
     
     if passed == total:
-        print("🎉 ALL TESTS PASSED!")
+        print("\n🎉 ALL TESTS PASSED - v3.6 Packages Module is working correctly!")
     else:
-        print(f"⚠️ {total - passed} test(s) failed")
-    
-    print("=" * 60)
+        print(f"\n⚠️  {total - passed} test(s) failed - Review failures above")
 
 if __name__ == "__main__":
     main()

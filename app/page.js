@@ -596,6 +596,7 @@ const NAV = [
   { id: 'tickets',   label: 'حجز التذاكر', icon: Plane, color: 'from-sky-600 to-blue-500' },
   { id: 'visas',     label: 'التأشيرات', icon: FileBadge2, color: 'from-emerald-600 to-teal-500' },
   { id: 'services',  label: 'الخدمات', icon: Briefcase, color: 'from-orange-600 to-amber-500' },
+  { id: 'packages',  label: 'الباكجات والبرامج', icon: FileBadge2, color: 'from-teal-600 to-emerald-500' },
   { id: 'fx',        label: 'صرافة العملات', icon: ArrowLeftRight, color: 'from-fuchsia-600 to-purple-500' },
   { id: 'receipt',   label: 'سند قبض', icon: ArrowDownLeft, color: 'from-green-600 to-emerald-500' },
   { id: 'payment',   label: 'سند صرف', icon: ArrowUpRight, color: 'from-rose-600 to-pink-500' },
@@ -4241,6 +4242,280 @@ function ApplyToSubscriptionDialog({ open, onOpenChange, data, onSaved }) {
   )
 }
 
+// ================================================================
+// v3.6 — PACKAGES & TOURS SCREEN
+// ================================================================
+const PACKAGE_TYPES = [
+  { v: 'umrah', l: '🕋 عمرة' },
+  { v: 'hajj', l: '🕋 حج' },
+  { v: 'tourism', l: '🌍 سياحة خارجية' },
+  { v: 'group', l: '👥 قروبات' },
+]
+const COMPONENT_TYPES = [
+  { v: 'visa', l: 'تأشيرة' }, { v: 'ticket', l: 'تذكرة' }, { v: 'hotel', l: 'فندق' },
+  { v: 'transport', l: 'نقل/مواصلات' }, { v: 'other', l: 'أخرى' },
+]
+
+function PackagesScreen() {
+  const [packages, setPackages] = useState([])
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState(null)
+  const [detailsPkg, setDetailsPkg] = useState(null)
+  const [reportPkg, setReportPkg] = useState(null)
+  const load = () => api('/packages').then(setPackages).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [])
+  const closePkg = async (p) => {
+    if (!confirm(`إغلاق الباكج "${p.name}"؟ (لن يمكن إضافة تسجيلات جديدة)`)) return
+    try { await api(`/packages/${p.id}`, { method: 'PATCH', body: { status: 'closed' } }); toast.success('تم إغلاق الباكج'); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const reopenPkg = async (p) => {
+    try { await api(`/packages/${p.id}`, { method: 'PATCH', body: { status: 'open' } }); toast.success('تم إعادة فتح الباكج'); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const delPkg = async (p) => {
+    if (!confirm(`حذف الباكج "${p.name}"؟`)) return
+    try { await api(`/packages/${p.id}`, { method: 'DELETE' }); toast.success('تم الحذف'); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const openPackages = packages.filter(p => p.status !== 'closed')
+  const closedPackages = packages.filter(p => p.status === 'closed')
+  return (
+    <div className="space-y-4">
+      <TopBar title="الباكجات والبرامج السياحية" subtitle={`${openPackages.length} باكج نشط • ${closedPackages.length} أرشيف`}
+        right={<Button onClick={() => { setEditing(null); setOpen(true) }} className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> باكج جديد</Button>} />
+      <div>
+        <div className="text-sm font-bold text-slate-700 mb-2">🟢 الباكجات المفتوحة</div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {openPackages.map(p => <PkgCard key={p.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} />)}
+          {openPackages.length === 0 && <div className="col-span-full text-center text-slate-400 py-8 text-sm">لا توجد باكجات مفتوحة — أنشئ باكج جديد</div>}
+        </div>
+      </div>
+      {closedPackages.length > 0 && <div>
+        <div className="text-sm font-bold text-slate-500 mt-6 mb-2">🗄️ أرشيف الباكجات المغلقة</div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {closedPackages.map(p => <PkgCard key={p.id} p={p} closed onOpen={() => setDetailsPkg(p)} onReopen={() => reopenPkg(p)} onReport={() => setReportPkg(p)} />)}
+        </div>
+      </div>}
+      <PackageDialog open={open} onOpenChange={v => { setOpen(v); if (!v) setEditing(null) }} record={editing} onSaved={load} />
+      {detailsPkg && <PackageDetailsDialog pkg={detailsPkg} onClose={() => setDetailsPkg(null)} onChanged={load} />}
+      {reportPkg && <PackageReportDialog pkg={reportPkg} onClose={() => setReportPkg(null)} />}
+    </div>
+  )
+}
+
+function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, closed }) {
+  const typeL = PACKAGE_TYPES.find(t => t.v === p.package_type)?.l || p.package_type
+  return (
+    <Card className={`overflow-hidden hover:shadow-md transition ${closed ? 'opacity-70' : ''}`}>
+      <div className={closed ? 'h-1 bg-slate-400' : 'h-1 grad-brand'} />
+      <CardContent className="p-4 space-y-2">
+        <div className="flex items-start justify-between">
+          <div>
+            <div className="font-bold text-slate-800">{p.name}</div>
+            <div className="text-xs text-slate-500">{typeL}</div>
+          </div>
+          <Badge className={closed ? 'bg-slate-200 text-slate-600 hover:bg-slate-200' : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100'}>{closed ? 'مغلق' : 'مفتوح'}</Badge>
+        </div>
+        <div className="text-xs text-slate-500 space-y-0.5">
+          {p.start_date && <div>📅 من {fmtDate(p.start_date)} {p.end_date && `→ ${fmtDate(p.end_date)}`}</div>}
+          <div>🧩 {p.components_count || 0} مكوّن • 👥 {p.bookings_count || 0} مسجل</div>
+        </div>
+        <div className="flex flex-wrap gap-1 pt-2 border-t">
+          <Button size="sm" variant="outline" onClick={onOpen} className="h-7 px-2 text-xs gap-1"><FileBadge2 className="w-3 h-3" /> المكونات والتسجيل</Button>
+          <Button size="sm" variant="outline" onClick={onReport} className="h-7 px-2 text-xs gap-1 text-blue-600"><ReceiptText className="w-3 h-3" /> التقرير</Button>
+          {!closed && onEdit && <Button size="sm" variant="ghost" onClick={onEdit} className="h-7 px-2 text-xs"><Pencil className="w-3 h-3" /></Button>}
+          {!closed && onClose && <Button size="sm" variant="ghost" onClick={onClose} className="h-7 px-2 text-xs text-orange-600">إغلاق</Button>}
+          {closed && onReopen && <Button size="sm" variant="ghost" onClick={onReopen} className="h-7 px-2 text-xs text-emerald-600">فتح</Button>}
+          {!closed && onDelete && p.bookings_count === 0 && <Button size="sm" variant="ghost" onClick={onDelete} className="h-7 px-2 text-xs text-rose-600"><Trash2 className="w-3 h-3" /></Button>}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function PackageDialog({ open, onOpenChange, record, onSaved }) {
+  const [f, setF] = useState({ name: '', package_type: 'umrah', currency: 'SAR', start_date: '', end_date: '', notes: '' })
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    if (!open) return
+    if (record) setF({ name: record.name, package_type: record.package_type, currency: record.currency, start_date: record.start_date ? new Date(record.start_date).toISOString().slice(0,10) : '', end_date: record.end_date ? new Date(record.end_date).toISOString().slice(0,10) : '', notes: record.notes || '' })
+    else setF({ name: '', package_type: 'umrah', currency: 'SAR', start_date: todayISO(), end_date: '', notes: '' })
+  }, [open, record])
+  const save = async () => {
+    if (!f.name) return toast.error('اسم الباكج مطلوب')
+    try {
+      setSaving(true)
+      if (record) await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, end_date: f.end_date || null, notes: f.notes } })
+      else await api('/packages', { method: 'POST', body: f })
+      toast.success(record ? 'تم التحديث' : 'تم إنشاء الباكج')
+      onSaved(); onOpenChange(false)
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent dir="rtl" className="max-w-lg">
+        <DialogHeader><DialogTitle>{record ? 'تعديل الباكج' : 'باكج جديد'}</DialogTitle></DialogHeader>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="md:col-span-2"><Field label="اسم الباكج" required><Input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="عمرة رجب 2026" /></Field></div>
+          <Field label="النوع"><Select value={f.package_type} onValueChange={v => setF({ ...f, package_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{PACKAGE_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
+          <Field label="العملة"><Select value={f.currency} onValueChange={v => setF({ ...f, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
+          <Field label="تاريخ البداية"><Input type="date" value={f.start_date} onChange={e => setF({ ...f, start_date: e.target.value })} disabled={!!record} /></Field>
+          <Field label="تاريخ النهاية"><Input type="date" value={f.end_date} onChange={e => setF({ ...f, end_date: e.target.value })} /></Field>
+          <div className="md:col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field></div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
+          <Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function PackageDetailsDialog({ pkg, onClose, onChanged }) {
+  const [tab, setTab] = useState('components')
+  const [comps, setComps] = useState([])
+  const [bookings, setBookings] = useState([])
+  const [suppliers, setSuppliers] = useState([])
+  const [clients, setClients] = useState([])
+  const [boxes, setBoxes] = useState([])
+  const [newComp, setNewComp] = useState({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '' })
+  const [newBooking, setNewBooking] = useState({ client_id: '', pilgrim_name: '', passport_no: '', pax_count: 1, payment_method: 'credit', box_id: '', notes: '' })
+  const load = () => Promise.all([
+    api(`/packages/${pkg.id}/components`).then(setComps),
+    api(`/packages/${pkg.id}/bookings`).then(setBookings),
+    api('/suppliers').then(setSuppliers), api('/clients').then(setClients), api('/boxes').then(setBoxes),
+  ]).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [pkg.id])
+  const addComp = async () => {
+    if (!newComp.name || !newComp.supplier_id) return toast.error('اسم المكوّن والمورد مطلوبان')
+    try { await api(`/packages/${pkg.id}/components`, { method: 'POST', body: newComp }); toast.success('تمت الإضافة'); setNewComp({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '' }); load(); onChanged && onChanged() }
+    catch (e) { toast.error(e.message) }
+  }
+  const delComp = async (id) => { if (!confirm('حذف المكوّن؟')) return; try { await api(`/packages/${pkg.id}/components/${id}`, { method: 'DELETE' }); load(); onChanged && onChanged() } catch (e) { toast.error(e.message) } }
+  const addBooking = async () => {
+    if (!newBooking.client_id) return toast.error('اختر حساب القبض')
+    if (comps.length === 0) return toast.error('أضف مكونات الباكج أولاً')
+    try { await api(`/packages/${pkg.id}/bookings`, { method: 'POST', body: newBooking }); toast.success('✅ تم التسجيل + قيد محاسبي'); setNewBooking({ client_id: '', pilgrim_name: '', passport_no: '', pax_count: 1, payment_method: 'credit', box_id: '', notes: '' }); load(); onChanged && onChanged() }
+    catch (e) { toast.error(e.message) }
+  }
+  const totalCost = comps.reduce((s, c) => s + (c.cost_per_pax || 0), 0)
+  const totalSale = comps.reduce((s, c) => s + (c.sale_per_pax || 0), 0)
+  const profit = totalSale - totalCost
+  return (
+    <Dialog open={true} onOpenChange={onClose}>
+      <DialogContent dir="rtl" className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{pkg.name} — {PACKAGE_TYPES.find(t => t.v === pkg.package_type)?.l}</DialogTitle>
+          <DialogDescription>سعر الفرد الواحد: تكلفة <b>{fmt(totalCost, pkg.currency)}</b> • بيع <b>{fmt(totalSale, pkg.currency)}</b> • ربح <b className="text-emerald-600">{fmt(profit, pkg.currency)}</b></DialogDescription>
+        </DialogHeader>
+        <div className="flex gap-2 mb-3 border-b">
+          <button onClick={() => setTab('components')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'components' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500'}`}>🧩 المكونات ({comps.length})</button>
+          <button onClick={() => setTab('bookings')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'bookings' ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-slate-500'}`}>👥 المسجلون ({bookings.length})</button>
+        </div>
+        {tab === 'components' && (
+          <div className="space-y-3">
+            {pkg.status !== 'closed' && (
+              <div className="grid grid-cols-1 md:grid-cols-6 gap-2 p-3 bg-slate-50 rounded-lg">
+                <Field label="نوع"><Select value={newComp.component_type} onValueChange={v => setNewComp({ ...newComp, component_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{COMPONENT_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
+                <Field label="الاسم"><Input value={newComp.name} onChange={e => setNewComp({ ...newComp, name: e.target.value })} placeholder="فندق البلد" /></Field>
+                <Field label="المورد"><Select value={newComp.supplier_id} onValueChange={v => setNewComp({ ...newComp, supplier_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent></Select></Field>
+                <Field label={`تكلفة/فرد (${pkg.currency})`}><Input type="number" value={newComp.cost_per_pax} onChange={e => setNewComp({ ...newComp, cost_per_pax: e.target.value })} /></Field>
+                <Field label={`بيع/فرد (${pkg.currency})`}><Input type="number" value={newComp.sale_per_pax} onChange={e => setNewComp({ ...newComp, sale_per_pax: e.target.value })} /></Field>
+                <div className="flex items-end"><Button onClick={addComp} className="w-full grad-brand text-white gap-1"><Plus className="w-4 h-4" /> إضافة</Button></div>
+              </div>
+            )}
+            <Table>
+              <TableHeader><TableRow><TableHead>النوع</TableHead><TableHead>الاسم</TableHead><TableHead>المورد</TableHead><TableHead className="text-left">تكلفة/فرد</TableHead><TableHead className="text-left">بيع/فرد</TableHead><TableHead className="text-left text-emerald-600">ربح/فرد</TableHead><TableHead></TableHead></TableRow></TableHeader>
+              <TableBody>
+                {comps.map(c => (
+                  <TableRow key={c.id}>
+                    <TableCell><Badge variant="outline">{COMPONENT_TYPES.find(t => t.v === c.component_type)?.l || c.component_type}</Badge></TableCell>
+                    <TableCell className="font-semibold">{c.name}</TableCell>
+                    <TableCell className="text-xs">{c.supplier_name}</TableCell>
+                    <TableCell className="text-left">{fmt(c.cost_per_pax, pkg.currency)}</TableCell>
+                    <TableCell className="text-left">{fmt(c.sale_per_pax, pkg.currency)}</TableCell>
+                    <TableCell className="text-left text-emerald-600 font-bold">{fmt(c.sale_per_pax - c.cost_per_pax, pkg.currency)}</TableCell>
+                    <TableCell>{pkg.status !== 'closed' && <Button size="sm" variant="ghost" onClick={() => delComp(c.id)} className="text-rose-600 h-6 w-6 p-0"><Trash2 className="w-3 h-3" /></Button>}</TableCell>
+                  </TableRow>
+                ))}
+                {comps.length === 0 && <TableRow><TableCell colSpan={7} className="text-center text-slate-400 py-6">لا توجد مكونات — أضف تأشيرة، تذكرة، فندق، نقل...</TableCell></TableRow>}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+        {tab === 'bookings' && (
+          <div className="space-y-3">
+            {pkg.status !== 'closed' && (
+              <div className="grid grid-cols-1 md:grid-cols-6 gap-2 p-3 bg-emerald-50 rounded-lg border border-emerald-200">
+                <Field label="حساب القبض"><Select value={newBooking.client_id} onValueChange={v => setNewBooking({ ...newBooking, client_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{clients.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent></Select></Field>
+                <Field label="اسم المعتمر/المسافر"><Input value={newBooking.pilgrim_name} onChange={e => setNewBooking({ ...newBooking, pilgrim_name: e.target.value })} /></Field>
+                <Field label="رقم الجواز"><Input value={newBooking.passport_no} onChange={e => setNewBooking({ ...newBooking, passport_no: e.target.value })} /></Field>
+                <Field label="عدد الأفراد"><Input type="number" min="1" value={newBooking.pax_count} onChange={e => setNewBooking({ ...newBooking, pax_count: e.target.value })} /></Field>
+                <Field label="الدفع"><Select value={newBooking.payment_method} onValueChange={v => setNewBooking({ ...newBooking, payment_method: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="credit">🕓 آجل</SelectItem><SelectItem value="cash">💵 نقد</SelectItem></SelectContent></Select></Field>
+                <div className="flex items-end"><Button onClick={addBooking} className="w-full bg-emerald-600 text-white gap-1"><Plus className="w-4 h-4" /> تسجيل + قيد</Button></div>
+                {newBooking.payment_method === 'cash' && <div className="md:col-span-6"><Field label="الصندوق"><Select value={newBooking.box_id} onValueChange={v => setNewBooking({ ...newBooking, box_id: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></Field></div>}
+              </div>
+            )}
+            <Table>
+              <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>المعتمر/المسافر</TableHead><TableHead>حساب القبض</TableHead><TableHead>الجواز</TableHead><TableHead className="text-center">أفراد</TableHead><TableHead>الدفع</TableHead><TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead><TableHead className="text-left text-emerald-600">ربح</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {bookings.map(b => (
+                  <TableRow key={b.id}>
+                    <TableCell className="text-xs">{fmtDate(b.created_at)}</TableCell>
+                    <TableCell className="font-semibold">{b.pilgrim_name}</TableCell>
+                    <TableCell className="text-xs">{b.client_name}</TableCell>
+                    <TableCell className="font-mono text-xs">{b.passport_no || '—'}</TableCell>
+                    <TableCell className="text-center">{b.pax_count}</TableCell>
+                    <TableCell>{b.payment_method === 'cash' ? '💵' : '🕓'}</TableCell>
+                    <TableCell className="text-left">{fmt(b.total_cost, b.currency)}</TableCell>
+                    <TableCell className="text-left">{fmt(b.total_sale, b.currency)}</TableCell>
+                    <TableCell className="text-left text-emerald-600 font-bold">{fmt(b.commission, b.currency)}</TableCell>
+                  </TableRow>
+                ))}
+                {bookings.length === 0 && <TableRow><TableCell colSpan={9} className="text-center text-slate-400 py-6">لا يوجد مسجلون بعد</TableCell></TableRow>}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+        <DialogFooter><Button variant="outline" onClick={onClose}>إغلاق</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function PackageReportDialog({ pkg, onClose }) {
+  const [data, setData] = useState(null)
+  useEffect(() => { api(`/packages/${pkg.id}/report`).then(setData).catch(e => toast.error(e.message)) }, [pkg.id])
+  if (!data) return <Dialog open={true} onOpenChange={onClose}><DialogContent dir="rtl"><Loader2 className="w-6 h-6 animate-spin mx-auto" /></DialogContent></Dialog>
+  const cur = pkg.currency
+  return (
+    <Dialog open={true} onOpenChange={onClose}>
+      <DialogContent dir="rtl" className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>📊 تقرير مالي — {pkg.name}</DialogTitle>
+          <DialogDescription>ملخص كامل لأداء الباكج (المبيعات، التكاليف، صافي الربح)</DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Card><CardContent className="p-3"><div className="text-xs text-slate-500">المسجلون</div><div className="text-2xl font-bold">{data.totals.bookings}</div><div className="text-[10px] text-slate-400">{data.totals.pax} فرد</div></CardContent></Card>
+          <Card><CardContent className="p-3"><div className="text-xs text-slate-500">الإيرادات</div><div className="text-xl font-bold text-blue-600">{fmt(data.totals.revenue, cur)}</div></CardContent></Card>
+          <Card><CardContent className="p-3"><div className="text-xs text-slate-500">التكاليف للموردين</div><div className="text-xl font-bold text-rose-600">{fmt(data.totals.cost, cur)}</div></CardContent></Card>
+          <Card className="grad-brand text-white border-0"><CardContent className="p-3"><div className="text-xs opacity-90">صافي الربح</div><div className="text-2xl font-extrabold">{fmt(data.totals.profit, cur)}</div><div className="text-[10px] opacity-80">هامش {data.margin_pct}%</div></CardContent></Card>
+        </div>
+        <div>
+          <div className="font-bold text-sm mb-2">💰 توزيع التكاليف على الموردين</div>
+          <Table><TableHeader><TableRow><TableHead>المورد</TableHead><TableHead className="text-left">إجمالي التكلفة ({cur})</TableHead></TableRow></TableHeader><TableBody>
+            {data.supplier_breakdown.map((s, i) => <TableRow key={i}><TableCell>{s.name}</TableCell><TableCell className="text-left font-bold text-rose-600">{fmt(s.cost, cur)}</TableCell></TableRow>)}
+            {data.supplier_breakdown.length === 0 && <TableRow><TableCell colSpan={2} className="text-center text-slate-400 py-4">لا توجد بيانات</TableCell></TableRow>}
+          </TableBody></Table>
+        </div>
+        <DialogFooter><Button variant="outline" onClick={onClose}>إغلاق</Button><Button onClick={() => window.print()} className="grad-brand text-white gap-2"><Printer className="w-4 h-4" /> طباعة</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function OfficeSettings() {
   const { settings, refreshMe, user, tenant } = useAuth()
   const [f, setF] = useState({
@@ -4569,6 +4844,7 @@ function TenantApp() {
         {tab === 'tickets' && <TicketsScreen />}
         {tab === 'visas' && <VisasScreen />}
         {tab === 'services' && <ServicesScreen />}
+        {tab === 'packages' && <PackagesScreen />}
         {tab === 'fx' && <FxScreen />}
         {tab === 'receipt' && <VoucherScreen mode="receipt" />}
         {tab === 'payment' && <VoucherScreen mode="payment" />}

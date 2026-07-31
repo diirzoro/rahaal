@@ -401,7 +401,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.5',
+          version: '3.6',
           db: 'connected',
         })
       } catch (e) {
@@ -1093,9 +1093,166 @@ async function handleRoute(request, { params }) {
       return ok(rest)
     }
 
+    // ============ v3.6 — PACKAGES & TOURS (MVP) ============
+    if (route === '/packages' && method === 'GET') {
+      const list = await db.collection('packages').find(tf).sort({ created_at: -1 }).toArray()
+      // Enrich each with counts
+      const enriched = await Promise.all(list.map(async p => {
+        const [comps, books] = await Promise.all([
+          db.collection('package_components').countDocuments({ tenant_id: T, package_id: p.id }),
+          db.collection('package_bookings').countDocuments({ tenant_id: T, package_id: p.id }),
+        ])
+        return { ...p, _id: undefined, components_count: comps, bookings_count: books }
+      }))
+      return ok(enriched)
+    }
+    if (route === '/packages' && method === 'POST') {
+      const b = await request.json()
+      if (!b.name || !b.package_type) return bad('الاسم والنوع مطلوبان')
+      const doc = {
+        id: uuidv4(), tenant_id: T, name: String(b.name), package_type: b.package_type,
+        currency: CURRENCIES.includes(b.currency) ? b.currency : 'SAR',
+        start_date: b.start_date ? new Date(b.start_date) : null,
+        end_date: b.end_date ? new Date(b.end_date) : null,
+        notes: b.notes || '', status: 'open',
+        created_at: new Date(),
+      }
+      await db.collection('packages').insertOne(doc)
+      const { _id, ...rest } = doc; return ok(rest)
+    }
+    const pkgIdMatch = route.match(/^\/packages\/([^/]+)$/)
+    if (pkgIdMatch && method === 'PATCH') {
+      const b = await request.json()
+      const upd = {}
+      for (const k of ['name', 'package_type', 'notes', 'end_date', 'status']) if (b[k] !== undefined) upd[k] = k === 'end_date' && b[k] ? new Date(b[k]) : b[k]
+      await db.collection('packages').updateOne({ id: pkgIdMatch[1], tenant_id: T }, { $set: upd })
+      return ok({ success: true })
+    }
+    if (pkgIdMatch && method === 'DELETE') {
+      // Only allow delete if no bookings
+      const bk = await db.collection('package_bookings').countDocuments({ tenant_id: T, package_id: pkgIdMatch[1] })
+      if (bk > 0) return bad('لا يمكن حذف باكج به تسجيلات — أغلقه بدلاً من الحذف')
+      await db.collection('package_components').deleteMany({ tenant_id: T, package_id: pkgIdMatch[1] })
+      await db.collection('packages').deleteOne({ id: pkgIdMatch[1], tenant_id: T })
+      return ok({ success: true })
+    }
+
+    // Package components
+    const pkgCompMatch = route.match(/^\/packages\/([^/]+)\/components$/)
+    if (pkgCompMatch && method === 'GET') {
+      const list = await db.collection('package_components').find({ tenant_id: T, package_id: pkgCompMatch[1] }).sort({ created_at: 1 }).toArray()
+      return ok(list.map(c => ({ ...c, _id: undefined })))
+    }
+    if (pkgCompMatch && method === 'POST') {
+      const b = await request.json()
+      if (!b.name || !b.supplier_id) return bad('اسم المكوّن والمورد مطلوبان')
+      const sup = await db.collection('suppliers').findOne({ id: b.supplier_id, tenant_id: T })
+      if (!sup) return bad('المورد غير موجود')
+      const doc = {
+        id: uuidv4(), tenant_id: T, package_id: pkgCompMatch[1],
+        name: b.name, component_type: b.component_type || 'other',  // visa/ticket/hotel/transport/other
+        supplier_id: sup.id, supplier_name: sup.name,
+        cost_per_pax: Number(b.cost_per_pax) || 0,
+        sale_per_pax: Number(b.sale_per_pax) || 0,
+        notes: b.notes || '', created_at: new Date(),
+      }
+      await db.collection('package_components').insertOne(doc)
+      const { _id, ...rest } = doc; return ok(rest)
+    }
+    const pkgCompDelMatch = route.match(/^\/packages\/([^/]+)\/components\/([^/]+)$/)
+    if (pkgCompDelMatch && method === 'DELETE') {
+      await db.collection('package_components').deleteOne({ id: pkgCompDelMatch[2], tenant_id: T, package_id: pkgCompDelMatch[1] })
+      return ok({ success: true })
+    }
+
+    // Package bookings — register a client with auto-JE
+    const pkgBookMatch = route.match(/^\/packages\/([^/]+)\/bookings$/)
+    if (pkgBookMatch && method === 'GET') {
+      const list = await db.collection('package_bookings').find({ tenant_id: T, package_id: pkgBookMatch[1] }).sort({ created_at: -1 }).toArray()
+      return ok(list.map(b => ({ ...b, _id: undefined })))
+    }
+    if (pkgBookMatch && method === 'POST') {
+      const b = await request.json()
+      const pkgId = pkgBookMatch[1]
+      const pkg = await db.collection('packages').findOne({ id: pkgId, tenant_id: T })
+      if (!pkg) return bad('الباكج غير موجود', 404)
+      if (pkg.status === 'closed') return bad('الباكج مغلق — لا يمكن إضافة تسجيلات جديدة')
+      if (!b.client_id) return bad('حساب القبض مطلوب')
+      const cli = await db.collection('clients').findOne({ id: b.client_id, tenant_id: T })
+      if (!cli) return bad('العميل غير موجود')
+      const comps = await db.collection('package_components').find({ tenant_id: T, package_id: pkgId }).toArray()
+      if (comps.length === 0) return bad('لا توجد مكونات في الباكج — أضف المكونات قبل التسجيل')
+      const pax = Math.max(1, Number(b.pax_count) || 1)
+      const cur = pkg.currency
+      const total_cost = +comps.reduce((s, c) => s + (c.cost_per_pax * pax), 0).toFixed(2)
+      const total_sale = +comps.reduce((s, c) => s + (c.sale_per_pax * pax), 0).toFixed(2)
+      const commission = +(total_sale - total_cost).toFixed(2)
+      const payMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+      let box = null
+      if (payMethod === 'cash') {
+        if (!b.box_id) return bad('اختر الصندوق للدفع النقدي')
+        box = await db.collection('boxes').findOne({ id: b.box_id, tenant_id: T })
+        if (!box) return bad('الصندوق غير موجود')
+      }
+      const bookingDoc = {
+        id: uuidv4(), tenant_id: T, package_id: pkgId,
+        client_id: cli.id, client_name: cli.name,
+        pilgrim_name: b.pilgrim_name || cli.name,
+        passport_no: b.passport_no || '',
+        pax_count: pax, currency: cur,
+        total_cost, total_sale, commission,
+        payment_method: payMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
+        component_snapshots: comps.map(c => ({ id: c.id, name: c.name, supplier_id: c.supplier_id, supplier_name: c.supplier_name, cost_per_pax: c.cost_per_pax, sale_per_pax: c.sale_per_pax, cost_total: c.cost_per_pax * pax, sale_total: c.sale_per_pax * pax })),
+        notes: b.notes || '', created_at: new Date(), created_by: sess.user.email,
+      }
+      await db.collection('package_bookings').insertOne(bookingDoc)
+      // Balances
+      if (payMethod === 'cash') await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
+      else await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
+      for (const c of comps) await updateBalance(db, 'suppliers', { id: c.supplier_id, tenant_id: T }, cur, c.cost_per_pax * pax)
+      // Single combined JE
+      const lines = []
+      if (payMethod === 'cash') lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
+      else lines.push({ account_code: '1301', account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
+      // Group supplier credits (one line per supplier)
+      const supGrouped = {}
+      for (const c of comps) { supGrouped[c.supplier_id] = (supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }); supGrouped[c.supplier_id].amount += c.cost_per_pax * pax }
+      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
+      if (commission > 0) lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name}`, debit: 0, credit: commission })
+      await createJournalEntry(db, T, {
+        date: new Date(), description: `تسجيل ${bookingDoc.pilgrim_name} في ${pkg.name} — ${pax} فرد`,
+        ref_type: 'package_booking', ref_id: bookingDoc.id, currency: cur, lines,
+      })
+      const { _id, ...rest } = bookingDoc; return ok(rest)
+    }
+
+    // Package closing report
+    const pkgReportMatch = route.match(/^\/packages\/([^/]+)\/report$/)
+    if (pkgReportMatch && method === 'GET') {
+      const pkgId = pkgReportMatch[1]
+      const pkg = await db.collection('packages').findOne({ id: pkgId, tenant_id: T })
+      if (!pkg) return bad('الباكج غير موجود', 404)
+      const bookings = await db.collection('package_bookings').find({ tenant_id: T, package_id: pkgId }).sort({ created_at: 1 }).toArray()
+      const totals = { bookings: bookings.length, pax: 0, revenue: 0, cost: 0, profit: 0 }
+      for (const b of bookings) { totals.pax += b.pax_count; totals.revenue += b.total_sale; totals.cost += b.total_cost; totals.profit += b.commission }
+      const supplierBreakdown = {}
+      for (const b of bookings) {
+        for (const s of b.component_snapshots || []) {
+          const key = s.supplier_id
+          supplierBreakdown[key] = supplierBreakdown[key] || { name: s.supplier_name, cost: 0 }
+          supplierBreakdown[key].cost += s.cost_total
+        }
+      }
+      return ok({
+        package: { ...pkg, _id: undefined },
+        totals,
+        margin_pct: totals.revenue > 0 ? +((totals.profit / totals.revenue) * 100).toFixed(2) : 0,
+        bookings: bookings.map(b => ({ ...b, _id: undefined })),
+        supplier_breakdown: Object.values(supplierBreakdown).map(s => ({ ...s, cost: +s.cost.toFixed(2) })).sort((a,b) => b.cost - a.cost),
+      })
+    }
+
     // ============ v3.5 — BULK STATEMENT SEND ============
-    // Returns an array of { party, phone, whatsapp_link, message } for every active client with a phone.
-    // Actual sending is done client-side by opening each wa.me URL (or user copies the batch).
     if (route === '/bulk-statement/generate' && method === 'POST') {
       const b = await request.json()
       const kind = b.kind || 'clients'   // 'clients' | 'suppliers'
