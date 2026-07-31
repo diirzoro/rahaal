@@ -10,7 +10,7 @@ import {
   Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
   Building, Settings, Upload, FileSpreadsheet, CheckCircle2, XCircle,
   AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key,
-  ArrowLeftRight,
+  ArrowLeftRight, Briefcase, CalendarClock, LogIn,
 } from 'lucide-react'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTip, ResponsiveContainer,
@@ -521,7 +521,8 @@ function Field({ label, required, children }) {
 const NAV = [
   { id: 'dashboard', label: 'لوحة التحكم', icon: LayoutDashboard, color: 'from-blue-600 to-cyan-500' },
   { id: 'tickets',   label: 'حجز التذاكر', icon: Plane, color: 'from-sky-600 to-blue-500' },
-  { id: 'visas',     label: 'التأشيرات والخدمات', icon: FileBadge2, color: 'from-emerald-600 to-teal-500' },
+  { id: 'visas',     label: 'التأشيرات', icon: FileBadge2, color: 'from-emerald-600 to-teal-500' },
+  { id: 'services',  label: 'الخدمات', icon: Briefcase, color: 'from-orange-600 to-amber-500' },
   { id: 'fx',        label: 'صرافة العملات', icon: ArrowLeftRight, color: 'from-fuchsia-600 to-purple-500' },
   { id: 'receipt',   label: 'سند قبض', icon: ArrowDownLeft, color: 'from-green-600 to-emerald-500' },
   { id: 'payment',   label: 'سند صرف', icon: ArrowUpRight, color: 'from-rose-600 to-pink-500' },
@@ -632,10 +633,11 @@ function Dashboard({ setTab }) {
     <div className="space-y-6">
       <TopBar title="لوحة التحكم" subtitle="نظرة سريعة على أداء المكتب اليوم"
         right={<Button variant="outline" onClick={load} className="gap-2"><Activity className="w-4 h-4" /> تحديث</Button>} />
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <QuickAction icon={Plane} label="حجز تذكرة" grad="grad-brand" onClick={() => setTab('tickets')} />
-        <QuickAction icon={FileBadge2} label="تأشيرة/خدمة" grad="grad-green" onClick={() => setTab('visas')} />
-        <QuickAction icon={ArrowDownLeft} label="سند قبض" grad="grad-gold" onClick={() => setTab('receipt')} />
+        <QuickAction icon={FileBadge2} label="تأشيرة" grad="grad-green" onClick={() => setTab('visas')} />
+        <QuickAction icon={Briefcase} label="خدمة" grad="grad-gold" onClick={() => setTab('services')} />
+        <QuickAction icon={ArrowDownLeft} label="سند قبض" grad="grad-brand" onClick={() => setTab('receipt')} />
         <QuickAction icon={ArrowUpRight} label="سند صرف" grad="grad-rose" onClick={() => setTab('payment')} />
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -644,11 +646,72 @@ function Dashboard({ setTab }) {
         <KpiCard title="أرباح اليوم" icon={TrendingUp} grad="grad-green"
           values={CURRENCIES.map(c => ({ label: c, value: fmt(data?.kpi?.profit_today?.[c] || 0, c) }))} loading={loading} />
         <KpiCard title="عدد الحركات اليوم" icon={Activity} grad="grad-purple" bigValue={data?.kpi?.count_today || 0}
-          details={[{ label: 'تذاكر', value: data?.kpi?.tickets_today || 0 }, { label: 'تأشيرات', value: data?.kpi?.visas_today || 0 }]} loading={loading} />
+          details={[{ label: 'تذاكر', value: data?.kpi?.tickets_today || 0 }, { label: 'تأشيرات', value: data?.kpi?.visas_today || 0 }, { label: 'خدمات', value: data?.kpi?.services_today || 0 }]} loading={loading} />
         <KpiCard title="تاريخ اليوم" icon={Calendar} grad="grad-slate"
           bigValue={new Date().toLocaleDateString('ar-EG', { day: 'numeric', month: 'long' })}
           details={[{ label: '', value: new Date().toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric' }) }]} loading={loading} />
       </div>
+
+      {/* v3.0 — Visa Expiration Alerts Widget (10 days ahead + overdue) */}
+      {data?.visa_alerts && data.visa_alerts.length > 0 && (
+        <Card className="border-amber-300 bg-gradient-to-l from-amber-50 to-orange-50 shadow-md">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-amber-900">
+              <AlertTriangle className="w-5 h-5 text-amber-600" /> تنبيهات انتهاء التأشيرات ({data.visa_alerts.length})
+              <Badge className="bg-amber-100 text-amber-900 hover:bg-amber-100 mr-2 border border-amber-300">
+                خلال 10 أيام + متأخرة
+              </Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader><TableRow>
+                  <TableHead>صاحب التأشيرة</TableHead>
+                  <TableHead>نوع التأشيرة</TableHead>
+                  <TableHead>الجواز</TableHead>
+                  <TableHead>الجنسية</TableHead>
+                  <TableHead>حساب القبض</TableHead>
+                  <TableHead>تاريخ الدخول</TableHead>
+                  <TableHead>تاريخ الخروج المتوقع</TableHead>
+                  <TableHead className="text-center">الحالة</TableHead>
+                  <TableHead className="text-center">إجراء</TableHead>
+                </TableRow></TableHeader>
+                <TableBody>
+                  {data.visa_alerts.map(v => (
+                    <TableRow key={v.id} className={v.overdue ? 'bg-rose-50/50' : v.days_left <= 3 ? 'bg-amber-50/40' : ''}>
+                      <TableCell className="font-semibold">{v.passenger_name}</TableCell>
+                      <TableCell className="text-xs">{v.service_type}</TableCell>
+                      <TableCell className="font-mono text-xs">{v.passport_no || '—'}</TableCell>
+                      <TableCell className="text-xs">{v.nationality || '—'}</TableCell>
+                      <TableCell className="text-xs">{v.client_name}</TableCell>
+                      <TableCell className="text-xs">{v.entry_date ? new Date(v.entry_date).toLocaleDateString('ar-EG') : '—'}</TableCell>
+                      <TableCell className="text-xs font-bold">{v.expected_exit_date ? new Date(v.expected_exit_date).toLocaleDateString('ar-EG') : '—'}</TableCell>
+                      <TableCell className="text-center">
+                        {v.overdue ? (
+                          <Badge className="bg-rose-500 text-white hover:bg-rose-600">متأخر {Math.abs(v.days_left)} يوم</Badge>
+                        ) : v.days_left === 0 ? (
+                          <Badge className="bg-orange-500 text-white hover:bg-orange-600">اليوم</Badge>
+                        ) : (
+                          <Badge className={v.days_left <= 3 ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-yellow-400 text-amber-900 hover:bg-yellow-400'}>باقٍ {v.days_left} يوم</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-center">
+                        <Button size="sm" onClick={async () => {
+                          try { await api(`/visas/${v.id}/mark-exited`, { method: 'POST' }); toast.success('تم تسجيل الخروج'); load() }
+                          catch (e) { toast.error(e.message) }
+                        }} className="bg-emerald-500 hover:bg-emerald-600 text-white gap-1 h-8">
+                          <LogIn className="w-3.5 h-3.5 rotate-180" /> تم الخروج
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Tomorrow's Travelers Widget */}
       {tomorrow.length > 0 && (
@@ -1982,7 +2045,7 @@ function VisasScreen() {
 
 function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
   const isEdit = !!record
-  const emptyForm = { date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }
+  const emptyForm = { date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', entry_date: '', expected_exit_date: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }
   const [form, setForm] = useState(emptyForm)
   const [boxes, setBoxes] = useState([])
   const [saving, setSaving] = useState(false)
@@ -1997,6 +2060,8 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
         client_id: record.client_id || '', supplier_id: record.supplier_id || '',
         passenger_name: record.passenger_name || '', passport_no: record.passport_no || '',
         nationality: record.nationality || '',
+        entry_date: record.entry_date ? new Date(record.entry_date).toISOString().slice(0,10) : '',
+        expected_exit_date: record.expected_exit_date ? new Date(record.expected_exit_date).toISOString().slice(0,10) : '',
         cost: record.cost ?? '', sale_price: record.sale_price ?? '',
         payment_method: record.payment_method || 'credit', box_id: record.box_id || '',
       })
@@ -2033,6 +2098,16 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
             <Field label="رقم الجواز"><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value })} /></Field>
             <Field label="الجنسية"><Input value={form.nationality} onChange={e => setForm({ ...form, nationality: e.target.value })} /></Field>
           </div>
+          {/* v3.0 — Entry / Expected Exit tracking for expiration alerts */}
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mt-2">
+            <div className="text-sm font-bold text-amber-900 mb-2 flex items-center gap-2">
+              <CalendarClock className="w-4 h-4" /> تتبع الدخول والخروج (اختياري — لتفعيل تنبيه لوحة التحكم قبل 10 أيام)
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Field label="تاريخ الدخول"><Input type="date" value={form.entry_date} onChange={e => setForm({ ...form, entry_date: e.target.value })} /></Field>
+              <Field label="تاريخ الخروج المتوقع"><Input type="date" value={form.expected_exit_date} onChange={e => setForm({ ...form, expected_exit_date: e.target.value })} /></Field>
+            </div>
+          </div>
           <div className="bg-slate-50 border rounded-xl p-3 mt-2 flex items-center gap-4">
             <div className="text-sm font-bold text-slate-700">طريقة الدفع:</div>
             <div className="flex gap-2">
@@ -2057,6 +2132,297 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
       <QuickAddDialog open={qc} onOpenChange={setQc} kind="client" onSaved={onSaved} />
       <QuickAddDialog open={qs} onOpenChange={setQs} kind="supplier" onSaved={onSaved} />
     </>
+  )
+}
+
+// ================================================================
+// SERVICES SCREEN (v3.0) — Dedicated dynamic-catalog services module
+// Label: "حساب القبض" (Receivable Account) instead of "اسم العميل"
+// ================================================================
+function ServicesScreen() {
+  const { settings, tenant } = useAuth()
+  const [services, setServices] = useState([])
+  const [serviceTypes, setServiceTypes] = useState([])
+  const [clients, setClients] = useState([])
+  const [suppliers, setSuppliers] = useState([])
+  const [openManual, setOpenManual] = useState(false)
+  const [openTypes, setOpenTypes] = useState(false)
+  const [openSearch, setOpenSearch] = useState(false)
+  const [filter, setFilter] = useState(null)
+  const [selectedId, setSelectedId] = useState(null)
+  const [editing, setEditing] = useState(null)
+  const [rates, setRates] = useState(null)
+  const load = async () => {
+    try {
+      const [sv, st, c, s, r] = await Promise.all([
+        api('/services'), api('/service-types'), api('/clients'), api('/suppliers'), api('/rates')
+      ])
+      setServices(sv); setServiceTypes(st); setClients(c); setSuppliers(s); setRates(r.rates)
+    } catch (e) { toast.error(e.message) }
+  }
+  useEffect(() => { load() }, [])
+  const filtered = applyFilter(services, filter)
+  const selected = filtered.find(v => v.id === selectedId)
+  const handleAdd = () => { setEditing(null); setOpenManual(true) }
+  const handleEdit = () => { if (!selected) return toast.error('اختر خدمة أولاً'); setEditing(selected); setOpenManual(true) }
+  const handleDelete = async () => {
+    if (!selectedId) return
+    if (!confirm('حذف هذه الخدمة وعكس القيد المحاسبي؟')) return
+    try { await api(`/services/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const handlePrintTable = () => {
+    const totals = { cost: 0, sale_price: 0, commission: 0 }
+    for (const r of filtered) { totals.cost += r.cost; totals.sale_price += r.sale_price; totals.commission += r.commission }
+    printTable({
+      title: 'كشف الخدمات', settings, tenant, rows: filtered,
+      columns: [
+        { key: 'date', label: 'التاريخ', render: r => fmtDate(r.date) },
+        { key: 'service_type', label: 'الخدمة' },
+        { key: 'beneficiary_name', label: 'المستفيد' },
+        { key: 'reference_no', label: 'الرقم المرجعي' },
+        { key: 'client_name', label: 'حساب القبض' },
+        { key: 'supplier_name', label: 'المورد / المزود' },
+        { key: 'currency', label: 'العملة' },
+        { key: 'cost', label: 'تكلفة', align: 'left', render: r => fmt(r.cost, r.currency) },
+        { key: 'sale_price', label: 'بيع', align: 'left', render: r => fmt(r.sale_price, r.currency) },
+        { key: 'commission', label: 'عمولة', align: 'left', render: r => fmt(r.commission, r.currency) },
+      ],
+      totals: { cost: totals.cost.toFixed(2), sale_price: totals.sale_price.toFixed(2), commission: totals.commission.toFixed(2) },
+    })
+  }
+  return (
+    <div className="space-y-4">
+      <TopBar
+        title="الخدمات"
+        subtitle="حجز فنادق، تصديق شهادات، خدمات نقل، وأي خدمة إضافية — كتالوج ديناميكي مع قيود محاسبية تلقائية"
+        right={
+          <Button variant="outline" onClick={() => setOpenTypes(true)} className="gap-2 border-orange-200 text-orange-700 hover:bg-orange-50">
+            <Settings className="w-4 h-4" /> إدارة أنواع الخدمات ({serviceTypes.length})
+          </Button>
+        }
+      />
+      <ActionToolbar
+        addLabel="خدمة جديدة" onAdd={handleAdd} onRefresh={load} onSearch={() => setOpenSearch(true)}
+        onEdit={handleEdit} onDelete={handleDelete} onPrintTable={handlePrintTable}
+        selectedId={selectedId} count={filtered.length}
+      />
+      {filter && (
+        <div className="flex items-center gap-2 p-2 bg-blue-50 border border-blue-200 rounded-lg text-xs">
+          <Filter className="w-4 h-4 text-blue-600" /> فلتر نشط: <b>{filter.field}</b> {filter.condition === 'equals' ? 'يساوي' : 'يحتوي على'} "<b>{filter.term}</b>"
+          <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
+        </div>
+      )}
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Briefcase className="w-5 h-5 text-orange-600" /> سجل الخدمات ({filtered.length}{filter ? ` من ${services.length}` : ''})</CardTitle></CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-8"></TableHead>
+                  <TableHead>التاريخ</TableHead><TableHead>نوع الخدمة</TableHead>
+                  <TableHead>المستفيد</TableHead><TableHead>الرقم المرجعي</TableHead>
+                  <TableHead>حساب القبض</TableHead><TableHead>المورد / المزود</TableHead>
+                  <TableHead>الدفع</TableHead><TableHead>العملة</TableHead>
+                  <TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead>
+                  <TableHead className="text-left text-emerald-600">عمولة</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.length === 0 && <TableRow><TableCell colSpan={12} className="text-center text-slate-400 py-8">{filter ? 'لا نتائج للفلتر' : 'لا توجد خدمات — أضف خدمة جديدة من الأعلى'}</TableCell></TableRow>}
+                {filtered.map(v => (
+                  <TableRow key={v.id} className={selectedId === v.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={() => setSelectedId(v.id === selectedId ? null : v.id)}>
+                    <TableCell><input type="radio" checked={selectedId === v.id} onChange={() => setSelectedId(v.id)} /></TableCell>
+                    <TableCell className="text-xs">{fmtDate(v.date)}</TableCell>
+                    <TableCell><Badge className="bg-orange-100 text-orange-800 hover:bg-orange-100 border border-orange-200">{v.service_type}</Badge></TableCell>
+                    <TableCell>{v.beneficiary_name || '—'}</TableCell>
+                    <TableCell className="font-mono text-xs">{v.reference_no || '—'}</TableCell>
+                    <TableCell>{v.client_name}</TableCell>
+                    <TableCell>{v.supplier_name}</TableCell>
+                    <TableCell>{v.payment_method === 'cash' ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">💵 نقد</Badge> : <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">🕓 آجل</Badge>}</TableCell>
+                    <TableCell><Badge variant="outline">{v.currency}</Badge></TableCell>
+                    <TableCell className="text-left font-semibold">{fmt(v.cost, v.currency)}</TableCell>
+                    <TableCell className="text-left font-semibold">{fmt(v.sale_price, v.currency)}</TableCell>
+                    <TableCell className="text-left font-bold text-emerald-600">{fmt(v.commission, v.currency)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
+      <ServiceDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }}
+        clients={clients} suppliers={suppliers} rates={rates} serviceTypes={serviceTypes} record={editing}
+        onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل الخدمة وعكس القيد السابق' : 'تم حفظ الخدمة') }} />
+      <ServiceTypesDialog open={openTypes} onOpenChange={setOpenTypes} onChanged={load} />
+      <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
+        fields={[
+          { key: 'service_type', label: 'نوع الخدمة' }, { key: 'beneficiary_name', label: 'المستفيد' },
+          { key: 'reference_no', label: 'الرقم المرجعي' }, { key: 'client_name', label: 'حساب القبض' },
+          { key: 'supplier_name', label: 'المورد' }, { key: 'sale_price', label: 'سعر البيع' },
+          { key: 'currency', label: 'العملة' },
+        ]}
+        onApply={setFilter} onClear={() => setFilter(null)}
+      />
+    </div>
+  )
+}
+
+function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceTypes, onSaved, record }) {
+  const isEdit = !!record
+  const activeTypes = (serviceTypes || []).filter(t => t.active !== false)
+  const emptyForm = {
+    date: todayISO(), service_type: activeTypes[0]?.name || 'خدمات متنوعة',
+    currency: 'SAR', exchange_rate: 0.267,
+    client_id: '', supplier_id: '', beneficiary_name: '', reference_no: '', description: '',
+    cost: '', sale_price: '', payment_method: 'credit', box_id: '', notes: '',
+  }
+  const [form, setForm] = useState(emptyForm)
+  const [boxes, setBoxes] = useState([])
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    if (!open) return
+    if (record) {
+      setForm({
+        date: record.date ? new Date(record.date).toISOString().slice(0,10) : todayISO(),
+        service_type: record.service_type || 'خدمات متنوعة',
+        currency: record.currency || 'SAR', exchange_rate: record.exchange_rate || 1,
+        client_id: record.client_id || '', supplier_id: record.supplier_id || '',
+        beneficiary_name: record.beneficiary_name || '', reference_no: record.reference_no || '',
+        description: record.description || '', notes: record.notes || '',
+        cost: record.cost ?? '', sale_price: record.sale_price ?? '',
+        payment_method: record.payment_method || 'credit', box_id: record.box_id || '',
+      })
+    } else { setForm({ ...emptyForm, service_type: activeTypes[0]?.name || 'خدمات متنوعة' }) }
+  }, [open, record])
+  useEffect(() => { if (rates && !isEdit) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
+  useEffect(() => { if (open) api('/boxes').then(setBoxes).catch(()=>{}) }, [open])
+  useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: boxes[0].id })) }, [form.payment_method, boxes])
+  const commission = (Number(form.sale_price) || 0) - (Number(form.cost) || 0)
+  const submit = async () => {
+    if (!form.client_id) return toast.error('اختر حساب القبض')
+    if (!form.supplier_id) return toast.error('اختر المورد / المزود')
+    if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
+    if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق للدفع النقدي')
+    try {
+      setSaving(true)
+      if (isEdit) await api(`/services/${record.id}`, { method: 'PUT', body: form })
+      else await api('/services', { method: 'POST', body: form })
+      onOpenChange(false); onSaved(); setForm(emptyForm)
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" dir="rtl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-xl">
+            <div className="w-9 h-9 rounded-lg grad-gold flex items-center justify-center"><Briefcase className="w-4 h-4 text-white" /></div>
+            {isEdit ? '✏️ تعديل خدمة' : 'خدمة جديدة'}
+          </DialogTitle>
+          {isEdit && <DialogDescription>سيتم عكس القيد المحاسبي القديم وإعادة الترحيل تلقائياً — دون خصم من الحصة</DialogDescription>}
+        </DialogHeader>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
+          <Field label="نوع الخدمة">
+            <Select value={form.service_type} onValueChange={v => setForm({ ...form, service_type: v })}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>{activeTypes.map(t => <SelectItem key={t.id} value={t.name}>{t.name}</SelectItem>)}</SelectContent>
+            </Select>
+          </Field>
+          <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
+          <Field label="حساب القبض" required><SmartAutocomplete kind="client" items={clients} value={form.client_id} onChange={id => setForm({ ...form, client_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
+          <Field label="المورد / المزود" required><SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id} onChange={id => setForm({ ...form, supplier_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
+          <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
+          <Field label="اسم المستفيد"><Input value={form.beneficiary_name} onChange={e => setForm({ ...form, beneficiary_name: e.target.value })} placeholder="مثال: أحمد محمد" /></Field>
+          <Field label="الرقم المرجعي"><Input value={form.reference_no} onChange={e => setForm({ ...form, reference_no: e.target.value })} placeholder="مثال: HTL-2025-001" /></Field>
+          <Field label="وصف مختصر"><Input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="مثال: 3 ليالٍ فندق البلد" /></Field>
+        </div>
+        <div className="bg-slate-50 border rounded-xl p-3 mt-2 flex items-center gap-4">
+          <div className="text-sm font-bold text-slate-700">طريقة الدفع:</div>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setForm({ ...form, payment_method: 'credit' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'credit' ? 'bg-amber-500 text-white border-amber-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-amber-400'}`}>🕓 آجل (على حساب القبض)</button>
+            <button type="button" onClick={() => setForm({ ...form, payment_method: 'cash' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'cash' ? 'bg-emerald-500 text-white border-emerald-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-emerald-400'}`}>💵 نقد</button>
+          </div>
+          {form.payment_method === 'cash' && (
+            <div className="flex-1"><Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })}><SelectTrigger><SelectValue placeholder="اختر الصندوق/البنك" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></div>
+          )}
+        </div>
+        <div className="bg-gradient-to-l from-orange-50 to-amber-50 border rounded-xl p-4 mt-2">
+          <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Banknote className="w-4 h-4 text-orange-600" /> الجانب المالي</div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <Field label={`التكلفة (${form.currency})`} required><Input type="number" step="0.01" value={form.cost} onChange={e => setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
+            <Field label={`سعر البيع (${form.currency})`} required><Input type="number" step="0.01" value={form.sale_price} onChange={e => setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
+            <Field label={`العمولة (${form.currency})`}><div className={`px-3 py-2 rounded-md border text-lg font-extrabold ${commission >= 0 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>{fmt(commission, form.currency)}</div></Field>
+          </div>
+        </div>
+        <Field label="ملاحظات (اختياري)">
+          <Textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
+        </Field>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
+          <Button onClick={submit} disabled={saving} className="grad-gold text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (isEdit ? '💾 حفظ التعديل + عكس القيد' : 'حفظ + قيد')}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ServiceTypesDialog({ open, onOpenChange, onChanged }) {
+  const [types, setTypes] = useState([])
+  const [name, setName] = useState('')
+  const [saving, setSaving] = useState(false)
+  const load = async () => { try { setTypes(await api('/service-types')) } catch (e) { toast.error(e.message) } }
+  useEffect(() => { if (open) load() }, [open])
+  const add = async () => {
+    const n = name.trim()
+    if (!n) return toast.error('أدخل اسم نوع الخدمة')
+    try {
+      setSaving(true)
+      await api('/service-types', { method: 'POST', body: { name: n } })
+      setName(''); await load(); onChanged && onChanged()
+      toast.success('تمت الإضافة')
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  const del = async (id) => {
+    if (!confirm('حذف نوع الخدمة؟')) return
+    try { await api(`/service-types/${id}`, { method: 'DELETE' }); await load(); onChanged && onChanged(); toast.success('تم الحذف') }
+    catch (e) { toast.error(e.message) }
+  }
+  const toggle = async (t) => {
+    try { await api(`/service-types/${t.id}`, { method: 'PATCH', body: { active: !t.active } }); await load(); onChanged && onChanged() }
+    catch (e) { toast.error(e.message) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg" dir="rtl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Briefcase className="w-5 h-5 text-orange-600" /> إدارة أنواع الخدمات</DialogTitle>
+          <DialogDescription>أضف/أخفِ أنواع الخدمات التي يقدمها مكتبك (فنادق، تصديقات، خدمات نقل، ...)</DialogDescription>
+        </DialogHeader>
+        <div className="flex gap-2">
+          <Input value={name} onChange={e => setName(e.target.value)} placeholder="اسم نوع الخدمة الجديد" onKeyDown={e => e.key === 'Enter' && add()} />
+          <Button onClick={add} disabled={saving} className="grad-gold text-white gap-1"><Plus className="w-4 h-4" /> إضافة</Button>
+        </div>
+        <div className="mt-3 max-h-72 overflow-y-auto border rounded-lg divide-y">
+          {types.length === 0 && <div className="p-4 text-center text-slate-400 text-sm">لا توجد أنواع بعد</div>}
+          {types.map(t => (
+            <div key={t.id} className={`flex items-center justify-between p-2 ${t.active === false ? 'bg-slate-50 opacity-60' : ''}`}>
+              <div className="flex items-center gap-2">
+                <Briefcase className="w-4 h-4 text-orange-500" />
+                <span className="font-semibold">{t.name}</span>
+                {t.active === false && <Badge variant="outline" className="text-xs">مخفي</Badge>}
+              </div>
+              <div className="flex gap-1">
+                <Button size="sm" variant="ghost" onClick={() => toggle(t)} className="text-xs">{t.active === false ? 'إظهار' : 'إخفاء'}</Button>
+                <Button size="sm" variant="ghost" onClick={() => del(t.id)} className="text-rose-600"><Trash2 className="w-3.5 h-3.5" /></Button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إغلاق</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -3035,6 +3401,7 @@ function TenantApp() {
         {tab === 'dashboard' && <Dashboard setTab={setTab} />}
         {tab === 'tickets' && <TicketsScreen />}
         {tab === 'visas' && <VisasScreen />}
+        {tab === 'services' && <ServicesScreen />}
         {tab === 'fx' && <FxScreen />}
         {tab === 'receipt' && <VoucherScreen mode="receipt" />}
         {tab === 'payment' && <VoucherScreen mode="payment" />}

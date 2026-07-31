@@ -2509,3 +2509,58 @@ agent_communication:
       ✅ Health endpoint: Version updated to 3.0
       
       Backend v3.0 is production-ready. All new features verified and working correctly.
+
+# ============================================================
+# v3.0 FRONTEND — verified via screenshots (manual)
+# ============================================================
+frontend:
+  - task: "v3.0 Services Screen + Service Dialog + Service Types Manager"
+    implemented: true
+    working: true
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Added new sidebar tab "الخدمات" (orange Briefcase icon).
+          ServicesScreen renders full table with columns using "حساب القبض" label instead of "اسم العميل".
+          ServiceDialog: dynamic service_type dropdown, حساب القبض/المورد autocomplete,
+          beneficiary_name/reference_no/description fields, cash/credit toggle, cost/sale/commission section.
+          ServiceTypesDialog: add/toggle/delete dynamic service catalog per tenant.
+          Verified visually: dashboard shows visa_alerts widget, services KPI count, sidebar has services tab.
+
+  - task: "v3.0 Visa Dialog — entry_date + expected_exit_date fields"
+    implemented: true
+    working: true
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          VisaDialog now shows an amber-highlighted section "تتبع الدخول والخروج (اختياري)"
+          with two date inputs. Fields are persisted through create/edit flow.
+
+  - task: "v3.0 Dashboard Visa Alerts Widget"
+    implemented: true
+    working: true
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Amber Card added above Tomorrow's Travelers widget. Shows overdue + upcoming (within 10 days)
+          visas with color-coded badges (rose for overdue, amber for near, yellow for others).
+          Each row has a "تم الخروج" button that POSTs /api/visas/:id/mark-exited and reloads dashboard.
+          Verified visually: 3 alerts displayed including 1 overdue (فاطمة علي -2 days), 2 upcoming.
+
+metadata:
+  version: "3.0"
