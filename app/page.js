@@ -1396,7 +1396,16 @@ function printVoucher({ kind, record, settings, tenant }) {
   const title = titleMap[kind] || 'سند'
   let content = ''
   if (kind === 'ticket') {
-    // v2.7 — Three-coupon ticket layout (Passenger / Dispatch / Branch) with prominent Carrier banner
+    // v3.2 — Three-coupon ticket layout with travel_mode-aware header + prominent departure time
+    const travelMode = record.travel_mode === 'land' ? 'land' : 'air'
+    const modeIcon = travelMode === 'land' ? '🚌' : '✈️'
+    const modeLabel = travelMode === 'land' ? 'قسيمة تذكرة نقل بري' : 'قسيمة تذكرة سفر جوي'
+    const modeCopyLabel = travelMode === 'land' ? 'نسخة الراكب — Land Trip' : 'نسخة الراكب — Air Trip'
+    const carrierIcon = travelMode === 'land' ? '🚌' : '✈️'
+    const carrierLabel = travelMode === 'land' ? 'شركة النقل' : 'شركة الطيران'
+    const modeHeaderGrad = travelMode === 'land' ? 'linear-gradient(90deg,#f97316,#ea580c)' : 'linear-gradient(90deg,#1e40af,#0ea5e9)'
+    const modeBorder = travelMode === 'land' ? '#c2410c' : '#1e40af'
+    const modeBg = travelMode === 'land' ? '#fff7ed' : '#eff6ff'
     const carrier = escHtml(record.carrier_name || 'غير محددة')
     const tktNum = escHtml(record.ticket_number || record.pnr || '—')
     const flightNo = escHtml(record.flight_number || record.pnr || '—')
@@ -1416,18 +1425,32 @@ function printVoucher({ kind, record, settings, tenant }) {
     const boarding = escHtml(record.boarding_point || '—')
     const salePoint = escHtml(record.sale_point || (tenant?.name || '—'))
     const priceStr = fmt(record.sale_price, record.currency)
+    // v3.2 — Prominent yellow departure-time badge next to travel date
+    const depTimeBadge = record.departure_time
+      ? `<div style="background: #fde047; border: 2px solid #ca8a04; border-radius: 10px; padding: 8px 14px; font-size: 18px; font-weight: 900; color: #713f12; text-align:center; box-shadow: 0 2px 4px rgba(0,0,0,0.08); letter-spacing: 1px;">⏰ ${depTime}</div>`
+      : ''
+    const dateTimeBlock = `
+      <div style="display:flex; gap:10px; align-items:center; justify-content:center; padding:10px; background:linear-gradient(135deg,#f0f9ff,#e0f2fe); border:2px solid #0284c7; border-radius:12px; margin-bottom:10px;">
+        <div style="flex:1;">
+          <div style="font-size:11px; color:#075985; font-weight:700;">📅 موعد ${travelMode === 'land' ? 'الانطلاق' : 'الإقلاع'}</div>
+          <div style="font-size:16px; font-weight:900; color:#0c4a6e;">${travelDate}</div>
+        </div>
+        ${depTimeBadge}
+      </div>
+    `
 
-    const carrierBanner = `<div style="border:2px solid #b45309; background: linear-gradient(90deg, #fef3c7, #fde68a); padding: 10px 14px; border-radius: 10px; margin-bottom: 12px; text-align:center; font-size: 16px; font-weight: 900; color: #78350f; letter-spacing: 0.5px;">🚌 الشركة الناقلة: ${carrier}</div>`
+    const carrierBanner = `<div style="border:2px solid ${modeBorder}; background: ${modeHeaderGrad}; padding: 10px 14px; border-radius: 10px; margin-bottom: 12px; text-align:center; font-size: 16px; font-weight: 900; color: #ffffff; letter-spacing: 0.5px;">${carrierIcon} ${carrierLabel}: ${carrier}</div>`
 
     const infoRow = (label, val) => `<div style="display:flex; gap:6px; padding: 4px 6px; border-bottom:1px dotted #cbd5e1; font-size: 12px;"><span style="font-weight:700; color:#475569;">${label}:</span><span style="color:#0f172a;">${val}</span></div>`
 
     const passengerCopy = `
-      <div style="border: 3px solid #1e40af; border-radius: 12px; padding: 14px; margin-bottom: 14px; background: #ffffff;">
+      <div style="border: 3px solid ${modeBorder}; border-radius: 12px; padding: 14px; margin-bottom: 14px; background: #ffffff;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-          <div style="font-size: 18px; font-weight: 900; color: #1e40af;">🎫 نسخة الراكب — Passenger Copy</div>
-          <div style="font-size: 13px; padding: 4px 10px; background:#dbeafe; border-radius: 6px; color:#1e40af; font-weight:700;">نوع التذكرة: ${tktType}</div>
+          <div style="font-size: 18px; font-weight: 900; color: ${modeBorder};">${modeIcon} ${modeLabel} — ${modeCopyLabel}</div>
+          <div style="font-size: 13px; padding: 4px 10px; background:${modeBg}; border-radius: 6px; color:${modeBorder}; font-weight:700; border:1px solid ${modeBorder};">نوع التذكرة: ${tktType}</div>
         </div>
         ${carrierBanner}
+        ${dateTimeBlock}
         <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px;">
           <div style="padding:8px; background:#f0f9ff; border-radius:8px; border:1px solid #bae6fd;">
             <div style="font-weight:900; color:#0369a1; margin-bottom:4px; font-size:13px;">👤 بيانات المسافر</div>
@@ -1440,29 +1463,31 @@ function printVoucher({ kind, record, settings, tenant }) {
             ${infoRow('تاريخ الإصدار', idDate)}
           </div>
           <div style="padding:8px; background:#f0fdf4; border-radius:8px; border:1px solid #bbf7d0;">
-            <div style="font-weight:900; color:#047857; margin-bottom:4px; font-size:13px;">✈️ تفاصيل الرحلة</div>
+            <div style="font-weight:900; color:#047857; margin-bottom:4px; font-size:13px;">${modeIcon} تفاصيل الرحلة</div>
             ${infoRow('رقم التذكرة', tktNum)}
-            ${infoRow('رقم الرحلة', flightNo)}
+            ${infoRow(travelMode === 'land' ? 'رقم الحافلة/الرحلة' : 'رقم الرحلة', flightNo)}
             ${infoRow('المسار', route)}
             ${infoRow('تاريخ الحجز', bookDate)}
-            ${infoRow('تاريخ الرحلة', travelDate)}
+            ${infoRow(travelMode === 'land' ? 'تاريخ السفر' : 'تاريخ الرحلة', travelDate)}
             ${infoRow('وقت الحضور', arrTime)}
-            ${infoRow('وقت الانطلاق', depTime)}
-            ${infoRow('نقطة الصعود', boarding)}
+            ${infoRow(travelMode === 'land' ? 'وقت الانطلاق' : 'وقت الإقلاع', depTime)}
+            ${infoRow(travelMode === 'land' ? 'محطة الانطلاق' : 'نقطة الصعود', boarding)}
             ${infoRow('نقطة البيع', salePoint)}
           </div>
         </div>
         <div style="padding:10px; background:#fef2f2; border:1px dashed #fecaca; border-radius:8px; font-size:11px; color:#7f1d1d;">
           <div style="font-weight:900; margin-bottom:4px;">⚠️ ملاحظات وشروط الحجز:</div>
           <ul style="margin:0; padding-right:18px; line-height:1.6;">
-            <li>يُشترط الحضور قبل موعد الرحلة بساعتين على الأقل.</li>
+            ${travelMode === 'land'
+              ? `<li><b>الحضور في محطة النقل قبل موعد الانطلاق بساعة واحدة على الأقل.</b></li>`
+              : `<li><b>الحضور في المطار قبل موعد الإقلاع بـ 4 ساعات لإتمام إجراءات السفر.</b></li>`}
             <li>غرامة التأجيل: 10% من قيمة التذكرة إن كان قبل الرحلة بأقل من 24 ساعة.</li>
             <li>الإلغاء: يخضع لسياسة الشركة الناقلة، تُخصم رسوم إدارية 5% مع استرداد الباقي.</li>
-            <li>على الراكب حمل بطاقته الأصلية وعرضها عند نقطة الصعود.</li>
+            <li>على الراكب حمل بطاقته الأصلية وعرضها عند ${travelMode === 'land' ? 'محطة الانطلاق' : 'نقطة الصعود'}.</li>
             <li>غير قابلة للتحويل لشخص آخر بدون إشعار مسبق.</li>
           </ul>
         </div>
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px; padding:8px 12px; background:linear-gradient(90deg,#1e40af,#3b82f6); border-radius:8px; color:white;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px; padding:8px 12px; background:${modeHeaderGrad}; border-radius:8px; color:white;">
           <div style="font-size:13px;">إجمالي القيمة المدفوعة</div>
           <div style="font-size:22px; font-weight:900;">${priceStr}</div>
         </div>
@@ -1472,27 +1497,28 @@ function printVoucher({ kind, record, settings, tenant }) {
     const stubCopy = (label, color, bgColor) => `
       <div style="border: 2px dashed ${color}; border-radius: 10px; padding: 10px; margin-bottom: 10px; background: ${bgColor};">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-          <div style="font-size: 14px; font-weight: 900; color: ${color};">✂️ ${label}</div>
+          <div style="font-size: 14px; font-weight: 900; color: ${color};">${modeIcon} ${label}</div>
           <div style="font-size: 11px; color:#64748b;">قصّ عند النقاط</div>
         </div>
-        <div style="border:1px solid ${color}; background:#fff; border-radius:6px; padding:6px; font-size: 11px; margin-bottom:6px; text-align:center; font-weight: 800; color: ${color};">🚌 ${carrier}</div>
+        <div style="border:1px solid ${color}; background:#fff; border-radius:6px; padding:6px; font-size: 11px; margin-bottom:6px; text-align:center; font-weight: 800; color: ${color};">${carrierIcon} ${carrier}</div>
         <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; font-size:11px;">
           <div><b>المسافر:</b> ${passName}</div>
           <div><b>رقم التذكرة:</b> ${tktNum}</div>
-          <div><b>الرحلة:</b> ${flightNo}</div>
+          <div><b>${travelMode === 'land' ? 'الحافلة' : 'الرحلة'}:</b> ${flightNo}</div>
           <div><b>المسار:</b> ${route}</div>
           <div><b>التاريخ:</b> ${travelDate}</div>
-          <div><b>الوقت:</b> ${depTime}</div>
+          <div style="background:#fef3c7; padding:2px 4px; border-radius:4px; font-weight:900;"><b>⏰ الوقت:</b> ${depTime}</div>
           <div><b>الهوية:</b> ${idNo}</div>
-          <div><b>نقطة الصعود:</b> ${boarding}</div>
+          <div><b>${travelMode === 'land' ? 'المحطة' : 'نقطة الصعود'}:</b> ${boarding}</div>
           <div style="font-weight:900; color:${color};">السعر: ${priceStr}</div>
         </div>
       </div>
     `
 
+    const dispatchLabel = travelMode === 'land' ? 'نسخة المحطة — Dispatch Copy' : 'نسخة الترحيل — Dispatch Copy'
     content = `<div style="max-width: 100%;">
       ${passengerCopy}
-      ${stubCopy('نسخة الترحيل — Dispatch Copy', '#065f46', '#ecfdf5')}
+      ${stubCopy(dispatchLabel, '#065f46', '#ecfdf5')}
       ${stubCopy('نسخة الفرع — Branch Copy', '#7c3aed', '#faf5ff')}
     </div>`
   } else if (kind === 'visa') {
