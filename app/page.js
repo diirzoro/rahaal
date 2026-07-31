@@ -950,6 +950,7 @@ function TicketsScreen() {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [editing, setEditing] = useState(null)
+  const [refundTarget, setRefundTarget] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
@@ -1005,7 +1006,7 @@ function TicketsScreen() {
       />
       <ActionToolbar
         addLabel="تذكرة جديدة" onAdd={handleAdd} onRefresh={load} onSearch={() => setOpenSearch(true)}
-        onEdit={handleEdit} onDelete={handleDelete} onPrintVoucher={handlePrintVoucher} onPrintTable={handlePrintTable}
+        onEdit={handleEdit} onDelete={handleDelete} onRefund={() => { if (!selected) return toast.error('اختر تذكرة أولاً'); if (selected.is_refunded) return toast.error('التذكرة مستردة مسبقاً'); setRefundTarget(selected) }} onPrintVoucher={handlePrintVoucher} onPrintTable={handlePrintTable}
         selectedId={selectedId} count={filtered.length}
       />
       {filter && (
@@ -1061,6 +1062,7 @@ function TicketsScreen() {
       </Card>
       <TicketDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }} clients={clients} suppliers={suppliers} rates={rates} record={editing}
         onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل التذكرة وعكس القيد السابق تلقائياً' : 'تم حفظ التذكرة وإنشاء القيد المحاسبي تلقائياً') }} />
+      <RefundDialog open={!!refundTarget} onOpenChange={v => !v && setRefundTarget(null)} record={refundTarget} refType="ticket" onSaved={() => { setRefundTarget(null); load() }} />
       <BulkImportDialog open={openBulk} onOpenChange={setOpenBulk} kind="tickets" onDone={() => { load(); setOpenBulk(false) }} />
       <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
         fields={[
@@ -1627,7 +1629,177 @@ function SmartAutocomplete({ kind, items, value, onChange, placeholder, onCreate
 // ================================================================
 // ACTION TOOLBAR (unified across screens)
 // ================================================================
-function ActionToolbar({ onAdd, onRefresh, onDelete, onSearch, onPrint, onPrintVoucher, onPrintTable, onEdit, onExit, selectedId, count, addLabel }) {
+// ================================================================
+// v3.5 — REFUND DIALOG + BULK STATEMENT MODAL
+// ================================================================
+function RefundDialog({ open, onOpenChange, record, refType, onSaved }) {
+  const { tenant } = useAuth()
+  const [f, setF] = useState({ supplier_penalty: '', office_fee: '', reason: '', notes: '' })
+  const [saving, setSaving] = useState(false)
+  useEffect(() => { if (open) setF({ supplier_penalty: '', office_fee: '', reason: '', notes: '' }) }, [open, record])
+  if (!record) return null
+  const sale = Number(record.sale_price) || 0
+  const cost = Number(record.cost) || 0
+  const sp = Number(f.supplier_penalty) || 0
+  const of = Number(f.office_fee) || 0
+  const refundToClient = +(sale - sp - of).toFixed(2)
+  const totalFees = +(sp + of).toFixed(2)
+  const invalid = refundToClient < 0
+  const submit = async () => {
+    if (invalid) return toast.error('مجموع الرسوم أكبر من قيمة البيع')
+    try {
+      setSaving(true)
+      const doc = await api('/refunds', { method: 'POST', body: {
+        ref_type: refType, ref_id: record.id,
+        supplier_penalty: sp, office_fee: of, reason: f.reason, notes: f.notes,
+      } })
+      toast.success('✅ تم إنشاء سند الاسترداد وعكس القيد')
+      onSaved && onSaved(doc)
+      onOpenChange(false)
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  const printCredit = () => {
+    const passenger = record.passenger_name || record.beneficiary_name || record.client_name || '—'
+    const dateStr = new Date().toLocaleDateString('ar-EG', { year:'numeric', month:'long', day:'numeric' })
+    const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>سند استرداد</title>
+<style>body{font-family:'Tahoma',sans-serif;background:#f8fafc;padding:24px;color:#0f172a}
+.doc{max-width:700px;margin:auto;background:#fff;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.06);overflow:hidden}
+.hdr{background:linear-gradient(135deg,#dc2626,#f97316);color:#fff;padding:22px 28px;display:flex;justify-content:space-between;align-items:center}
+.hdr h1{margin:0;font-size:22px;font-weight:900}
+.sec{padding:18px 28px;border-bottom:1px solid #e2e8f0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.row{padding:6px 10px;background:#f8fafc;border-radius:6px;font-size:12px;display:flex;justify-content:space-between}
+.big{background:#fef2f2;border:2px solid #fecaca;border-radius:10px;padding:14px;text-align:center;margin:10px 0}
+.big .n{font-size:32px;font-weight:900;color:#dc2626}
+.foot{padding:16px 28px;background:#f8fafc;font-size:11px;color:#64748b;text-align:center}
+@media print{.actions{display:none}}
+</style></head><body><div class="doc">
+<div class="hdr"><h1>🔄 سند استرداد (Credit Note)</h1><div style="text-align:left"><div style="font-size:14px;font-weight:800">${escHtml(tenant?.name || 'مكتب رحّال')}</div><div style="font-size:11px;opacity:.9">${dateStr}</div></div></div>
+<div class="sec"><div class="grid">
+<div class="row"><b>العميل:</b><span>${escHtml(record.client_name)}</span></div>
+<div class="row"><b>المسافر/المستفيد:</b><span>${escHtml(passenger)}</span></div>
+<div class="row"><b>${refType === 'ticket' ? 'PNR' : refType === 'visa' ? 'الجواز' : 'المرجع'}:</b><span>${escHtml(record.pnr || record.passport_no || record.reference_no || '—')}</span></div>
+<div class="row"><b>العملة:</b><span>${escHtml(record.currency)}</span></div>
+<div class="row"><b>قيمة البيع الأصلية:</b><span>${fmt(sale, record.currency)}</span></div>
+<div class="row"><b>غرامة المورد:</b><span style="color:#dc2626">-${fmt(sp, record.currency)}</span></div>
+<div class="row"><b>رسوم خدمة المكتب:</b><span style="color:#dc2626">-${fmt(of, record.currency)}</span></div>
+<div class="row"><b>سبب الإلغاء:</b><span>${escHtml(f.reason || '—')}</span></div>
+</div>
+<div class="big"><div style="font-size:12px;color:#7f1d1d;font-weight:700;margin-bottom:6px">صافي المبلغ المسترد للعميل</div><div class="n">${fmt(refundToClient, record.currency)}</div></div>
+</div>
+<div class="foot">صادر إلكترونياً من نظام رحّال — Rahaal ERP • ${dateStr}</div>
+</div><div class="actions" style="text-align:center;margin-top:16px"><button onclick="window.print()" style="background:#dc2626;color:#fff;border:0;padding:10px 20px;border-radius:8px;font-weight:800;cursor:pointer">🖨️ طباعة</button></div>
+</body></html>`
+    const w = window.open('', '_blank', 'width=800,height=900')
+    if (!w) return toast.error('السماح بالنوافذ المنبثقة مطلوب')
+    w.document.open(); w.document.write(html); w.document.close(); w.focus()
+  }
+  const shareWA = () => {
+    const passenger = record.passenger_name || record.beneficiary_name || record.client_name
+    const msg = `عزيزنا العميل ${record.client_name}،\n\n🔄 سند استرداد\n📋 ${refType === 'ticket' ? 'تذكرة' : refType === 'visa' ? 'تأشيرة' : 'خدمة'} ${passenger}\n💰 قيمة البيع: ${fmt(sale, record.currency)}\n➖ غرامة المورد: ${fmt(sp, record.currency)}\n➖ رسوم المكتب: ${fmt(of, record.currency)}\n\n✅ *صافي المبلغ المسترد: ${fmt(refundToClient, record.currency)}*\n\n${f.reason ? `السبب: ${f.reason}\n\n` : ''}شكراً لتعاملكم — ${tenant?.name || 'مكتب رحّال'}`
+    const phone = record.passenger_whatsapp || record.passenger_phone || record.beneficiary_whatsapp || record.beneficiary_phone
+    openWhatsApp(phone, msg)
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent dir="rtl" className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><ArrowLeftRight className="w-5 h-5 text-orange-600" /> استرداد/إلغاء {refType === 'ticket' ? 'تذكرة' : refType === 'visa' ? 'تأشيرة' : 'خدمة'}</DialogTitle>
+          <DialogDescription>سيتم عكس القيد الأصلي، وإنشاء قيد جديد يخصم الرسوم ويعيد الرصيد للعميل</DialogDescription>
+        </DialogHeader>
+        <div className="bg-slate-50 border rounded-lg p-3 text-sm space-y-1">
+          <div className="flex justify-between"><span className="text-slate-500">العميل:</span><span className="font-semibold">{record.client_name}</span></div>
+          <div className="flex justify-between"><span className="text-slate-500">المسافر/المستفيد:</span><span>{record.passenger_name || record.beneficiary_name || '—'}</span></div>
+          <div className="flex justify-between"><span className="text-slate-500">قيمة البيع الأصلية:</span><span className="font-bold text-blue-600">{fmt(sale, record.currency)}</span></div>
+          <div className="flex justify-between"><span className="text-slate-500">التكلفة الأصلية:</span><span>{fmt(cost, record.currency)}</span></div>
+          <div className="flex justify-between"><span className="text-slate-500">طريقة الدفع الأصلية:</span><span>{record.payment_method === 'cash' ? '💵 نقد' : '🕓 آجل'}</span></div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="غرامة المورد/الشركة"><Input type="number" step="0.01" value={f.supplier_penalty} onChange={e => setF({ ...f, supplier_penalty: e.target.value })} placeholder="0" /></Field>
+          <Field label="رسوم خدمة المكتب"><Input type="number" step="0.01" value={f.office_fee} onChange={e => setF({ ...f, office_fee: e.target.value })} placeholder="0" /></Field>
+          <div className="md:col-span-2"><Field label="سبب الإلغاء"><Input value={f.reason} onChange={e => setF({ ...f, reason: e.target.value })} placeholder="طلب العميل / تعذر السفر / تأجيل ..." /></Field></div>
+          <div className="md:col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field></div>
+        </div>
+        <div className={`rounded-xl p-4 border-2 ${invalid ? 'border-rose-300 bg-rose-50' : 'border-emerald-300 bg-emerald-50'}`}>
+          <div className="text-xs text-slate-600 mb-1">صافي المبلغ الذي سيُعاد للعميل</div>
+          <div className={`text-3xl font-extrabold ${invalid ? 'text-rose-600' : 'text-emerald-700'}`}>{fmt(refundToClient, record.currency)}</div>
+          <div className="text-[10px] text-slate-500 mt-1">= قيمة البيع ({fmt(sale, record.currency)}) − إجمالي الرسوم ({fmt(totalFees, record.currency)})</div>
+          {invalid && <div className="text-xs text-rose-700 mt-2 font-semibold">⚠️ مجموع الرسوم أكبر من قيمة البيع</div>}
+        </div>
+        <DialogFooter className="flex-wrap gap-2">
+          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
+          <Button onClick={printCredit} variant="outline" className="gap-1"><Printer className="w-4 h-4" /> طباعة سند الاسترداد</Button>
+          <WaBtn phone={record.passenger_whatsapp || record.passenger_phone || record.beneficiary_whatsapp || record.beneficiary_phone} message={`سيتم إرسال تفاصيل الاسترداد على واتساب`} size="md" label="مشاركة على واتساب" />
+          <Button onClick={submit} disabled={saving || invalid} className="bg-orange-600 hover:bg-orange-700 text-white">
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : '💾 تنفيذ الاسترداد + قيد عكسي'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function BulkStatementDialog({ open, onOpenChange }) {
+  const [kind, setKind] = useState('clients')
+  const [loading, setLoading] = useState(false)
+  const [results, setResults] = useState(null)
+  const generate = async () => {
+    try {
+      setLoading(true)
+      const r = await api('/bulk-statement/generate', { method: 'POST', body: { kind, period: 'month' } })
+      setResults(r); toast.success(`تم توليد ${r.count} كشف`)
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }
+  const openAll = () => {
+    if (!results?.items) return
+    if (!confirm(`سيتم فتح ${results.items.length} نافذة واتساب — تأكد من السماح بالنوافذ المنبثقة. متابعة؟`)) return
+    results.items.forEach((it, i) => setTimeout(() => window.open(it.wa_link, '_blank', 'noopener'), i * 300))
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent dir="rtl" className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">📢 إرسال جماعي لكشوفات الحسابات</DialogTitle>
+          <DialogDescription>يولّد رسائل واتساب جاهزة لجميع {kind === 'clients' ? 'العملاء' : 'الموردين'} الذين لديهم رصيد + رقم هاتف</DialogDescription>
+        </DialogHeader>
+        <div className="flex gap-2 mb-3">
+          <button onClick={() => setKind('clients')} className={`flex-1 px-4 py-2 rounded-lg font-bold border-2 ${kind === 'clients' ? 'bg-blue-500 text-white border-blue-600' : 'bg-white border-slate-300'}`}>العملاء</button>
+          <button onClick={() => setKind('suppliers')} className={`flex-1 px-4 py-2 rounded-lg font-bold border-2 ${kind === 'suppliers' ? 'bg-orange-500 text-white border-orange-600' : 'bg-white border-slate-300'}`}>الموردون</button>
+          <Button onClick={generate} disabled={loading} className="grad-brand text-white gap-2">{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : '🔄 توليد'}</Button>
+        </div>
+        {results && (
+          <div className="space-y-2">
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center justify-between">
+              <div><b>{results.count}</b> كشف جاهز للإرسال</div>
+              <Button onClick={openAll} className="bg-[#25D366] hover:bg-[#128C7E] text-white gap-2">📤 فتح الكل على واتساب</Button>
+            </div>
+            <div className="max-h-80 overflow-y-auto border rounded-lg divide-y">
+              {results.items.map(it => (
+                <div key={it.id} className="flex items-center justify-between p-2 hover:bg-slate-50">
+                  <div>
+                    <div className="font-semibold">{it.name}</div>
+                    <div className="text-xs text-slate-500" dir="ltr">📞 {it.phone || 'لا يوجد'}</div>
+                  </div>
+                  <div className="flex gap-1">
+                    <div className="text-xs text-slate-600 self-center ml-2">
+                      {['USD', 'SAR', 'YER'].filter(c => Math.abs(it.balances[c] || 0) > 0.01).map(c => `${c}: ${(it.balances[c] || 0).toFixed(0)}`).join(' • ')}
+                    </div>
+                    <a href={it.wa_link} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 h-8 px-3 rounded-md bg-[#25D366] hover:bg-[#128C7E] text-white text-xs font-semibold">
+                      💬 إرسال
+                    </a>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إغلاق</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ActionToolbar({ onAdd, onRefresh, onDelete, onSearch, onPrint, onPrintVoucher, onPrintTable, onEdit, onExit, onRefund, selectedId, count, addLabel }) {
   const btn = (icon, label, cb, cls = '', disabled = false) => (
     <Button size="sm" variant="outline" onClick={cb} disabled={disabled}
       className={`gap-2 ${cls}`}>{icon}<span className="hidden md:inline">{label}</span></Button>
@@ -1636,6 +1808,7 @@ function ActionToolbar({ onAdd, onRefresh, onDelete, onSearch, onPrint, onPrintV
     <div className="flex flex-wrap items-center gap-2 p-2 bg-white border rounded-lg shadow-sm mb-4">
       {onAdd && <Button onClick={onAdd} size="sm" className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> {addLabel || 'إضافة'}</Button>}
       {onEdit && btn(<Key className="w-4 h-4" />, 'تعديل', onEdit, 'text-amber-600 hover:bg-amber-50', !selectedId)}
+      {onRefund && btn(<ArrowLeftRight className="w-4 h-4" />, 'استرداد/إلغاء', onRefund, 'text-orange-600 hover:bg-orange-50', !selectedId)}
       {onDelete && btn(<Trash2 className="w-4 h-4" />, 'حذف', onDelete, 'text-rose-600 hover:bg-rose-50', !selectedId)}
       {onRefresh && btn(<Activity className="w-4 h-4" />, 'تحديث', onRefresh)}
       {onSearch && btn(<Search className="w-4 h-4" />, 'بحث', onSearch)}
@@ -2075,6 +2248,7 @@ function VisasScreen() {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [editing, setEditing] = useState(null)
+  const [refundTarget, setRefundTarget] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
@@ -2126,7 +2300,7 @@ function VisasScreen() {
       />
       <ActionToolbar
         addLabel="خدمة جديدة" onAdd={handleAdd} onRefresh={load} onSearch={() => setOpenSearch(true)}
-        onEdit={handleEdit} onDelete={handleDelete} onPrintVoucher={handlePrintVoucher} onPrintTable={handlePrintTable}
+        onEdit={handleEdit} onDelete={handleDelete} onRefund={() => { if (!selected) return toast.error('اختر تأشيرة أولاً'); if (selected.is_refunded) return toast.error('التأشيرة مستردة مسبقاً'); setRefundTarget(selected) }} onPrintVoucher={handlePrintVoucher} onPrintTable={handlePrintTable}
         selectedId={selectedId} count={filtered.length}
       />
       {filter && (
@@ -2176,6 +2350,7 @@ function VisasScreen() {
       </Card>
       <VisaDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }} clients={clients} suppliers={suppliers} rates={rates} record={editing}
         onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل الخدمة وعكس القيد السابق تلقائياً' : 'تم حفظ الخدمة') }} />
+      <RefundDialog open={!!refundTarget} onOpenChange={v => !v && setRefundTarget(null)} record={refundTarget} refType="visa" onSaved={() => { setRefundTarget(null); load() }} />
       <BulkImportDialog open={openBulk} onOpenChange={setOpenBulk} kind="visas" onDone={() => { load(); setOpenBulk(false) }} />
       <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
         fields={[
@@ -2313,6 +2488,7 @@ function ServicesScreen() {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [editing, setEditing] = useState(null)
+  const [refundTarget, setRefundTarget] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
@@ -2366,7 +2542,7 @@ function ServicesScreen() {
       />
       <ActionToolbar
         addLabel="خدمة جديدة" onAdd={handleAdd} onRefresh={load} onSearch={() => setOpenSearch(true)}
-        onEdit={handleEdit} onDelete={handleDelete} onPrintTable={handlePrintTable}
+        onEdit={handleEdit} onDelete={handleDelete} onRefund={() => { if (!selected) return toast.error('اختر خدمة أولاً'); if (selected.is_refunded) return toast.error('الخدمة مستردة مسبقاً'); setRefundTarget(selected) }} onPrintTable={handlePrintTable}
         selectedId={selectedId} count={filtered.length}
       />
       {filter && (
@@ -2418,6 +2594,7 @@ function ServicesScreen() {
         clients={clients} suppliers={suppliers} rates={rates} serviceTypes={serviceTypes} record={editing}
         onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل الخدمة وعكس القيد السابق' : 'تم حفظ الخدمة') }} />
       <ServiceTypesDialog open={openTypes} onOpenChange={setOpenTypes} onChanged={load} />
+      <RefundDialog open={!!refundTarget} onOpenChange={v => !v && setRefundTarget(null)} record={refundTarget} refType="service" onSaved={() => { setRefundTarget(null); load() }} />
       <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
         fields={[
           { key: 'service_type', label: 'نوع الخدمة' }, { key: 'beneficiary_name', label: 'المستفيد' },
@@ -3163,6 +3340,7 @@ function ProfitsReport() {
 
 function StatementReport() {
   const { tenant, settings } = useAuth()
+  const [bulkOpen, setBulkOpen] = useState(false)
   const [accounts, setAccounts] = useState([])
   const [id, setId] = useState('')
   const [data, setData] = useState(null)
@@ -3340,6 +3518,14 @@ function StatementReport() {
 
   return (
     <Card><CardContent className="p-4 space-y-4">
+      <div className="flex items-center gap-2 mb-2 p-2 bg-gradient-to-l from-emerald-50 to-blue-50 border border-emerald-200 rounded-lg">
+        <span className="text-sm font-bold text-emerald-800">📢 v3.5 جديد:</span>
+        <span className="text-xs text-slate-600">أرسل ملخص كشف الحساب لجميع العملاء ذوي الأرصدة بضغطة واحدة</span>
+        <Button size="sm" onClick={() => setBulkOpen(true)} className="mr-auto bg-[#25D366] hover:bg-[#128C7E] text-white gap-1 h-8">
+          <span>📤</span> إرسال جماعي عبر واتساب
+        </Button>
+      </div>
+      <BulkStatementDialog open={bulkOpen} onOpenChange={setBulkOpen} />
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 p-3 bg-slate-50 rounded-lg">
         <Field label="بحث بالاسم / الرمز"><Input value={q} onChange={e => setQ(e.target.value)} placeholder="اكتب اسم أو رمز الحساب..." /></Field>
         <div className="md:col-span-2">

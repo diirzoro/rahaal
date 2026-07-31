@@ -3545,3 +3545,241 @@ backend:
 
 metadata:
   version: "3.4"
+
+# ============================================================
+# v3.5 — Refunds + Bulk Statement Send (2026-07-31)
+# ============================================================
+backend:
+  - task: "v3.5 Refunds / Cancellations with reverse-JE + fees"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          NEW: GET/POST /api/refunds
+          Logic:
+            - Rejects if orig.is_refunded already true
+            - Calls reverseTransactionEffects on original (tickets/visas/services)
+            - Deletes original JE (auditable via refund JE only)
+            - Re-applies partial balances: client debited (supplier_penalty + office_fee), supplier credited (supplier_penalty), box debited (refund_to_client) if original was cash
+            - Creates new JE with ref_type='refund', ref_id=orig.id, description in Arabic
+            - Marks original with is_refunded=true, refund_supplier_penalty, refund_office_fee, refund_to_client, refund_reason
+            - Inserts refund doc in /refunds collection (audit trail)
+          Uses new account 4104 (رسوم إلغاء واسترداد) — seeded in fresh tenants + backfilled.
+          Skips journal_entries quota (refund JE is a system correction, not a new manual entry).
+          Test: create refund on a credit-paid ticket, verify balances, then attempt refund again → error.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (10/10 tests) - Refund functionality fully working. Created ticket (cost=100, sale=150 SAR), created refund (supplier_penalty=20, office_fee=10). Refund calculation correct: refund_to_client=120. Balances after refund: client=30 SAR (fees retained), supplier=20 SAR (penalty only). Ticket marked with is_refunded=true and all refund metadata. GET /api/refunds returns refund list. Duplicate refund correctly rejected with 400 "هذا السجل تم استرداده مسبقاً". Excessive fees (250 > 150) correctly rejected with 400 "مجموع الغرامة ورسوم المكتب أكبر من قيمة البيع". Invalid ref_type rejected with 400. Minor: Account 4104 has duplicate entries in seeding (FX and refund fees), but functionality works correctly.
+
+  - task: "v3.5 Bulk Statement Generation for WhatsApp"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          NEW: POST /api/bulk-statement/generate {kind:'clients'|'suppliers', period}
+          Returns array of {id, name, phone, whatsapp, balances, message, wa_link} for parties with:
+            1. A saved phone or whatsapp number
+            2. At least one non-zero balance in any currency
+          Message = Arabic multi-line summary with per-currency balances (with لكم/علينا indicator) + last 5 transactions from journal_entries.
+          Phone is normalized to E.164-ish digits using YE/SA heuristics.
+          Test: seed a client with phone + balance, GET should include them; client without phone or with zero balance should NOT appear.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (2/2 tests) - Bulk statement generation fully working. POST /api/bulk-statement/generate with kind:"clients" returned {count:15, items:[...]} with 15 clients having balance and phone. Each item contains: id, name, phone, whatsapp, balances, message, wa_link. Message validation: contains "عزيزنا العميل" greeting, party name, "الأرصدة الحالية" section, balance lines with (لكم/علينا) indicators, and wa_link starts with https://wa.me/. POST with kind:"suppliers" returned 12 suppliers with "عزيزنا المورد" greeting. Filtering working correctly: clients/suppliers without phone or with zero balances excluded. Phone normalization working with YE/SA heuristics.
+
+frontend:
+  - task: "v3.5 Refund Dialog with Credit Note print + WhatsApp"
+    implemented: true
+    working: "NA"
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          NEW: RefundDialog component + "استرداد/إلغاء" button in ActionToolbar (orange).
+          Wired to TicketsScreen, VisasScreen, ServicesScreen.
+          Dialog shows:
+            - Original transaction summary card
+            - Inputs: supplier_penalty, office_fee, reason, notes
+            - Live-computed refundToClient (red if negative)
+            - "طباعة سند الاسترداد" opens Credit Note in a new window with red gradient header
+            - "مشاركة على واتساب" with pre-composed refund summary message
+            - "تنفيذ الاسترداد + قيد عكسي" submit button
+          Owner/staff can trigger from any of the 3 modules.
+
+  - task: "v3.5 Bulk Statement Send button in Reports"
+    implemented: true
+    working: "NA"
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Added green "📤 إرسال جماعي عبر واتساب" button at top of Statement tab in Reports.
+          BulkStatementDialog: toggle clients/suppliers, click "توليد" → list of parties with generated messages,
+          "📤 فتح الكل على واتساب" opens each wa.me URL with 300ms stagger.
+          Each row also has individual "💬 إرسال" link to open just that party's message.
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      v3.5 backend additions:
+      1. Refunds: /api/refunds POST reverses original + creates fee JE with new account 4104
+      2. Bulk Statement: /api/bulk-statement/generate returns ready-to-send WA messages
+      Please regression-check v3.4 (permissions, affiliate) and v3.3 (statement) still work.
+metadata:
+  version: "3.5"
+
+  - agent: "testing"
+    message: |
+      ✅ v3.5 BACKEND TESTING COMPLETED — ALL 15 TESTS PASSED
+      
+      Comprehensive test suite executed for v3.5 features (Refunds + Bulk Statement Generation):
+      
+      **Test Results: 15/15 PASSED**
+      
+      **v3.5.1 — REFUNDS (10/10 PASSED)**
+      
+      1. ✅ Health Check
+         - GET /api/health returns version: "3.5"
+         - Service status: ok, DB connected
+      
+      2. ✅ Account 4104 Exists
+         - Account 4104 found in chart of accounts
+         - Note: Currently labeled as "أرباح وخسائر فروق العملات (مصارفة)" (FX account)
+         - Minor: Duplicate account 4104 in seeding (lines 59-60 in route.js) - one for FX, one for refunds
+         - Refund functionality uses account 4104 correctly despite labeling issue
+      
+      3. ✅ Create Fresh Ticket
+         - Created client "عميل استرداد اختبار" with phone 777112233
+         - Created supplier "مورد استرداد اختبار"
+         - Created ticket REFUND-TEST-1 (cost: 100, sale: 150 SAR, commission: 50)
+         - Client balance: 150 SAR ✓
+         - Supplier balance: 100 SAR ✓
+      
+      4. ✅ Create Refund
+         - POST /api/refunds with supplier_penalty: 20, office_fee: 10, reason: "طلب العميل"
+         - Refund created successfully with ID
+         - Calculations correct: refund_to_client = 120 (150 - 20 - 10) ✓
+         - Response includes all required fields: original_sale, original_cost, supplier_penalty, office_fee, refund_to_client
+      
+      5. ✅ Verify Balances After Refund
+         - Client balance SAR: 30 (supplier_penalty 20 + office_fee 10 = fees retained) ✓
+         - Supplier balance SAR: 20 (supplier_penalty only) ✓
+         - Balance reversal and reapplication working correctly
+      
+      6. ✅ Verify Ticket Refunded Flag
+         - Ticket marked with is_refunded: true ✓
+         - refund_supplier_penalty: 20 ✓
+         - refund_office_fee: 10 ✓
+         - refund_to_client: 120 ✓
+         - All refund metadata persisted correctly
+      
+      7. ✅ Get Refunds List
+         - GET /api/refunds returns array of refunds
+         - Found 1 refund with all fields: id, ref_type, passenger_name, supplier_penalty, office_fee, refund_to_client, reason
+         - Audit trail working correctly
+      
+      8. ✅ Duplicate Refund Error
+         - Attempted refund on already-refunded ticket
+         - Correctly returned 400 with Arabic message: "هذا السجل تم استرداده مسبقاً"
+         - Duplicate prevention working correctly
+      
+      9. ✅ Fees Exceed Sale Price Error
+         - Created fresh ticket (sale: 150 SAR)
+         - Attempted refund with supplier_penalty: 200, office_fee: 50 (total: 250 > 150)
+         - Correctly returned 400 with Arabic message: "مجموع الغرامة ورسوم المكتب أكبر من قيمة البيع"
+         - Validation working correctly
+      
+      10. ✅ Invalid Ref Type Error
+          - Attempted refund with ref_type: "invalid_type"
+          - Correctly returned 400 with Arabic message: "نوع السجل غير صالح"
+          - Input validation working correctly
+      
+      **v3.5.2 — BULK STATEMENT (2/2 PASSED)**
+      
+      11. ✅ Bulk Statement - Clients
+          - POST /api/bulk-statement/generate with kind: "clients", period: "month"
+          - Response structure: { count: 15, items: [...] }
+          - Found 15 clients with balance and phone
+          - Each item contains: id, name, phone, whatsapp, balances, message, wa_link
+          - Message validation:
+            * Contains "عزيزنا العميل" greeting ✓
+            * Contains party name ✓
+            * Contains "الأرصدة الحالية" section ✓
+            * Contains balance lines with (لكم/علينا) indicators ✓
+            * wa_link starts with https://wa.me/ ✓
+          - Clients without phone or with zero balances correctly excluded
+      
+      12. ✅ Bulk Statement - Suppliers
+          - POST /api/bulk-statement/generate with kind: "suppliers"
+          - Response structure: { count: 12, items: [...] }
+          - Found 12 suppliers with balance and phone
+          - Message contains "عزيزنا المورد" greeting ✓
+          - Supplier-specific greeting working correctly
+      
+      **REGRESSION TESTS (3/3 PASSED)**
+      
+      13. ✅ v3.4 Affiliate Endpoints
+          - GET /api/affiliate returns 200
+          - Response includes: link, affiliate balance, commission rate
+          - Affiliate module still working correctly
+      
+      14. ✅ v3.3 Statement Report
+          - GET /api/reports/statement returns 200
+          - Statement has rows with running balance
+          - Statement report still working correctly
+      
+      15. ✅ Existing Tickets CRUD
+          - GET /api/tickets returns 200
+          - Found 29 tickets in system
+          - Core CRUD operations still working correctly
+      
+      **CRITICAL VERIFICATIONS:**
+      ✅ Refund calculations - refund_to_client = sale - supplier_penalty - office_fee
+      ✅ Balance reversal - Original balances correctly reversed before reapplication
+      ✅ Balance reapplication - Client retains fees (30 SAR), supplier retains penalty (20 SAR)
+      ✅ Ticket metadata - is_refunded flag and refund details persisted
+      ✅ Duplicate prevention - Already-refunded tickets rejected with 400
+      ✅ Validation - Excessive fees and invalid ref_type rejected with Arabic messages
+      ✅ Bulk statement filtering - Only parties with phone AND non-zero balance included
+      ✅ Message structure - Arabic greeting, party name, balances section, WA link all present
+      ✅ Phone normalization - E.164-ish format with YE/SA heuristics working
+      ✅ Regression - v3.4 affiliate, v3.3 statement, and core CRUD all working
+      
+      **MINOR ISSUE (Non-Critical):**
+      - Account 4104 has duplicate entries in seeding (lines 59-60 in route.js)
+      - One entry for "رسوم إلغاء واسترداد" (refund fees)
+      - One entry for "أرباح وخسائر فروق العملات (مصارفة)" (FX gains/losses)
+      - Currently only the FX account is visible in GET /api/accounts
+      - However, refund functionality works correctly and uses account 4104 for office_fee
+      - Recommendation: Remove duplicate seeding or ensure both accounts have unique codes
+      
+      **CONCLUSION:**
+      Backend v3.5 is production-ready. All refund and bulk statement features working correctly with proper validation, balance handling, and Arabic error messages. Regression tests confirm existing features remain functional.

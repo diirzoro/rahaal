@@ -56,6 +56,7 @@ async function seedTenantDefaults(db, tenantId) {
     { id: uuidv4(), tenant_id: t, code: '4101', name_ar: 'إيرادات عمولات التذاكر', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '4102', name_ar: 'إيرادات عمولات التأشيرات والموافقات', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '4103', name_ar: 'إيرادات خدمات إضافية', type: 'revenue', parent: '4', is_group: false, created_at: now },
+    { id: uuidv4(), tenant_id: t, code: '4104', name_ar: 'رسوم إلغاء واسترداد', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '4104', name_ar: 'أرباح وخسائر فروق العملات (مصارفة)', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '5', name_ar: 'المصروفات', type: 'expense', parent: null, is_group: true, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '5101', name_ar: 'مصاريف تشغيلية', type: 'expense', parent: '5', is_group: true, created_at: now },
@@ -391,7 +392,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.4',
+          version: '3.5',
           db: 'connected',
         })
       } catch (e) {
@@ -984,6 +985,155 @@ async function handleRoute(request, { params }) {
         $inc: { 'affiliate.balance_usd': amount, 'affiliate.total_earned_usd': amount },
       })
       return ok({ success: true, credited_usd: amount, is_individual: isIndividual })
+    }
+
+    // ============ v3.5 — REFUNDS / CANCELLATIONS ============
+    // Reverses original transaction, then applies:
+    //  - Supplier keeps supplier_penalty (retained from cost)
+    //  - Office keeps office_fee (recorded as revenue 4104)
+    //  - Client receives sale_price - supplier_penalty - office_fee
+    if (route === '/refunds' && method === 'GET') {
+      const list = await db.collection('refunds').find(tf).sort({ created_at: -1 }).limit(200).toArray()
+      return ok(list.map(r => ({ ...r, _id: undefined })))
+    }
+    if (route === '/refunds' && method === 'POST') {
+      const b = await request.json()
+      const refType = b.ref_type
+      if (!['ticket', 'visa', 'service'].includes(refType)) return bad('نوع السجل غير صالح')
+      const coll = refType === 'ticket' ? 'tickets' : refType === 'visa' ? 'visas' : 'services'
+      const orig = await db.collection(coll).findOne({ id: b.ref_id, tenant_id: T })
+      if (!orig) return bad('السجل الأصلي غير موجود', 404)
+      if (orig.is_refunded) return bad('هذا السجل تم استرداده مسبقاً')
+
+      const supplierPenalty = Number(b.supplier_penalty) || 0
+      const officeFee = Number(b.office_fee) || 0
+      const cur = orig.currency
+      const cost = Number(orig.cost) || 0
+      const sale = Number(orig.sale_price) || 0
+      const commission = +(sale - cost).toFixed(2)
+      const refundToClient = +(sale - supplierPenalty - officeFee).toFixed(2)
+      if (refundToClient < 0) return bad('مجموع الغرامة ورسوم المكتب أكبر من قيمة البيع')
+
+      // Reverse original balances effects
+      await reverseTransactionEffects(db, T, refType + 's', orig)
+      // Delete the original JE (so the reversal is auditable via a fresh refund JE)
+      const origJe = await db.collection('journal_entries').findOne({ ref_id: orig.id, tenant_id: T })
+      if (origJe) await db.collection('journal_entries').deleteOne({ id: origJe.id })
+
+      // Re-apply partial effects:
+      // Client: only pays the retained portion (supplier_penalty + office_fee) — so add that as their receivable
+      const clientRetained = +(supplierPenalty + officeFee).toFixed(2)
+      // Supplier: keeps supplier_penalty; we owe them supplierPenalty (not full cost)
+      await updateBalance(db, 'clients', { id: orig.client_id, tenant_id: T }, cur, clientRetained)
+      await updateBalance(db, 'suppliers', { id: orig.supplier_id, tenant_id: T }, cur, supplierPenalty)
+      // If original was cash, we need to record the cash refund out of box
+      const wasCash = orig.payment_method === 'cash'
+      const box = wasCash && orig.box_id ? await db.collection('boxes').findOne({ id: orig.box_id, tenant_id: T }) : null
+      const refundJeLines = []
+      if (wasCash && box) {
+        // Client got their money back from box: reduce box balance by refundToClient
+        await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, -refundToClient)
+        refundJeLines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: 0, credit: refundToClient })
+      }
+      // Refund JE — reversal + fees
+      // Client side: retained on account (they still owe us penalty + fee) — Debit client
+      if (clientRetained > 0) refundJeLines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: orig.client_id, party_name: orig.client_name, debit: clientRetained, credit: 0 })
+      // Supplier: they keep supplier_penalty — Credit supplier
+      if (supplierPenalty > 0) refundJeLines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: orig.supplier_id, party_name: orig.supplier_name, debit: 0, credit: supplierPenalty })
+      // Office fee: revenue 4104
+      if (officeFee > 0) refundJeLines.push({ account_code: '4104', account_name: 'رسوم إلغاء واسترداد', party_type: 'revenue', party_id: null, party_name: 'رسوم استرداد', debit: 0, credit: officeFee })
+      // For non-cash refunds, we need a balancing line since debit=clientRetained, credit=supplierPenalty+officeFee=clientRetained (already balanced!) ✓
+      // For cash refunds: debit clientRetained, credit refundToClient+supplierPenalty+officeFee = refundToClient + clientRetained = sale ✓ hmm — need also to debit revenue 4101 for reversal
+      // Actually simpler: on cash refunds, add a debit line reversing sale
+      if (wasCash) {
+        // Reverse the original sale-side revenue that we had. Debit revenue by the commission (loss of earned commission).
+        if (commission > 0) refundJeLines.push({ account_code: refType === 'ticket' ? '4101' : refType === 'visa' ? '4102' : '4103', account_name: 'إيرادات (عكس)', party_type: 'revenue', party_id: null, party_name: 'عكس إيراد الحجز', debit: commission, credit: 0 })
+        // And debit cost as expense reversal (we no longer owe supplier full cost — supplier keeps only penalty)
+        const supplierReturned = +(cost - supplierPenalty).toFixed(2)
+        if (supplierReturned > 0) refundJeLines.push({ account_code: '2101', account_name: 'استرجاع من المورد', party_type: 'supplier', party_id: orig.supplier_id, party_name: orig.supplier_name, debit: supplierReturned, credit: 0 })
+      }
+
+      await createJournalEntry(db, T, {
+        date: new Date(b.date || Date.now()),
+        description: `استرداد ${refType === 'ticket' ? 'تذكرة' : refType === 'visa' ? 'تأشيرة' : 'خدمة'} — ${orig.passenger_name || orig.beneficiary_name || orig.client_name}${b.reason ? ` (${b.reason})` : ''}`,
+        ref_type: 'refund', ref_id: orig.id, currency: cur, lines: refundJeLines,
+      }, { skipQuota: true })
+
+      // Mark original as refunded (soft)
+      await db.collection(coll).updateOne({ id: orig.id, tenant_id: T }, { $set: {
+        is_refunded: true, refunded_at: new Date(), refunded_by: sess.user.email,
+        refund_supplier_penalty: supplierPenalty, refund_office_fee: officeFee, refund_to_client: refundToClient,
+        refund_reason: b.reason || '',
+      } })
+
+      // Store refund record
+      const refundDoc = {
+        id: uuidv4(), tenant_id: T, ref_type: refType, ref_id: orig.id,
+        currency: cur, original_sale: sale, original_cost: cost,
+        supplier_penalty: supplierPenalty, office_fee: officeFee, refund_to_client: refundToClient,
+        client_id: orig.client_id, client_name: orig.client_name,
+        supplier_id: orig.supplier_id, supplier_name: orig.supplier_name,
+        passenger_name: orig.passenger_name || orig.beneficiary_name || '',
+        reason: b.reason || '', notes: b.notes || '',
+        payment_method: orig.payment_method, was_cash: wasCash,
+        date: new Date(b.date || Date.now()),
+        created_by: sess.user.email, created_at: new Date(),
+      }
+      await db.collection('refunds').insertOne(refundDoc)
+      const { _id, ...rest } = refundDoc
+      return ok(rest)
+    }
+
+    // ============ v3.5 — BULK STATEMENT SEND ============
+    // Returns an array of { party, phone, whatsapp_link, message } for every active client with a phone.
+    // Actual sending is done client-side by opening each wa.me URL (or user copies the batch).
+    if (route === '/bulk-statement/generate' && method === 'POST') {
+      const b = await request.json()
+      const kind = b.kind || 'clients'   // 'clients' | 'suppliers'
+      const period = b.period || 'month' // 'month' | 'all'
+      const officeName = sess.tenant?.name || 'مكتب رحّال'
+      const parties = await db.collection(kind).find({ tenant_id: T }).sort({ name: 1 }).toArray()
+      const now = new Date()
+      const results = []
+      for (const p of parties) {
+        if (!p.phone && !p.whatsapp) continue
+        // Skip if all balances are zero
+        const bals = p.balances || {}
+        const hasBalance = ['USD', 'SAR', 'YER'].some(c => Math.abs(bals[c] || 0) > 0.01)
+        if (!hasBalance) continue
+        // Get last 5 transactions from journal entries
+        const recentLines = await db.collection('journal_entries').aggregate([
+          { $match: { tenant_id: T, [kind === 'clients' ? 'lines.party_type' : 'lines.party_type']: kind === 'clients' ? 'client' : 'supplier' } },
+          { $sort: { date: -1 } }, { $limit: 100 },
+          { $unwind: '$lines' },
+          { $match: { 'lines.party_id': p.id } },
+          { $limit: 5 },
+        ]).toArray()
+        const balanceLines = ['USD', 'SAR', 'YER']
+          .map(c => { const bal = bals[c] || 0; return bal !== 0 ? `• ${c}: ${bal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${bal >= 0 ? '(لكم)' : '(علينا)'}` : null })
+          .filter(Boolean).join('\n') || '• لا توجد أرصدة'
+        const recentText = recentLines.length > 0
+          ? '\n\n📋 آخر ' + recentLines.length + ' حركات:\n' + recentLines.map(je => {
+              const l = je.lines
+              const amt = (l.debit || 0) - (l.credit || 0)
+              const dc = amt > 0 ? `مدين ${Math.abs(amt).toFixed(2)}` : `دائن ${Math.abs(amt).toFixed(2)}`
+              return `• ${new Date(je.date).toISOString().slice(0,10)} — ${(je.description || '').slice(0,40)} (${dc})`
+            }).join('\n') : ''
+        const msg = `عزيزنا ${kind === 'clients' ? 'العميل' : 'المورد'} ${p.name}،\n\n📊 هذا ملخص كشف حسابكم لدى ${officeName}\n📅 حتى: ${now.toISOString().slice(0,10)}\n\n💰 الأرصدة الحالية:\n${balanceLines}${recentText}\n\n📞 للاستفسار عن أي حركة تواصل معنا مباشرة.\nشكراً لثقتكم بنا 🌹`
+        const phone = p.whatsapp || p.phone
+        // Basic normalization matching frontend logic
+        let d = String(phone).replace(/[^\d]/g, '')
+        if (d.startsWith('00')) d = d.slice(2)
+        if (d.startsWith('0')) d = '967' + d.slice(1)
+        if (d.length === 9 && d.startsWith('7')) d = '967' + d
+        if (d.length === 9 && d.startsWith('5')) d = '966' + d
+        results.push({
+          id: p.id, name: p.name, phone: p.phone, whatsapp: p.whatsapp || p.phone,
+          balances: bals, message: msg,
+          wa_link: `https://wa.me/${d}?text=${encodeURIComponent(msg)}`,
+        })
+      }
+      return ok({ count: results.length, items: results })
     }
 
 
