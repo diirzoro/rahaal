@@ -2735,3 +2735,34 @@ agent_communication:
       
       **RECOMMENDATION:**
       Main agent should summarize and finish. v3.0 implementation is complete and working correctly. Services Module UI fully verified with correct Arabic labels. Visa alerts and strict import backend fully tested. Only minor manual verification needed for visa alerts widget rendering (backend is 100% functional).
+
+# ============================================================
+# v3.1 C1 — Label Rename "اسم العميل" → "حساب القبض" (2026-07-31)
+# ============================================================
+frontend:
+  - task: "v3.1 C1 — Rename Client label to حساب القبض in Tickets & Visas forms"
+    implemented: true
+    working: true
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Applied "حساب القبض" (Receivable Account) label instead of "اسم العميل" / "العميل" in:
+          - TicketDialog: form field label + dialog description ("على حساب القبض") + toast validation
+          - TicketsScreen: main table header, print report columns, universal search dropdown
+          - VisaDialog: form field label + toast validation
+          - VisasScreen: main table header, print report columns, universal search dropdown
+          - BulkImportDialog preview table (used for tickets + visas)
+          - Profits Report (mixes tickets/visas/services rows)
+          - TICKET_FIELDS + VISA_FIELDS column-map defaults (added "حساب القبض" alias)
+          NOT changed (per user spec):
+          - VoucherScreen (receipt/payment) — still uses "العميل" party label
+          - FX exchange screen — still uses "العميل" column
+          Verified visually: tickets table header shows "حساب القبض" in dashboard/tickets tab.
+
+metadata:
+  version: "3.1-c1"

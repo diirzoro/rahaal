@@ -903,7 +903,7 @@ function TicketsScreen() {
         { key: 'pnr', label: 'PNR' },
         { key: 'route', label: 'خط السير' },
         { key: 'passenger_name', label: 'المسافر' },
-        { key: 'client_name', label: 'العميل' },
+        { key: 'client_name', label: 'حساب القبض' },
         { key: 'supplier_name', label: 'المورد' },
         { key: 'currency', label: 'عملة' },
         { key: 'cost', label: 'تكلفة', align: 'left', render: r => fmt(r.cost, r.currency) },
@@ -941,7 +941,7 @@ function TicketsScreen() {
                 <TableHead className="w-8"></TableHead><TableHead>التاريخ</TableHead><TableHead>PNR</TableHead>
                 <TableHead>خط السير</TableHead><TableHead>المسافر</TableHead>
                 <TableHead>🚌 الشركة الناقلة</TableHead>
-                <TableHead>العميل</TableHead>
+                <TableHead>حساب القبض</TableHead>
                 <TableHead>المورد</TableHead><TableHead>الدفع</TableHead><TableHead>العملة</TableHead>
                 <TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead>
                 <TableHead className="text-left text-emerald-600">عمولة</TableHead>
@@ -976,7 +976,7 @@ function TicketsScreen() {
       <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
         fields={[
           { key: 'pnr', label: 'رقم التذكرة (PNR)' }, { key: 'passenger_name', label: 'اسم المسافر' },
-          { key: 'client_name', label: 'اسم العميل' }, { key: 'supplier_name', label: 'اسم المورد' },
+          { key: 'client_name', label: 'حساب القبض' }, { key: 'supplier_name', label: 'اسم المورد' },
           { key: 'route', label: 'خط السير' }, { key: 'sale_price', label: 'سعر البيع' }, { key: 'currency', label: 'العملة' },
         ]}
         onApply={setFilter} onClear={() => setFilter(null)}
@@ -1034,7 +1034,7 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
   useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: boxes[0].id })) }, [form.payment_method, boxes])
   const commission = useMemo(() => (Number(form.sale_price) || 0) - (Number(form.cost) || 0), [form.sale_price, form.cost])
   const submit = async () => {
-    if (!form.client_id || !form.supplier_id) return toast.error('اختر العميل والمورد')
+    if (!form.client_id || !form.supplier_id) return toast.error('اختر حساب القبض والمورد')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
     if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق للدفع النقدي')
     try {
@@ -1051,12 +1051,12 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" dir="rtl">
-          <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><div className="w-9 h-9 rounded-lg grad-brand flex items-center justify-center"><Plane className="w-4 h-4 text-white -rotate-45" /></div>{isEdit ? '✏️ تعديل تذكرة' : 'حجز تذكرة جديدة'}</DialogTitle><DialogDescription>{isEdit ? 'سيتم عكس القيد المحاسبي القديم وإعادة الترحيل بالقيم الجديدة تلقائياً — دون خصم من حصة القيود' : 'سيتم إنشاء قيد يومية تلقائي — نقد (خصم من الصندوق) أو آجل (على حساب العميل)'}</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><div className="w-9 h-9 rounded-lg grad-brand flex items-center justify-center"><Plane className="w-4 h-4 text-white -rotate-45" /></div>{isEdit ? '✏️ تعديل تذكرة' : 'حجز تذكرة جديدة'}</DialogTitle><DialogDescription>{isEdit ? 'سيتم عكس القيد المحاسبي القديم وإعادة الترحيل بالقيم الجديدة تلقائياً — دون خصم من حصة القيود' : 'سيتم إنشاء قيد يومية تلقائي — نقد (خصم من الصندوق) أو آجل (على حساب القبض)'}</DialogDescription></DialogHeader>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-2">
             <Field label="تاريخ الحركة"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
             <Field label="نوع العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
-            <Field label="اسم العميل" required>
+            <Field label="حساب القبض" required>
               <SmartAutocomplete kind="client" items={clients} value={form.client_id}
                 onChange={(id) => setForm({ ...form, client_id: id })}
                 onCreated={() => onSaved && onSaved()} />
@@ -1590,7 +1590,7 @@ const TICKET_FIELDS = [
   { key: 'passenger_name', label: 'اسم المسافر', aliases: ['passenger', 'name', 'اسم المسافر', 'الاسم'] },
   { key: 'passport_no', label: 'رقم الجواز', aliases: ['passport', 'passport no', 'رقم الجواز'] },
   { key: 'travel_date', label: 'تاريخ السفر', aliases: ['travel date', 'departure', 'تاريخ السفر'] },
-  { key: 'client_name', label: 'اسم العميل', aliases: ['client', 'customer', 'العميل', 'اسم العميل'] },
+  { key: 'client_name', label: 'حساب القبض', aliases: ['client', 'customer', 'العميل', 'اسم العميل', 'حساب القبض'] },
   { key: 'supplier_name', label: 'اسم المورد', aliases: ['supplier', 'vendor', 'agent', 'المورد', 'الوكيل', 'اسم المورد'] },
   { key: 'cost', label: 'التكلفة', aliases: ['cost', 'buy', 'purchase', 'التكلفة', 'الشراء'] },
   { key: 'sale_price', label: 'سعر البيع', aliases: ['sale', 'sell', 'price', 'sale price', 'البيع', 'سعر البيع'] },
@@ -1602,7 +1602,7 @@ const VISA_FIELDS = [
   { key: 'passenger_name', label: 'اسم المسافر/المعتمر', aliases: ['name', 'pilgrim', 'الاسم', 'اسم المعتمر'] },
   { key: 'passport_no', label: 'رقم الجواز', aliases: ['passport', 'رقم الجواز'] },
   { key: 'nationality', label: 'الجنسية', aliases: ['nationality', 'الجنسية'] },
-  { key: 'client_name', label: 'اسم العميل', aliases: ['client', 'customer', 'العميل'] },
+  { key: 'client_name', label: 'حساب القبض', aliases: ['client', 'customer', 'العميل', 'اسم العميل', 'حساب القبض'] },
   { key: 'supplier_name', label: 'اسم المورد', aliases: ['supplier', 'agent', 'المورد', 'الوكيل'] },
   { key: 'cost', label: 'التكلفة', aliases: ['cost', 'التكلفة'] },
   { key: 'sale_price', label: 'سعر البيع', aliases: ['sale', 'price', 'البيع', 'سعر البيع'] },
@@ -1848,7 +1848,7 @@ function BulkImportDialog({ open, onOpenChange, kind, onDone }) {
                     <TableHead className="w-12">#</TableHead>
                     <TableHead>الحالة</TableHead>
                     {kind === 'tickets' ? <TableHead>PNR</TableHead> : <TableHead>الجواز</TableHead>}
-                    <TableHead>المسافر</TableHead><TableHead>العميل</TableHead><TableHead>المورد</TableHead>
+                    <TableHead>المسافر</TableHead><TableHead>حساب القبض</TableHead><TableHead>المورد</TableHead>
                     <TableHead>عملة</TableHead><TableHead className="text-left">تكلفة</TableHead>
                     <TableHead className="text-left">بيع</TableHead><TableHead className="text-left">عمولة</TableHead>
                   </TableRow>
@@ -1960,7 +1960,7 @@ function VisasScreen() {
         { key: 'service_type', label: 'الخدمة' },
         { key: 'passenger_name', label: 'المسافر' },
         { key: 'passport_no', label: 'الجواز' },
-        { key: 'client_name', label: 'العميل' },
+        { key: 'client_name', label: 'حساب القبض' },
         { key: 'supplier_name', label: 'المورد' },
         { key: 'currency', label: 'العملة' },
         { key: 'cost', label: 'تكلفة', align: 'left', render: r => fmt(r.cost, r.currency) },
@@ -1997,7 +1997,7 @@ function VisasScreen() {
                 <TableRow>
                   <TableHead className="w-8"></TableHead>
                   <TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>المسافر</TableHead>
-                  <TableHead>الجواز</TableHead><TableHead>الجنسية</TableHead><TableHead>العميل</TableHead>
+                  <TableHead>الجواز</TableHead><TableHead>الجنسية</TableHead><TableHead>حساب القبض</TableHead>
                   <TableHead>المورد</TableHead><TableHead>الدفع</TableHead><TableHead>العملة</TableHead>
                   <TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead>
                   <TableHead className="text-left text-emerald-600">عمولة</TableHead>
@@ -2033,7 +2033,7 @@ function VisasScreen() {
       <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
         fields={[
           { key: 'passenger_name', label: 'اسم المسافر' }, { key: 'passport_no', label: 'رقم الجواز' },
-          { key: 'client_name', label: 'اسم العميل' }, { key: 'supplier_name', label: 'اسم المورد' },
+          { key: 'client_name', label: 'حساب القبض' }, { key: 'supplier_name', label: 'اسم المورد' },
           { key: 'service_type', label: 'نوع الخدمة' }, { key: 'nationality', label: 'الجنسية' },
           { key: 'sale_price', label: 'سعر البيع' }, { key: 'currency', label: 'العملة' },
         ]}
@@ -2072,7 +2072,7 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
   useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: boxes[0].id })) }, [form.payment_method, boxes])
   const commission = (Number(form.sale_price) || 0) - (Number(form.cost) || 0)
   const submit = async () => {
-    if (!form.client_id || !form.supplier_id) return toast.error('اختر العميل والمورد')
+    if (!form.client_id || !form.supplier_id) return toast.error('اختر حساب القبض والمورد')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
     if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق للدفع النقدي')
     try {
@@ -2091,7 +2091,7 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
             <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
             <Field label="نوع الخدمة"><Select value={form.service_type} onValueChange={v => setForm({ ...form, service_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{VISA_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
-            <Field label="العميل" required><SmartAutocomplete kind="client" items={clients} value={form.client_id} onChange={id => setForm({ ...form, client_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
+            <Field label="حساب القبض" required><SmartAutocomplete kind="client" items={clients} value={form.client_id} onChange={id => setForm({ ...form, client_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
             <Field label="المورد" required><SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id} onChange={id => setForm({ ...form, supplier_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
             <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
             <Field label="اسم صاحب التأشيرة"><Input value={form.passenger_name} onChange={e => setForm({ ...form, passenger_name: e.target.value })} /></Field>
@@ -2829,7 +2829,7 @@ function ProfitsReport() {
       <DateRange from={from} setFrom={setFrom} to={to} setTo={setTo} />
       {data && (<>
         <div className="grid grid-cols-3 gap-3 mb-4">{CURRENCIES.map(c => (<Card key={c}><CardContent className="p-3"><div className="text-xs text-slate-500">إجمالي الأرباح — {c}</div><div className="text-lg font-extrabold text-emerald-600">{fmt(data.totals_profit[c], c)}</div><div className="text-xs text-slate-500 mt-1">مبيعات: {fmt(data.totals_sales[c], c)}</div></CardContent></Card>))}</div>
-        <Table><TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>مرجع</TableHead><TableHead>العميل</TableHead><TableHead>المورد</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead><TableHead className="text-left">ربح</TableHead></TableRow></TableHeader>
+        <Table><TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>مرجع</TableHead><TableHead>حساب القبض</TableHead><TableHead>المورد</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead><TableHead className="text-left">ربح</TableHead></TableRow></TableHeader>
           <TableBody>{data.rows.map(r => (<TableRow key={r.id}><TableCell className="text-xs">{fmtDate(r.date)}</TableCell><TableCell><Badge variant="outline">{r.kind}</Badge></TableCell><TableCell className="font-mono text-xs">{r.ref || '—'}</TableCell><TableCell>{r.client}</TableCell><TableCell>{r.supplier}</TableCell><TableCell>{r.currency}</TableCell><TableCell className="text-left">{fmt(r.cost, r.currency)}</TableCell><TableCell className="text-left">{fmt(r.sale, r.currency)}</TableCell><TableCell className="text-left font-bold text-emerald-600">{fmt(r.profit, r.currency)}</TableCell></TableRow>))}</TableBody>
         </Table>
       </>)}
