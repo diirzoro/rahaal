@@ -364,7 +364,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.0',
+          version: '3.2',
           db: 'connected',
         })
       } catch (e) {
@@ -828,8 +828,14 @@ async function handleRoute(request, { params }) {
           passenger_name: t.passenger_name || c.name || '',
           passport_no: t.passport_no,
           travel_date: t.travel_date,
+          // v3.2 — Include travel_mode, departure_time, phone/whatsapp for smart WhatsApp templates
+          travel_mode: t.travel_mode || 'air',
+          departure_time: t.departure_time || '',
+          passenger_phone: t.passenger_phone || c.phone || '',
+          passenger_whatsapp: t.passenger_whatsapp || c.whatsapp || c.phone || '',
           client_name: t.client_name,
           client_phone: c.phone || '',
+          client_whatsapp: c.whatsapp || c.phone || '',
           currency: t.currency, sale_price: t.sale_price,
         }
       })
@@ -846,9 +852,28 @@ async function handleRoute(request, { params }) {
     if (route === '/clients' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم العميل مطلوب')
-      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', notes: b.notes || '', balances: emptyBalances(), created_at: new Date() }
+      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', balances: emptyBalances(), created_at: new Date() }
       await db.collection('clients').insertOne(doc)
       const { _id, ...rest } = doc; return ok(rest)
+    }
+    // v3.2 — Update client contact info
+    const clientIdMatch = route.match(/^\/clients\/([^/]+)$/)
+    if (clientIdMatch && method === 'PUT') {
+      const b = await request.json()
+      const upd = {}
+      for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes']) if (b[k] !== undefined) upd[k] = b[k]
+      await db.collection('clients').updateOne({ id: clientIdMatch[1], tenant_id: T }, { $set: upd })
+      return ok({ success: true })
+    }
+    if (clientIdMatch && method === 'DELETE') {
+      // Only delete if no transactions
+      const cid = clientIdMatch[1]
+      const hasTx = await db.collection('tickets').findOne({ tenant_id: T, client_id: cid })
+        || await db.collection('visas').findOne({ tenant_id: T, client_id: cid })
+        || await db.collection('services').findOne({ tenant_id: T, client_id: cid })
+      if (hasTx) return bad('لا يمكن حذف عميل له حركات — احذف الحركات أولاً')
+      await db.collection('clients').deleteOne({ id: cid, tenant_id: T })
+      return ok({ success: true })
     }
 
     // Suppliers
@@ -856,9 +881,27 @@ async function handleRoute(request, { params }) {
     if (route === '/suppliers' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم المورد مطلوب')
-      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', notes: b.notes || '', balances: emptyBalances(), created_at: new Date() }
+      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', balances: emptyBalances(), created_at: new Date() }
       await db.collection('suppliers').insertOne(doc)
       const { _id, ...rest } = doc; return ok(rest)
+    }
+    // v3.2 — Update supplier contact info
+    const supIdMatch = route.match(/^\/suppliers\/([^/]+)$/)
+    if (supIdMatch && method === 'PUT') {
+      const b = await request.json()
+      const upd = {}
+      for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes']) if (b[k] !== undefined) upd[k] = b[k]
+      await db.collection('suppliers').updateOne({ id: supIdMatch[1], tenant_id: T }, { $set: upd })
+      return ok({ success: true })
+    }
+    if (supIdMatch && method === 'DELETE') {
+      const sid = supIdMatch[1]
+      const hasTx = await db.collection('tickets').findOne({ tenant_id: T, supplier_id: sid })
+        || await db.collection('visas').findOne({ tenant_id: T, supplier_id: sid })
+        || await db.collection('services').findOne({ tenant_id: T, supplier_id: sid })
+      if (hasTx) return bad('لا يمكن حذف مورد له حركات — احذف الحركات أولاً')
+      await db.collection('suppliers').deleteOne({ id: sid, tenant_id: T })
+      return ok({ success: true })
     }
 
     // Boxes
@@ -871,8 +914,46 @@ async function handleRoute(request, { params }) {
       const { _id, ...rest } = doc; return ok(rest)
     }
 
-    // Accounts
+    // Accounts (Chart of Accounts)
     if (route === '/accounts' && method === 'GET') return ok(clean(await db.collection('accounts').find(tf).sort({ code: 1 }).toArray()))
+    if (route === '/accounts' && method === 'POST') {
+      const b = await request.json()
+      if (!b.code || !b.name_ar || !b.type) return bad('الرمز والاسم والنوع مطلوبة')
+      const exists = await db.collection('accounts').findOne({ tenant_id: T, code: String(b.code) })
+      if (exists) return bad('رمز الحساب مستخدم بالفعل')
+      if (b.parent) {
+        const p = await db.collection('accounts').findOne({ tenant_id: T, code: String(b.parent) })
+        if (!p) return bad('الحساب الأب غير موجود')
+      }
+      const doc = {
+        id: uuidv4(), tenant_id: T, code: String(b.code), name_ar: String(b.name_ar),
+        type: b.type, parent: b.parent ? String(b.parent) : null,
+        is_group: !!b.is_group, notes: b.notes || '',
+        created_at: new Date(),
+      }
+      await db.collection('accounts').insertOne(doc)
+      const { _id, ...rest } = doc; return ok(rest)
+    }
+    const acctIdMatch = route.match(/^\/accounts\/([^/]+)$/)
+    if (acctIdMatch && method === 'PUT') {
+      const b = await request.json()
+      const upd = {}
+      for (const k of ['name_ar', 'type', 'parent', 'is_group', 'notes']) if (b[k] !== undefined) upd[k] = b[k]
+      await db.collection('accounts').updateOne({ id: acctIdMatch[1], tenant_id: T }, { $set: upd })
+      return ok({ success: true })
+    }
+    if (acctIdMatch && method === 'DELETE') {
+      const acc = await db.collection('accounts').findOne({ id: acctIdMatch[1], tenant_id: T })
+      if (!acc) return bad('الحساب غير موجود', 404)
+      // Check for children
+      const childCount = await db.collection('accounts').countDocuments({ tenant_id: T, parent: acc.code })
+      if (childCount > 0) return bad(`لا يمكن حذف الحساب — يحتوي على ${childCount} حساب فرعي`)
+      // Check for journal entries
+      const jeCount = await db.collection('journal_entries').countDocuments({ tenant_id: T, 'lines.account_code': acc.code })
+      if (jeCount > 0) return bad(`لا يمكن حذف الحساب — مستخدم في ${jeCount} قيد يومية`)
+      await db.collection('accounts').deleteOne({ id: acctIdMatch[1], tenant_id: T })
+      return ok({ success: true })
+    }
 
     // Tickets
     if (route === '/tickets' && method === 'GET') return ok(clean(await db.collection('tickets').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
@@ -1230,6 +1311,10 @@ async function createTicket(db, T, b, opts = {}) {
     client_id: cli.id, client_name: cli.name, supplier_id: sup.id, supplier_name: sup.name,
     pnr: b.pnr || '', route: b.route || '', passenger_name: b.passenger_name || '',
     passport_no: b.passport_no || '', travel_date: b.travel_date ? new Date(b.travel_date) : null,
+    // v3.2 — Travel mode + departure time for smart WhatsApp templates
+    travel_mode: b.travel_mode === 'land' ? 'land' : 'air',
+    departure_time: b.departure_time || '',
+    passenger_whatsapp: b.passenger_whatsapp || b.passenger_phone || '',
     // v2.7 — Non-financial informational fields for printable ticket
     carrier_name: b.carrier_name || '',
     passenger_phone: b.passenger_phone || '',
@@ -1291,6 +1376,9 @@ async function createVisa(db, T, b, opts = {}) {
     client_id: cli.id, client_name: cli.name, supplier_id: sup.id, supplier_name: sup.name,
     passenger_name: b.passenger_name || '', passport_no: b.passport_no || '',
     nationality: b.nationality || '', attachment_url: b.attachment_url || '',
+    // v3.2 — Phone / WhatsApp for direct-contact smart templates
+    passenger_phone: b.passenger_phone || '',
+    passenger_whatsapp: b.passenger_whatsapp || b.passenger_phone || '',
     // v3.0 — Entry/Exit tracking for expiration alerts
     entry_date: b.entry_date ? new Date(b.entry_date) : null,
     expected_exit_date: b.expected_exit_date ? new Date(b.expected_exit_date) : null,
@@ -1343,6 +1431,9 @@ async function createService(db, T, b, opts = {}) {
     currency: b.currency, exchange_rate: Number(b.exchange_rate) || 1,
     client_id: cli.id, client_name: cli.name, supplier_id: sup.id, supplier_name: sup.name,
     beneficiary_name: b.beneficiary_name || '', reference_no: b.reference_no || '',
+    // v3.2 — Phone / WhatsApp
+    beneficiary_phone: b.beneficiary_phone || '',
+    beneficiary_whatsapp: b.beneficiary_whatsapp || b.beneficiary_phone || '',
     notes: b.notes || '',
     cost, sale_price: sale, commission,
     payment_method: paymentMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
@@ -1641,16 +1732,24 @@ async function computeDashboard(db, T) {
     is_exited: { $ne: true },
     expected_exit_date: { $ne: null, $lt: todayStart },
   }).sort({ expected_exit_date: 1 }).limit(50).toArray()
-  const alertRows = [...overdue, ...visaAlerts].map(v => {
+  const alertRows = await Promise.all([...overdue, ...visaAlerts].map(async v => {
     const exit = new Date(v.expected_exit_date)
     const daysLeft = Math.ceil((exit - now) / 86400000)
+    // v3.2 — Resolve phone from client if visa row doesn't have one
+    let phone = v.passenger_phone || ''
+    let whatsapp = v.passenger_whatsapp || v.passenger_phone || ''
+    if (!phone && v.client_id) {
+      const c = await db.collection('clients').findOne({ id: v.client_id, tenant_id: T })
+      if (c) { phone = c.phone || ''; whatsapp = c.whatsapp || c.phone || '' }
+    }
     return {
       id: v.id, service_type: v.service_type, passenger_name: v.passenger_name || v.client_name || '—',
       passport_no: v.passport_no || '', nationality: v.nationality || '',
       client_name: v.client_name, entry_date: v.entry_date, expected_exit_date: v.expected_exit_date,
+      passenger_phone: phone, passenger_whatsapp: whatsapp,
       days_left: daysLeft, overdue: daysLeft < 0,
     }
-  })
+  }))
 
   const recentTickets = await db.collection('tickets').find(tf).sort({ created_at: -1 }).limit(5).toArray()
   const recentVisas   = await db.collection('visas').find(tf).sort({ created_at: -1 }).limit(5).toArray()

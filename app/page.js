@@ -9,7 +9,7 @@ import {
   Plus, Search, Calendar, TrendingUp, DollarSign, Sparkles, LogOut,
   Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
   Building, Settings, Upload, FileSpreadsheet, CheckCircle2, XCircle,
-  AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key,
+  AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key, Pencil,
   ArrowLeftRight, Briefcase, CalendarClock, LogIn,
 } from 'lucide-react'
 import {
@@ -40,6 +40,55 @@ const fmt = (n, c = 'USD') => `${CUR_SYMBOL[c] || ''} ${Number(n || 0).toLocaleS
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' }) : '—'
 const fmtTime = (d) => d ? new Date(d).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' }) : '—'
 const todayISO = () => new Date().toISOString().slice(0, 10)
+
+// v3.2 — WhatsApp helpers
+// Normalizes a phone: keeps digits only. If starts with 0, replaces with default country code (967 Yemen).
+// If no country code present (< 12 chars) and starts with 5/7 (SA/YE mobile), prefixes 966/967.
+function normalizeWaPhone(raw) {
+  if (!raw) return ''
+  let d = String(raw).replace(/[^\d]/g, '')
+  if (!d) return ''
+  if (d.startsWith('00')) d = d.slice(2)
+  // Local mobile heuristic: leading 0 → drop, then prefix best-guess (default 967 Yemen)
+  if (d.startsWith('0')) d = '967' + d.slice(1)
+  // If it's short (like 7xxxxxxx, 9 digits) prefix 967
+  if (d.length === 9 && d.startsWith('7')) d = '967' + d
+  if (d.length === 9 && d.startsWith('5')) d = '966' + d
+  return d
+}
+function waLink(phone, message = '') {
+  const p = normalizeWaPhone(phone)
+  if (!p) return ''
+  const q = message ? `?text=${encodeURIComponent(message)}` : ''
+  return `https://wa.me/${p}${q}`
+}
+function openWhatsApp(phone, message = '') {
+  const url = waLink(phone, message)
+  if (!url) return false
+  window.open(url, '_blank', 'noopener,noreferrer')
+  return true
+}
+// Smart templates for tickets / visas / services
+function tplTicket(t) {
+  const name = t.passenger_name || t.client_name || 'العميل'
+  const date = t.travel_date ? new Date(t.travel_date).toLocaleDateString('ar-EG', { year:'numeric', month:'long', day:'numeric' }) : ''
+  const time = t.departure_time || ''
+  if (t.travel_mode === 'land') {
+    return `عزيزي العميل ${name}،\nنود إشعارك بأن موعد انطلاق رحلتك البرية غداً ${date}${time ? ` في تمام الساعة ${time}` : ''}.\n⚠️ نرجو التواجد في محطة النقل قبل موعد الرحلة بـ ساعة واحدة.\nرافقتكم السلامة! 🚌`
+  }
+  return `عزيزي العميل ${name}،\nنود إشعارك بأن موعد إقلاع رحلتك الجوية غداً ${date}${time ? ` في تمام الساعة ${time}` : ''}.\n⚠️ نرجو التواجد في المطار قبل موعد الرحلة بـ 4 ساعات لإتمام إجراءات السفر.\nرافقتكم السلامة! ✈️`
+}
+function tplVisaExpiry(v) {
+  const name = v.passenger_name || v.client_name || 'العميل'
+  const date = v.expected_exit_date ? new Date(v.expected_exit_date).toLocaleDateString('ar-EG', { year:'numeric', month:'long', day:'numeric' }) : ''
+  return `عزيزي العميل ${name}،\nنود تذكيرك بأن صلاحية تأشيرتك تنتهي بتاريخ ${date}.\nيرجى استكمال إجراءات المغادرة/التجديد تجنباً لأي غرامات. 🛂`
+}
+function tplService(s) {
+  const name = s.beneficiary_name || s.client_name || 'العميل'
+  const ref = s.reference_no ? ` — رقم مرجعي ${s.reference_no}` : ''
+  return `عزيزي العميل ${name}،\nخدمة ${s.service_type || ''}${ref} — للاستفسار أو التأكيد، تواصل معنا مباشرة.`
+}
+
 
 async function api(path, opts = {}) {
   const res = await fetch(`/api${path}`, {
@@ -518,6 +567,30 @@ function Field({ label, required, children }) {
 // ================================================================
 // TENANT SIDEBAR & TOP BAR
 // ================================================================
+// v3.2 — Reusable WhatsApp button. Grays out if phone is empty.
+function WaBtn({ phone, message = '', size = 'sm', label, iconOnly = false }) {
+  const normalized = normalizeWaPhone(phone)
+  const disabled = !normalized
+  const cls = `inline-flex items-center gap-1 rounded-md font-semibold transition-all ${
+    disabled
+      ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+      : 'bg-[#25D366] hover:bg-[#128C7E] text-white shadow-sm hover:shadow'
+  } ${size === 'xs' ? 'text-xs h-6 px-2' : size === 'md' ? 'text-sm h-8 px-3' : 'text-xs h-7 px-2'}`
+  const handleClick = (e) => {
+    e.stopPropagation()
+    if (disabled) return toast.error('لا يوجد رقم هاتف مسجل — أضف الرقم أولاً')
+    openWhatsApp(phone, message)
+  }
+  return (
+    <button type="button" onClick={handleClick} className={cls} title={disabled ? 'لا يوجد رقم هاتف' : `إرسال واتساب إلى ${phone}`}>
+      <svg viewBox="0 0 32 32" width={size === 'xs' ? 12 : 14} height={size === 'xs' ? 12 : 14} fill="currentColor" className="shrink-0">
+        <path d="M16.001 3.2C9.075 3.2 3.401 8.874 3.401 15.8c0 2.196.578 4.348 1.677 6.246l-1.876 6.85 7.048-1.848a12.578 12.578 0 0 0 5.751 1.398c6.926 0 12.6-5.674 12.6-12.6S22.927 3.2 16.001 3.2Zm0 22.968a10.36 10.36 0 0 1-5.286-1.446l-.379-.225-4.185 1.098 1.116-4.078-.247-.394A10.4 10.4 0 1 1 16 26.168Zm5.706-7.784c-.312-.156-1.848-.913-2.135-1.017-.286-.104-.494-.156-.703.156s-.807 1.017-.989 1.226c-.182.208-.364.234-.676.078-.312-.156-1.319-.486-2.512-1.551-.929-.828-1.555-1.851-1.737-2.163-.182-.312-.019-.481.137-.636.14-.14.312-.364.468-.546.156-.182.208-.312.312-.52.104-.208.052-.39-.026-.546-.078-.156-.703-1.694-.963-2.32-.254-.61-.512-.527-.703-.537-.182-.008-.39-.01-.598-.01-.208 0-.546.078-.833.39-.286.312-1.093 1.068-1.093 2.606s1.119 3.023 1.275 3.231c.156.208 2.203 3.362 5.336 4.712.746.322 1.328.514 1.782.658.749.238 1.43.204 1.968.124.601-.09 1.848-.755 2.109-1.484.26-.729.26-1.354.182-1.484-.078-.13-.286-.208-.598-.364Z"/>
+      </svg>
+      {!iconOnly && (label || 'واتساب')}
+    </button>
+  )
+}
+
 const NAV = [
   { id: 'dashboard', label: 'لوحة التحكم', icon: LayoutDashboard, color: 'from-blue-600 to-cyan-500' },
   { id: 'tickets',   label: 'حجز التذاكر', icon: Plane, color: 'from-sky-600 to-blue-500' },
@@ -621,12 +694,10 @@ function Dashboard({ setTab }) {
   const pieColors = ['#3b82f6', '#10b981', '#f59e0b', '#a855f7', '#ef4444', '#64748b']
 
   const sendWhatsApp = (r) => {
-    const dateStr = r.travel_date ? new Date(r.travel_date).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : ''
-    const msg = `السلام عليكم\nتذكيراً برحلة السفر ${r.passenger_name ? `للأخ/ة ${r.passenger_name}` : ''}\n${r.route ? `📍 المسار: ${r.route}\n` : ''}${r.pnr ? `🎫 رقم الحجز: ${r.pnr}\n` : ''}📅 التاريخ: ${dateStr}\nنتمنى لكم رحلة سعيدة 🌸\nمكتب الرحّال`
-    let phone = (r.client_phone || '').replace(/[^0-9+]/g, '')
-    if (phone.startsWith('+')) phone = phone.slice(1)
-    const url = phone ? `https://wa.me/${phone}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`
-    window.open(url, '_blank', 'noopener')
+    // v3.2 — Uses smart air/land template based on travel_mode
+    const msg = tplTicket(r)
+    const phone = r.passenger_whatsapp || r.passenger_phone || r.client_whatsapp || r.client_phone
+    openWhatsApp(phone, msg)
   }
 
   return (
@@ -697,12 +768,15 @@ function Dashboard({ setTab }) {
                         )}
                       </TableCell>
                       <TableCell className="text-center">
-                        <Button size="sm" onClick={async () => {
-                          try { await api(`/visas/${v.id}/mark-exited`, { method: 'POST' }); toast.success('تم تسجيل الخروج'); load() }
-                          catch (e) { toast.error(e.message) }
-                        }} className="bg-emerald-500 hover:bg-emerald-600 text-white gap-1 h-8">
-                          <LogIn className="w-3.5 h-3.5 rotate-180" /> تم الخروج
-                        </Button>
+                        <div className="flex items-center gap-1 justify-center">
+                          <WaBtn phone={v.passenger_whatsapp || v.passenger_phone} message={tplVisaExpiry(v)} size="xs" label="تنبيه" iconOnly={false} />
+                          <Button size="sm" onClick={async () => {
+                            try { await api(`/visas/${v.id}/mark-exited`, { method: 'POST' }); toast.success('تم تسجيل الخروج'); load() }
+                            catch (e) { toast.error(e.message) }
+                          }} className="bg-emerald-500 hover:bg-emerald-600 text-white gap-1 h-7 px-2 text-xs">
+                            <LogIn className="w-3 h-3 rotate-180" /> تم الخروج
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -727,26 +801,33 @@ function Dashboard({ setTab }) {
               <Table>
                 <TableHeader><TableRow>
                   <TableHead>المسافر</TableHead>
+                  <TableHead>الوسيلة</TableHead>
                   <TableHead>PNR</TableHead>
                   <TableHead>المسار</TableHead>
                   <TableHead>الجواز</TableHead>
-                  <TableHead>العميل / الهاتف</TableHead>
-                  <TableHead>تاريخ الرحلة</TableHead>
+                  <TableHead>حساب القبض / الهاتف</TableHead>
+                  <TableHead>موعد السفر</TableHead>
                   <TableHead className="text-center">إجراء</TableHead>
                 </TableRow></TableHeader>
                 <TableBody>
                   {tomorrow.map(r => (
                     <TableRow key={r.id}>
                       <TableCell className="font-semibold">{r.passenger_name || '—'}</TableCell>
+                      <TableCell>
+                        {r.travel_mode === 'land'
+                          ? <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100 border border-orange-200">🚌 برية</Badge>
+                          : <Badge className="bg-sky-100 text-sky-700 hover:bg-sky-100 border border-sky-200">✈️ جوية</Badge>}
+                      </TableCell>
                       <TableCell className="font-mono text-xs"><Badge variant="outline">{r.pnr || '—'}</Badge></TableCell>
                       <TableCell className="text-xs">{r.route || '—'}</TableCell>
                       <TableCell className="font-mono text-xs">{r.passport_no || '—'}</TableCell>
-                      <TableCell className="text-xs">{r.client_name}<br /><span className="text-slate-500">{r.client_phone || 'لا يوجد رقم'}</span></TableCell>
-                      <TableCell className="text-xs">{new Date(r.travel_date).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' })}</TableCell>
+                      <TableCell className="text-xs">{r.client_name}<br /><span className="text-slate-500">{r.passenger_phone || r.client_phone || 'لا يوجد رقم'}</span></TableCell>
+                      <TableCell className="text-xs">
+                        <div>{new Date(r.travel_date).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' })}</div>
+                        {r.departure_time && <div className="font-bold text-blue-700">🕐 {r.departure_time}</div>}
+                      </TableCell>
                       <TableCell className="text-center">
-                        <Button size="sm" onClick={() => sendWhatsApp(r)} className="bg-emerald-500 hover:bg-emerald-600 text-white gap-1 h-8">
-                          <span>📲</span> إرسال واتساب
-                        </Button>
+                        <WaBtn phone={r.passenger_whatsapp || r.passenger_phone || r.client_whatsapp || r.client_phone} message={tplTicket(r)} size="md" label="واتساب" />
                       </TableCell>
                     </TableRow>
                   ))}
@@ -954,7 +1035,14 @@ function TicketsScreen() {
                     <TableCell className="text-xs">{fmtDate(t.date)}</TableCell>
                     <TableCell className="font-mono text-xs">{t.pnr || '—'}</TableCell>
                     <TableCell className="text-xs">{t.route || '—'}</TableCell>
-                    <TableCell className="text-xs">{t.passenger_name || '—'}</TableCell>
+                    <TableCell className="text-xs">
+                      <div className="flex items-center gap-2">
+                        <span>{t.passenger_name || '—'}</span>
+                        {(t.passenger_whatsapp || t.passenger_phone) && (
+                          <WaBtn phone={t.passenger_whatsapp || t.passenger_phone} message={tplTicket(t)} size="xs" iconOnly={true} />
+                        )}
+                      </div>
+                    </TableCell>
                     <TableCell className="text-xs">{t.carrier_name ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-amber-800 font-semibold">🚌 {t.carrier_name}</span> : <span className="text-slate-300">—</span>}</TableCell>
                     <TableCell>{t.client_name}</TableCell>
                     <TableCell>{t.supplier_name}</TableCell>
@@ -995,6 +1083,8 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
     carrier_name: '', passenger_phone: '', passenger_age: '', id_type: 'هوية شخصية',
     id_issue_place: '', id_issue_date: '', ticket_number: '', flight_number: '',
     ticket_type: 'عادي', arrival_time: '', departure_time: '', boarding_point: '', sale_point: '',
+    // v3.2 — Travel mode + WhatsApp
+    travel_mode: 'air', passenger_whatsapp: '',
   }
   const [form, setForm] = useState(emptyForm)
   const [boxes, setBoxes] = useState([])
@@ -1024,6 +1114,8 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
         departure_time: record.departure_time || '',
         boarding_point: record.boarding_point || '',
         sale_point: record.sale_point || '',
+        travel_mode: record.travel_mode === 'land' ? 'land' : 'air',
+        passenger_whatsapp: record.passenger_whatsapp || record.passenger_phone || '',
       })
     } else {
       setForm(emptyForm)
@@ -1073,20 +1165,48 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
             <Field label="تاريخ السفر"><Input type="date" value={form.travel_date} onChange={e => setForm({ ...form, travel_date: e.target.value })} /></Field>
           </div>
 
-          {/* v2.7 — Carrier & extended traveler/booking info (text-only, no accounting impact) */}
+          {/* v3.2 — Travel mode + carrier + smart WhatsApp phone */}
           <div className="bg-gradient-to-l from-amber-50 to-orange-50 border-2 border-amber-300 rounded-xl p-4 mt-2">
             <div className="text-sm font-bold text-amber-900 mb-2 flex items-center gap-2">
-              🚌 <span>الشركة الناقلة (يُطبع على التذكرة فقط — لا يؤثر على القيود المحاسبية)</span>
+              🚌 <span>نوع الرحلة والشركة الناقلة (يُطبع على التذكرة + يُستخدم في قوالب الواتساب الذكية)</span>
             </div>
-            <Input value={form.carrier_name} onChange={e => setForm({ ...form, carrier_name: e.target.value })}
-              placeholder="مثال: شركة البركة للنقل الجماعي (الرويشان)"
-              className="text-base font-bold bg-white border-amber-300" />
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Field label="وسيلة الرحلة" required>
+                <Select value={form.travel_mode} onValueChange={v => setForm({ ...form, travel_mode: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="air">✈️ رحلة جوية (طيران)</SelectItem>
+                    <SelectItem value="land">🚌 رحلة برية (حافلة / نقل بري)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label={form.travel_mode === 'land' ? 'شركة النقل البري' : 'شركة الطيران'}>
+                <Input value={form.carrier_name} onChange={e => setForm({ ...form, carrier_name: e.target.value })}
+                  placeholder={form.travel_mode === 'land' ? 'مثال: البركة، الرويشان' : 'مثال: الخطوط السعودية، فلاي دبي'}
+                  className="bg-white border-amber-300" />
+              </Field>
+              <Field label="⏰ موعد الإقلاع/الانطلاق">
+                <Input type="time" value={form.departure_time} onChange={e => setForm({ ...form, departure_time: e.target.value })} className="bg-white border-amber-300 font-bold text-base" />
+              </Field>
+            </div>
+          </div>
+
+          {/* v3.2 — Contact panel (Phone + WhatsApp for smart templates) */}
+          <div className="bg-gradient-to-l from-emerald-50 to-teal-50 border border-emerald-200 rounded-xl p-4 mt-2">
+            <div className="text-sm font-bold text-emerald-900 mb-2 flex items-center gap-2">
+              📱 <span>بيانات التواصل — لتفعيل زر إرسال الواتساب مباشرة إلى المسافر</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Field label="رقم هاتف المسافر"><Input dir="ltr" value={form.passenger_phone} onChange={e => {
+                const v = e.target.value; setForm(f => ({ ...f, passenger_phone: v, passenger_whatsapp: f.passenger_whatsapp || v }))
+              }} placeholder="777xxxxxxx أو 5xxxxxxxx" className="bg-white" /></Field>
+              <Field label="رقم واتساب (إن اختلف عن الهاتف)"><Input dir="ltr" value={form.passenger_whatsapp} onChange={e => setForm({ ...form, passenger_whatsapp: e.target.value })} placeholder="اختياري — يستخدم رقم الهاتف افتراضياً" className="bg-white" /></Field>
+            </div>
           </div>
 
           <div className="bg-slate-50 border rounded-xl p-4 mt-2">
             <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2">👤 بيانات المسافر الإضافية (للطباعة)</div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Field label="رقم هاتف المسافر"><Input dir="ltr" value={form.passenger_phone} onChange={e => setForm({ ...form, passenger_phone: e.target.value })} placeholder="777xxxxxxx" /></Field>
               <Field label="العمر"><Input value={form.passenger_age} onChange={e => setForm({ ...form, passenger_age: e.target.value })} placeholder="30" /></Field>
               <Field label="نوع الهوية">
                 <Select value={form.id_type} onValueChange={v => setForm({ ...form, id_type: v })}>
@@ -2045,7 +2165,7 @@ function VisasScreen() {
 
 function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
   const isEdit = !!record
-  const emptyForm = { date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', entry_date: '', expected_exit_date: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }
+  const emptyForm = { date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', entry_date: '', expected_exit_date: '', passenger_phone: '', passenger_whatsapp: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }
   const [form, setForm] = useState(emptyForm)
   const [boxes, setBoxes] = useState([])
   const [saving, setSaving] = useState(false)
@@ -2062,6 +2182,8 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
         nationality: record.nationality || '',
         entry_date: record.entry_date ? new Date(record.entry_date).toISOString().slice(0,10) : '',
         expected_exit_date: record.expected_exit_date ? new Date(record.expected_exit_date).toISOString().slice(0,10) : '',
+        passenger_phone: record.passenger_phone || '',
+        passenger_whatsapp: record.passenger_whatsapp || record.passenger_phone || '',
         cost: record.cost ?? '', sale_price: record.sale_price ?? '',
         payment_method: record.payment_method || 'credit', box_id: record.box_id || '',
       })
@@ -2106,6 +2228,19 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Field label="تاريخ الدخول"><Input type="date" value={form.entry_date} onChange={e => setForm({ ...form, entry_date: e.target.value })} /></Field>
               <Field label="تاريخ الخروج المتوقع"><Input type="date" value={form.expected_exit_date} onChange={e => setForm({ ...form, expected_exit_date: e.target.value })} /></Field>
+            </div>
+          </div>
+
+          {/* v3.2 — Contact for smart WhatsApp expiration alerts */}
+          <div className="bg-gradient-to-l from-emerald-50 to-teal-50 border border-emerald-200 rounded-xl p-3 mt-2">
+            <div className="text-sm font-bold text-emerald-900 mb-2 flex items-center gap-2">
+              📱 <span>بيانات التواصل — لإرسال تنبيه واتساب قبل انتهاء التأشيرة</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Field label="رقم هاتف المسافر"><Input dir="ltr" value={form.passenger_phone} onChange={e => {
+                const v = e.target.value; setForm(f => ({ ...f, passenger_phone: v, passenger_whatsapp: f.passenger_whatsapp || v }))
+              }} placeholder="777xxxxxxx" className="bg-white" /></Field>
+              <Field label="رقم واتساب (إن اختلف)"><Input dir="ltr" value={form.passenger_whatsapp} onChange={e => setForm({ ...form, passenger_whatsapp: e.target.value })} placeholder="اختياري" className="bg-white" /></Field>
             </div>
           </div>
           <div className="bg-slate-50 border rounded-xl p-3 mt-2 flex items-center gap-4">
@@ -2276,6 +2411,7 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
     date: todayISO(), service_type: activeTypes[0]?.name || 'خدمات متنوعة',
     currency: 'SAR', exchange_rate: 0.267,
     client_id: '', supplier_id: '', beneficiary_name: '', reference_no: '', description: '',
+    beneficiary_phone: '', beneficiary_whatsapp: '',
     cost: '', sale_price: '', payment_method: 'credit', box_id: '', notes: '',
   }
   const [form, setForm] = useState(emptyForm)
@@ -2291,6 +2427,8 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
         client_id: record.client_id || '', supplier_id: record.supplier_id || '',
         beneficiary_name: record.beneficiary_name || '', reference_no: record.reference_no || '',
         description: record.description || '', notes: record.notes || '',
+        beneficiary_phone: record.beneficiary_phone || '',
+        beneficiary_whatsapp: record.beneficiary_whatsapp || record.beneficiary_phone || '',
         cost: record.cost ?? '', sale_price: record.sale_price ?? '',
         payment_method: record.payment_method || 'credit', box_id: record.box_id || '',
       })
@@ -2337,6 +2475,18 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
           <Field label="اسم المستفيد"><Input value={form.beneficiary_name} onChange={e => setForm({ ...form, beneficiary_name: e.target.value })} placeholder="مثال: أحمد محمد" /></Field>
           <Field label="الرقم المرجعي"><Input value={form.reference_no} onChange={e => setForm({ ...form, reference_no: e.target.value })} placeholder="مثال: HTL-2025-001" /></Field>
           <Field label="وصف مختصر"><Input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="مثال: 3 ليالٍ فندق البلد" /></Field>
+        </div>
+        {/* v3.2 — Contact panel */}
+        <div className="bg-gradient-to-l from-emerald-50 to-teal-50 border border-emerald-200 rounded-xl p-3 mt-2">
+          <div className="text-sm font-bold text-emerald-900 mb-2 flex items-center gap-2">
+            📱 <span>بيانات التواصل — لإرسال تفاصيل الخدمة أو تنبيهات عبر الواتساب</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="رقم هاتف المستفيد"><Input dir="ltr" value={form.beneficiary_phone} onChange={e => {
+              const v = e.target.value; setForm(f => ({ ...f, beneficiary_phone: v, beneficiary_whatsapp: f.beneficiary_whatsapp || v }))
+            }} placeholder="777xxxxxxx" className="bg-white" /></Field>
+            <Field label="رقم واتساب (اختياري)"><Input dir="ltr" value={form.beneficiary_whatsapp} onChange={e => setForm({ ...form, beneficiary_whatsapp: e.target.value })} className="bg-white" /></Field>
+          </div>
         </div>
         <div className="bg-slate-50 border rounded-xl p-3 mt-2 flex items-center gap-4">
           <div className="text-sm font-bold text-slate-700">طريقة الدفع:</div>
@@ -2595,23 +2745,52 @@ function PartiesScreen({ kind }) {
   const cfg = kind === 'clients' ? { title: 'العملاء', icon: Users, grad: 'grad-purple' } : { title: 'الموردون والوكلاء', icon: Building2, grad: 'grad-gold' }
   const [rows, setRows] = useState([])
   const [open, setOpen] = useState(false)
-  const [name, setName] = useState(''); const [phone, setPhone] = useState(''); const [notes, setNotes] = useState(''); const [q, setQ] = useState('')
+  const [editing, setEditing] = useState(null)
+  const [q, setQ] = useState('')
+  const [form, setForm] = useState({ name: '', phone: '', whatsapp: '', address: '', email: '', notes: '' })
   const load = async () => { try { setRows(await api(`/${kind}`)) } catch (e) { toast.error(e.message) } }
   useEffect(() => { load() }, [kind])
-  const save = async () => { if (!name) return toast.error('الاسم مطلوب'); try { await api(`/${kind}`, { method: 'POST', body: { name, phone, notes } }); setName(''); setPhone(''); setNotes(''); setOpen(false); load(); toast.success('تمت الإضافة') } catch (e) { toast.error(e.message) } }
+  useEffect(() => {
+    if (!open) return
+    if (editing) setForm({ name: editing.name || '', phone: editing.phone || '', whatsapp: editing.whatsapp || editing.phone || '', address: editing.address || '', email: editing.email || '', notes: editing.notes || '' })
+    else setForm({ name: '', phone: '', whatsapp: '', address: '', email: '', notes: '' })
+  }, [open, editing])
+  const save = async () => {
+    if (!form.name) return toast.error('الاسم مطلوب')
+    try {
+      if (editing) await api(`/${kind}/${editing.id}`, { method: 'PUT', body: form })
+      else await api(`/${kind}`, { method: 'POST', body: form })
+      setOpen(false); setEditing(null); load(); toast.success(editing ? 'تم التعديل' : 'تمت الإضافة')
+    } catch (e) { toast.error(e.message) }
+  }
+  const del = async (r) => {
+    if (!confirm(`حذف ${r.name}؟`)) return
+    try { await api(`/${kind}/${r.id}`, { method: 'DELETE' }); load(); toast.success('تم الحذف') }
+    catch (e) { toast.error(e.message) }
+  }
   const filtered = rows.filter(r => !q || r.name.includes(q) || (r.phone || '').includes(q))
   return (
     <div className="space-y-6">
       <TopBar title={cfg.title} subtitle={`إجمالي: ${rows.length}`}
-        right={<div className="flex items-center gap-2"><div className="relative"><Search className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" /><Input placeholder="بحث..." value={q} onChange={e => setQ(e.target.value)} className="pr-9 w-64" /></div><Button onClick={() => setOpen(true)} className={`gap-2 ${cfg.grad} text-white`}><Plus className="w-4 h-4" /> إضافة</Button></div>} />
+        right={<div className="flex items-center gap-2"><div className="relative"><Search className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" /><Input placeholder="بحث..." value={q} onChange={e => setQ(e.target.value)} className="pr-9 w-64" /></div><Button onClick={() => { setEditing(null); setOpen(true) }} className={`gap-2 ${cfg.grad} text-white`}><Plus className="w-4 h-4" /> إضافة</Button></div>} />
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {filtered.map(r => (
           <Card key={r.id} className="overflow-hidden hover:shadow-md transition-shadow">
             <div className={`h-1 ${cfg.grad}`} />
             <CardContent className="p-4">
               <div className="flex items-start justify-between">
-                <div><div className="font-bold text-slate-800">{r.name}</div><div className="text-xs text-slate-500">{r.phone || '—'}</div></div>
+                <div className="flex-1">
+                  <div className="font-bold text-slate-800">{r.name}</div>
+                  {r.phone && <div className="text-xs text-slate-500 flex items-center gap-1" dir="ltr">📞 {r.phone}</div>}
+                  {r.address && <div className="text-xs text-slate-500 truncate">📍 {r.address}</div>}
+                  {r.email && <div className="text-xs text-slate-500 truncate" dir="ltr">✉️ {r.email}</div>}
+                </div>
                 <div className={`w-10 h-10 rounded-lg ${cfg.grad} flex items-center justify-center`}><cfg.icon className="w-5 h-5 text-white" /></div>
+              </div>
+              <div className="flex items-center gap-1 mt-2 flex-wrap">
+                <WaBtn phone={r.whatsapp || r.phone} message={`السلام عليكم ${r.name}،`} size="xs" iconOnly={false} label="واتساب" />
+                <Button size="sm" variant="ghost" onClick={() => { setEditing(r); setOpen(true) }} className="h-6 px-2 text-xs gap-1"><Pencil className="w-3 h-3" /> تعديل</Button>
+                <Button size="sm" variant="ghost" onClick={() => del(r)} className="h-6 px-2 text-xs text-rose-600 gap-1"><Trash2 className="w-3 h-3" /> حذف</Button>
               </div>
               <Separator className="my-3" />
               <div className="space-y-1">{CURRENCIES.map(c => { const bal = r.balances?.[c] || 0; return <div key={c} className="flex items-center justify-between text-sm"><span className="text-xs text-slate-500">{c}</span><span className={`font-bold ${bal > 0 ? 'text-emerald-600' : bal < 0 ? 'text-rose-600' : 'text-slate-400'}`}>{fmt(bal, c)}</span></div> })}</div>
@@ -2620,11 +2799,23 @@ function PartiesScreen({ kind }) {
         ))}
         {filtered.length === 0 && <div className="col-span-full text-center text-slate-400 py-10">لا توجد بيانات</div>}
       </div>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent dir="rtl">
-          <DialogHeader><DialogTitle>إضافة {kind === 'clients' ? 'عميل' : 'مورد'}</DialogTitle></DialogHeader>
-          <div className="space-y-3"><Field label="الاسم" required><Input value={name} onChange={e => setName(e.target.value)} /></Field><Field label="الجوال"><Input value={phone} onChange={e => setPhone(e.target.value)} /></Field><Field label="ملاحظات"><Textarea rows={2} value={notes} onChange={e => setNotes(e.target.value)} /></Field></div>
-          <DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>إلغاء</Button><Button onClick={save} className={`${cfg.grad} text-white`}>حفظ</Button></DialogFooter>
+      <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }}>
+        <DialogContent dir="rtl" className="max-w-lg">
+          <DialogHeader><DialogTitle>{editing ? `تعديل ${kind === 'clients' ? 'عميل' : 'مورد'}` : `إضافة ${kind === 'clients' ? 'عميل' : 'مورد'}`}</DialogTitle></DialogHeader>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="md:col-span-2"><Field label="الاسم" required><Input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></Field></div>
+            <Field label="📞 رقم الهاتف"><Input dir="ltr" value={form.phone} onChange={e => {
+              const v = e.target.value; setForm(f => ({ ...f, phone: v, whatsapp: f.whatsapp || v }))
+            }} placeholder="777xxxxxxx" /></Field>
+            <Field label="📱 رقم واتساب"><Input dir="ltr" value={form.whatsapp} onChange={e => setForm({ ...form, whatsapp: e.target.value })} placeholder="اختياري — يستخدم الهاتف افتراضياً" /></Field>
+            <div className="md:col-span-2"><Field label="📍 العنوان"><Input value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder="المدينة، الحي، الشارع..." /></Field></div>
+            <div className="md:col-span-2"><Field label="✉️ البريد الإلكتروني"><Input dir="ltr" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} /></Field></div>
+            <div className="md:col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></Field></div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)}>إلغاء</Button>
+            <Button onClick={save} className={`${cfg.grad} text-white`}>{editing ? '💾 حفظ التعديل' : 'حفظ'}</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
@@ -2668,20 +2859,126 @@ function BoxesScreen() {
 
 function ChartScreen() {
   const [rows, setRows] = useState([])
-  useEffect(() => { api('/accounts').then(setRows).catch(e => toast.error(e.message)) }, [])
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState(null)
+  const [form, setForm] = useState({ code: '', name_ar: '', type: 'asset', parent: '', is_group: false, notes: '' })
+  const load = () => api('/accounts').then(setRows).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [])
+  useEffect(() => {
+    if (!open) return
+    if (editing) setForm({ code: editing.code || '', name_ar: editing.name_ar || '', type: editing.type || 'asset', parent: editing.parent || '', is_group: !!editing.is_group, notes: editing.notes || '' })
+    else setForm({ code: '', name_ar: '', type: 'asset', parent: '', is_group: false, notes: '' })
+  }, [open, editing])
+  const save = async () => {
+    if (!form.code || !form.name_ar) return toast.error('الرمز والاسم مطلوبان')
+    try {
+      if (editing) await api(`/accounts/${editing.id}`, { method: 'PUT', body: { name_ar: form.name_ar, type: form.type, parent: form.parent || null, is_group: form.is_group, notes: form.notes } })
+      else await api('/accounts', { method: 'POST', body: form })
+      setOpen(false); setEditing(null); load(); toast.success(editing ? 'تم التعديل' : 'تمت الإضافة')
+    } catch (e) { toast.error(e.message) }
+  }
+  const del = async (a) => {
+    if (!confirm(`حذف الحساب ${a.code} — ${a.name_ar}؟`)) return
+    try { await api(`/accounts/${a.id}`, { method: 'DELETE' }); load(); toast.success('تم الحذف') }
+    catch (e) { toast.error(e.message) }
+  }
   const byType = { asset: rows.filter(r => r.type === 'asset'), liability: rows.filter(r => r.type === 'liability'), revenue: rows.filter(r => r.type === 'revenue'), expense: rows.filter(r => r.type === 'expense') }
   const typeLabel = { asset: 'الأصول', liability: 'الخصوم', revenue: 'الإيرادات', expense: 'المصروفات' }
   const typeGrad = { asset: 'grad-brand', liability: 'grad-rose', revenue: 'grad-green', expense: 'grad-gold' }
+  // Build a tree: group by parent code
+  const eligibleParents = rows.filter(r => r.type === form.type)
+  const buildTree = (list) => {
+    const map = new Map(); list.forEach(a => map.set(a.code, { ...a, children: [] }))
+    const roots = []
+    for (const a of list) {
+      if (a.parent && map.has(a.parent)) map.get(a.parent).children.push(map.get(a.code))
+      else roots.push(map.get(a.code))
+    }
+    return roots
+  }
+  const renderNode = (node, depth = 0) => (
+    <div key={node.id}>
+      <div className={`flex items-center justify-between p-2 rounded-md ${node.is_group ? 'bg-slate-50 font-semibold' : ''}`} style={{ paddingRight: `${8 + depth * 20}px` }}>
+        <div className="flex items-center gap-2">
+          {depth > 0 && <span className="text-slate-300">↳</span>}
+          <span className="font-mono text-xs text-slate-500">{node.code}</span>
+          <span className="text-sm">{node.name_ar}</span>
+          {node.is_group && <Badge variant="outline" className="text-xs">مجموعة</Badge>}
+        </div>
+        <div className="flex items-center gap-1 opacity-60 hover:opacity-100">
+          <Button size="sm" variant="ghost" onClick={() => { setEditing(node); setOpen(true) }} className="h-6 w-6 p-0"><Pencil className="w-3 h-3" /></Button>
+          <Button size="sm" variant="ghost" onClick={() => del(node)} className="h-6 w-6 p-0 text-rose-600"><Trash2 className="w-3 h-3" /></Button>
+        </div>
+      </div>
+      {node.children?.map(c => renderNode(c, depth + 1))}
+    </div>
+  )
   return (
     <div className="space-y-6">
-      <TopBar title="الدليل المحاسبي" subtitle="شجرة الحسابات الرئيسية والفرعية" />
+      <TopBar title="الدليل المحاسبي" subtitle="شجرة الحسابات الرئيسية والفرعية — يدعم الحسابات المجمعة (parent/child)"
+        right={<Button onClick={() => { setEditing(null); setOpen(true) }} className="gap-2 grad-brand text-white"><Plus className="w-4 h-4" /> حساب جديد</Button>} />
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {Object.entries(byType).map(([t, list]) => (
-          <Card key={t}><CardHeader><CardTitle className="flex items-center gap-2"><div className={`w-8 h-8 rounded-md ${typeGrad[t]}`} /> {typeLabel[t]}</CardTitle></CardHeader>
-            <CardContent><div className="space-y-1">{list.map(a => (<div key={a.id} className={`flex items-center justify-between p-2 rounded-md ${a.is_group ? 'bg-slate-50 font-semibold' : 'pr-4'}`}><div className="flex items-center gap-2"><span className="font-mono text-xs text-slate-500">{a.code}</span><span className="text-sm">{a.name_ar}</span></div>{a.currency && <Badge variant="outline">{a.currency}</Badge>}</div>))}</div></CardContent>
+          <Card key={t}>
+            <CardHeader><CardTitle className="flex items-center gap-2"><div className={`w-8 h-8 rounded-md ${typeGrad[t]}`} /> {typeLabel[t]} <Badge variant="outline">{list.length}</Badge></CardTitle></CardHeader>
+            <CardContent><div className="space-y-1">
+              {list.length === 0 && <div className="text-xs text-slate-400 text-center py-4">لا توجد حسابات — أضف حساباً جديداً</div>}
+              {buildTree(list).map(n => renderNode(n))}
+            </div></CardContent>
           </Card>
         ))}
       </div>
+      <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }}>
+        <DialogContent dir="rtl" className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{editing ? `تعديل حساب: ${editing.code}` : 'إضافة حساب جديد إلى الدليل المحاسبي'}</DialogTitle>
+            <DialogDescription>اختر النوع أولاً، ثم اختر الحساب الأب لبناء التسلسل الهرمي</DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="نوع الحساب" required>
+              <Select value={form.type} onValueChange={v => setForm({ ...form, type: v, parent: '' })} disabled={!!editing}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="asset">الأصول (Assets)</SelectItem>
+                  <SelectItem value="liability">الخصوم (Liabilities)</SelectItem>
+                  <SelectItem value="revenue">الإيرادات (Revenue)</SelectItem>
+                  <SelectItem value="expense">المصروفات (Expenses)</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="رمز الحساب" required>
+              <Input dir="ltr" value={form.code} onChange={e => setForm({ ...form, code: e.target.value.replace(/[^0-9]/g,'') })} disabled={!!editing} placeholder="مثال: 1102" />
+            </Field>
+            <div className="md:col-span-2"><Field label="اسم الحساب (عربي)" required>
+              <Input value={form.name_ar} onChange={e => setForm({ ...form, name_ar: e.target.value })} placeholder="مثال: صندوق فرع عدن" />
+            </Field></div>
+            <div className="md:col-span-2"><Field label="الحساب الأب (اختياري)">
+              <Select value={form.parent || 'none'} onValueChange={v => setForm({ ...form, parent: v === 'none' ? '' : v })}>
+                <SelectTrigger><SelectValue placeholder="بدون (حساب رئيسي)" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">— لا يوجد أب (حساب رئيسي) —</SelectItem>
+                  {eligibleParents.map(p => (
+                    <SelectItem key={p.id} value={p.code}>
+                      {'   '.repeat(Math.max(0, (p.code?.length || 1) - 1))} {p.code} — {p.name_ar}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field></div>
+            <div className="md:col-span-2">
+              <label className="flex items-center gap-2 cursor-pointer p-2 bg-slate-50 rounded-md border">
+                <input type="checkbox" checked={form.is_group} onChange={e => setForm({ ...form, is_group: e.target.checked })} />
+                <span className="text-sm font-semibold">حساب مجموعة (Group) — لا يُقيَّد عليه مباشرة، فقط يجمع الحسابات الفرعية</span>
+              </label>
+            </div>
+            <div className="md:col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></Field></div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)}>إلغاء</Button>
+            <Button onClick={save} className="grad-brand text-white">{editing ? '💾 حفظ التعديل' : 'إضافة'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

@@ -2766,3 +2766,261 @@ frontend:
 
 metadata:
   version: "3.1-c1"
+
+# ============================================================
+# v3.2 — Smart WhatsApp + Travel Mode + Chart Tree View (2026-07-31)
+# ============================================================
+backend:
+  - task: "v3.2 Ticket: travel_mode + departure_time + passenger_whatsapp"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          createTicket() now accepts travel_mode ('air' default, or 'land'), departure_time (HH:MM string),
+          and passenger_whatsapp (falls back to passenger_phone). PUT edit path uses same createTicket, so edit works.
+          Test: POST /tickets with travel_mode:'land', departure_time:'14:30', passenger_phone/whatsapp.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (3/3 tests) - Created ticket with travel_mode:'land', departure_time:'14:30', passenger_phone:'777123456', passenger_whatsapp:'777654321', passenger_name:'سعيد اختبار', passport_no:'YE-TEST-1'. All fields persisted correctly. Created ticket with travel_mode:'air', departure_time:'08:00', only passenger_phone:'777888999' - passenger_whatsapp correctly falls back to passenger_phone. GET /dashboard/tomorrow-travelers returns all v3.2 fields: travel_mode, departure_time, passenger_phone, passenger_whatsapp, client_whatsapp. Default behavior verified: ticket without travel_mode defaults to 'air', without departure_time defaults to empty string.
+
+  - task: "v3.2 Visa: passenger_phone + passenger_whatsapp"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          createVisa() accepts passenger_phone + passenger_whatsapp.
+          Dashboard visa_alerts[] now returns passenger_phone/whatsapp — pulls from visa row first,
+          else from linked client via lookup. Test: dashboard alert row must include phone field.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (3/3 tests) - Created visa with passenger_phone:'777888999', passenger_whatsapp:'777999888', entry_date:today, expected_exit_date:today+5. Both fields persisted correctly. GET /dashboard returns visa_alerts array with passenger_phone and passenger_whatsapp fields. Created visa WITHOUT passenger_phone but with linked client having phone:'777111222' - dashboard visa_alerts correctly resolves passenger_phone from linked client. Phone resolution logic working correctly.
+
+  - task: "v3.2 Service: beneficiary_phone + beneficiary_whatsapp"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          createService() accepts beneficiary_phone + beneficiary_whatsapp.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (2/2 tests) - Created service with beneficiary_phone:'777333444', beneficiary_whatsapp:'777444555', service_type:'فندق'. Both fields persisted correctly. GET /services returns all services with beneficiary_phone and beneficiary_whatsapp fields included.
+
+  - task: "v3.2 Extended Clients & Suppliers CRUD (phone, whatsapp, address, email, notes) + PUT/DELETE"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          POST /clients + /suppliers accept whatsapp/address/email/notes (in addition to phone).
+          NEW: PUT /clients/:id and /suppliers/:id for editing contact info.
+          NEW: DELETE /clients/:id and /suppliers/:id (only if no transactions reference them).
+          Test: create client with all fields, edit, verify persisted; try delete a used client → should error.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (8/8 tests) - CLIENTS: (1) POST /clients with all fields (phone:'777111111', whatsapp:'777222222', address:'صنعاء - شارع الزبيري', email:'test@example.com', notes:'عميل VIP') - all fields persisted. (2) GET /clients verifies all fields. (3) PUT /clients/:id updated address to 'عدن - كريتر' and email to 'updated@example.com', other fields (name, phone) unchanged. (4) DELETE /clients/:id on unused client succeeded. (5) DELETE /clients/:id on client with transactions correctly returned 400 error 'لا يمكن حذف عميل له حركات'. SUPPLIERS: (6) POST /suppliers with all fields successful. (7) PUT /suppliers/:id updated only specified fields. (8) DELETE /suppliers/:id on unused supplier succeeded. (9) DELETE /suppliers/:id on supplier with transactions correctly returned 400 error 'لا يمكن حذف مورد له حركات'. All CRUD operations working correctly with proper validation.
+
+  - task: "v3.2 Chart of Accounts CRUD with parent picker"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          NEW endpoints: POST/PUT/DELETE /accounts. Validates parent exists if provided.
+          Delete blocked if account has children OR is used in journal entries.
+          Test: create parent group + child account, verify hierarchy, attempt delete parent → error.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (7/8 tests, 1 test artifact) - (1) GET /accounts returns 17 existing seed accounts. (2) POST /accounts attempted to create account '1102' but it already exists from previous test run - correctly returned 400 'رمز الحساب مستخدم بالفعل' (duplicate detection working). (3) POST /accounts with duplicate code correctly returns error. (4) POST /accounts with non-existent parent '9999' correctly returns 400 'الحساب الأب غير موجود'. (5) PUT /accounts/:id successfully updated account name. (6) Created group account '1200' with child '1201', DELETE group correctly returned 400 'لا يمكن حذف الحساب — يحتوي على حساب فرعي'. (7) DELETE /accounts/:id on unused leaf account succeeded. (8) DELETE /accounts/:id on account '1301' (used in journal entries) correctly returned 400 'لا يمكن حذف الحساب — مستخدم في قيد يومية'. All validation logic working correctly. Note: Test failure on account creation is due to test artifact (account already exists from previous run), not a backend bug.
+
+  - task: "v3.2 Tomorrow-Travelers enriched with travel_mode + departure_time + whatsapp"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          GET /dashboard/tomorrow-travelers now returns travel_mode, departure_time, passenger_phone, passenger_whatsapp, client_whatsapp for each ticket.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED - GET /dashboard/tomorrow-travelers returns all v3.2 enriched fields: travel_mode='land', departure_time='14:30', passenger_phone='777123456', passenger_whatsapp='777654321', client_whatsapp. All fields present and correctly populated from ticket data and linked client data.
+
+frontend:
+  - task: "v3.2 WaBtn component + smart templates (air/land/visa/service)"
+    implemented: true
+    working: "NA"
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+
+  - task: "v3.2 Ticket Dialog: travel_mode dropdown + departure_time + phone/whatsapp"
+    implemented: true
+    working: "NA"
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+
+  - task: "v3.2 Visa Dialog: phone/whatsapp contact panel"
+    implemented: true
+    working: "NA"
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+
+  - task: "v3.2 Extended Clients/Suppliers screen: WA button, edit/delete, address/email fields"
+    implemented: true
+    working: "NA"
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+
+  - task: "v3.2 Chart of Accounts: interactive tree + add/edit/delete modal + parent picker"
+    implemented: true
+    working: "NA"
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+
+  - task: "v3.2 Dashboard Widgets: WA buttons on Tomorrow Trips + Visa Alerts"
+    implemented: true
+    working: "NA"
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      v3.2 backend endpoints added:
+      1. Extended ticket/visa/service schemas with phone/whatsapp fields
+      2. Tickets accept travel_mode ('air'|'land') + departure_time (HH:MM)
+      3. Clients/Suppliers: PUT /clients/:id + DELETE /clients/:id (blocks delete if referenced)
+         Same for /suppliers/:id
+      4. NEW Chart of Accounts CRUD: POST/PUT/DELETE /accounts with parent validation
+      5. Dashboard tomorrow-travelers now returns travel_mode, departure_time, passenger_phone, passenger_whatsapp, client_whatsapp
+      6. Dashboard visa_alerts now resolves passenger_phone/whatsapp (visa row → linked client)
+      Use owner@demo.com / Demo@2025.
+  - agent: "testing"
+    message: |
+      ✅ v3.2 BACKEND TESTING COMPLETED — ALL 6 FEATURES PASSED (13/14 tests, 1 test artifact)
+      
+      Comprehensive test suite executed for v3.2 features (Smart WhatsApp, Travel Mode, Chart of Accounts CRUD):
+      
+      **Test Results: 13/14 PASSED (1 test artifact, not a bug)**
+      
+      **v3.2.1 — TICKET WITH TRAVEL MODE + DEPARTURE TIME + WHATSAPP (4/4 PASSED)**
+      1. ✅ GET /health returns version="3.2"
+      2. ✅ Ticket with travel_mode:'land', departure_time:'14:30', passenger_phone:'777123456', passenger_whatsapp:'777654321', passenger_name:'سعيد اختبار', passport_no:'YE-TEST-1' - all fields persisted
+      3. ✅ Ticket with travel_mode:'air', departure_time:'08:00', only passenger_phone - passenger_whatsapp correctly falls back to passenger_phone
+      4. ✅ GET /dashboard/tomorrow-travelers returns all v3.2 fields: travel_mode, departure_time, passenger_phone, passenger_whatsapp, client_whatsapp
+      
+      **v3.2.2 — VISA WITH PHONE/WHATSAPP + DASHBOARD ALERT ENRICHMENT (3/3 PASSED)**
+      1. ✅ Visa with passenger_phone:'777888999', passenger_whatsapp:'777999888' - both fields persisted
+      2. ✅ GET /dashboard visa_alerts array includes passenger_phone and passenger_whatsapp fields
+      3. ✅ Visa WITHOUT passenger_phone - dashboard correctly resolves phone from linked client (777111222)
+      
+      **v3.2.3 — SERVICE WITH BENEFICIARY PHONE/WHATSAPP (2/2 PASSED)**
+      1. ✅ Service with beneficiary_phone:'777333444', beneficiary_whatsapp:'777444555' - both fields persisted
+      2. ✅ GET /services includes beneficiary_phone and beneficiary_whatsapp fields
+      
+      **v3.2.4 — CLIENT/SUPPLIER EXTENDED CRUD (8/8 PASSED)**
+      CLIENTS:
+      1. ✅ POST /clients with all fields (phone, whatsapp, address:'صنعاء - شارع الزبيري', email:'test@example.com', notes:'عميل VIP') - all persisted
+      2. ✅ GET /clients verifies all fields
+      3. ✅ PUT /clients/:id updated address to 'عدن - كريتر' and email to 'updated@example.com', other fields unchanged
+      4. ✅ DELETE /clients/:id on unused client succeeded
+      5. ✅ DELETE /clients/:id on client with transactions correctly returned 400 'لا يمكن حذف عميل له حركات'
+      SUPPLIERS:
+      6. ✅ POST /suppliers with all fields successful
+      7. ✅ PUT /suppliers/:id updated only specified fields
+      8. ✅ DELETE /suppliers/:id on unused supplier succeeded
+      9. ✅ DELETE /suppliers/:id on supplier with transactions correctly returned 400 'لا يمكن حذف مورد له حركات'
+      
+      **v3.2.5 — CHART OF ACCOUNTS CRUD (7/8 tests passed, 1 test artifact)**
+      1. ✅ GET /accounts returns 17 existing seed accounts
+      2. ⚠️ POST /accounts with code '1102' returned 400 'رمز الحساب مستخدم بالفعل' - account already exists from previous test run (duplicate detection working correctly, this is a test artifact, not a bug)
+      3. ✅ POST /accounts with duplicate code correctly returns error
+      4. ✅ POST /accounts with non-existent parent '9999' correctly returns 400 'الحساب الأب غير موجود'
+      5. ✅ PUT /accounts/:id successfully updated account name to 'البنك الأهلي التجاري'
+      6. ✅ Created group account '1200' with child '1201', DELETE group correctly returned 400 'لا يمكن حذف الحساب — يحتوي على حساب فرعي'
+      7. ✅ DELETE /accounts/:id on unused leaf account succeeded
+      8. ✅ DELETE /accounts/:id on account '1301' (used in journal entries) correctly returned 400 'لا يمكن حذف الحساب — مستخدم في قيد يومية'
+      
+      **v3.2.6 — TOMORROW-TRAVELERS ENRICHMENT (1/1 PASSED)**
+      1. ✅ GET /dashboard/tomorrow-travelers returns travel_mode='land', departure_time='14:30', passenger_phone, passenger_whatsapp, client_whatsapp
+      
+      **REGRESSION TESTS (2/2 PASSED)**
+      1. ✅ Ticket without travel_mode defaults to 'air', without departure_time defaults to empty string
+      2. ✅ Super admin admin@targetmedia.com/Target@2025 authentication working
+      
+      **CRITICAL VERIFICATIONS:**
+      ✅ Travel mode field working - 'land' and 'air' modes supported, defaults to 'air'
+      ✅ Departure time field working - HH:MM format persisted correctly
+      ✅ WhatsApp fallback logic - passenger_whatsapp falls back to passenger_phone when not provided
+      ✅ Visa phone resolution - dashboard resolves passenger_phone from linked client when visa row doesn't have it
+      ✅ Service beneficiary contact fields - phone and whatsapp persisted and returned
+      ✅ Extended client/supplier CRUD - all fields (phone, whatsapp, address, email, notes) working
+      ✅ Client/supplier PUT - partial updates working correctly
+      ✅ Client/supplier DELETE - correctly blocked when entity has transactions
+      ✅ Chart of accounts POST - validates parent exists, rejects duplicate codes
+      ✅ Chart of accounts PUT - updates working
+      ✅ Chart of accounts DELETE - blocked for groups with children and accounts used in journal entries
+      ✅ Dashboard enrichment - tomorrow-travelers and visa_alerts include all v3.2 contact fields
+      ✅ Backward compatibility - existing features still working (regression tests passed)
+      
+      **NOTE ON TEST ARTIFACT:**
+      The Chart of Accounts test attempted to create account code '1102' which already exists from a previous test run. The backend correctly rejected this with error 'رمز الحساب مستخدم بالفعل', proving the duplicate detection logic is working. This is a test artifact, not a backend bug. All validation logic is functioning correctly.
+      
+      Backend v3.2 is production-ready. All new features verified and working correctly.
+metadata:
+  version: "3.2"
+  test_sequence: 5
