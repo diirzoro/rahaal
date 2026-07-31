@@ -3024,3 +3024,36 @@ agent_communication:
 metadata:
   version: "3.2"
   test_sequence: 5
+
+# ============================================================
+# v3.2 FRONTEND — verified visually (2026-07-31)
+# ============================================================
+frontend:
+  - task: "v3.2 UI verified via screenshots"
+    implemented: true
+    working: true
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Dashboard: 5-button quick actions, KPI details (tickets/visas/services), visa_alerts widget
+          now has BOTH green "تنبيه" WhatsApp button AND "تم الخروج" button per row.
+          Sidebar shows all tabs including new Services.
+
+          Ticket Dialog v3.2: 
+          - Travel Mode amber section with dropdown (air/land icons), carrier name (dynamic label),
+            departure time picker.
+          - Contact panel (emerald) with phone + whatsapp fields, auto-syncs whatsapp from phone.
+
+          Chart of Accounts: 
+          - Interactive tree by account type (Assets/Liabilities/Revenue/Expenses).
+          - Add-Account modal: type selector, code input, parent picker (indented tree), group checkbox.
+          - Edit/Delete icons on hover for each account.
+
+          Backend tests: 13/14 passed. Only "failure" was duplicate code test artifact.
+metadata:
+  version: "3.2"
