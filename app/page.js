@@ -605,6 +605,7 @@ const NAV = [
   { id: 'chart',     label: 'الدليل المحاسبي', icon: BookOpenText, color: 'from-purple-600 to-fuchsia-500' },
   { id: 'journal',   label: 'قيود اليومية', icon: ReceiptText, color: 'from-slate-700 to-slate-500' },
   { id: 'reports',   label: 'التقارير المالية', icon: BarChart3, color: 'from-cyan-600 to-blue-500' },
+  { id: 'affiliate', label: 'التسويق بالعمولة', icon: User, color: 'from-emerald-600 to-teal-500' },
   { id: 'settings',  label: 'إعدادات المكتب', icon: Settings, color: 'from-slate-800 to-slate-600' },
 ]
 
@@ -3594,6 +3595,466 @@ function ReferralsTab() {
   )
 }
 
+// ================================================================
+// v3.4 — Permissions Dialog + Affiliate Screen
+// ================================================================
+const PERMISSION_GROUPS = [
+  {
+    title: '🎫 التذاكر', keys: [
+      { k: 'tickets_view', l: 'عرض التذاكر' },
+      { k: 'tickets_add',  l: 'إضافة تذكرة' },
+      { k: 'tickets_edit', l: 'تعديل تذكرة' },
+      { k: 'tickets_delete', l: 'حذف تذكرة' },
+    ]
+  },
+  {
+    title: '🛂 التأشيرات', keys: [
+      { k: 'visas_view', l: 'عرض التأشيرات' },
+      { k: 'visas_add', l: 'إضافة تأشيرة' },
+      { k: 'visas_edit', l: 'تعديل تأشيرة' },
+      { k: 'visas_delete', l: 'حذف تأشيرة' },
+    ]
+  },
+  {
+    title: '🛎️ الخدمات', keys: [
+      { k: 'services_view', l: 'عرض الخدمات' },
+      { k: 'services_add', l: 'إضافة خدمة' },
+      { k: 'services_edit', l: 'تعديل خدمة' },
+      { k: 'services_delete', l: 'حذف خدمة' },
+    ]
+  },
+  {
+    title: '📊 التقارير والأرباح', keys: [
+      { k: 'reports_view', l: 'الوصول إلى التقارير المالية' },
+      { k: 'show_profit', l: 'إظهار عمود الربح والعمولة' },
+    ]
+  },
+  {
+    title: '💳 السندات والدليل المحاسبي', keys: [
+      { k: 'vouchers_manage', l: 'إدارة سندات القبض/الصرف' },
+      { k: 'accounts_manage', l: 'إدارة الدليل المحاسبي (شجرة الحسابات)' },
+    ]
+  },
+  {
+    title: '💰 الأسعار والخصومات', keys: [
+      { k: 'edit_price', l: 'تعديل السعر المعتمد للتذكرة/الخدمة' },
+      { k: 'apply_discount', l: 'منح خصومات للعميل' },
+    ]
+  },
+]
+
+function PermissionsDialog({ target, onClose, onSaved }) {
+  const [perms, setPerms] = useState({})
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    if (target) setPerms(target.permissions || {})
+  }, [target])
+  const setKey = (k, v) => setPerms(p => ({ ...p, [k]: v }))
+  const setAll = (val) => {
+    const next = {}
+    PERMISSION_GROUPS.forEach(g => g.keys.forEach(({ k }) => next[k] = val))
+    setPerms(next)
+  }
+  const save = async () => {
+    try {
+      setSaving(true)
+      await api(`/tenant/users/${target.id}`, { method: 'PATCH', body: { permissions: perms } })
+      onSaved && onSaved()
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  const allTrue = PERMISSION_GROUPS.every(g => g.keys.every(({ k }) => perms[k]))
+  return (
+    <Dialog open={!!target} onOpenChange={v => !v && onClose()}>
+      <DialogContent dir="rtl" className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-xl">
+            <Key className="w-5 h-5 text-blue-600" /> صلاحيات {target?.name || ''}
+          </DialogTitle>
+          <DialogDescription>حدد بالضبط ما يستطيع هذا الموظف فعله. المالك دائماً لديه صلاحيات كاملة (لا يحتاج ضبط).</DialogDescription>
+        </DialogHeader>
+        <div className="flex gap-2 mb-2 pb-2 border-b">
+          <Button size="sm" variant="outline" onClick={() => setAll(true)} className="text-xs gap-1"><Power className="w-3 h-3 text-emerald-600" /> منح جميع الصلاحيات</Button>
+          <Button size="sm" variant="outline" onClick={() => setAll(false)} className="text-xs gap-1"><Power className="w-3 h-3 text-rose-600" /> إلغاء جميع الصلاحيات</Button>
+          {allTrue && <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100">الصلاحيات كاملة</Badge>}
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {PERMISSION_GROUPS.map(g => (
+            <div key={g.title} className="border rounded-lg p-3 bg-slate-50">
+              <div className="font-bold text-sm text-slate-800 mb-2">{g.title}</div>
+              <div className="space-y-1">
+                {g.keys.map(({ k, l }) => (
+                  <label key={k} className="flex items-center gap-2 p-1.5 rounded hover:bg-white cursor-pointer text-sm">
+                    <input type="checkbox" checked={!!perms[k]} onChange={e => setKey(k, e.target.checked)} className="w-4 h-4 accent-blue-600" />
+                    <span className={perms[k] ? 'font-semibold text-slate-800' : 'text-slate-500'}>{l}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>إلغاء</Button>
+          <Button onClick={save} disabled={saving} className="grad-brand text-white">
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : '💾 حفظ الصلاحيات'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function AffiliateScreen() {
+  const [data, setData] = useState(null)
+  const [pmOpen, setPmOpen] = useState(false)
+  const [editingPm, setEditingPm] = useState(null)
+  const [cashoutOpen, setCashoutOpen] = useState(false)
+  const [applyOpen, setApplyOpen] = useState(false)
+  const load = () => api('/affiliate').then(setData).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [])
+  const copyLink = async () => {
+    try { await navigator.clipboard.writeText(data.link); toast.success('تم نسخ الرابط') } catch (e) { toast.error('تعذّر النسخ') }
+  }
+  const shareBanner = (b) => {
+    const msg = `${b.headline}\n\n${b.body}\n\n${b.cta}: ${data.link}`
+    openWhatsApp('', msg)  // Opens WA share with pre-filled text (no specific number)
+  }
+  const copyBanner = async (b) => {
+    const msg = `${b.headline}\n\n${b.body}\n\n${b.cta}: ${data.link}`
+    try { await navigator.clipboard.writeText(msg); toast.success('تم نسخ نص البانر') } catch (e) { toast.error('تعذّر النسخ') }
+  }
+  if (!data) return <div className="p-8 text-center text-slate-400"><Loader2 className="w-6 h-6 animate-spin mx-auto" /></div>
+  const pct = Math.round((data.commission_rate || 0.1) * 100)
+  const target = data.is_individual ? 'أفراد' : 'مكتب'
+  return (
+    <div className="space-y-6">
+      <TopBar
+        title="التسويق بالعمولة (Affiliate)"
+        subtitle={`اربح ${pct}% من قيمة اشتراك كل مكتب تدعوه عبر رابطك — سواء اشترك شهرياً أو سنوياً`}
+        right={<Badge className="bg-blue-100 text-blue-800 hover:bg-blue-100 border border-blue-200">حسابك: {target}</Badge>}
+      />
+
+      {/* Balance + KPIs */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Card className="grad-brand text-white border-0 shadow-lg">
+          <CardContent className="p-4">
+            <div className="text-xs opacity-90">الرصيد الحالي</div>
+            <div className="text-3xl font-extrabold">${data.balance_usd.toFixed(2)}</div>
+            <div className="text-[10px] opacity-80 mt-1">قابل للسحب أو التحويل للاشتراك</div>
+          </CardContent>
+        </Card>
+        <Card><CardContent className="p-4">
+          <div className="text-xs text-slate-500">إجمالي ما اكتسبته</div>
+          <div className="text-2xl font-bold text-emerald-600">${data.total_earned_usd.toFixed(2)}</div>
+        </CardContent></Card>
+        <Card><CardContent className="p-4">
+          <div className="text-xs text-slate-500">مكاتب أحلتها</div>
+          <div className="text-2xl font-bold text-slate-800">{data.referred_offices}</div>
+          <div className="text-[10px] text-emerald-600 mt-1">{data.activated_offices} نشط • {data.pending_offices} قيد التفعيل</div>
+        </CardContent></Card>
+        <Card><CardContent className="p-4">
+          <div className="text-xs text-slate-500">الحد الأدنى للسحب</div>
+          <div className="text-2xl font-bold text-orange-600">${data.min_cashout_usd}</div>
+        </CardContent></Card>
+      </div>
+
+      {/* Referral link */}
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2"><User className="w-5 h-5 text-blue-600" /> رابط الإحالة الخاص بك</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex gap-2">
+            <div className="flex-1 p-3 bg-slate-50 border-2 border-dashed border-slate-300 rounded-lg font-mono text-xs" dir="ltr">{data.link}</div>
+            <Button onClick={copyLink} className="gap-2"><span>📋</span> نسخ</Button>
+            <WaBtn phone="" message={`جرّب برنامج رحّال لمحاسبة مكاتب السفريات 🚀\nسجّل مجاناً عبر رابطي:\n${data.link}`} size="md" label="مشاركة" />
+          </div>
+          <div className="flex items-center gap-2 text-xs text-slate-600">
+            <span className="font-bold">🔑 كودك:</span>
+            <Badge className="font-mono">{data.code}</Badge>
+            <span>• كل من يسجّل عبر رابطك تكسب <b>{pct}%</b> من قيمة اشتراكه في رصيدك.</span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Marketing banners */}
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2"><ImageIcon className="w-5 h-5 text-orange-600" /> بانرات ونصوص تسويقية جاهزة</CardTitle></CardHeader>
+        <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {data.banners.map(b => (
+            <div key={b.id} className="border-2 border-blue-100 rounded-xl overflow-hidden">
+              <div className="grad-brand p-4 text-white">
+                <div className="text-lg font-extrabold">{b.headline}</div>
+              </div>
+              <div className="p-3 space-y-2 bg-white">
+                <div className="text-xs text-slate-500 font-semibold">{b.title}</div>
+                <div className="text-sm text-slate-700 leading-relaxed">{b.body}</div>
+                <div className="text-sm font-bold text-orange-600">{b.cta} → {data.link}</div>
+                <div className="flex gap-2 pt-2 border-t">
+                  <Button size="sm" onClick={() => copyBanner(b)} variant="outline" className="gap-1 text-xs h-8"><span>📋</span> نسخ النص</Button>
+                  <button onClick={() => shareBanner(b)} className="inline-flex items-center gap-1 h-8 px-3 rounded-md bg-[#25D366] hover:bg-[#128C7E] text-white text-xs font-semibold">
+                    <svg viewBox="0 0 32 32" width={12} height={12} fill="currentColor"><path d="M16.001 3.2C9.075 3.2 3.401 8.874 3.401 15.8c0 2.196.578 4.348 1.677 6.246l-1.876 6.85 7.048-1.848a12.578 12.578 0 0 0 5.751 1.398c6.926 0 12.6-5.674 12.6-12.6S22.927 3.2 16.001 3.2Z"/></svg>
+                    مشاركة على واتساب
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      {/* Payout methods */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle className="flex items-center gap-2"><Wallet className="w-5 h-5 text-emerald-600" /> طرق السحب المحفوظة ({data.payout_methods.length})</CardTitle>
+          <Button onClick={() => { setEditingPm(null); setPmOpen(true) }} className="gap-2 grad-gold text-white"><Plus className="w-4 h-4" /> إضافة طريقة سحب</Button>
+        </CardHeader>
+        <CardContent>
+          {data.payout_methods.length === 0 && (
+            <div className="text-center py-8 text-slate-400 text-sm">لا توجد طرق سحب محفوظة. أضف طريقة قبل طلب السحب.</div>
+          )}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {data.payout_methods.map(m => (
+              <div key={m.id} className={`border-2 rounded-lg p-3 ${m.is_default ? 'border-emerald-400 bg-emerald-50' : 'border-slate-200'}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="font-bold text-slate-800">
+                    {m.method_type === 'bank' ? '🏦 تحويل بنكي' : m.method_type === 'wallet' ? '📱 محفظة رقمية' : '📮 حوالة محلية'}
+                  </div>
+                  {m.is_default && <Badge className="bg-emerald-500 text-white hover:bg-emerald-600">الافتراضية</Badge>}
+                </div>
+                <div className="text-xs space-y-1 text-slate-600">
+                  {m.provider && <div><b>الجهة:</b> {m.provider}</div>}
+                  <div><b>الاسم:</b> {m.account_name}</div>
+                  {m.account_number && <div dir="ltr"><b>الرقم:</b> {m.account_number}</div>}
+                  {m.phone && <div dir="ltr"><b>الهاتف:</b> {m.phone}</div>}
+                  {m.city && <div><b>المدينة:</b> {m.city}</div>}
+                </div>
+                <div className="flex gap-1 mt-3 pt-2 border-t">
+                  <Button size="sm" variant="ghost" onClick={() => { setEditingPm(m); setPmOpen(true) }} className="h-7 px-2 text-xs gap-1"><Pencil className="w-3 h-3" /> تعديل</Button>
+                  <Button size="sm" variant="ghost" onClick={async () => { if (confirm('حذف طريقة السحب؟')) { await api(`/affiliate/payout-methods/${m.id}`, { method: 'DELETE' }); load(); toast.success('تم الحذف') } }} className="h-7 px-2 text-xs text-rose-600 gap-1"><Trash2 className="w-3 h-3" /> حذف</Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Actions */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <Card className="border-2 border-emerald-200">
+          <CardContent className="p-5">
+            <div className="text-lg font-bold text-emerald-700 mb-2">💵 طلب سحب نقدي (Cash Out)</div>
+            <div className="text-xs text-slate-600 mb-3">اسحب رصيدك المكتسب — الحد الأدنى ${data.min_cashout_usd} — عبر إحدى طرق السحب المحفوظة.</div>
+            <Button onClick={() => setCashoutOpen(true)} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white gap-2" disabled={data.balance_usd < data.min_cashout_usd || data.payout_methods.length === 0}>
+              <span>💸</span> طلب سحب رصيدي
+            </Button>
+            {data.payout_methods.length === 0 && <div className="text-[10px] text-rose-600 mt-1 text-center">أضف طريقة سحب أولاً</div>}
+          </CardContent>
+        </Card>
+        <Card className="border-2 border-blue-200">
+          <CardContent className="p-5">
+            <div className="text-lg font-bold text-blue-700 mb-2">🔄 تحويل الرصيد لتغطية الاشتراك</div>
+            <div className="text-xs text-slate-600 mb-3">استخدم رصيد الأفلييت لتغطية اشتراكك الشهري/السنوي أو رسوم الصيانة السنوية بدلاً من الدفع نقداً.</div>
+            <Button onClick={() => setApplyOpen(true)} className="w-full grad-brand text-white gap-2" disabled={data.balance_usd <= 0}>
+              <span>🎫</span> تحويل الرصيد للاشتراك
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Withdrawal history */}
+      {data.withdrawals.length > 0 && (
+        <Card>
+          <CardHeader><CardTitle className="flex items-center gap-2"><ReceiptText className="w-5 h-5 text-slate-600" /> سجل عمليات السحب والتحويل</CardTitle></CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>المبلغ</TableHead><TableHead>الطريقة</TableHead><TableHead>الحالة</TableHead><TableHead>ملاحظات</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {data.withdrawals.map(w => (
+                  <TableRow key={w.id}>
+                    <TableCell className="text-xs">{fmtDate(w.created_at)}</TableCell>
+                    <TableCell className="font-bold">${(w.amount_usd || 0).toFixed(2)}</TableCell>
+                    <TableCell className="text-xs">{w.payout_method_snapshot?.method_type === 'subscription' ? 'اشتراك (رصيد داخلي)' : (w.payout_method_snapshot?.provider || w.payout_method_snapshot?.method_type || '—')}</TableCell>
+                    <TableCell>
+                      {w.status === 'pending' && <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100">قيد المراجعة</Badge>}
+                      {w.status === 'processing' && <Badge className="bg-blue-100 text-blue-800 hover:bg-blue-100">جاري التنفيذ</Badge>}
+                      {w.status === 'paid' && <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100">تم الدفع</Badge>}
+                      {w.status === 'rejected' && <Badge className="bg-rose-100 text-rose-800 hover:bg-rose-100">مرفوض</Badge>}
+                      {w.status === 'applied_to_subscription' && <Badge className="bg-purple-100 text-purple-800 hover:bg-purple-100">تم التحويل للاشتراك</Badge>}
+                    </TableCell>
+                    <TableCell className="text-xs text-slate-500">{w.notes || '—'}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      <PayoutMethodDialog open={pmOpen} onOpenChange={setPmOpen} editing={editingPm} onSaved={() => { setPmOpen(false); setEditingPm(null); load() }} />
+      <CashoutDialog open={cashoutOpen} onOpenChange={setCashoutOpen} data={data} onSaved={() => { setCashoutOpen(false); load() }} />
+      <ApplyToSubscriptionDialog open={applyOpen} onOpenChange={setApplyOpen} data={data} onSaved={() => { setApplyOpen(false); load() }} />
+    </div>
+  )
+}
+
+function PayoutMethodDialog({ open, onOpenChange, editing, onSaved }) {
+  const [f, setF] = useState({ method_type: 'wallet', provider: '', account_name: '', account_number: '', phone: '', city: '', is_default: false, notes: '' })
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    if (!open) return
+    if (editing) setF({
+      method_type: editing.method_type, provider: editing.provider || '',
+      account_name: editing.account_name, account_number: editing.account_number || '',
+      phone: editing.phone || '', city: editing.city || '', is_default: !!editing.is_default, notes: editing.notes || '',
+    })
+    else setF({ method_type: 'wallet', provider: '', account_name: '', account_number: '', phone: '', city: '', is_default: false, notes: '' })
+  }, [open, editing])
+  const save = async () => {
+    if (!f.account_name) return toast.error('اسم صاحب الحساب مطلوب')
+    try {
+      setSaving(true)
+      if (editing) await api(`/affiliate/payout-methods/${editing.id}`, { method: 'PUT', body: f })
+      else await api('/affiliate/payout-methods', { method: 'POST', body: f })
+      toast.success(editing ? 'تم التحديث' : 'تمت الإضافة')
+      onSaved()
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  const typeLabel = { bank: '🏦 تحويل بنكي', wallet: '📱 محفظة رقمية', local_remittance: '📮 حوالة محلية' }
+  const providerPlaceholder = f.method_type === 'bank' ? 'اسم البنك (البنك اليمني، بنك الكريمي...)' : f.method_type === 'wallet' ? 'اسم المحفظة (كريمي، جوالي، فلوسي، الكيبل...)' : 'اسم شبكة الحوالة (النجم، الإمتياز، بن دوّل...)'
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent dir="rtl" className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Wallet className="w-5 h-5 text-emerald-600" /> {editing ? 'تعديل طريقة سحب' : 'إضافة طريقة سحب جديدة'}</DialogTitle>
+          <DialogDescription>احفظ بيانات السحب لمرة واحدة، وستُستخدم تلقائياً عند طلب السحب في المرات القادمة.</DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="md:col-span-2"><Field label="نوع طريقة السحب" required>
+            <Select value={f.method_type} onValueChange={v => setF({ ...f, method_type: v })}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="bank">🏦 تحويل بنكي (IBAN)</SelectItem>
+                <SelectItem value="wallet">📱 محفظة رقمية (Creami, Jawali, Floosak...)</SelectItem>
+                <SelectItem value="local_remittance">📮 حوالة محلية (النجم، الإمتياز، بن دوّل...)</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field></div>
+          <div className="md:col-span-2"><Field label="الجهة/المُقدّم"><Input value={f.provider} onChange={e => setF({ ...f, provider: e.target.value })} placeholder={providerPlaceholder} /></Field></div>
+          <Field label="اسم صاحب الحساب" required><Input value={f.account_name} onChange={e => setF({ ...f, account_name: e.target.value })} /></Field>
+          <Field label={f.method_type === 'bank' ? 'رقم الحساب / IBAN' : 'رقم الهاتف / المرجع'}><Input dir="ltr" value={f.account_number} onChange={e => setF({ ...f, account_number: e.target.value })} /></Field>
+          <Field label="رقم الهاتف (للتواصل عند الحوالة)"><Input dir="ltr" value={f.phone} onChange={e => setF({ ...f, phone: e.target.value })} /></Field>
+          <Field label="المدينة"><Input value={f.city} onChange={e => setF({ ...f, city: e.target.value })} /></Field>
+          <div className="md:col-span-2"><Field label="ملاحظات"><Input value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} placeholder="أي تعليمات إضافية لتنفيذ الحوالة" /></Field></div>
+          <div className="md:col-span-2">
+            <label className="flex items-center gap-2 cursor-pointer p-2 bg-emerald-50 rounded-md border border-emerald-200">
+              <input type="checkbox" checked={f.is_default} onChange={e => setF({ ...f, is_default: e.target.checked })} className="w-4 h-4 accent-emerald-600" />
+              <span className="text-sm font-semibold">اجعل هذه الطريقة الافتراضية</span>
+            </label>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
+          <Button onClick={save} disabled={saving} className="grad-gold text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (editing ? '💾 حفظ التعديل' : 'إضافة')}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function CashoutDialog({ open, onOpenChange, data, onSaved }) {
+  const [amount, setAmount] = useState('')
+  const [pmId, setPmId] = useState('')
+  const [notes, setNotes] = useState('')
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    if (!open) return
+    setAmount(''); setNotes('')
+    const def = data.payout_methods?.find(m => m.is_default) || data.payout_methods?.[0]
+    setPmId(def?.id || '')
+  }, [open, data])
+  const submit = async () => {
+    const amt = Number(amount) || 0
+    if (amt < data.min_cashout_usd) return toast.error(`الحد الأدنى ${data.min_cashout_usd} USD`)
+    if (amt > data.balance_usd) return toast.error('المبلغ يتجاوز رصيدك')
+    if (!pmId) return toast.error('اختر طريقة السحب')
+    try {
+      setSaving(true)
+      await api('/affiliate/cashout', { method: 'POST', body: { amount_usd: amt, payout_method_id: pmId, notes } })
+      toast.success('✅ تم إرسال طلب السحب — قيد المراجعة')
+      onSaved()
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent dir="rtl" className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>💸 طلب سحب رصيد الأفلييت</DialogTitle>
+          <DialogDescription>الرصيد المتاح: <b>${data.balance_usd.toFixed(2)}</b> • الحد الأدنى: <b>${data.min_cashout_usd}</b></DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <Field label="المبلغ المطلوب (USD)" required>
+            <Input type="number" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} className="text-xl font-bold" />
+          </Field>
+          <Field label="طريقة السحب" required>
+            <Select value={pmId} onValueChange={setPmId}>
+              <SelectTrigger><SelectValue placeholder="اختر..." /></SelectTrigger>
+              <SelectContent>
+                {(data.payout_methods || []).map(m => (
+                  <SelectItem key={m.id} value={m.id}>
+                    {m.method_type === 'bank' ? '🏦' : m.method_type === 'wallet' ? '📱' : '📮'} {m.provider || m.method_type} — {m.account_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="ملاحظات (اختياري)"><Input value={notes} onChange={e => setNotes(e.target.value)} /></Field>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
+          <Button onClick={submit} disabled={saving} className="bg-emerald-600 hover:bg-emerald-700 text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : '💵 إرسال طلب السحب'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ApplyToSubscriptionDialog({ open, onOpenChange, data, onSaved }) {
+  const [amount, setAmount] = useState('')
+  const [saving, setSaving] = useState(false)
+  useEffect(() => { if (open) setAmount(data.balance_usd.toFixed(2)) }, [open, data])
+  const submit = async () => {
+    const amt = Number(amount) || 0
+    if (amt <= 0) return toast.error('أدخل مبلغاً صالحاً')
+    if (amt > data.balance_usd) return toast.error('المبلغ يتجاوز رصيدك')
+    try {
+      setSaving(true)
+      await api('/affiliate/apply-to-subscription', { method: 'POST', body: { amount_usd: amt } })
+      toast.success('✅ تم تحويل الرصيد لتغطية الاشتراك')
+      onSaved()
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent dir="rtl" className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>🔄 تحويل الرصيد لتغطية الاشتراك</DialogTitle>
+          <DialogDescription>سيتم خصم المبلغ من رصيد الأفلييت وإضافته كرصيد اشتراك يُستخدم تلقائياً عند التجديد.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm">
+            💰 رصيد الأفلييت الحالي: <b className="text-emerald-700">${data.balance_usd.toFixed(2)}</b>
+          </div>
+          <Field label="المبلغ (USD)" required>
+            <Input type="number" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} className="text-xl font-bold" />
+          </Field>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
+          <Button onClick={submit} disabled={saving} className="grad-brand text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : '🎫 تحويل الآن'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function OfficeSettings() {
   const { settings, refreshMe, user, tenant } = useAuth()
   const [f, setF] = useState({
@@ -3604,6 +4065,7 @@ function OfficeSettings() {
   const [users, setUsers] = useState([])
   const [newUser, setNewUser] = useState({ name: '', email: '', password: '', role: 'staff' })
   const [addingUser, setAddingUser] = useState(false)
+  const [permTarget, setPermTarget] = useState(null)
   const logoRef = useRef(null)
 
   useEffect(() => {
@@ -3640,6 +4102,11 @@ function OfficeSettings() {
 
   const toggleUser = async (u) => {
     try { await api(`/tenant/users/${u.id}`, { method: 'PATCH', body: { active: !u.active } }); setUsers(await api('/tenant/users')) }
+    catch (e) { toast.error(e.message) }
+  }
+  const deleteUser = async (u) => {
+    if (!confirm(`حذف الموظف ${u.name} (${u.email})؟`)) return
+    try { await api(`/tenant/users/${u.id}`, { method: 'DELETE' }); setUsers(await api('/tenant/users')); toast.success('تم الحذف') }
     catch (e) { toast.error(e.message) }
   }
 
@@ -3703,8 +4170,11 @@ function OfficeSettings() {
                 <Field label="كلمة المرور"><Input dir="ltr" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} /></Field>
                 <Button onClick={addUser} disabled={addingUser} className="grad-brand text-white gap-2">{addingUser ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} إضافة موظف</Button>
               </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 text-xs text-amber-900">
+                <b>ℹ️ تنويه:</b> المالك (Owner) يحصل تلقائياً على كافة الصلاحيات. الموظف الجديد يبدأ بصلاحيات محدودة (عرض وإضافة التذاكر/التأشيرات/الخدمات فقط). اضغط على <b>"تعديل الصلاحيات"</b> بجانب اسم الموظف لضبط ما يستطيع فعله.
+              </div>
               <Table>
-                <TableHeader><TableRow><TableHead>الاسم</TableHead><TableHead>البريد</TableHead><TableHead>الدور</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">إجراء</TableHead></TableRow></TableHeader>
+                <TableHeader><TableRow><TableHead>الاسم</TableHead><TableHead>البريد</TableHead><TableHead>الدور</TableHead><TableHead>الحالة</TableHead><TableHead className="text-center">الصلاحيات</TableHead><TableHead className="text-left">إجراء</TableHead></TableRow></TableHeader>
                 <TableBody>
                   {users.map(u => (
                     <TableRow key={u.id}>
@@ -3712,13 +4182,30 @@ function OfficeSettings() {
                       <TableCell dir="ltr" className="text-xs">{u.email}</TableCell>
                       <TableCell><Badge variant={u.role === 'owner' ? 'default' : 'outline'}>{u.role === 'owner' ? 'مالك' : 'موظف'}</Badge></TableCell>
                       <TableCell><Badge className={u.active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100' : 'bg-rose-100 text-rose-700 hover:bg-rose-100'}>{u.active ? 'نشط' : 'موقوف'}</Badge></TableCell>
-                      <TableCell className="text-left">{u.role !== 'owner' && <Button size="sm" variant="outline" onClick={() => toggleUser(u)}><Power className="w-3 h-3" /></Button>}</TableCell>
+                      <TableCell className="text-center">
+                        {u.role === 'owner' ? (
+                          <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100">كاملة</Badge>
+                        ) : (
+                          <Button size="sm" variant="outline" onClick={() => setPermTarget(u)} className="gap-1 h-7 text-xs">
+                            <Key className="w-3 h-3" /> تعديل الصلاحيات
+                          </Button>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-left">
+                        {u.role !== 'owner' && (
+                          <div className="flex gap-1 justify-end">
+                            <Button size="sm" variant="outline" onClick={() => toggleUser(u)} title={u.active ? 'إيقاف' : 'تفعيل'}><Power className="w-3 h-3" /></Button>
+                            <Button size="sm" variant="outline" onClick={() => deleteUser(u)} className="text-rose-600" title="حذف"><Trash2 className="w-3 h-3" /></Button>
+                          </div>
+                        )}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
             </CardContent>
           </Card>
+          <PermissionsDialog target={permTarget} onClose={() => setPermTarget(null)} onSaved={() => { setPermTarget(null); api('/tenant/users').then(setUsers).catch(() => {}); toast.success('تم حفظ الصلاحيات') }} />
         </TabsContent>
 
         <TabsContent value="rates" className="mt-4">
@@ -3906,6 +4393,7 @@ function TenantApp() {
         {tab === 'journal' && <JournalScreen />}
         {tab === 'reports' && <ReportsScreen />}
         {tab === 'settings' && user.role === 'owner' && <OfficeSettings />}
+        {tab === 'affiliate' && <AffiliateScreen />}
 
         {/* v2.8.1 — Global footer with contact + Target Media badge */}
         <div className="mt-8 pt-4 border-t border-slate-200 text-center text-xs text-slate-500 space-y-2">

@@ -3262,3 +3262,259 @@ frontend:
 
 metadata:
   version: "3.3"
+
+# ============================================================
+# v3.4 — Permissions + Affiliate Module (2026-07-31)
+# ============================================================
+backend:
+  - task: "v3.4 Employee Permissions (18 flags across 6 groups)"
+    implemented: true
+    working: "NA"
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          DEFAULT_STAFF_PERMISSIONS object with 18 flags across 6 groups:
+            - Tickets: view/add/edit/delete
+            - Visas: view/add/edit/delete
+            - Services: view/add/edit/delete
+            - Reports: reports_view, show_profit
+            - Vouchers/Accounts: vouchers_manage, accounts_manage
+            - Prices/Discounts: edit_price, apply_discount
+          Owner role gets ownerPermissions() automatically (all true).
+          /auth/me and /tenant/users GET now return permissions in user object.
+          POST /tenant/users: new employees get limited defaults (view/add tickets+visas+services only).
+          PATCH /tenant/users/:id accepts permissions object — sanitized against DEFAULT keys.
+          DELETE /tenant/users/:id (new) — blocked if user is owner.
+          Test: create staff user, verify defaults returned, PATCH permissions, verify sanitization ignores unknown keys.
+
+  - task: "v3.4 Affiliate Module (link, balance, banners, payout methods, cashout)"
+    implemented: true
+    working: "NA"
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Commission rate: 10%. Cashout minimums: $10 individual / $50 office.
+          Endpoints:
+            - GET /affiliate → { code, link, balance_usd, total_earned_usd, commission_rate, min_cashout_usd, is_individual, referred_offices, activated_offices, pending_offices, withdrawals[], payout_methods[], banners[] }
+            - GET/POST /affiliate/payout-methods (method_type: bank/wallet/local_remittance, provider, account_name, account_number, phone, city, is_default, notes)
+            - PUT/DELETE /affiliate/payout-methods/:id
+            - POST /affiliate/cashout ({amount_usd, payout_method_id, notes}) — validates min, sufficient balance, creates cashout_requests doc with status='pending', reserves funds by decrementing balance_usd + incrementing reserved_usd
+            - POST /affiliate/apply-to-subscription ({amount_usd}) — moves balance to tenant.subscription_credit_usd
+            - POST /affiliate/dev-seed-balance ({amount_usd, is_individual}) — TEST-ONLY: credits balance for demo purposes
+          NO USDT — only bank/wallet/local_remittance (per user's regulatory requirement).
+          Test: seed 200 USD, add payout method, request cashout $50, verify balance decrements and request pending.
+
+frontend:
+  - task: "v3.4 Permissions Dialog in Settings→Users"
+    implemented: true
+    working: "NA"
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+
+  - task: "v3.4 Affiliate Screen (sidebar tab 'التسويق بالعمولة')"
+    implemented: true
+    working: "NA"
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          New sidebar tab "التسويق بالعمولة" (User icon, emerald→teal gradient).
+          AffiliateScreen shows:
+            1. KPI cards: current balance ($), total earned, referred offices (active/pending), min cashout
+            2. Referral link section with copy + WhatsApp share button
+            3. Marketing banners with copy-text + WhatsApp share buttons
+            4. Payout methods manager (add/edit/delete + set default)
+            5. Cashout dialog (validates min amount) + Apply-to-subscription dialog
+            6. Withdrawal history table with color-coded statuses
+          Uses PayoutMethodDialog, CashoutDialog, ApplyToSubscriptionDialog sub-components.
+
+test_plan:
+  current_focus:
+    - "v3.4 Employee Permissions (18 flags across 6 groups)"
+    - "v3.4 Affiliate Module (link, balance, banners, payout methods, cashout)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      v3.4 backend added:
+      1. Permissions: DEFAULT_STAFF_PERMISSIONS (18 flags), owner auto-all=true, PATCH sanitized
+      2. Affiliate: GET /affiliate returns full dashboard payload
+         GET/POST /affiliate/payout-methods (3 types: bank/wallet/local_remittance — NO USDT)
+         POST /affiliate/cashout (min $10 individual / $50 office, deducts + reserves)
+         POST /affiliate/apply-to-subscription (moves balance to subscription_credit_usd)
+         POST /affiliate/dev-seed-balance (TEST-ONLY helper to seed balance)
+      Use owner@demo.com / Demo@2025. Please regression-check that v3.3 features still work.
+metadata:
+  version: "3.4"
+
+
+  - agent: "testing"
+    message: |
+      ✅ v3.4 BACKEND TESTING COMPLETED — ALL 26 TESTS PASSED
+      
+      Comprehensive test suite executed for v3.4 features (Employee Permissions, Affiliate Module, Individual vs Office minimums):
+      
+      **Test Results: 26/26 PASSED**
+      
+      **v3.4.1 — EMPLOYEE PERMISSIONS (5/5 PASSED)**
+      1. ✅ GET /health returns version="3.4"
+      2. ✅ GET /auth/me returns user.permissions object with 18 keys, all true for owner role
+         - Verified all 18 permission keys present: tickets_view, tickets_add, tickets_edit, tickets_delete, visas_view, visas_add, visas_edit, visas_delete, services_view, services_add, services_edit, services_delete, reports_view, show_profit, vouchers_manage, accounts_manage, edit_price, apply_discount
+      3. ✅ GET /tenant/users returns all users with permissions object, owner shows all-true
+      4. ✅ PATCH /tenant/users/:id updates permissions correctly, invalid keys filtered out (tested with invalid_key which was correctly ignored)
+      5. ✅ DELETE /tenant/users/OWNER_ID correctly blocked with Arabic error "لا يمكن حذف حساب المالك"
+      
+      **v3.4.2 — AFFILIATE MODULE (11/11 PASSED)**
+      1. ✅ GET /affiliate returns complete structure with all required fields:
+         - code, link, balance_usd, total_earned_usd, commission_rate (0.1), min_cashout_usd (50 for office), is_individual (false), referred_offices, activated_offices, pending_offices, withdrawals[], payout_methods[], banners[] (2 items)
+      2. ✅ POST /affiliate/dev-seed-balance credits $200 to balance successfully
+      3. ✅ POST /affiliate/payout-methods validation:
+         - Invalid method_type (usdt) correctly rejected with "نوع طريقة السحب غير صالح"
+         - Missing account_name correctly rejected with 400
+      4. ✅ POST /affiliate/payout-methods creates wallet payout method (provider: كريمي, account_name: أحمد الاختبار, phone: 777123456, is_default: true)
+      5. ✅ POST /affiliate/payout-methods creates bank payout method (provider: البنك اليمني للإنشاء, account_name: مكتب رحال, account_number: YE-IBAN-123, is_default: false)
+      6. ✅ GET /affiliate/payout-methods lists 2+ methods with correct default flags (wallet is_default=true, bank is_default=false)
+      7. ✅ PUT /affiliate/payout-methods/:id sets bank as default, wallet no longer default (only one default at a time)
+      8. ✅ POST /affiliate/cashout validation:
+         - Amount below minimum ($30 < $50 office) correctly rejected with "الحد الأدنى للسحب هو 50 USD"
+         - Amount above balance correctly rejected with "الرصيد غير كافٍ"
+         - Missing payout_method_id correctly rejected with 400
+      9. ✅ POST /affiliate/cashout with $60 successful:
+         - Balance decreased by $60
+         - Withdrawal in history with status='pending', amount_usd=60, notes='اختبار'
+      10. ✅ POST /affiliate/apply-to-subscription with $50 successful:
+          - Balance decreased by $50
+          - Withdrawal in history with status='applied_to_subscription', amount_usd=50
+      11. ✅ DELETE /affiliate/payout-methods/:id removes wallet successfully
+      
+      **v3.4.3 — INDIVIDUAL vs OFFICE MINIMUMS (4/4 PASSED)**
+      1. ✅ POST /affiliate/dev-seed-balance with is_individual=true sets min_cashout_usd=10
+      2. ✅ POST /affiliate/cashout with $8 (below $10 individual minimum) correctly rejected with "الحد الأدنى ... 10 USD"
+      3. ✅ POST /affiliate/cashout with $12 (above $10 individual minimum) successful
+      4. ✅ POST /affiliate/dev-seed-balance with is_individual=false resets to office mode (min_cashout_usd=50)
+      
+      **REGRESSION TESTS (6/6 PASSED)**
+      1. ✅ GET /services working
+      2. ✅ GET /visas working
+      3. ✅ GET /tickets working
+      4. ✅ GET /dashboard working
+      5. ✅ GET /reports/statement working
+      6. ✅ Login/logout flow working
+      
+      **CRITICAL VERIFICATIONS:**
+      ✅ Employee Permissions: 18 permission flags across 6 groups, owner auto-all=true, PATCH sanitization working
+      ✅ Affiliate Module: Complete structure with code, link, balance, withdrawals, payout methods, banners
+      ✅ Payout Methods: 3 types supported (bank/wallet/local_remittance), NO USDT as per requirement
+      ✅ Cashout Validation: Min amount ($10 individual / $50 office), sufficient balance, payout method required
+      ✅ Cashout Success: Balance decrements, reserves funds, creates cashout_requests with status='pending'
+      ✅ Apply-to-Subscription: Moves balance to subscription_credit_usd, creates virtual cashout with status='applied_to_subscription'
+      ✅ Individual vs Office: Different minimums ($10 vs $50) correctly enforced based on is_individual flag
+      ✅ Withdrawals History: Populated from cashout_requests collection with amount_usd and status fields
+      ✅ Default Payout Method: Only one default at a time, PUT updates correctly
+      ✅ Delete Owner: Correctly blocked with Arabic error message
+      ✅ Regression: All v3.3 and earlier features still working
+      
+      Backend v3.4 is production-ready. All new features verified and working correctly.
+
+backend:
+  - task: "v3.4 Employee Permissions (18 flags across 6 groups)"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          DEFAULT_STAFF_PERMISSIONS object with 18 flags across 6 groups:
+            - Tickets: view/add/edit/delete
+            - Visas: view/add/edit/delete
+            - Services: view/add/edit/delete
+            - Reports: reports_view, show_profit
+            - Vouchers/Accounts: vouchers_manage, accounts_manage
+            - Prices/Discounts: edit_price, apply_discount
+          Owner role gets ownerPermissions() automatically (all true).
+          /auth/me and /tenant/users GET now return permissions in user object.
+          POST /tenant/users: new employees get limited defaults (view/add tickets+visas+services only).
+          PATCH /tenant/users/:id accepts permissions object — sanitized against DEFAULT keys.
+          DELETE /tenant/users/:id (new) — blocked if user is owner.
+          Test: create staff user, verify defaults returned, PATCH permissions, verify sanitization ignores unknown keys.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (5/5 tests) - Employee Permissions fully functional:
+          1. GET /health returns version="3.4"
+          2. GET /auth/me returns user.permissions object with all 18 keys, owner has all=true
+          3. GET /tenant/users returns all users with permissions, owner shows all-true
+          4. PATCH /tenant/users/:id updates permissions, sanitizes invalid keys (invalid_key filtered out)
+          5. DELETE /tenant/users/OWNER_ID blocked with Arabic error "لا يمكن حذف حساب المالك"
+          CRITICAL: All 18 permission keys verified: tickets_view, tickets_add, tickets_edit, tickets_delete, visas_view, visas_add, visas_edit, visas_delete, services_view, services_add, services_edit, services_delete, reports_view, show_profit, vouchers_manage, accounts_manage, edit_price, apply_discount
+
+  - task: "v3.4 Affiliate Module (link, balance, banners, payout methods, cashout)"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Commission rate: 10%. Cashout minimums: $10 individual / $50 office.
+          Endpoints:
+            - GET /affiliate → { code, link, balance_usd, total_earned_usd, commission_rate, min_cashout_usd, is_individual, referred_offices, activated_offices, pending_offices, withdrawals[], payout_methods[], banners[] }
+            - GET/POST /affiliate/payout-methods (method_type: bank/wallet/local_remittance, provider, account_name, account_number, phone, city, is_default, notes)
+            - PUT/DELETE /affiliate/payout-methods/:id
+            - POST /affiliate/cashout ({amount_usd, payout_method_id, notes}) — validates min, sufficient balance, creates cashout_requests doc with status='pending', reserves funds by decrementing balance_usd + incrementing reserved_usd
+            - POST /affiliate/apply-to-subscription ({amount_usd}) — moves balance to tenant.subscription_credit_usd
+            - POST /affiliate/dev-seed-balance ({amount_usd, is_individual}) — TEST-ONLY: credits balance for demo purposes
+          NO USDT — only bank/wallet/local_remittance (per user's regulatory requirement).
+          Test: seed 200 USD, add payout method, request cashout $50, verify balance decrements and request pending.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (15/15 tests) - Affiliate Module fully functional:
+          1. GET /affiliate returns complete structure with all required fields (code, link, balance_usd, total_earned_usd, commission_rate=0.1, min_cashout_usd=50 office, is_individual=false, referred_offices, activated_offices, pending_offices, withdrawals[], payout_methods[], banners[2])
+          2. POST /affiliate/dev-seed-balance credits $200 successfully
+          3. Payout method validation: invalid method_type (usdt) rejected with "نوع طريقة السحب غير صالح", missing account_name rejected
+          4. POST /affiliate/payout-methods creates wallet (كريمي, أحمد الاختبار, 777123456, is_default=true)
+          5. POST /affiliate/payout-methods creates bank (البنك اليمني للإنشاء, مكتب رحال, YE-IBAN-123, is_default=false)
+          6. GET /affiliate/payout-methods lists 2+ methods with correct defaults
+          7. PUT /affiliate/payout-methods/:id sets bank as default, wallet no longer default
+          8. Cashout validation: below min ($30<$50) rejected, above balance rejected, missing payout_method_id rejected
+          9. POST /affiliate/cashout $60 successful: balance decreased, withdrawal in history with status='pending', amount_usd=60
+          10. POST /affiliate/apply-to-subscription $50 successful: balance decreased, withdrawal with status='applied_to_subscription'
+          11. DELETE /affiliate/payout-methods/:id removes wallet
+          12. Individual mode: is_individual=true sets min_cashout_usd=10
+          13. Individual cashout below $10 rejected
+          14. Individual cashout $12 successful
+          15. Reset to office mode: is_individual=false sets min_cashout_usd=50
+          CRITICAL: Withdrawals populated from cashout_requests collection with amount_usd field. Only one default payout method at a time. Individual vs office minimums correctly enforced.
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"

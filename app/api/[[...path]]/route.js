@@ -86,6 +86,31 @@ async function seedTenantDefaults(db, tenantId) {
   })
 }
 
+// v3.4 — Employee permissions defaults (owner has all=true implicitly)
+const DEFAULT_STAFF_PERMISSIONS = {
+  tickets_view: true, tickets_add: true, tickets_edit: false, tickets_delete: false,
+  visas_view: true, visas_add: true, visas_edit: false, visas_delete: false,
+  services_view: true, services_add: true, services_edit: false, services_delete: false,
+  reports_view: false, show_profit: false,
+  vouchers_manage: false, accounts_manage: false,
+  edit_price: false, apply_discount: false,
+}
+function ownerPermissions() {
+  const p = {}
+  for (const k of Object.keys(DEFAULT_STAFF_PERMISSIONS)) p[k] = true
+  return p
+}
+function effectivePermissions(user) {
+  if (!user) return DEFAULT_STAFF_PERMISSIONS
+  if (user.role === 'owner') return ownerPermissions()
+  return { ...DEFAULT_STAFF_PERMISSIONS, ...(user.permissions || {}) }
+}
+
+// v3.4 — Affiliate defaults
+const AFFILIATE_COMMISSION_RATE = 0.10
+const AFFILIATE_MIN_CASHOUT_INDIVIDUAL = 10
+const AFFILIATE_MIN_CASHOUT_OFFICE = 50
+
 async function seedInitial(db) {
   // Purge legacy data lacking tenant_id (from earlier MVP)
   for (const c of ['accounts', 'boxes', 'clients', 'suppliers', 'tickets', 'visas', 'vouchers', 'journal_entries', 'settings']) {
@@ -224,7 +249,7 @@ async function getSession(request, db) {
     impersonated_by_email: session.impersonated_by_email 
   }
 }
-function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, tenant_id: u.tenant_id, active: u.active } }
+function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, tenant_id: u.tenant_id, active: u.active, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
 function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price } : null }
 
 // Referral helpers
@@ -364,7 +389,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.3',
+          version: '3.4',
           db: 'connected',
         })
       } catch (e) {
@@ -713,7 +738,7 @@ async function handleRoute(request, { params }) {
     if (route === '/tenant/users' && method === 'GET') {
       if (sess.user.role !== 'owner') return bad('غير مصرح', 403)
       const users = await db.collection('users').find(tf).sort({ created_at: 1 }).toArray()
-      return ok(users.map(u => ({ id: u.id, email: u.email, name: u.name, role: u.role, active: u.active, created_at: u.created_at })))
+      return ok(users.map(u => ({ id: u.id, email: u.email, name: u.name, role: u.role, active: u.active, created_at: u.created_at, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } })))
     }
     if (route === '/tenant/users' && method === 'POST') {
       if (sess.user.role !== 'owner') return bad('غير مصرح', 403)
@@ -731,10 +756,13 @@ async function handleRoute(request, { params }) {
       if (await db.collection('users').findOne({ email: String(b.email).toLowerCase().trim() })) return bad('البريد مستخدم بالفعل')
       const doc = {
         id: uuidv4(), tenant_id: T, email: String(b.email).toLowerCase().trim(), name: b.name,
-        role: b.role || 'staff', active: true, password_hash: bcrypt.hashSync(b.password, 8), created_at: new Date(),
+        role: b.role || 'staff', active: true, password_hash: bcrypt.hashSync(b.password, 8),
+        // v3.4 — Default limited permissions on new employees
+        permissions: b.permissions ? { ...DEFAULT_STAFF_PERMISSIONS, ...b.permissions } : { ...DEFAULT_STAFF_PERMISSIONS },
+        created_at: new Date(),
       }
       await db.collection('users').insertOne(doc)
-      return ok({ id: doc.id, email: doc.email, name: doc.name, role: doc.role, active: doc.active })
+      return ok({ id: doc.id, email: doc.email, name: doc.name, role: doc.role, active: doc.active, permissions: doc.permissions })
     }
     const userIdMatch = route.match(/^\/tenant\/users\/([^/]+)$/)
     if (userIdMatch && method === 'PATCH') {
@@ -745,7 +773,21 @@ async function handleRoute(request, { params }) {
       if (b.role) upd.role = b.role
       if (b.name) upd.name = b.name
       if (b.password) upd.password_hash = bcrypt.hashSync(b.password, 8)
+      // v3.4 — Permission update
+      if (b.permissions && typeof b.permissions === 'object') {
+        const sanitized = {}
+        for (const k of Object.keys(DEFAULT_STAFF_PERMISSIONS)) sanitized[k] = !!b.permissions[k]
+        upd.permissions = sanitized
+      }
       await db.collection('users').updateOne({ id: userIdMatch[1], tenant_id: T }, { $set: upd })
+      return ok({ success: true })
+    }
+    if (userIdMatch && method === 'DELETE') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح', 403)
+      const target = await db.collection('users').findOne({ id: userIdMatch[1], tenant_id: T })
+      if (!target) return bad('المستخدم غير موجود', 404)
+      if (target.role === 'owner') return bad('لا يمكن حذف حساب المالك')
+      await db.collection('users').deleteOne({ id: userIdMatch[1], tenant_id: T })
       return ok({ success: true })
     }
 
@@ -790,6 +832,158 @@ async function handleRoute(request, { params }) {
         })),
       })
     }
+
+    // ============ v3.4 — AFFILIATE MODULE (Marketing + Cash Balance) ============
+    if (route === '/affiliate' && method === 'GET') {
+      const code = await ensureReferralCode(db, T)
+      const t = await db.collection('tenants').findOne({ id: T })
+      const affiliate = t.affiliate || { balance_usd: 0, total_earned_usd: 0, total_withdrawn_usd: 0, commission_rate: AFFILIATE_COMMISSION_RATE, is_individual: false }
+      const publicBase = process.env.NEXT_PUBLIC_BASE_URL || ''
+      const link = `${publicBase}/signup?ref=${code}`
+      const invitees = await db.collection('tenants').find({ referred_by: T }).sort({ created_at: -1 }).toArray()
+      const activated = invitees.filter(x => x.activation_confirmed).length
+      const withdrawals = await db.collection('cashout_requests').find({ tenant_id: T }).sort({ created_at: -1 }).limit(20).toArray()
+      const payoutMethods = await db.collection('payout_methods').find({ tenant_id: T }).sort({ created_at: -1 }).toArray()
+      const minCashout = affiliate.is_individual ? AFFILIATE_MIN_CASHOUT_INDIVIDUAL : AFFILIATE_MIN_CASHOUT_OFFICE
+      // Marketing banners/texts (bundled here for simplicity)
+      const banners = [
+        {
+          id: 'b1', title: 'برنامج رحّال للمحاسبة السحابية',
+          headline: '🚀 أدر مكتب سفرك من مكان واحد — بدون أوراق!',
+          body: 'نظام رحّال يحوّل مكتب سفرك إلى مكتب رقمي: تذاكر، تأشيرات، حسابات، كشوف عملاء، وطباعة قسائم — كل ذلك بلمسة زر. جرّبه مجاناً!',
+          cta: 'ابدأ تجربتك المجانية الآن',
+        },
+        {
+          id: 'b2', title: 'العرض التسويقي — للتواصل السريع',
+          headline: '📊 كل ما يحتاجه مكتب السفريات في نظام واحد',
+          body: 'رحّال ERP: حجز التذاكر (جوي/بري) + التأشيرات + الخدمات + محاسبة متعددة العملات (YER/SAR/USD) + قوالب واتساب ذكية + كشوف حسابات احترافية.',
+          cta: 'اطلب عرضك الآن',
+        },
+      ]
+      return ok({
+        code, link,
+        balance_usd: affiliate.balance_usd || 0,
+        total_earned_usd: affiliate.total_earned_usd || 0,
+        total_withdrawn_usd: affiliate.total_withdrawn_usd || 0,
+        commission_rate: affiliate.commission_rate || AFFILIATE_COMMISSION_RATE,
+        min_cashout_usd: minCashout,
+        is_individual: !!affiliate.is_individual,
+        referred_offices: invitees.length,
+        activated_offices: activated,
+        pending_offices: invitees.length - activated,
+        withdrawals: withdrawals.map(w => ({ ...w, _id: undefined })),
+        payout_methods: payoutMethods.map(m => ({ ...m, _id: undefined })),
+        banners,
+      })
+    }
+
+    if (route === '/affiliate/payout-methods' && method === 'GET') {
+      const list = await db.collection('payout_methods').find({ tenant_id: T }).sort({ created_at: -1 }).toArray()
+      return ok(list.map(m => ({ ...m, _id: undefined })))
+    }
+    if (route === '/affiliate/payout-methods' && method === 'POST') {
+      const b = await request.json()
+      if (!b.method_type || !b.account_name) return bad('نوع طريقة السحب واسم صاحب الحساب مطلوبان')
+      const allowed = ['bank', 'wallet', 'local_remittance']
+      if (!allowed.includes(b.method_type)) return bad('نوع طريقة السحب غير صالح')
+      const doc = {
+        id: uuidv4(), tenant_id: T,
+        method_type: b.method_type,             // 'bank' | 'wallet' | 'local_remittance'
+        provider: b.provider || '',              // Bank name / Wallet name (Creami/Jawali/...) / Remittance (Al-Najm/Al-Ehtiyaz/...)
+        account_name: String(b.account_name).trim(),
+        account_number: b.account_number || '',  // IBAN or phone or ref
+        phone: b.phone || '',
+        city: b.city || '',
+        is_default: !!b.is_default,
+        notes: b.notes || '',
+        created_at: new Date(),
+      }
+      if (doc.is_default) {
+        await db.collection('payout_methods').updateMany({ tenant_id: T }, { $set: { is_default: false } })
+      }
+      await db.collection('payout_methods').insertOne(doc)
+      const { _id, ...rest } = doc; return ok(rest)
+    }
+    const pmMatch = route.match(/^\/affiliate\/payout-methods\/([^/]+)$/)
+    if (pmMatch && method === 'PUT') {
+      const b = await request.json()
+      const upd = {}
+      for (const k of ['provider', 'account_name', 'account_number', 'phone', 'city', 'notes']) if (b[k] !== undefined) upd[k] = b[k]
+      if (b.is_default !== undefined) {
+        upd.is_default = !!b.is_default
+        if (upd.is_default) {
+          await db.collection('payout_methods').updateMany({ tenant_id: T }, { $set: { is_default: false } })
+        }
+      }
+      await db.collection('payout_methods').updateOne({ id: pmMatch[1], tenant_id: T }, { $set: upd })
+      return ok({ success: true })
+    }
+    if (pmMatch && method === 'DELETE') {
+      await db.collection('payout_methods').deleteOne({ id: pmMatch[1], tenant_id: T })
+      return ok({ success: true })
+    }
+
+    if (route === '/affiliate/cashout' && method === 'POST') {
+      const b = await request.json()
+      const t = await db.collection('tenants').findOne({ id: T })
+      const affiliate = t.affiliate || { balance_usd: 0, is_individual: false }
+      const minCashout = affiliate.is_individual ? AFFILIATE_MIN_CASHOUT_INDIVIDUAL : AFFILIATE_MIN_CASHOUT_OFFICE
+      const amount = Number(b.amount_usd) || 0
+      if (amount < minCashout) return bad(`الحد الأدنى للسحب هو ${minCashout} USD`)
+      if (amount > (affiliate.balance_usd || 0)) return bad('الرصيد غير كافٍ')
+      if (!b.payout_method_id) return bad('اختر طريقة السحب')
+      const pm = await db.collection('payout_methods').findOne({ id: b.payout_method_id, tenant_id: T })
+      if (!pm) return bad('طريقة السحب غير موجودة')
+      const doc = {
+        id: uuidv4(), tenant_id: T,
+        amount_usd: amount,
+        payout_method_id: pm.id,
+        payout_method_snapshot: { method_type: pm.method_type, provider: pm.provider, account_name: pm.account_name, account_number: pm.account_number, phone: pm.phone },
+        status: 'pending',            // pending → processing → paid | rejected
+        notes: b.notes || '',
+        requested_by: sess.user.email,
+        created_at: new Date(),
+      }
+      await db.collection('cashout_requests').insertOne(doc)
+      // Reserve funds
+      await db.collection('tenants').updateOne({ id: T }, { $inc: { 'affiliate.balance_usd': -amount, 'affiliate.reserved_usd': amount } })
+      const { _id, ...rest } = doc; return ok(rest)
+    }
+
+    if (route === '/affiliate/apply-to-subscription' && method === 'POST') {
+      const b = await request.json()
+      const amount = Number(b.amount_usd) || 0
+      const t = await db.collection('tenants').findOne({ id: T })
+      const affiliate = t.affiliate || { balance_usd: 0 }
+      if (amount <= 0) return bad('أدخل مبلغاً صالحاً')
+      if (amount > (affiliate.balance_usd || 0)) return bad('الرصيد غير كافٍ')
+      // Deduct from affiliate, credit subscription
+      await db.collection('tenants').updateOne({ id: T }, {
+        $inc: { 'affiliate.balance_usd': -amount, 'affiliate.total_applied_to_subscription_usd': amount, subscription_credit_usd: amount },
+      })
+      // Log as a "virtual cashout" for history
+      await db.collection('cashout_requests').insertOne({
+        id: uuidv4(), tenant_id: T, amount_usd: amount, status: 'applied_to_subscription',
+        notes: 'تم تحويل الرصيد لتغطية الاشتراك',
+        payout_method_snapshot: { method_type: 'subscription', provider: 'Internal Credit' },
+        requested_by: sess.user.email, created_at: new Date(),
+      })
+      return ok({ success: true, applied_usd: amount })
+    }
+
+    // v3.4 — TEST-ONLY endpoint (dev/testing convenience): seed affiliate balance
+    // Guarded to the current tenant only. NOT exposed in production UI.
+    if (route === '/affiliate/dev-seed-balance' && method === 'POST') {
+      const b = await request.json()
+      const amount = Number(b.amount_usd) || 100
+      const isIndividual = !!b.is_individual
+      await db.collection('tenants').updateOne({ id: T }, {
+        $set: { 'affiliate.commission_rate': AFFILIATE_COMMISSION_RATE, 'affiliate.is_individual': isIndividual },
+        $inc: { 'affiliate.balance_usd': amount, 'affiliate.total_earned_usd': amount },
+      })
+      return ok({ success: true, credited_usd: amount, is_individual: isIndividual })
+    }
+
 
     // ============ UNIFIED CHART OF ACCOUNTS (for FX 'account' mode + Statement) ============
     if (route === '/accounts/all' && method === 'GET') {
