@@ -3161,6 +3161,7 @@ function ProfitsReport() {
 }
 
 function StatementReport() {
+  const { tenant, settings } = useAuth()
   const [accounts, setAccounts] = useState([])
   const [id, setId] = useState('')
   const [data, setData] = useState(null)
@@ -3183,6 +3184,158 @@ function StatementReport() {
     try { setData(await api(`/reports/statement?${p}`)) } catch (e) { toast.error(e.message) }
   }
   useEffect(() => { load() }, [id, currencyMode, period, day, month, from, to])
+
+  // v3.3 — Human-readable period text
+  const periodLabel = () => {
+    if (period === 'all') return 'كل الفترات (منذ البداية)'
+    if (period === 'day') return `يوم ${fmtDate(day)}`
+    if (period === 'month') return `شهر ${month}`
+    if (period === 'range') return `من ${fmtDate(from)} إلى ${fmtDate(to)}`
+    if (period === 'up_to_date') return `حتى ${fmtDate(to)}`
+    return ''
+  }
+
+  // v3.3 — Print a professional statement of account
+  const handlePrint = () => {
+    if (!data || !data.party) return toast.error('اختر حساباً وحمّل الكشف أولاً')
+    const p = data.party
+    const rowsHtml = (data.rows || []).map(r => `
+      <tr>
+        <td>${fmtDate(r.date)}</td>
+        <td style="font-size:11px;">${escHtml(r.description)}</td>
+        <td><span style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:10px;">${escHtml(r.ref_type || '')}</span></td>
+        <td><b>${r.currency}</b></td>
+        <td style="text-align:left; color:#1e40af; font-weight:600;">${r.debit ? fmt(r.debit, r.currency) : '—'}</td>
+        <td style="text-align:left; color:#b91c1c; font-weight:600;">${r.credit ? fmt(r.credit, r.currency) : '—'}</td>
+        <td style="text-align:left; font-weight:800; color:${r.balance >= 0 ? '#059669' : '#dc2626'};">${fmt(r.balance, r.currency)}</td>
+      </tr>
+    `).join('')
+    const summaryHtml = (data.summary && data.summary.length > 0) ? data.summary.map(s => `
+      <tr>
+        <td><b>${s.currency}</b></td>
+        <td style="text-align:left; color:#1e40af;">${fmt(s.total_debit, s.currency)}</td>
+        <td style="text-align:left; color:#b91c1c;">${fmt(s.total_credit, s.currency)}</td>
+        <td style="text-align:left; font-weight:900; color:${s.balance >= 0 ? '#059669' : '#dc2626'}; font-size:14px;">${fmt(s.balance, s.currency)}</td>
+      </tr>
+    `).join('') : CURRENCIES.map(c => {
+      const bal = p.balances?.[c] || 0
+      return `<tr><td><b>${c}</b></td><td>—</td><td>—</td><td style="text-align:left; font-weight:900; color:${bal >= 0 ? '#059669' : '#dc2626'};">${fmt(bal, c)}</td></tr>`
+    }).join('')
+
+    const off = tenant?.name || 'مكتب رحّال'
+    const offPhone = tenant?.phone || settings?.phone || ''
+    const offAddr = settings?.address || ''
+    const partyPhone = p.phone || ''
+    const partyAddr = p.address || ''
+
+    const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>كشف حساب — ${escHtml(p.name)}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Tahoma','Segoe UI',sans-serif; background:#f8fafc; margin:0; padding:24px; color:#0f172a; }
+  .doc { max-width: 820px; margin: 0 auto; background:#fff; border-radius:14px; box-shadow: 0 10px 30px rgba(0,0,0,0.06); padding:0; overflow:hidden; }
+  .hdr { background: linear-gradient(135deg,#1e3a8a 0%,#3b82f6 60%,#f97316 100%); color:#fff; padding:22px 28px; display:flex; justify-content:space-between; align-items:center; }
+  .hdr h1 { margin:0; font-size:22px; font-weight:900; letter-spacing:0.5px; }
+  .hdr .off { text-align:left; }
+  .hdr .off .n { font-size:16px; font-weight:800; }
+  .hdr .off .p { font-size:12px; opacity:0.92; margin-top:2px; }
+  .band { background: #eff6ff; border-bottom:2px solid #dbeafe; padding:14px 28px; display:flex; justify-content:space-between; align-items:center; font-size:12px; }
+  .band .k { color:#475569; }
+  .band .v { color:#0f172a; font-weight:800; }
+  .party { padding:18px 28px; background:#fff; border-bottom:1px solid #e2e8f0; }
+  .party h2 { margin:0 0 6px 0; font-size:18px; color:#1e3a8a; }
+  .party .meta { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:#475569; margin-top:6px; }
+  .party .meta span { padding:4px 10px; background:#f1f5f9; border-radius:8px; }
+  .sec { padding:14px 28px; }
+  .sec h3 { margin:0 0 10px 0; font-size:14px; color:#1e3a8a; border-right:4px solid #f97316; padding-right:8px; }
+  table { width:100%; border-collapse: collapse; font-size:12px; }
+  thead th { background:#1e3a8a; color:#fff; padding:8px 6px; text-align:right; font-weight:700; font-size:11px; }
+  tbody td { padding:6px 6px; border-bottom:1px solid #e2e8f0; }
+  tbody tr:nth-child(even) { background:#fafafa; }
+  .totals { margin-top:10px; }
+  .totals table thead th { background:#1e40af; }
+  .totals table tbody td { padding:10px 8px; font-size:13px; background:#f8fafc; border-bottom:2px solid #e2e8f0; }
+  .foot { padding:16px 28px 24px; background:#f8fafc; border-top:1px solid #e2e8f0; display:flex; justify-content:space-between; align-items:end; font-size:11px; color:#64748b; }
+  .sig { text-align:center; }
+  .sig .l { border-top: 1px dashed #94a3b8; padding-top:4px; width:180px; margin-top:24px; }
+  .actions { text-align:center; margin-top: 16px; padding-bottom:10px; }
+  .actions button { border:none; padding: 10px 18px; margin: 0 4px; border-radius:8px; font-weight:800; cursor:pointer; font-size:12px; }
+  .actions .prn { background:#1e3a8a; color:#fff; }
+  .actions .cls { background:#e2e8f0; color:#475569; }
+  @media print { body { background:#fff; padding:0; } .doc { box-shadow:none; border-radius:0; } .actions { display:none; } }
+</style>
+</head><body>
+<div class="doc">
+  <div class="hdr">
+    <h1>📊 كشف حساب</h1>
+    <div class="off"><div class="n">${escHtml(off)}</div><div class="p">${escHtml(offPhone)}${offAddr ? ' • ' + escHtml(offAddr) : ''}</div></div>
+  </div>
+  <div class="band">
+    <div><span class="k">الفترة:</span> <span class="v">${escHtml(periodLabel())}</span></div>
+    <div><span class="k">تاريخ الطباعة:</span> <span class="v">${fmtDate(new Date())}</span></div>
+    <div><span class="k">عدد الحركات:</span> <span class="v">${(data.rows || []).length}</span></div>
+  </div>
+  <div class="party">
+    <h2>${escHtml(p.name)}</h2>
+    <div class="meta">
+      ${partyPhone ? `<span>📞 ${escHtml(partyPhone)}</span>` : ''}
+      ${partyAddr ? `<span>📍 ${escHtml(partyAddr)}</span>` : ''}
+      <span>نوع الحساب: <b>${escHtml({client:'عميل', supplier:'مورد', box:'صندوق/بنك', account:'حساب دفتري'}[selected?.kind] || '—')}</b></span>
+    </div>
+  </div>
+  <div class="sec">
+    <h3>💼 ملخص الأرصدة النهائية بحسب العملة</h3>
+    <div class="totals">
+      <table>
+        <thead><tr><th>العملة</th><th style="text-align:left;">إجمالي مدين</th><th style="text-align:left;">إجمالي دائن</th><th style="text-align:left;">الرصيد النهائي</th></tr></thead>
+        <tbody>${summaryHtml}</tbody>
+      </table>
+    </div>
+  </div>
+  <div class="sec">
+    <h3>📋 تفصيل الحركات (الرصيد التراكمي بجانب كل حركة)</h3>
+    <table>
+      <thead><tr><th>التاريخ</th><th>البيان</th><th>المرجع</th><th>العملة</th><th style="text-align:left;">مدين</th><th style="text-align:left;">دائن</th><th style="text-align:left;">الرصيد التراكمي</th></tr></thead>
+      <tbody>${rowsHtml || '<tr><td colspan="7" style="text-align:center; color:#94a3b8; padding:20px;">لا توجد حركات في هذه الفترة</td></tr>'}</tbody>
+    </table>
+  </div>
+  <div class="foot">
+    <div>
+      <div>هذا الكشف صادر إلكترونياً من نظام رحّال — Rahaal ERP</div>
+      <div style="margin-top:2px;">يعتمد الرصيد النهائي على القيود المحاسبية المرحّلة حتى تاريخ الطباعة.</div>
+    </div>
+    <div class="sig">توقيع المحاسب <div class="l"></div></div>
+  </div>
+</div>
+<div class="actions">
+  <button class="prn" onclick="window.print()">🖨️ طباعة</button>
+  <button class="cls" onclick="window.close()">إغلاق</button>
+</div>
+</body></html>`
+    const w = window.open('', '_blank', 'width=900,height=1000')
+    if (!w) return toast.error('السماح بالنوافذ المنبثقة مطلوب للطباعة')
+    w.document.open(); w.document.write(html); w.document.close(); w.focus()
+    setTimeout(() => { try { w.print() } catch(e){} }, 400)
+  }
+
+  // v3.3 — Share statement summary via WhatsApp (formatted text)
+  const handleWhatsAppShare = () => {
+    if (!data || !data.party) return toast.error('اختر حساباً وحمّل الكشف أولاً')
+    const p = data.party
+    if (!p.phone && !p.whatsapp) return toast.error('العميل لا يمتلك رقم هاتف مسجل — أضف الرقم أولاً في شاشة العملاء')
+    const off = tenant?.name || 'مكتب رحّال'
+    const balances = (data.summary && data.summary.length > 0)
+      ? data.summary.map(s => `• ${s.currency}: ${fmt(s.balance, s.currency)} ${s.balance >= 0 ? '(لكم)' : '(علينا)'}`).join('\n')
+      : CURRENCIES.map(c => { const b = p.balances?.[c] || 0; return b !== 0 ? `• ${c}: ${fmt(b, c)} ${b >= 0 ? '(لكم)' : '(علينا)'}` : null }).filter(Boolean).join('\n') || '• لا توجد أرصدة'
+    const lastRows = (data.rows || []).slice(-5).reverse()
+    const lastText = lastRows.length > 0
+      ? '\n\n📋 آخر ' + Math.min(5, lastRows.length) + ' حركات:\n' + lastRows.map(r => {
+          const dc = r.debit > 0 ? `مدين ${fmt(r.debit, r.currency)}` : `دائن ${fmt(r.credit, r.currency)}`
+          return `• ${fmtDate(r.date)} — ${r.description?.slice(0,40) || ''} (${dc})`
+        }).join('\n')
+      : ''
+    const msg = `عزيزنا العميل ${p.name}،\n\n📊 هذا ملخص كشف حسابكم لدى ${off}\n📅 الفترة: ${periodLabel()}\n\n💰 الأرصدة الحالية:\n${balances}${lastText}\n\n📞 للاستفسار عن أي حركة تواصل معنا مباشرة.\nشكراً لثقتكم بنا 🌹`
+    openWhatsApp(p.whatsapp || p.phone, msg)
+  }
 
   return (
     <Card><CardContent className="p-4 space-y-4">
@@ -3235,8 +3388,12 @@ function StatementReport() {
 
       {data?.party && (
         <div className="p-3 rounded-lg bg-gradient-to-l from-blue-50 to-slate-50 border border-blue-100">
-          <div className="flex items-center justify-between">
-            <div><div className="text-lg font-bold text-slate-800">{data.party.name}</div>{data.party.phone && <div className="text-xs text-slate-500">📞 {data.party.phone}</div>}</div>
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <div className="text-lg font-bold text-slate-800">{data.party.name}</div>
+              {data.party.phone && <div className="text-xs text-slate-500" dir="ltr">📞 {data.party.phone}</div>}
+              {data.party.address && <div className="text-xs text-slate-500">📍 {data.party.address}</div>}
+            </div>
             <div className="flex gap-2">
               {CURRENCIES.map(c => (
                 <div key={c} className="text-center px-3 py-1.5 rounded-lg bg-white border">
@@ -3245,6 +3402,20 @@ function StatementReport() {
                 </div>
               ))}
             </div>
+          </div>
+          {/* v3.3 — Print + WhatsApp Share buttons */}
+          <div className="flex gap-2 mt-3 pt-3 border-t border-blue-200">
+            <Button onClick={handlePrint} className="grad-brand text-white gap-2 h-9">
+              <Printer className="w-4 h-4" /> طباعة كشف الحساب
+            </Button>
+            {(selected?.kind === 'client' || selected?.kind === 'supplier') && (
+              <WaBtn phone={data.party.whatsapp || data.party.phone} message={''} size="md" label="مشاركة الكشف عبر واتساب" />
+            )}
+            {(selected?.kind === 'client' || selected?.kind === 'supplier') && (
+              <Button onClick={handleWhatsAppShare} className="bg-[#25D366] hover:bg-[#128C7E] text-white gap-2 h-9" title="إرسال ملخص كشف الحساب">
+                📊 ملخص الرصيد + آخر 5 حركات
+              </Button>
+            )}
           </div>
         </div>
       )}

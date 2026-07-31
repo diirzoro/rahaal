@@ -3225,3 +3225,40 @@ frontend:
           Verified via screenshot: both variants render correctly with dynamic labels.
 metadata:
   version: "3.2-print-update"
+
+# ============================================================
+# v3.3 — Ledger Statement Print + WhatsApp Share (2026-07-31)
+# ============================================================
+frontend:
+  - task: "v3.3 Statement of Account — Print + WhatsApp Share"
+    implemented: true
+    working: true
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Enhanced StatementReport (Reports → كشف حساب tab) with 3 new action buttons visible when
+          an account is selected:
+            1. 🖨️ "طباعة كشف الحساب" — opens a print window with a professional financial statement:
+               - Blue→orange gradient header with office name and phone
+               - Info band: period label, print date, transaction count
+               - Party section: name, phone, address, account type
+               - Balance summary table per currency (color-coded green/red)
+               - Detailed transaction table with running balance (Debit/Credit/Balance)
+               - Footer with electronic origin declaration + accountant signature line
+               - Auto-triggers window.print() 400ms after loading
+            2. 📞 WaBtn "مشاركة الكشف عبر واتساب" — opens wa.me with basic template
+            3. 📊 "ملخص الرصيد + آخر 5 حركات" — smart summary via WhatsApp:
+               - Balance breakdown per currency (with "لكم"/"علينا" indicator)
+               - Last 5 transactions formatted line by line
+               - Office name signature
+          Only shown for client/supplier accounts (not for boxes or COA accounts).
+          Reuses existing GET /api/reports/statement backend (already returns party phone/whatsapp).
+          Verified via screenshot: professional print rendered with Air Travel Client (300 SAR balance).
+
+metadata:
+  version: "3.3"
