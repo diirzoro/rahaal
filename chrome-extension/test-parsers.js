@@ -155,6 +155,40 @@ const FIXTURES = [
       تاريخ الانتهاء: 18 نوفمبر 2025
     `,
   },
+  // v1.3 — NEW FIXTURES from real user samples
+  {
+    id: '10-albaraka-real',
+    expected_doc_type: 'bus',
+    expected_carrier: 'شركة البركة للنقل البري',
+    require: ['name_ar', 'passport_no', 'ticket_no', 'trip_date', 'amount'],
+    text: `
+      شركة البركة للنقل البري
+      Albaraka Bus
+      رقم التذكرة: 16539300
+      اسم المسافر: محروس عبدالله محروس عمر
+      رقم الجواز: MK14733
+      خط السير: عدن - جدة
+      تاريخ الرحلة: 2026/07/21
+      السعر: 300.00 ر.س
+    `,
+  },
+  {
+    id: '11-roaadalafdal',
+    expected_doc_type: 'flight',
+    expected_carrier: 'رواد الأفضل',
+    require: ['name_ar', 'ticket_no', 'trip_date', 'amount'],
+    text: `
+      نجمة الأفضل - رواد الأفضل
+      roaadalafdal.com
+      رقم التذكرة: 262061521
+      اسم المسافر: محمد سالم سعيد بن عمر بأعمر
+      رقم الهاتف: 776612938
+      نوع الهوية: بطاقة شخصية
+      خط السير: عدن - الشحر
+      تاريخ الرحلة: 2026-08-01
+      السعر: 30000 YER
+    `,
+  },
 ];
 
 // ---- Set up mock window / document ----

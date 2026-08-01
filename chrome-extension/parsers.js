@@ -140,25 +140,72 @@
       name: 'albaraka-bus',
       match(text, ctx) { return /albaraka|bus/i.test(ctx.hostname + ctx.title) || hasAny(text, 'البركة', 'نقل بري', 'حافلة'); },
       parse(text) {
+        // v1.3.1 — matches actual Al-Baraka ticket layout
+        // Real sample: ticket_no=16539300 (numeric), passport=MK14733 (alphanumeric), name=محروس عبدالله محروس عمر, 300.00 ر.س, route=عدن - جدة
+        const nameAr = first(text, /(?:اسم\s*(?:المسافر|الراكب|صاحب\s*التذكرة)|المسافر|الراكب)[:\s]*([\u0600-\u06FF ]{4,80})/);
+        // Passport: alphanumeric like MK14733 or plain digits
+        const passport = first(text, /(?:رقم\s*(?:الجواز|الهوية|السفر|البطاقة))[:\s]*([A-Z]{1,3}\d{4,10}|\d{6,12})/i);
+        // Ticket: pure digits (8-10) OR prefixed
+        const ticketNo = first(text, /(?:رقم\s*التذكرة|Ticket\s*No\.?)[:\s]*(\d{6,12}|[A-Z]{1,3}\d{4,10})/i);
+        const flightNo = first(text, /(?:رقم\s*الرحلة|Trip|Flight)\s*(?:No\.?)?[:\s]*(\d{3,8})/i);
+        // Route between YE + KSA cities
+        const cities = ['المكلا','عدن','صنعاء','تعز','الحديدة','سيئون','مأرب','الشحر','مكة','المدينة','جدة','الرياض','الدمام'];
+        const routeMatch = text.match(new RegExp(`(${cities.join('|')})\\s*[\\-–—→>]\\s*(${cities.join('|')})`));
+        const amount = firstNum(text, /(?:السعر|القيمة|المبلغ|Price|Total)[:\s]*([\d,]+\.?\d*)\s*(?:ر\.?\s*س|SAR|ريال)/i)
+                    || firstNum(text, /([\d,]+\.\d{2})\s*(?:ر\.?\s*س|SAR|ريال\s*سعودي)/i)
+                    || firstNum(text, /(?:السعر|القيمة|المبلغ)[:\s]*([\d,]+\.?\d*)/);
         return {
-          traveler: {
-            name_ar: first(text, /(?:اسم\s*(?:الراكب|المسافر))[:\s]+([\u0600-\u06FF ]{4,80})/),
-            passport_no: first(text, /(?:رقم\s*(?:الجواز|الهوية))[:\s]+(\d{6,12})/),
-          },
+          traveler: { name_ar: nameAr, passport_no: passport },
           booking: {
             doc_type: 'bus', carrier: 'شركة البركة للنقل البري',
-            ticket_no: first(text, /(?:رقم\s*التذكرة|Ticket\s*No)[:\s]+([A-Z]{1,3}\d{3,8})/i),
-            flight_no: first(text, /(?:رقم\s*الرحلة|Trip\s*No)[:\s]+(\d{3,8})/),
-            route_from: first(text, /(?:من|From)[:\s]+([\u0600-\u06FFA-Za-z]{3,30})/),
-            route_to: first(text, /(?:إلى|To)[:\s]+([\u0600-\u06FFA-Za-z]{3,30})/),
+            ticket_no: ticketNo, flight_no: flightNo,
+            route_from: routeMatch ? routeMatch[1] : first(text, /(?:من|From)[:\s]*([\u0600-\u06FFA-Za-z]{3,30})/),
+            route_to: routeMatch ? routeMatch[2] : first(text, /(?:إلى|To)[:\s]*([\u0600-\u06FFA-Za-z]{3,30})/),
           },
           dates: {
-            trip_date: parseDate(first(text, /(?:تاريخ\s*(?:الرحلة|السفر))[:\s]+([^\n]+)/)),
-            depart_time: parseTime(first(text, /(?:وقت\s*(?:التحرك|الانطلاق|المغادرة))[:\s]+([^\n]+)/)),
-            arrive_time: parseTime(first(text, /(?:وقت\s*(?:الوصول))[:\s]+([^\n]+)/)),
-            issued_at: parseDate(first(text, /(?:تاريخ\s*(?:الإصدار|الطباعة))[:\s]+([^\n]+)/)),
+            trip_date: parseDate(first(text, /(?:تاريخ\s*(?:الرحلة|السفر|التحرك))[:\s]*([^\n]+)/)),
+            depart_time: parseTime(first(text, /(?:وقت\s*(?:التحرك|الانطلاق|المغادرة))[:\s]*([^\n]+)/)),
+            arrive_time: parseTime(first(text, /(?:وقت\s*الوصول)[:\s]*([^\n]+)/)),
+            issued_at: parseDate(first(text, /(?:تاريخ\s*(?:الإصدار|الطباعة|الحجز))[:\s]*([^\n]+)/)),
           },
-          financial: { amount: firstNum(text, /(?:السعر|القيمة|المبلغ)[:\s]+([\d,]+\.?\d*)/), currency: detectCurrency(text) || 'SAR' },
+          financial: { amount, currency: 'SAR' },
+        };
+      },
+    },
+    // v1.3 — Roaadalafdal (رواد الأفضل / نجمة الأفضل) — Yemeni airline
+    {
+      name: 'roaadalafdal',
+      match(text, ctx) {
+        return /roaadalafdal|روادالافضل|رواد\s*الأفضل|نجمة\s*الأفضل/i.test(ctx.hostname + ctx.title + text);
+      },
+      parse(text) {
+        // Real sample: ticket=262061521, name=محمد سالم سعيد بن عمر بأعمر, phone=776612938, 30000 YER, route=عدن - الشحر, 2026-08-01
+        const nameAr = first(text, /(?:اسم\s*(?:المسافر|الراكب))[:\s]*([\u0600-\u06FF ]{4,80})/);
+        const nameEn = first(text, /(?:Passenger(?:\s*Name)?|Name)[:\s]*([A-Z][A-Z ]+\/[A-Z][A-Z ]{2,60})/i);
+        const passport = first(text, /(?:رقم\s*(?:الجواز|الهوية)|Passport)[:\s]*([A-Z0-9]{6,15})/i);
+        const phone = first(text, /(?:رقم\s*(?:الهاتف|الجوال)|Phone|Mobile)[:\s]*([+\d][\d\s\-]{6,19})/i);
+        const ticketNo = first(text, /(?:رقم\s*التذكرة|Ticket\s*(?:No\.?|Number))[:\s]*(\d{6,12}|[A-Z0-9\-]{4,20})/i);
+        const cities = ['صنعاء','عدن','المكلا','سيئون','تعز','الحديدة','الشحر','مأرب','القاهرة','جدة','الرياض','دبي','SAH','ADE','MYN','CAI','JED','RUH','DXB'];
+        const routeMatch = text.match(new RegExp(`(${cities.join('|')})\\s*[\\-–—→>]\\s*(${cities.join('|')})`));
+        const amount = firstNum(text, /(?:السعر|القيمة|المبلغ|Price|Total|Fare)[:\s]*([\d,]+\.?\d*)\s*(?:ر\.?\s*ي|YER|ريال)/i)
+                    || firstNum(text, /([\d,]+)\s*(?:YER|ريال\s*يمني|ر\.?\s*ي)/i)
+                    || firstNum(text, /(?:السعر|القيمة|المبلغ)[:\s]*([\d,]+\.?\d*)/);
+        return {
+          traveler: { name_ar: nameAr, name_en: nameEn, passport_no: passport, phone },
+          booking: {
+            doc_type: 'flight', carrier: 'رواد الأفضل',
+            ticket_no: ticketNo,
+            pnr: first(text, /(?:PNR|Booking(?:\s*Ref)?)[:\s]*([A-Z0-9]{5,8})/i),
+            route_from: routeMatch ? routeMatch[1] : first(text, /(?:من|From)[:\s]*([\u0600-\u06FFA-Za-z]{3,30})/),
+            route_to: routeMatch ? routeMatch[2] : first(text, /(?:إلى|To)[:\s]*([\u0600-\u06FFA-Za-z]{3,30})/),
+          },
+          dates: {
+            trip_date: parseDate(first(text, /(?:تاريخ\s*(?:الرحلة|السفر)|Flight\s*Date)[:\s]*([^\n]+)/i)),
+            depart_time: parseTime(first(text, /(?:وقت\s*(?:الإقلاع|المغادرة)|Departure)[:\s]*([^\n]+)/i)),
+            arrive_time: parseTime(first(text, /(?:وقت\s*الوصول|Arrival)[:\s]*([^\n]+)/i)),
+            issued_at: parseDate(first(text, /(?:تاريخ\s*(?:الإصدار|الحجز)|Issued)[:\s]*([^\n]+)/i)),
+          },
+          financial: { amount, currency: 'YER' },
         };
       },
     },
