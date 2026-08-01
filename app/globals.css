@@ -100,3 +100,46 @@ html, body {
   from { opacity: 0; transform: translateY(4px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+
+/* ==================================================
+ * v3.9.5 — Mobile & Tablet responsive helpers
+ * ================================================== */
+
+/* Make shadcn tables always scroll horizontally on small screens */
+table { min-width: max-content; }
+.overflow-x-auto > table { min-width: 100%; }
+
+/* Wrap all bare tables in a scrollable container automatically */
+[dir="rtl"] table, [dir="ltr"] table { -webkit-overflow-scrolling: touch; }
+
+/* Auto horizontal scroll for shadcn TabsList when it overflows on mobile */
+[role="tablist"] {
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  flex-wrap: nowrap !important;
+  max-width: 100%;
+}
+[role="tablist"]::-webkit-scrollbar { display: none; }
+[role="tab"] { white-space: nowrap; }
+
+/* Compact spacing on very small screens */
+@media (max-width: 640px) {
+  .container { padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
+  h1 { font-size: 1.5rem !important; line-height: 2rem; }
+  h2 { font-size: 1.25rem !important; line-height: 1.75rem; }
+  /* Dialog on mobile: use most of the width */
+  [role="dialog"] { max-width: 96vw !important; }
+  /* Make dialog footers stack on mobile */
+  [role="dialog"] > div > div:last-child > button {
+    min-height: 44px;
+  }
+  /* Cards: reduce padding on mobile */
+  .card-mobile-tight { padding: 0.75rem !important; }
+}
+
+/* Print-safe adjustments (unchanged from base but ensures tables don't get cut) */
+@media print {
+  table { min-width: 100%; }
+}

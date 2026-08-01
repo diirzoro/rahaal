@@ -625,9 +625,9 @@ const NAV = [
 function Sidebar({ current, onChange }) {
   const { tenant, settings, user } = useAuth()
   return (
-    <aside className="w-64 shrink-0 h-screen sticky top-0 bg-gradient-to-b from-[#0f1e4d] via-[#1e3a8a] to-[#0a1544] text-slate-100 flex flex-col border-l border-blue-900/60">
-      <div className="p-5 border-b border-blue-900/50">
-        <div className="flex items-center gap-3">
+    <aside className="w-16 md:w-64 shrink-0 h-screen sticky top-0 bg-gradient-to-b from-[#0f1e4d] via-[#1e3a8a] to-[#0a1544] text-slate-100 flex flex-col border-l border-blue-900/60 transition-all">
+      <div className="p-2 md:p-5 border-b border-blue-900/50">
+        <div className="flex items-center gap-3 justify-center md:justify-start">
           {settings?.logo_base64 ? (
             <img src={settings.logo_base64} alt="logo" className="w-11 h-11 rounded-xl object-cover bg-white" />
           ) : (
@@ -638,13 +638,13 @@ function Sidebar({ current, onChange }) {
               </svg>
             </div>
           )}
-          <div className="min-w-0">
+          <div className="min-w-0 hidden md:block">
             <div className="text-lg font-extrabold tracking-tight truncate">{settings?.agency_name || tenant?.name || 'رحّـــال'}</div>
             <div className="text-[10px] text-orange-300 font-black tracking-widest" style={{ letterSpacing: '0.15em' }}>RAHAL ERP</div>
           </div>
         </div>
       </div>
-      <nav className="flex-1 overflow-y-auto p-3 space-y-1">
+      <nav className="flex-1 overflow-y-auto p-1 md:p-3 space-y-1">
         {NAV.filter(n => n.id !== 'settings' || user.role === 'owner').map(item => {
           const Icon = item.icon
           const active = current === item.id
@@ -652,23 +652,24 @@ function Sidebar({ current, onChange }) {
             <button
               key={item.id}
               onClick={() => onChange(item.id)}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+              title={item.label}
+              className={`w-full flex items-center gap-3 px-2 md:px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
                 active ? 'bg-white/10 text-white shadow-inner' : 'text-slate-300 hover:bg-white/5 hover:text-white'
               }`}
             >
-              <span className={`w-8 h-8 rounded-md flex items-center justify-center bg-gradient-to-br ${item.color} ${active ? 'shadow-lg' : 'opacity-80'}`}>
+              <span className={`w-8 h-8 rounded-md flex items-center justify-center bg-gradient-to-br ${item.color} ${active ? 'shadow-lg' : 'opacity-80'} shrink-0`}>
                 <Icon className="w-4 h-4 text-white" />
               </span>
-              <span className="flex-1 text-right">{item.label}</span>
-              {active && <ChevronLeft className="w-4 h-4 text-slate-400" />}
+              <span className="flex-1 text-right hidden md:inline">{item.label}</span>
+              {active && <ChevronLeft className="w-4 h-4 text-slate-400 hidden md:block" />}
             </button>
           )
         })}
       </nav>
-      <div className="p-3 border-t border-slate-800/70">
+      <div className="p-2 md:p-3 border-t border-slate-800/70">
         <div className="flex items-center gap-3 p-2 rounded-lg bg-white/5">
-          <div className="w-9 h-9 rounded-full grad-brand flex items-center justify-center"><User className="w-4 h-4 text-white" /></div>
-          <div className="flex-1 min-w-0">
+          <div className="w-9 h-9 rounded-full grad-brand flex items-center justify-center shrink-0"><User className="w-4 h-4 text-white" /></div>
+          <div className="flex-1 min-w-0 hidden md:block">
             <div className="text-xs font-semibold truncate">{user.name}</div>
             <div className="text-[10px] text-slate-400 truncate">{user.role === 'owner' ? 'مالك المكتب' : 'موظف'}</div>
           </div>
@@ -5017,7 +5018,7 @@ function OfficeSettings() {
           <TabsTrigger value="users"><Users className="w-4 h-4 ml-1" /> المستخدمون</TabsTrigger>
           <TabsTrigger value="rates"><ArrowUpRight className="w-4 h-4 ml-1" /> أسعار الصرف</TabsTrigger>
           <TabsTrigger value="referrals">🎁 نظام الإحالة</TabsTrigger>
-          <TabsTrigger value="extension">🕋 إضافة المتصفح</TabsTrigger>
+          <TabsTrigger value="extension" className="hidden lg:inline-flex">🕋 إضافة المتصفح</TabsTrigger>
           <TabsTrigger value="print"><Printer className="w-4 h-4 ml-1" /> معاينة الطباعة</TabsTrigger>
         </TabsList>
 
@@ -5262,7 +5263,7 @@ function TenantApp() {
   return (
     <div className="flex min-h-screen bg-slate-50">
       <Sidebar current={tab} onChange={setTab} />
-      <main className="flex-1 p-6 md:p-8 max-w-[1600px]">
+      <main className="flex-1 p-3 sm:p-4 md:p-6 lg:p-8 max-w-[1600px] overflow-x-hidden min-w-0">
         {isImpersonating && (
           <div className="mb-3 px-4 py-2 rounded-lg bg-gradient-to-l from-red-600 to-rose-600 text-white flex items-center gap-2 shadow-lg animate-pulse">
             <span className="text-xl">👁️</span>

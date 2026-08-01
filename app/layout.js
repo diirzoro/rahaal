@@ -5,6 +5,7 @@ import { Toaster } from '@/components/ui/sonner'
 export const metadata = {
   title: 'رحّال — نظام محاسبة مكاتب السفريات',
   description: 'Rahaal Travel Office ERP & Multi-Currency Accounting',
+  viewport: 'width=device-width, initial-scale=1, maximum-scale=5, viewport-fit=cover',
 }
 
 export default function RootLayout({ children }) {
