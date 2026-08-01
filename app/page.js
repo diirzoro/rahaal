@@ -10,7 +10,7 @@ import {
   Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
   Building, Settings, Upload, FileSpreadsheet, CheckCircle2, XCircle,
   AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key, Pencil,
-  ArrowLeftRight, Briefcase, CalendarClock, LogIn,
+  ArrowLeftRight, Briefcase, CalendarClock, LogIn, Package,
 } from 'lucide-react'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTip, ResponsiveContainer,
@@ -718,12 +718,11 @@ function Dashboard({ setTab }) {
     <div className="space-y-6">
       <TopBar title="لوحة التحكم" subtitle="نظرة سريعة على أداء المكتب اليوم"
         right={<Button variant="outline" onClick={load} className="gap-2"><Activity className="w-4 h-4" /> تحديث</Button>} />
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <QuickAction icon={Plane} label="حجز تذكرة" grad="grad-brand" onClick={() => setTab('tickets')} />
         <QuickAction icon={FileBadge2} label="تأشيرة" grad="grad-green" onClick={() => setTab('visas')} />
+        <QuickAction icon={Package} label="الباكج" grad="grad-teal" onClick={() => setTab('packages')} />
         <QuickAction icon={Briefcase} label="خدمة" grad="grad-gold" onClick={() => setTab('services')} />
-        <QuickAction icon={ArrowDownLeft} label="سند قبض" grad="grad-brand" onClick={() => setTab('receipt')} />
-        <QuickAction icon={ArrowUpRight} label="سند صرف" grad="grad-rose" onClick={() => setTab('payment')} />
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <KpiCard title="مبيعات اليوم" icon={DollarSign} grad="grad-brand"
@@ -5829,10 +5828,21 @@ function LandingPage({ onLoginClick, onSignupClick }) {
     { icon: '👥', title: 'صلاحيات ومستخدمون', desc: 'دور المالك والموظفين مع صلاحيات دقيقة على كل شاشة وعملية.', color: 'from-slate-500 to-slate-700' },
   ]
   const pricing = [
-    { tier: 'Silver', price: '25$', period: 'شهرياً', tag: 'للبدء', color: 'from-slate-400 to-slate-600', bullets: ['30 قيد محاسبي / شهر', 'مستخدم واحد + فرع واحد', 'كل الوحدات الأساسية', 'دعم عبر واتساب'] },
-    { tier: 'Gold', price: '150$', period: 'شهرياً', tag: 'الأكثر مبيعاً 🔥', color: 'from-amber-500 to-orange-600', highlight: true, bullets: ['قيود غير محدودة', 'مستخدمون وفروع بلا حدود', 'إضافة المتصفح 🕋', 'دعم فوري 24/7'] },
-    { tier: 'Gold Annual', price: '1,500$', period: 'سنوياً (وفّر شهرين)', tag: 'الأفضل قيمة', color: 'from-purple-500 to-fuchsia-600', bullets: ['كل مزايا Gold الشهري', 'شهران مجاناً', 'أولوية الميزات الجديدة', 'استشارة محاسبية شهرية'] },
+    {
+      tier: 'Silver', old_price: '500$', price: '250$', period: 'سنوياً', tag: 'للبدء', color: 'from-slate-400 to-slate-600',
+      bullets: ['فرع واحد + مستخدم واحد', 'جميع الوحدات الأساسية', 'محاسبة + تذاكر + تأشيرات + باكجات', 'بدون إضافة المتصفح', 'دعم عبر واتساب'],
+    },
+    {
+      tier: 'Gold', old_price: '1,000$', price: '500$', period: 'سنوياً', tag: 'الأكثر مبيعاً 🔥', color: 'from-amber-500 to-orange-600', highlight: true,
+      bullets: ['فرع واحد + 8 مستخدمين', 'قيود غير محدودة', 'كل مزايا الفضية', 'إضافة المتصفح باشتراك مستقل', 'دعم فوري متقدم'],
+    },
+    {
+      tier: 'Enterprise', old_price: '2,000$', price: '1,000$', period: 'سنوياً', tag: '💎 الأفضل قيمة', color: 'from-purple-500 to-fuchsia-600',
+      bullets: ['فروع لا محدودة + مستخدمين بلا حدود', 'قيود غير محدودة', '🕋 إضافة المتصفح مجاناً وبلا حدود', 'أولوية الميزات الجديدة', 'دعم VIP على مدار 24/7'],
+    },
   ]
+  // v3.9.1 — WhatsApp CTA (single source of truth)
+  const WA_LINK = 'https://wa.me/967781115482?text=' + encodeURIComponent('أهلاً بكم، أرغب في الاستفسار عن اشتراك منظومة رحّال')
   const heroImg = 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=1200&q=80'
   const extImg = 'https://images.unsplash.com/photo-1526628953301-3e589a6a8b74?w=1200&q=80'
   const dashImg = 'https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=1200&q=80'
@@ -5990,9 +6000,13 @@ function LandingPage({ onLoginClick, onSignupClick }) {
             {pricing.map((p, i) => (
               <div key={i} className={`relative rounded-2xl p-6 border-2 ${p.highlight ? 'border-orange-500 bg-gradient-to-br from-orange-50 to-white shadow-2xl scale-105' : 'border-slate-200 bg-white hover:shadow-xl'} transition`}>
                 {p.highlight && <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-gradient-to-l from-orange-500 to-red-500 text-white text-xs font-black px-3 py-1 rounded-full shadow">{p.tag}</div>}
-                <div className={`inline-block bg-gradient-to-br ${p.color} text-white px-3 py-1 rounded-lg text-xs font-bold mb-3`}>{p.tier}</div>
-                <div className="flex items-baseline gap-1 mb-1">
+                <div className="flex items-center justify-between mb-3">
+                  <div className={`inline-block bg-gradient-to-br ${p.color} text-white px-3 py-1 rounded-lg text-xs font-bold`}>{p.tier}</div>
+                  <div className="bg-rose-100 text-rose-700 text-[10px] font-black px-2 py-0.5 rounded-full">خصم 50% لفترة محدودة</div>
+                </div>
+                <div className="flex items-baseline gap-2 mb-1">
                   <span className="text-4xl font-black text-slate-900">{p.price}</span>
+                  {p.old_price && <span className="text-lg text-slate-400 line-through font-semibold">{p.old_price}</span>}
                 </div>
                 <div className="text-sm text-slate-500 mb-5">{p.period}</div>
                 <ul className="space-y-2 mb-6 text-sm">
@@ -6020,7 +6034,7 @@ function LandingPage({ onLoginClick, onSignupClick }) {
             <button onClick={onSignupClick} className="bg-white text-blue-900 px-8 py-4 rounded-xl font-black text-lg shadow-2xl hover:scale-105 transition">
               🚀 اشترك الآن — مجاناً
             </button>
-            <a href="https://wa.me/966500000000" target="_blank" rel="noopener noreferrer" className="bg-emerald-500 hover:bg-emerald-600 text-white px-8 py-4 rounded-xl font-black text-lg shadow-2xl hover:scale-105 transition flex items-center gap-2">
+            <a href={WA_LINK} target="_blank" rel="noopener noreferrer" className="bg-emerald-500 hover:bg-emerald-600 text-white px-8 py-4 rounded-xl font-black text-lg shadow-2xl hover:scale-105 transition flex items-center gap-2">
               💬 تواصل عبر واتساب
             </a>
           </div>
@@ -6053,15 +6067,14 @@ function LandingPage({ onLoginClick, onSignupClick }) {
           <div>
             <div className="text-white font-bold mb-3">تواصل</div>
             <ul className="space-y-2">
-              <li><a href="https://wa.me/966500000000" target="_blank" rel="noopener noreferrer" className="hover:text-white">📱 واتساب</a></li>
-              <li><a href="mailto:info@targetmedia.com" className="hover:text-white">✉️ info@targetmedia.com</a></li>
+              <li><a href={WA_LINK} target="_blank" rel="noopener noreferrer" className="hover:text-white">📱 واتساب: 967781115482</a></li>
               <li><button onClick={onLoginClick} className="hover:text-white">🔐 تسجيل الدخول</button></li>
             </ul>
           </div>
         </div>
         <div className="max-w-7xl mx-auto px-4 lg:px-8 mt-8 pt-6 border-t border-slate-800 flex flex-wrap justify-between text-xs">
           <div>© {new Date().getFullYear()} Target Media. جميع الحقوق محفوظة.</div>
-          <div>Rahaal ERP v3.8 · صُنع بحب للمكاتب السياحية 🕋</div>
+          <div>Rahaal ERP v3.9 · صُنع بحب للمكاتب السياحية 🕋</div>
         </div>
       </footer>
     </div>

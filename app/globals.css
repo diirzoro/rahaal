@@ -83,6 +83,7 @@ html, body {
 .grad-purple { background: linear-gradient(135deg, #4c1d95 0%, #a855f7 100%); }
 .grad-rose   { background: linear-gradient(135deg, #9f1239 0%, #fb7185 100%); }
 .grad-slate  { background: linear-gradient(135deg, #0f172a 0%, #334155 100%); }
+.grad-teal   { background: linear-gradient(135deg, #0f766e 0%, #14b8a6 100%); }
 .tm-blue    { color: #1e3a8a; }
 .tm-orange  { color: #f97316; }
 .bg-tm-blue { background-color: #1e3a8a; }
