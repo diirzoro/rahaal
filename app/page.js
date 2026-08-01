@@ -4772,38 +4772,141 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
 }
 
 function PackageDialog({ open, onOpenChange, record, onSaved }) {
+  // v3.9.6 — Dynamic Package Builder: items list + live totals + supplier per item
   const [f, setF] = useState({ name: '', package_type: 'umrah', currency: 'SAR', start_date: '', end_date: '', notes: '' })
+  const [items, setItems] = useState([]) // [{ component_type, name, supplier_id, cost, sale }]
+  const [suppliers, setSuppliers] = useState([])
   const [saving, setSaving] = useState(false)
   useEffect(() => {
     if (!open) return
-    if (record) setF({ name: record.name, package_type: record.package_type, currency: record.currency, start_date: record.start_date ? new Date(record.start_date).toISOString().slice(0,10) : '', end_date: record.end_date ? new Date(record.end_date).toISOString().slice(0,10) : '', notes: record.notes || '' })
-    else setF({ name: '', package_type: 'umrah', currency: 'SAR', start_date: todayISO(), end_date: '', notes: '' })
+    api('/suppliers').then(setSuppliers).catch(() => {})
+    if (record) {
+      setF({ name: record.name, package_type: record.package_type, currency: record.currency, start_date: record.start_date ? new Date(record.start_date).toISOString().slice(0,10) : '', end_date: record.end_date ? new Date(record.end_date).toISOString().slice(0,10) : '', notes: record.notes || '' })
+      setItems([])
+    } else {
+      setF({ name: '', package_type: 'umrah', currency: 'SAR', start_date: todayISO(), end_date: '', notes: '' })
+      setItems([])
+    }
   }, [open, record])
+  const addItem = () => setItems([...items, { component_type: 'hotel', name: '', supplier_id: '', cost: 0, sale: 0 }])
+  const updItem = (i, k, v) => { const c = [...items]; c[i] = { ...c[i], [k]: v }; setItems(c) }
+  const rmItem = (i) => setItems(items.filter((_, idx) => idx !== i))
+  const nights = f.start_date && f.end_date ? Math.max(0, Math.ceil((new Date(f.end_date) - new Date(f.start_date)) / 86400000)) : 0
+  const totalCost = items.reduce((s, it) => s + (Number(it.cost) || 0), 0)
+  const totalSale = items.reduce((s, it) => s + (Number(it.sale) || 0), 0)
+  const profit = totalSale - totalCost
+  const marginPct = totalSale > 0 ? +((profit / totalSale) * 100).toFixed(2) : 0
   const save = async () => {
     if (!f.name) return toast.error('اسم الباكج مطلوب')
+    if (!record && items.length > 0) {
+      const bad = items.find(it => !it.name || !it.supplier_id)
+      if (bad) return toast.error('كل بند يحتاج اسم ومورد')
+    }
     try {
       setSaving(true)
-      if (record) await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, end_date: f.end_date || null, notes: f.notes } })
-      else await api('/packages', { method: 'POST', body: f })
-      toast.success(record ? 'تم التحديث' : 'تم إنشاء الباكج')
+      if (record) {
+        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, end_date: f.end_date || null, notes: f.notes } })
+        toast.success('تم التحديث')
+      } else {
+        const pkg = await api('/packages', { method: 'POST', body: f })
+        // Create each item as a package component
+        for (const it of items) {
+          await api(`/packages/${pkg.id}/components`, { method: 'POST', body: {
+            component_type: it.component_type, name: it.name, supplier_id: it.supplier_id,
+            cost_per_pax: Number(it.cost) || 0, sale_per_pax: Number(it.sale) || 0,
+          } })
+        }
+        toast.success(`✅ تم إنشاء الباكج${items.length ? ` مع ${items.length} بند` : ''}`)
+      }
       onSaved(); onOpenChange(false)
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent dir="rtl" className="max-w-lg">
-        <DialogHeader><DialogTitle>{record ? 'تعديل الباكج' : 'باكج جديد'}</DialogTitle></DialogHeader>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <DialogContent dir="rtl" className="max-w-4xl max-h-[92vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">🕋 {record ? 'تعديل الباكج' : 'باكج جديد — Dynamic Builder'}</DialogTitle>
+        </DialogHeader>
+        {/* Package info */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
           <div className="md:col-span-2"><Field label="اسم الباكج" required><Input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="عمرة رجب 2026" /></Field></div>
           <Field label="النوع"><Select value={f.package_type} onValueChange={v => setF({ ...f, package_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{PACKAGE_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="العملة"><Select value={f.currency} onValueChange={v => setF({ ...f, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="تاريخ البداية"><Input type="date" value={f.start_date} onChange={e => setF({ ...f, start_date: e.target.value })} disabled={!!record} /></Field>
           <Field label="تاريخ النهاية"><Input type="date" value={f.end_date} onChange={e => setF({ ...f, end_date: e.target.value })} /></Field>
-          <div className="md:col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field></div>
+          <div className="md:col-span-2"><Field label={`المدة${nights > 0 ? ` (${nights} ليلة تلقائي)` : ''}`}><Input value={nights ? `${nights} ليلة` : ''} disabled className="bg-slate-50" /></Field></div>
         </div>
+        {/* Dynamic items list — only for NEW packages */}
+        {!record && (
+          <div className="border-2 border-dashed border-slate-200 rounded-xl p-3 mb-3 bg-slate-50/50">
+            <div className="flex items-center justify-between mb-2">
+              <div className="font-bold text-slate-800 text-sm">📦 بنود الخدمات الديناميكية</div>
+              <Button size="sm" variant="outline" onClick={addItem} className="gap-1 h-7 text-xs border-teal-300 text-teal-700 hover:bg-teal-50"><Plus className="w-3 h-3" /> إضافة بند/خدمة</Button>
+            </div>
+            {items.length === 0 ? (
+              <div className="text-center text-xs text-slate-400 py-4">لا توجد بنود بعد — اضغط "+ إضافة بند/خدمة" لبناء الباكج</div>
+            ) : (
+              <div className="space-y-2">
+                {items.map((it, i) => (
+                  <div key={i} className="grid grid-cols-12 gap-2 items-end bg-white p-2 rounded-lg border">
+                    <div className="col-span-3">
+                      <div className="text-[10px] text-slate-500 mb-1">نوع الخدمة</div>
+                      <Select value={it.component_type} onValueChange={v => updItem(i, 'component_type', v)}>
+                        <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>{COMPONENT_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent>
+                      </Select>
+                    </div>
+                    <div className="col-span-3">
+                      <div className="text-[10px] text-slate-500 mb-1">الاسم / التفاصيل</div>
+                      <Input value={it.name} onChange={e => updItem(i, 'name', e.target.value)} className="h-8 text-xs" placeholder="فندق مكة رتاج الحرم" />
+                    </div>
+                    <div className="col-span-3">
+                      <div className="text-[10px] text-slate-500 mb-1">المورد (شجرة الحسابات) *</div>
+                      <Select value={it.supplier_id} onValueChange={v => updItem(i, 'supplier_id', v)}>
+                        <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="اختر" /></SelectTrigger>
+                        <SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
+                      </Select>
+                    </div>
+                    <div className="col-span-1"><div className="text-[10px] text-slate-500 mb-1">تكلفة</div><Input type="number" value={it.cost} onChange={e => updItem(i, 'cost', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
+                    <div className="col-span-1"><div className="text-[10px] text-slate-500 mb-1">بيع</div><Input type="number" value={it.sale} onChange={e => updItem(i, 'sale', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
+                    <div className="col-span-1 text-center">
+                      <div className="text-[10px] text-slate-500 mb-1">ربح</div>
+                      <div className={`text-xs font-bold ${(Number(it.sale) - Number(it.cost)) >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{((Number(it.sale) || 0) - (Number(it.cost) || 0)).toFixed(2)}</div>
+                    </div>
+                    <div className="col-span-1"><Button size="sm" variant="ghost" onClick={() => rmItem(i)} className="h-8 w-8 p-0 text-rose-600 hover:bg-rose-50"><Trash2 className="w-3 h-3" /></Button></div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* Live Totals */}
+            {items.length > 0 && (
+              <div className="grid grid-cols-4 gap-2 mt-3 pt-3 border-t border-slate-200">
+                <div className="rounded-lg bg-orange-50 border border-orange-200 p-2 text-center">
+                  <div className="text-[10px] text-orange-700 font-semibold">إجمالي التكلفة</div>
+                  <div className="text-sm font-black text-orange-800">{totalCost.toLocaleString('en-US', { maximumFractionDigits: 2 })} {f.currency}</div>
+                </div>
+                <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-2 text-center">
+                  <div className="text-[10px] text-emerald-700 font-semibold">إجمالي البيع</div>
+                  <div className="text-sm font-black text-emerald-800">{totalSale.toLocaleString('en-US', { maximumFractionDigits: 2 })} {f.currency}</div>
+                </div>
+                <div className={`rounded-lg border p-2 text-center ${profit >= 0 ? 'bg-blue-50 border-blue-200' : 'bg-rose-50 border-rose-200'}`}>
+                  <div className={`text-[10px] font-semibold ${profit >= 0 ? 'text-blue-700' : 'text-rose-700'}`}>الربح المتوقع</div>
+                  <div className={`text-sm font-black ${profit >= 0 ? 'text-blue-800' : 'text-rose-800'}`}>{profit.toLocaleString('en-US', { maximumFractionDigits: 2 })} {f.currency}</div>
+                </div>
+                <div className="rounded-lg bg-fuchsia-50 border border-fuchsia-200 p-2 text-center">
+                  <div className="text-[10px] text-fuchsia-700 font-semibold">هامش الربح</div>
+                  <div className="text-sm font-black text-fuchsia-800">{marginPct}%</div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        <Field label="ملاحظات"><Textarea rows={2} value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
-          <Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ'}</Button>
+          <Button onClick={save} disabled={saving} className="grad-brand text-white gap-2">
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (record ? 'حفظ' : `🚀 إنشاء الباكج${items.length ? ` + ${items.length} بند` : ''}`)}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
