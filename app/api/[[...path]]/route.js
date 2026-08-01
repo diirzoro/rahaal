@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.1',
+          version: '3.9.2',
           db: 'connected',
         })
       } catch (e) {

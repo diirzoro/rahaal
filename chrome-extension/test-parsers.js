@@ -162,8 +162,16 @@ global.window = {};
 global.location = { hostname: 'test.local', href: 'https://test.local/' };
 global.document = { title: '', body: { innerText: '' } };
 
-// Load content script (it registers window.__RAHAL_SCRAPE__)
-require('./content-script.js');
+// Load shared parsers library
+require('./parsers.js');
+
+// Simulated __RAHAL_SCRAPE__ using shared parsers directly (matches content-script behavior)
+global.window.__RAHAL_SCRAPE__ = function () {
+  const text = global.document.body ? global.document.body.innerText : '';
+  const data = global.window.RahalParsers.scrape(text, { hostname: global.location.hostname, title: global.document.title });
+  if (data) data.source_url = global.location.href;
+  return data;
+};
 
 // ---- Run tests ----
 let pass = 0, fail = 0;

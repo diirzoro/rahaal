@@ -3823,7 +3823,7 @@ function ExtensionTab() {
             <li>افتح صفحة تذكرة (يمنية / Fly Aden) أو تأشيرة (KSA e-Visa) → افتح الإضافة → <b>قراءة المستند من الصفحة</b> → <b>سحب إلى رحّال 🚀</b>.</li>
           </ol>
           <div className="bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-900">
-            💡 البوابات المدعومة حالياً (Parsers أولية): <b>Yemenia Airways</b> + <b>KSA e-Visa (MOFA/Enjaz)</b>. المرحلة التالية ستضيف Fly Aden والبركة للنقل والموافقات الأمنية.
+            💡 <b>الجديد v1.2:</b> الإضافة الآن تدعم قراءة ملفات PDF ومعاينة الطباعة! يكفي فتح صفحة الـ PDF والضغط "قراءة PDF". البوابات المدعومة: Yemenia · Fly Aden · KSA e-Visa (عمرة/زيارة/عمل) · البركة للنقل · الموافقات الأمنية (Ethiopia/Egypt).
           </div>
         </CardContent>
       </Card>

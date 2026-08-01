@@ -10,7 +10,7 @@
     <div class="logo">🕋</div>
     <div class="brand">
       <div class="title">Rahaal Scraper</div>
-      <div class="subtitle">قارئ رحّال الآلي</div>
+      <div class="subtitle">قارئ رحّال الآلي · v1.2</div>
     </div>
   </div>
 
@@ -32,16 +32,50 @@
   <div id="screen-ready" class="screen hidden">
     <div class="connected-badge">✅ متصل بـ <span id="tenant-name">—</span></div>
     <div class="section-title">📄 المستند الحالي</div>
+    <div id="page-type-badge" class="page-type">🔍 جاري الفحص...</div>
     <div id="detected-info" class="detected">
-      <div class="detected-empty">افتح صفحة تذكرة أو تأشيرة، ثم اضغط أدناه</div>
+      <div class="detected-empty">اضغط الزر أدناه لقراءة الصفحة الحالية</div>
     </div>
-    <button id="btn-scan" class="primary">🔍 قراءة المستند من الصفحة</button>
-    <button id="btn-open-widget" class="secondary hidden">🚀 سحب إلى رحّال</button>
+    <button id="btn-scan" class="primary">🔍 قراءة الصفحة (HTML)</button>
+    <button id="btn-scan-pdf" class="primary hidden" style="background: linear-gradient(90deg,#dc2626,#ea580c)">📕 قراءة PDF</button>
+    <button id="btn-open-widget" class="secondary hidden">🚀 سحب إلى رحّال (فتح نافذة تأكيد)</button>
     <div class="footer-actions">
       <a href="#" id="btn-reset" class="link">إعادة ضبط الرمز</a>
     </div>
   </div>
 
-  <script src="popup.js"></script>
+  <!-- PDF confirmation form (inline in popup — used when PDF viewer is active) -->
+  <div id="screen-pdf-confirm" class="screen hidden">
+    <div class="section-title">📋 مراجعة بيانات PDF</div>
+    <div id="pdf-parser-info" class="page-type" style="background:#dbeafe;color:#1e40af"></div>
+    <div id="pdf-info" class="detected"></div>
+    <label>حساب القبض (العميل) *</label>
+    <select id="pdf-client"><option value="">— اختر —</option></select>
+    <label>المورد/الناقل *</label>
+    <select id="pdf-supplier"><option value="">— اختر —</option></select>
+    <div class="row">
+      <div style="flex:1"><label>التكلفة</label><input type="number" id="pdf-cost" step="0.01"></div>
+      <div style="flex:1"><label>السعر</label><input type="number" id="pdf-sale" step="0.01"></div>
+    </div>
+    <div class="row">
+      <div style="flex:1"><label>العملة</label>
+        <select id="pdf-currency"><option value="USD">USD</option><option value="SAR">SAR</option><option value="YER">YER</option></select>
+      </div>
+      <div style="flex:1"><label>الدفع</label>
+        <select id="pdf-payment"><option value="credit">آجل</option><option value="cash">نقد</option></select>
+      </div>
+    </div>
+    <div id="pdf-box-wrapper" style="display:none">
+      <label>الصندوق</label><select id="pdf-box"><option value="">— اختر —</option></select>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="pdf-cancel" class="secondary" style="flex:0 0 90px">إلغاء</button>
+      <button id="pdf-confirm" class="primary" style="flex:1">تأكيد الحفظ</button>
+    </div>
+    <div id="pdf-status" class="status"></div>
+  </div>
+
+  <script src="parsers.js"></script>
+  <script src="popup.js" type="module"></script>
 </body>
 </html>

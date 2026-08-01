@@ -29,6 +29,8 @@ button.hidden { display: none; }
 .detected .row:last-child { border-bottom: 0; }
 .detected .k { color: #64748b; font-size: 11px; }
 .detected .v { font-weight: 600; }
+.page-type { text-align: center; font-size: 11px; font-weight: 700; padding: 6px 10px; border-radius: 6px; margin-bottom: 8px; background: #dbeafe; color: #1e40af; }
+.row { display: flex; gap: 8px; }
 .footer-actions { text-align: center; margin-top: 12px; padding-top: 8px; border-top: 1px solid #e2e8f0; }
 .link { font-size: 11px; color: #1e40af; text-decoration: none; }
 .link:hover { text-decoration: underline; }
