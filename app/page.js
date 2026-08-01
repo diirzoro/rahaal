@@ -3699,6 +3699,172 @@ function IncomeStatement() {
 // ================================================================
 // OFFICE SETTINGS (White-Labeling)
 // ================================================================
+// v3.8 — Chrome Extension management tab (Personal Access Tokens + download)
+function ExtensionTab() {
+  const [tokens, setTokens] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [showNew, setShowNew] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newToken, setNewToken] = useState(null)
+  const [creating, setCreating] = useState(false)
+  const publicBase = typeof window !== 'undefined' ? window.location.origin : ''
+  const load = () => api('/pats').then(setTokens).catch(e => toast.error(e.message)).finally(() => setLoading(false))
+  useEffect(() => { load() }, [])
+  const createToken = async () => {
+    try {
+      setCreating(true)
+      const r = await api('/pats', { method: 'POST', body: { name: newName || 'إضافة المتصفح' } })
+      setNewToken(r); setNewName(''); load()
+    } catch (e) { toast.error(e.message) } finally { setCreating(false) }
+  }
+  const revokeToken = async (id) => {
+    if (!confirm('إلغاء هذا الرمز نهائياً؟ الإضافة المرتبطة به لن تعمل بعد ذلك.')) return
+    try { await api(`/pats/${id}`, { method: 'DELETE' }); toast.success('تم الإلغاء'); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const copy = (text) => { navigator.clipboard.writeText(text); toast.success('📋 تم النسخ') }
+  return (
+    <div className="space-y-4">
+      <Card className="overflow-hidden border-0 shadow-md bg-gradient-to-l from-indigo-600 via-blue-600 to-cyan-600 text-white">
+        <CardContent className="p-5">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-14 h-14 rounded-xl bg-white/15 flex items-center justify-center text-3xl">🕋</div>
+              <div>
+                <div className="text-xs uppercase tracking-wider opacity-90">Rahaal Scraper Extension</div>
+                <div className="text-lg font-extrabold">قارئ رحّال الآلي للمتصفح</div>
+                <div className="text-xs opacity-90 mt-1">يسحب بيانات التذاكر والتأشيرات تلقائياً من صفحات شركات الطيران والتأشيرات إلى نظام رحّال ERP بضغطة زر واحدة.</div>
+              </div>
+            </div>
+            <a href="/rahal-extension.zip" download className="bg-white text-blue-700 hover:bg-blue-50 font-bold px-4 py-2 rounded-lg text-sm flex items-center gap-2 shrink-0">
+              <Upload className="w-4 h-4 rotate-180" /> تحميل الإضافة (.zip)
+            </a>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-row items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2"><Key className="w-4 h-4" /> رموز الوصول (Personal Access Tokens)</CardTitle>
+            <CardDescription className="mt-1">أنشئ رمزاً واحداً لكل جهاز/مستعرض تستخدم عليه الإضافة. الحد الأقصى: 5 رموز نشطة.</CardDescription>
+          </div>
+          <Button onClick={() => { setShowNew(true); setNewToken(null); setNewName('') }} className="grad-brand text-white gap-2 shrink-0"><Plus className="w-4 h-4" /> إنشاء رمز جديد</Button>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <div className="text-center py-8 text-slate-400"><Loader2 className="w-6 h-6 animate-spin mx-auto" /></div>
+          ) : tokens.length === 0 ? (
+            <div className="text-center py-8 text-slate-400 text-sm">لا توجد رموز — اضغط "إنشاء رمز جديد" للبدء</div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>الاسم</TableHead>
+                  <TableHead>البادئة</TableHead>
+                  <TableHead>تاريخ الإنشاء</TableHead>
+                  <TableHead>آخر استخدام</TableHead>
+                  <TableHead>الحالة</TableHead>
+                  <TableHead className="text-left">إجراء</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {tokens.map(t => (
+                  <TableRow key={t.id}>
+                    <TableCell className="font-semibold">{t.name}</TableCell>
+                    <TableCell dir="ltr" className="font-mono text-xs">{t.prefix}…</TableCell>
+                    <TableCell className="text-xs text-slate-500">{fmtDate(t.created_at)}</TableCell>
+                    <TableCell className="text-xs text-slate-500">{t.last_used_at ? fmtDate(t.last_used_at) : '—'}</TableCell>
+                    <TableCell>
+                      {t.revoked_at ? (
+                        <Badge className="bg-rose-100 text-rose-700 hover:bg-rose-100">ملغى</Badge>
+                      ) : (
+                        <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">نشط</Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-left">
+                      {!t.revoked_at && (
+                        <Button size="sm" variant="outline" onClick={() => revokeToken(t.id)} className="text-rose-600 border-rose-200 hover:bg-rose-50"><Trash2 className="w-3 h-3" /></Button>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base flex items-center gap-2">📖 دليل التثبيت السريع</CardTitle></CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          <ol className="list-decimal pr-5 space-y-2 text-slate-700 leading-7">
+            <li>حمّل الإضافة من الزر أعلاه <b>(rahal-extension.zip)</b> وفك الضغط في مجلد ثابت مثل <code className="bg-slate-100 px-1 rounded" dir="ltr">~/rahal-extension/</code>.</li>
+            <li>افتح Chrome واذهب إلى <code className="bg-slate-100 px-1 rounded" dir="ltr">chrome://extensions/</code> ثم فعّل <b>Developer mode</b> أعلى اليمين.</li>
+            <li>اضغط <b>Load unpacked</b> واختر المجلد المفكوك — ستظهر أيقونة الإضافة 🕋 في شريط الأدوات.</li>
+            <li>هنا في رحّال: اضغط <b>"إنشاء رمز جديد"</b> أعلاه، انسخ الـ Token فوراً (لن يظهر مرة أخرى).</li>
+            <li>افتح الإضافة والصق:
+              <ul className="list-disc pr-5 mt-1 text-slate-600">
+                <li>عنوان الخادم: <code className="bg-slate-100 px-1 rounded" dir="ltr">{publicBase}</code> <button onClick={() => copy(publicBase)} className="text-blue-600 text-xs mr-1">نسخ</button></li>
+                <li>الرمز الشخصي: <code className="bg-slate-100 px-1 rounded" dir="ltr">rhl_pat_...</code></li>
+              </ul>
+            </li>
+            <li>افتح صفحة تذكرة (يمنية / Fly Aden) أو تأشيرة (KSA e-Visa) → افتح الإضافة → <b>قراءة المستند من الصفحة</b> → <b>سحب إلى رحّال 🚀</b>.</li>
+          </ol>
+          <div className="bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-900">
+            💡 البوابات المدعومة حالياً (Parsers أولية): <b>Yemenia Airways</b> + <b>KSA e-Visa (MOFA/Enjaz)</b>. المرحلة التالية ستضيف Fly Aden والبركة للنقل والموافقات الأمنية.
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Create Token Dialog */}
+      <Dialog open={showNew} onOpenChange={(v) => { setShowNew(v); if (!v) { setNewToken(null); setNewName('') } }}>
+        <DialogContent dir="rtl" className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><Key className="w-5 h-5 text-blue-600" /> {newToken ? 'الرمز الجديد' : 'إنشاء رمز شخصي جديد'}</DialogTitle>
+          </DialogHeader>
+          {!newToken ? (
+            <>
+              <div className="space-y-3">
+                <Field label="اسم الرمز (لتذكر مكان استخدامه)">
+                  <Input value={newName} onChange={e => setNewName(e.target.value)} placeholder="لابتوب المكتب — Chrome" />
+                </Field>
+                <div className="text-xs text-slate-500">سيُعرض الرمز الكامل مرة واحدة فقط — انسخه فوراً.</div>
+              </div>
+              <DialogFooter>
+                <Button variant="ghost" onClick={() => setShowNew(false)}>إلغاء</Button>
+                <Button onClick={createToken} disabled={creating} className="grad-brand text-white gap-2">
+                  {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} إنشاء الرمز
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <div className="space-y-3">
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-sm text-emerald-900">
+                  ✅ تم إنشاء الرمز بنجاح باسم <b>{newToken.name}</b>
+                </div>
+                <div className="bg-slate-900 text-white rounded-lg p-3 font-mono text-xs break-all" dir="ltr">
+                  {newToken.token}
+                </div>
+                <Button onClick={() => copy(newToken.token)} className="w-full gap-2 bg-blue-600 hover:bg-blue-700 text-white">
+                  📋 نسخ الرمز إلى الحافظة
+                </Button>
+                <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">
+                  ⚠️ <b>تنبيه:</b> {newToken.warning || 'انسخ الرمز الآن — لن يظهر مرة أخرى.'}
+                </div>
+              </div>
+              <DialogFooter>
+                <Button onClick={() => { setShowNew(false); setNewToken(null) }} className="grad-brand text-white">تم — إغلاق</Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
 function ReferralsTab() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -4788,6 +4954,7 @@ function OfficeSettings() {
           <TabsTrigger value="users"><Users className="w-4 h-4 ml-1" /> المستخدمون</TabsTrigger>
           <TabsTrigger value="rates"><ArrowUpRight className="w-4 h-4 ml-1" /> أسعار الصرف</TabsTrigger>
           <TabsTrigger value="referrals">🎁 نظام الإحالة</TabsTrigger>
+          <TabsTrigger value="extension">🕋 إضافة المتصفح</TabsTrigger>
           <TabsTrigger value="print"><Printer className="w-4 h-4 ml-1" /> معاينة الطباعة</TabsTrigger>
         </TabsList>
 
@@ -4951,6 +5118,10 @@ function OfficeSettings() {
 
         <TabsContent value="referrals" className="mt-4">
           <ReferralsTab />
+        </TabsContent>
+
+        <TabsContent value="extension" className="mt-4">
+          <ExtensionTab />
         </TabsContent>
 
         <TabsContent value="print" className="mt-4">

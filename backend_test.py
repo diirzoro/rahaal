@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Backend Test Suite for Rahaal ERP v3.6 — Packages Module
-Tests all package endpoints, bookings, components, reports, and regressions
+v3.8 Backend Testing — PATs + Scraper Ingest + Bearer Auth
+Test credentials: owner@demo.com / Demo@2025
 """
 
 import requests
 import json
-import os
+import sys
 from datetime import datetime, timedelta
 
-# Configuration
-BASE_URL = os.getenv('NEXT_PUBLIC_BASE_URL', 'https://visa-booking-5.preview.emergentagent.com')
-API_URL = f"{BASE_URL}/api"
+# Base URL from environment
+BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
 
 # Test credentials
 OWNER_EMAIL = "owner@demo.com"
@@ -19,762 +18,706 @@ OWNER_PASSWORD = "Demo@2025"
 
 # Global session
 session = requests.Session()
-session.headers.update({'Content-Type': 'application/json'})
+session.headers.update({"Content-Type": "application/json"})
 
-# Test data storage
-test_data = {
-    'supplier1_id': None,
-    'supplier2_id': None,
-    'client_id': None,
-    'package_id': None,
-    'booking_id': None,
-    'empty_package_id': None
-}
+# Test state
+test_results = []
+created_pat_token = None
+created_client_id = None
+created_supplier_id = None
+created_ticket_id = None
+created_visa_id = None
 
-def print_test(msg):
-    """Print test step"""
-    print(f"\n{'='*80}")
-    print(f"TEST: {msg}")
-    print('='*80)
-
-def print_result(success, msg):
-    """Print test result"""
-    status = "✅ PASSED" if success else "❌ FAILED"
-    print(f"{status}: {msg}")
+def log_test(name, passed, details=""):
+    """Log test result"""
+    status = "✅ PASSED" if passed else "❌ FAILED"
+    print(f"{status} - {name}")
+    if details:
+        print(f"  Details: {details}")
+    test_results.append({"name": name, "passed": passed, "details": details})
 
 def login():
-    """Login and get session cookie"""
-    print_test("Login as owner@demo.com")
-    try:
-        resp = session.post(f"{API_URL}/auth/login", json={
-            'email': OWNER_EMAIL,
-            'password': OWNER_PASSWORD
-        })
-        if resp.status_code == 200:
-            print_result(True, f"Login successful, session cookie set")
-            return True
-        else:
-            print_result(False, f"Login failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"Login exception: {str(e)}")
-        return False
+    """Login as owner"""
+    print("\n=== LOGIN ===")
+    resp = session.post(f"{BASE_URL}/auth/login", json={
+        "email": OWNER_EMAIL,
+        "password": OWNER_PASSWORD
+    })
+    if resp.status_code == 200:
+        data = resp.json()
+        log_test("Login as owner", True, f"User: {data.get('user', {}).get('email')}")
+        return data
+    else:
+        log_test("Login as owner", False, f"Status: {resp.status_code}, Response: {resp.text}")
+        sys.exit(1)
 
 def test_health():
-    """Test 1: GET /api/health → verify version:3.6"""
-    print_test("1. GET /api/health → verify version:3.6")
-    try:
-        resp = session.get(f"{API_URL}/health")
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get('version') == '3.6':
-                print_result(True, f"Health check passed, version=3.6")
-                return True
-            else:
-                print_result(False, f"Version mismatch: expected 3.6, got {data.get('version')}")
-                return False
+    """Test 1: Health endpoint returns version 3.8"""
+    print("\n=== TEST 1: HEALTH CHECK ===")
+    resp = session.get(f"{BASE_URL}/health")
+    if resp.status_code == 200:
+        data = resp.json()
+        version = data.get("version")
+        if version == "3.8":
+            log_test("Health version 3.8", True, f"Version: {version}")
         else:
-            print_result(False, f"Health check failed: {resp.status_code}")
-            return False
-    except Exception as e:
-        print_result(False, f"Health check exception: {str(e)}")
-        return False
+            log_test("Health version 3.8", False, f"Expected '3.8', got '{version}'")
+    else:
+        log_test("Health version 3.8", False, f"Status: {resp.status_code}")
 
-def test_create_suppliers_and_client():
-    """Test 2: Create suppliers and client for testing"""
-    print_test("2. Create suppliers and client for testing")
+def test_pat_crud():
+    """Test 2-6: PAT CRUD operations"""
+    global created_pat_token
     
-    # Create supplier 1 (visa supplier)
-    try:
-        resp = session.post(f"{API_URL}/suppliers", json={
-            'name': 'مورد تأشيرات باكج'
-        })
-        if resp.status_code == 200:
-            data = resp.json()
-            test_data['supplier1_id'] = data.get('id')
-            print_result(True, f"Supplier 1 created: {test_data['supplier1_id']}")
-        else:
-            print_result(False, f"Supplier 1 creation failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"Supplier 1 exception: {str(e)}")
-        return False
-    
-    # Create supplier 2 (hotel supplier)
-    try:
-        resp = session.post(f"{API_URL}/suppliers", json={
-            'name': 'فندق باكج'
-        })
-        if resp.status_code == 200:
-            data = resp.json()
-            test_data['supplier2_id'] = data.get('id')
-            print_result(True, f"Supplier 2 created: {test_data['supplier2_id']}")
-        else:
-            print_result(False, f"Supplier 2 creation failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"Supplier 2 exception: {str(e)}")
-        return False
-    
-    # Create client
-    try:
-        resp = session.post(f"{API_URL}/clients", json={
-            'name': 'عميل باكج اختبار',
-            'phone': '777500500'
-        })
-        if resp.status_code == 200:
-            data = resp.json()
-            test_data['client_id'] = data.get('id')
-            print_result(True, f"Client created: {test_data['client_id']}")
-            return True
-        else:
-            print_result(False, f"Client creation failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"Client exception: {str(e)}")
-        return False
-
-def test_create_package():
-    """Test 3: POST /api/packages"""
-    print_test("3. POST /api/packages - Create package")
-    try:
-        resp = session.post(f"{API_URL}/packages", json={
-            'name': 'عمرة رجب اختبار',
-            'package_type': 'umrah',
-            'currency': 'SAR',
-            'start_date': '2025-01-01',
-            'end_date': '2025-01-15',
-            'notes': 'باقة اقتصادية'
-        })
-        if resp.status_code == 200:
-            data = resp.json()
-            test_data['package_id'] = data.get('id')
-            status = data.get('status')
-            if status == 'open':
-                print_result(True, f"Package created: {test_data['package_id']}, status={status}")
-                return True
-            else:
-                print_result(False, f"Package status incorrect: expected 'open', got '{status}'")
-                return False
-        else:
-            print_result(False, f"Package creation failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"Package creation exception: {str(e)}")
-        return False
-
-def test_get_packages():
-    """Test 4: GET /api/packages → verify returned list"""
-    print_test("4. GET /api/packages → verify returned list")
-    try:
-        resp = session.get(f"{API_URL}/packages")
-        if resp.status_code == 200:
-            data = resp.json()
-            packages = data if isinstance(data, list) else data.get('packages', [])
-            
-            # Find our package
-            our_package = None
-            for pkg in packages:
-                if pkg.get('id') == test_data['package_id']:
-                    our_package = pkg
-                    break
-            
-            if our_package:
-                components_count = our_package.get('components_count', 0)
-                bookings_count = our_package.get('bookings_count', 0)
-                if components_count == 0 and bookings_count == 0:
-                    print_result(True, f"Package found with components_count=0, bookings_count=0")
-                    return True
-                else:
-                    print_result(False, f"Package counts incorrect: components={components_count}, bookings={bookings_count}")
-                    return False
-            else:
-                print_result(False, f"Package {test_data['package_id']} not found in list")
-                return False
-        else:
-            print_result(False, f"GET packages failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"GET packages exception: {str(e)}")
-        return False
-
-def test_add_components():
-    """Test 5: POST /api/packages/{package_id}/components"""
-    print_test("5. POST /api/packages/{package_id}/components - Add 2 components")
-    
-    # Add visa component
-    try:
-        resp = session.post(f"{API_URL}/packages/{test_data['package_id']}/components", json={
-            'name': 'تأشيرة عمرة',
-            'component_type': 'visa',
-            'supplier_id': test_data['supplier1_id'],
-            'cost_per_pax': 200,
-            'sale_per_pax': 300
-        })
-        if resp.status_code == 200:
-            print_result(True, f"Visa component added successfully")
-        else:
-            print_result(False, f"Visa component failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"Visa component exception: {str(e)}")
-        return False
-    
-    # Add hotel component
-    try:
-        resp = session.post(f"{API_URL}/packages/{test_data['package_id']}/components", json={
-            'name': 'فندق 3 ليال',
-            'component_type': 'hotel',
-            'supplier_id': test_data['supplier2_id'],
-            'cost_per_pax': 400,
-            'sale_per_pax': 600
-        })
-        if resp.status_code == 200:
-            print_result(True, f"Hotel component added successfully")
-            return True
-        else:
-            print_result(False, f"Hotel component failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"Hotel component exception: {str(e)}")
-        return False
-
-def test_get_components():
-    """Test 6: GET /api/packages/{package_id}/components → verify 2 components"""
-    print_test("6. GET /api/packages/{package_id}/components → verify 2 components")
-    try:
-        resp = session.get(f"{API_URL}/packages/{test_data['package_id']}/components")
-        if resp.status_code == 200:
-            data = resp.json()
-            components = data if isinstance(data, list) else data.get('components', [])
-            if len(components) == 2:
-                print_result(True, f"2 components returned: {[c.get('name') for c in components]}")
-                return True
-            else:
-                print_result(False, f"Expected 2 components, got {len(components)}")
-                return False
-        else:
-            print_result(False, f"GET components failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"GET components exception: {str(e)}")
-        return False
-
-def test_create_booking():
-    """Test 7: POST /api/packages/{package_id}/bookings"""
-    print_test("7. POST /api/packages/{package_id}/bookings - Create booking with 2 pax")
-    try:
-        resp = session.post(f"{API_URL}/packages/{test_data['package_id']}/bookings", json={
-            'client_id': test_data['client_id'],
-            'pilgrim_name': 'معتمر أول',
-            'passport_no': 'YE123',
-            'pax_count': 2,
-            'payment_method': 'credit'
-        })
-        if resp.status_code == 200:
-            data = resp.json()
-            test_data['booking_id'] = data.get('id')
-            
-            # Verify calculations
-            total_cost = data.get('total_cost')
-            total_sale = data.get('total_sale')
-            commission = data.get('commission')
-            component_snapshots = data.get('component_snapshots', [])
-            
-            expected_cost = (200 + 400) * 2  # 1200
-            expected_sale = (300 + 600) * 2  # 1800
-            expected_commission = expected_sale - expected_cost  # 600
-            
-            checks = []
-            checks.append(('total_cost', total_cost == expected_cost, f"{total_cost} == {expected_cost}"))
-            checks.append(('total_sale', total_sale == expected_sale, f"{total_sale} == {expected_sale}"))
-            checks.append(('commission', commission == expected_commission, f"{commission} == {expected_commission}"))
-            checks.append(('component_snapshots', len(component_snapshots) == 2, f"len={len(component_snapshots)} == 2"))
-            
-            # Verify component snapshots have cost_total
-            if len(component_snapshots) == 2:
-                for snap in component_snapshots:
-                    cost_total = snap.get('cost_total')
-                    cost_per_pax = snap.get('cost_per_pax')
-                    expected_total = cost_per_pax * 2
-                    checks.append((f"component {snap.get('name')} cost_total", cost_total == expected_total, f"{cost_total} == {expected_total}"))
-            
-            all_passed = all(check[1] for check in checks)
-            if all_passed:
-                print_result(True, f"Booking created: {test_data['booking_id']}, all calculations correct")
-                for name, passed, msg in checks:
-                    print(f"  ✓ {name}: {msg}")
-                return True
-            else:
-                print_result(False, f"Booking calculations incorrect")
-                for name, passed, msg in checks:
-                    status = "✓" if passed else "✗"
-                    print(f"  {status} {name}: {msg}")
-                return False
-        else:
-            print_result(False, f"Booking creation failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"Booking creation exception: {str(e)}")
-        return False
-
-def test_verify_balances():
-    """Test 8: Verify balances after booking"""
-    print_test("8. Verify balances - Client and Suppliers")
-    
-    # Get client balance
-    try:
-        resp = session.get(f"{API_URL}/clients")
-        if resp.status_code == 200:
-            data = resp.json()
-            clients = data if isinstance(data, list) else data.get('clients', [])
-            client = next((c for c in clients if c.get('id') == test_data['client_id']), None)
-            if client:
-                balances = client.get('balances', {})
-                balance_sar = balances.get('SAR', 0)
-                # Client should have 1800 SAR balance (or delta of 1800 from initial)
-                print(f"  Client balance SAR: {balance_sar}")
-                # We'll check if it's >= 1800 since there might be previous transactions
-                if balance_sar >= 1800:
-                    print_result(True, f"Client balance SAR >= 1800 (actual: {balance_sar})")
-                else:
-                    print_result(False, f"Client balance SAR < 1800 (actual: {balance_sar})")
-                    return False
-            else:
-                print_result(False, f"Client not found")
-                return False
-        else:
-            print_result(False, f"GET clients failed: {resp.status_code}")
-            return False
-    except Exception as e:
-        print_result(False, f"GET clients exception: {str(e)}")
-        return False
-    
-    # Get suppliers balances
-    try:
-        resp = session.get(f"{API_URL}/suppliers")
-        if resp.status_code == 200:
-            data = resp.json()
-            suppliers = data if isinstance(data, list) else data.get('suppliers', [])
-            
-            supplier1 = next((s for s in suppliers if s.get('id') == test_data['supplier1_id']), None)
-            supplier2 = next((s for s in suppliers if s.get('id') == test_data['supplier2_id']), None)
-            
-            if supplier1 and supplier2:
-                balances1 = supplier1.get('balances', {})
-                balances2 = supplier2.get('balances', {})
-                balance1_sar = balances1.get('SAR', 0)
-                balance2_sar = balances2.get('SAR', 0)
-                
-                print(f"  Supplier1 (visa) balance SAR: {balance1_sar}")
-                print(f"  Supplier2 (hotel) balance SAR: {balance2_sar}")
-                
-                # Supplier1 should have 400 SAR (200*2), Supplier2 should have 800 SAR (400*2)
-                checks = []
-                checks.append(balance1_sar >= 400)
-                checks.append(balance2_sar >= 800)
-                
-                if all(checks):
-                    print_result(True, f"Supplier balances correct: supplier1={balance1_sar}, supplier2={balance2_sar}")
-                    return True
-                else:
-                    print_result(False, f"Supplier balances incorrect")
-                    return False
-            else:
-                print_result(False, f"Suppliers not found")
-                return False
-        else:
-            print_result(False, f"GET suppliers failed: {resp.status_code}")
-            return False
-    except Exception as e:
-        print_result(False, f"GET suppliers exception: {str(e)}")
-        return False
-
-def test_get_bookings():
-    """Test 9: GET /api/packages/{package_id}/bookings → verify 1 booking"""
-    print_test("9. GET /api/packages/{package_id}/bookings → verify 1 booking")
-    try:
-        resp = session.get(f"{API_URL}/packages/{test_data['package_id']}/bookings")
-        if resp.status_code == 200:
-            data = resp.json()
-            bookings = data if isinstance(data, list) else data.get('bookings', [])
-            if len(bookings) >= 1:
-                print_result(True, f"{len(bookings)} booking(s) returned")
-                return True
-            else:
-                print_result(False, f"Expected at least 1 booking, got {len(bookings)}")
-                return False
-        else:
-            print_result(False, f"GET bookings failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"GET bookings exception: {str(e)}")
-        return False
-
-def test_package_report():
-    """Test 10: GET /api/packages/{package_id}/report"""
-    print_test("10. GET /api/packages/{package_id}/report - Verify totals and breakdown")
-    try:
-        resp = session.get(f"{API_URL}/packages/{test_data['package_id']}/report")
-        if resp.status_code == 200:
-            data = resp.json()
-            
-            totals = data.get('totals', {})
-            margin_pct = data.get('margin_pct', 0)
-            supplier_breakdown = data.get('supplier_breakdown', [])
-            
-            # Verify totals
-            checks = []
-            checks.append(('bookings', totals.get('bookings') >= 1, f"{totals.get('bookings')} >= 1"))
-            checks.append(('pax', totals.get('pax') >= 2, f"{totals.get('pax')} >= 2"))
-            checks.append(('revenue', totals.get('revenue') >= 1800, f"{totals.get('revenue')} >= 1800"))
-            checks.append(('cost', totals.get('cost') >= 1200, f"{totals.get('cost')} >= 1200"))
-            checks.append(('profit', totals.get('profit') >= 600, f"{totals.get('profit')} >= 600"))
-            
-            # Verify margin_pct (should be around 33.33%)
-            expected_margin = (600 / 1800) * 100  # 33.33
-            margin_ok = abs(margin_pct - expected_margin) < 1  # Allow 1% tolerance
-            checks.append(('margin_pct', margin_ok, f"{margin_pct:.2f} ≈ {expected_margin:.2f}"))
-            
-            # Verify supplier_breakdown has 2 rows
-            checks.append(('supplier_breakdown count', len(supplier_breakdown) == 2, f"len={len(supplier_breakdown)} == 2"))
-            
-            # Verify sorted desc by cost (hotel 800, visa 400)
-            if len(supplier_breakdown) == 2:
-                first_cost = supplier_breakdown[0].get('cost', 0)
-                second_cost = supplier_breakdown[1].get('cost', 0)
-                checks.append(('sorted desc', first_cost >= second_cost, f"{first_cost} >= {second_cost}"))
-            
-            all_passed = all(check[1] for check in checks)
-            if all_passed:
-                print_result(True, f"Package report correct")
-                for name, passed, msg in checks:
-                    print(f"  ✓ {name}: {msg}")
-                return True
-            else:
-                print_result(False, f"Package report incorrect")
-                for name, passed, msg in checks:
-                    status = "✓" if passed else "✗"
-                    print(f"  {status} {name}: {msg}")
-                return False
-        else:
-            print_result(False, f"GET report failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"GET report exception: {str(e)}")
-        return False
-
-def test_close_package():
-    """Test 11: PATCH /api/packages/{package_id} with status:closed"""
-    print_test("11. PATCH /api/packages/{package_id} - Close package")
-    try:
-        resp = session.patch(f"{API_URL}/packages/{test_data['package_id']}", json={
-            'status': 'closed'
-        })
-        if resp.status_code == 200:
-            print_result(True, f"Package closed successfully")
-            return True
-        else:
-            print_result(False, f"Close package failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"Close package exception: {str(e)}")
-        return False
-
-def test_booking_on_closed_package():
-    """Test 12: POST /api/packages/{package_id}/bookings on closed package → expect 400"""
-    print_test("12. POST booking on closed package → expect 400 'الباكج مغلق'")
-    try:
-        resp = session.post(f"{API_URL}/packages/{test_data['package_id']}/bookings", json={
-            'client_id': test_data['client_id'],
-            'pilgrim_name': 'معتمر ثاني',
-            'passport_no': 'YE456',
-            'pax_count': 1,
-            'payment_method': 'credit'
-        })
-        if resp.status_code == 400:
-            error_msg = resp.text
-            if 'مغلق' in error_msg or 'closed' in error_msg.lower():
-                print_result(True, f"Booking on closed package correctly rejected: {error_msg}")
-                return True
-            else:
-                print_result(False, f"Wrong error message: {error_msg}")
-                return False
-        else:
-            print_result(False, f"Expected 400, got {resp.status_code}")
-            return False
-    except Exception as e:
-        print_result(False, f"Booking on closed package exception: {str(e)}")
-        return False
-
-def test_reopen_package():
-    """Test 13: PATCH /api/packages/{package_id} with status:open"""
-    print_test("13. PATCH /api/packages/{package_id} - Reopen package")
-    try:
-        resp = session.patch(f"{API_URL}/packages/{test_data['package_id']}", json={
-            'status': 'open'
-        })
-        if resp.status_code == 200:
-            print_result(True, f"Package reopened successfully")
-            return True
-        else:
-            print_result(False, f"Reopen package failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"Reopen package exception: {str(e)}")
-        return False
-
-def test_delete_package_with_bookings():
-    """Test 14: DELETE /api/packages/{package_id} with bookings → expect 400"""
-    print_test("14. DELETE package with bookings → expect 400 'لا يمكن حذف باكج به تسجيلات'")
-    try:
-        resp = session.delete(f"{API_URL}/packages/{test_data['package_id']}")
-        if resp.status_code == 400:
-            error_msg = resp.text
-            if 'تسجيلات' in error_msg or 'bookings' in error_msg.lower():
-                print_result(True, f"Delete package with bookings correctly rejected: {error_msg}")
-                return True
-            else:
-                print_result(False, f"Wrong error message: {error_msg}")
-                return False
-        else:
-            print_result(False, f"Expected 400, got {resp.status_code}")
-            return False
-    except Exception as e:
-        print_result(False, f"Delete package with bookings exception: {str(e)}")
-        return False
-
-def test_create_and_delete_empty_package():
-    """Test 15: Create empty package and delete it → success"""
-    print_test("15. Create empty package and delete it → success")
-    
-    # Create empty package
-    try:
-        resp = session.post(f"{API_URL}/packages", json={
-            'name': 'باكج فارغ للحذف',
-            'package_type': 'hajj',
-            'currency': 'SAR',
-            'start_date': '2025-02-01',
-            'end_date': '2025-02-15'
-        })
-        if resp.status_code == 200:
-            data = resp.json()
-            test_data['empty_package_id'] = data.get('id')
-            print(f"  Empty package created: {test_data['empty_package_id']}")
-        else:
-            print_result(False, f"Empty package creation failed: {resp.status_code}")
-            return False
-    except Exception as e:
-        print_result(False, f"Empty package creation exception: {str(e)}")
-        return False
-    
-    # Delete empty package
-    try:
-        resp = session.delete(f"{API_URL}/packages/{test_data['empty_package_id']}")
-        if resp.status_code == 200:
-            print_result(True, f"Empty package deleted successfully")
-            return True
-        else:
-            print_result(False, f"Empty package deletion failed: {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        print_result(False, f"Empty package deletion exception: {str(e)}")
-        return False
-
-def test_journal_entry():
-    """Test 16: Verify journal entry for package booking"""
-    print_test("16. Verify journal entry - ref_type='package_booking'")
-    try:
-        resp = session.get(f"{API_URL}/journal-entries")
-        if resp.status_code == 200:
-            data = resp.json()
-            entries = data if isinstance(data, list) else data.get('entries', [])
-            
-            # Find journal entry for our booking
-            booking_je = None
-            for entry in entries:
-                if entry.get('ref_type') == 'package_booking' and entry.get('ref_id') == test_data['booking_id']:
-                    booking_je = entry
-                    break
-            
-            if booking_je:
-                lines = booking_je.get('lines', [])
-                
-                # Verify structure: should have lines for client debit, supplier credits, commission credit
-                # Expected: client debit 1800, supplier1 credit 400, supplier2 credit 800, commission credit 600
-                # Total debits should equal total credits
-                
-                total_debit = sum(line.get('debit', 0) for line in lines)
-                total_credit = sum(line.get('credit', 0) for line in lines)
-                
-                checks = []
-                checks.append(('ref_type', booking_je.get('ref_type') == 'package_booking', f"ref_type={booking_je.get('ref_type')}"))
-                checks.append(('ref_id', booking_je.get('ref_id') == test_data['booking_id'], f"ref_id matches"))
-                checks.append(('balanced', abs(total_debit - total_credit) < 0.01, f"debit={total_debit}, credit={total_credit}"))
-                checks.append(('lines count', len(lines) >= 3, f"lines={len(lines)} >= 3"))
-                
-                all_passed = all(check[1] for check in checks)
-                if all_passed:
-                    print_result(True, f"Journal entry correct")
-                    for name, passed, msg in checks:
-                        print(f"  ✓ {name}: {msg}")
-                    return True
-                else:
-                    print_result(False, f"Journal entry incorrect")
-                    for name, passed, msg in checks:
-                        status = "✓" if passed else "✗"
-                        print(f"  {status} {name}: {msg}")
-                    return False
-            else:
-                print_result(False, f"Journal entry for booking {test_data['booking_id']} not found")
-                return False
-        else:
-            print_result(False, f"GET journal entries failed: {resp.status_code}")
-            return False
-    except Exception as e:
-        print_result(False, f"GET journal entries exception: {str(e)}")
-        return False
-
-def test_regression_refunds():
-    """Test 17: Regression - v3.5 refunds still work"""
-    print_test("17. REGRESSION - v3.5 refunds still work")
-    
-    # Create a ticket first
-    try:
-        # Get a client and supplier
-        resp = session.get(f"{API_URL}/clients")
-        clients = resp.json() if resp.status_code == 200 else []
-        if isinstance(clients, dict):
-            clients = clients.get('clients', [])
-        
-        resp = session.get(f"{API_URL}/suppliers")
-        suppliers = resp.json() if resp.status_code == 200 else []
-        if isinstance(suppliers, dict):
-            suppliers = suppliers.get('suppliers', [])
-        
-        if not clients or not suppliers:
-            print_result(False, f"No clients or suppliers available for regression test")
-            return False
-        
-        client_id = clients[0].get('id')
-        supplier_id = suppliers[0].get('id')
-        
-        # Create ticket
-        resp = session.post(f"{API_URL}/tickets", json={
-            'pnr': f'REGR-{datetime.now().strftime("%H%M%S")}',
-            'client_id': client_id,
-            'supplier_id': supplier_id,
-            'passenger_name': 'مسافر اختبار',
-            'passport_no': 'YE-REGR-1',
-            'currency': 'SAR',
-            'cost': 100,
-            'sale_price': 150,
-            'payment_method': 'credit'
-        })
-        
-        if resp.status_code != 200:
-            print_result(False, f"Ticket creation failed: {resp.status_code}")
-            return False
-        
-        ticket_data = resp.json()
-        ticket_id = ticket_data.get('id')
-        
-        # Create refund using v3.5 endpoint: POST /refunds
-        resp = session.post(f"{API_URL}/refunds", json={
-            'ref_type': 'ticket',
-            'ref_id': ticket_id,
-            'supplier_penalty': 20,
-            'office_fee': 10,
-            'reason': 'اختبار استرجاع'
-        })
-        
-        if resp.status_code == 200:
-            print_result(True, f"v3.5 refunds still working")
-            return True
-        else:
-            print_result(False, f"Refund failed: {resp.status_code} - {resp.text}")
-            return False
-            
-    except Exception as e:
-        print_result(False, f"Regression refunds exception: {str(e)}")
-        return False
-
-def test_regression_permissions():
-    """Test 18: Regression - v3.4 permissions/affiliate still work"""
-    print_test("18. REGRESSION - v3.4 permissions/affiliate still work")
-    
-    # Just verify we can access auth/me and it has expected structure
-    try:
-        resp = session.get(f"{API_URL}/auth/me")
-        if resp.status_code == 200:
-            data = resp.json()
-            user = data.get('user')
-            if user and user.get('role'):
-                print_result(True, f"v3.4 permissions still working, role={user.get('role')}")
-                return True
-            else:
-                print_result(False, f"User structure incorrect")
-                return False
-        else:
-            print_result(False, f"Auth/me failed: {resp.status_code}")
-            return False
-    except Exception as e:
-        print_result(False, f"Regression permissions exception: {str(e)}")
-        return False
-
-def main():
-    """Run all tests"""
-    print("\n" + "="*80)
-    print("RAHAAL ERP v3.6 — PACKAGES MODULE BACKEND TEST SUITE")
-    print("="*80)
-    
-    # Login first
-    if not login():
-        print("\n❌ LOGIN FAILED - Cannot proceed with tests")
+    print("\n=== TEST 2: GET /api/pats (initial list) ===")
+    resp = session.get(f"{BASE_URL}/pats")
+    if resp.status_code == 200:
+        data = resp.json()
+        initial_count = len(data)
+        log_test("GET /api/pats returns list", True, f"Found {initial_count} existing PATs")
+    else:
+        log_test("GET /api/pats returns list", False, f"Status: {resp.status_code}")
         return
     
-    # Run all tests
-    results = []
-    
-    results.append(("Health Check v3.6", test_health()))
-    results.append(("Create Suppliers and Client", test_create_suppliers_and_client()))
-    results.append(("Create Package", test_create_package()))
-    results.append(("Get Packages List", test_get_packages()))
-    results.append(("Add Components", test_add_components()))
-    results.append(("Get Components", test_get_components()))
-    results.append(("Create Booking", test_create_booking()))
-    results.append(("Verify Balances", test_verify_balances()))
-    results.append(("Get Bookings", test_get_bookings()))
-    results.append(("Package Report", test_package_report()))
-    results.append(("Close Package", test_close_package()))
-    results.append(("Booking on Closed Package", test_booking_on_closed_package()))
-    results.append(("Reopen Package", test_reopen_package()))
-    results.append(("Delete Package with Bookings", test_delete_package_with_bookings()))
-    results.append(("Create and Delete Empty Package", test_create_and_delete_empty_package()))
-    results.append(("Verify Journal Entry", test_journal_entry()))
-    results.append(("Regression - Refunds", test_regression_refunds()))
-    results.append(("Regression - Permissions", test_regression_permissions()))
-    
-    # Summary
-    print("\n" + "="*80)
-    print("TEST SUMMARY")
-    print("="*80)
-    
-    passed = sum(1 for _, result in results if result)
-    total = len(results)
-    
-    for name, result in results:
-        status = "✅ PASSED" if result else "❌ FAILED"
-        print(f"{status}: {name}")
-    
-    print("\n" + "="*80)
-    print(f"TOTAL: {passed}/{total} tests passed")
-    print("="*80)
-    
-    if passed == total:
-        print("\n🎉 ALL TESTS PASSED - v3.6 Packages Module is working correctly!")
+    print("\n=== TEST 3: POST /api/pats (create token) ===")
+    resp = session.post(f"{BASE_URL}/pats", json={"name": "test-machine-1"})
+    if resp.status_code == 200:
+        data = resp.json()
+        token = data.get("token")
+        prefix = data.get("prefix")
+        warning = data.get("warning")
+        
+        if token and token.startswith("rhl_pat_") and len(token) >= 40:
+            log_test("POST /api/pats creates token", True, 
+                    f"Token: {token[:20]}..., Prefix: {prefix}, Warning: {warning}")
+            created_pat_token = token
+        else:
+            log_test("POST /api/pats creates token", False, 
+                    f"Invalid token format: {token}")
     else:
-        print(f"\n⚠️  {total - passed} test(s) failed - Review failures above")
+        log_test("POST /api/pats creates token", False, f"Status: {resp.status_code}")
+        return
+    
+    print("\n=== TEST 4: GET /api/pats (verify token appears with prefix only) ===")
+    resp = session.get(f"{BASE_URL}/pats")
+    if resp.status_code == 200:
+        data = resp.json()
+        found = False
+        for pat in data:
+            if pat.get("prefix") == prefix:
+                found = True
+                has_token_field = "token" in pat
+                if not has_token_field:
+                    log_test("PAT list shows prefix, not full token", True, 
+                            f"Prefix: {pat.get('prefix')}, Name: {pat.get('name')}")
+                else:
+                    log_test("PAT list shows prefix, not full token", False, 
+                            "Full token leaked in list response")
+                break
+        if not found:
+            log_test("PAT list shows prefix, not full token", False, "New PAT not found in list")
+    else:
+        log_test("PAT list shows prefix, not full token", False, f"Status: {resp.status_code}")
+    
+    print("\n=== TEST 5: Create 4 more PATs (total 5 active) ===")
+    success_count = 0
+    for i in range(2, 6):
+        resp = session.post(f"{BASE_URL}/pats", json={"name": f"test-machine-{i}"})
+        if resp.status_code == 200:
+            success_count += 1
+    
+    if success_count == 4:
+        log_test("Create 4 more PATs (total 5)", True, f"Created {success_count} additional PATs")
+    else:
+        log_test("Create 4 more PATs (total 5)", False, f"Only created {success_count} PATs")
+    
+    print("\n=== TEST 6: Try creating 6th PAT (should fail with 400) ===")
+    resp = session.post(f"{BASE_URL}/pats", json={"name": "test-machine-6"})
+    if resp.status_code == 400:
+        error = resp.json().get("error", "")
+        if "5" in error or "الحد الأقصى" in error:
+            log_test("6th PAT creation blocked", True, f"Error: {error}")
+        else:
+            log_test("6th PAT creation blocked", False, f"Wrong error message: {error}")
+    else:
+        log_test("6th PAT creation blocked", False, f"Expected 400, got {resp.status_code}")
+
+def test_pat_revoke():
+    """Test 7: DELETE /api/pats/:id (revoke)"""
+    print("\n=== TEST 7: DELETE /api/pats/:id (revoke token) ===")
+    
+    # Get list of PATs
+    resp = session.get(f"{BASE_URL}/pats")
+    if resp.status_code != 200:
+        log_test("DELETE /api/pats/:id", False, "Could not fetch PAT list")
+        return
+    
+    pats = resp.json()
+    if not pats:
+        log_test("DELETE /api/pats/:id", False, "No PATs to revoke")
+        return
+    
+    # Revoke the first one
+    pat_id = pats[0].get("id")
+    resp = session.delete(f"{BASE_URL}/pats/{pat_id}")
+    if resp.status_code == 200:
+        # Verify revoked_at is set
+        resp = session.get(f"{BASE_URL}/pats")
+        if resp.status_code == 200:
+            updated_pats = resp.json()
+            revoked_pat = next((p for p in updated_pats if p.get("id") == pat_id), None)
+            if revoked_pat and revoked_pat.get("revoked_at"):
+                log_test("DELETE /api/pats/:id sets revoked_at", True, 
+                        f"Revoked at: {revoked_pat.get('revoked_at')}")
+            else:
+                log_test("DELETE /api/pats/:id sets revoked_at", False, 
+                        "revoked_at not set")
+        else:
+            log_test("DELETE /api/pats/:id sets revoked_at", False, 
+                    "Could not verify revoked_at")
+    else:
+        log_test("DELETE /api/pats/:id sets revoked_at", False, 
+                f"Status: {resp.status_code}")
+
+def test_bearer_auth():
+    """Test 8-11: Bearer authentication with PAT"""
+    global created_pat_token
+    
+    if not created_pat_token:
+        print("\n=== SKIPPING BEARER AUTH TESTS (no PAT token) ===")
+        return
+    
+    print("\n=== TEST 8: GET /api/scraper/ping WITHOUT Authorization ===")
+    resp = requests.get(f"{BASE_URL}/scraper/ping")
+    if resp.status_code == 401:
+        log_test("Scraper ping without auth returns 401", True)
+    else:
+        log_test("Scraper ping without auth returns 401", False, 
+                f"Expected 401, got {resp.status_code}")
+    
+    print("\n=== TEST 9: GET /api/scraper/ping WITH invalid Bearer token ===")
+    resp = requests.get(f"{BASE_URL}/scraper/ping", 
+                       headers={"Authorization": "Bearer rhl_pat_invalid123456789012345678"})
+    if resp.status_code == 401:
+        log_test("Scraper ping with invalid token returns 401", True)
+    else:
+        log_test("Scraper ping with invalid token returns 401", False, 
+                f"Expected 401, got {resp.status_code}")
+    
+    print("\n=== TEST 10: GET /api/scraper/ping WITH valid Bearer token ===")
+    resp = requests.get(f"{BASE_URL}/scraper/ping", 
+                       headers={"Authorization": f"Bearer {created_pat_token}"})
+    if resp.status_code == 200:
+        data = resp.json()
+        ok = data.get("ok")
+        tenant = data.get("tenant", {})
+        user = data.get("user", {})
+        version = data.get("version")
+        
+        if ok and tenant.get("id") and user.get("id") and version == "3.8":
+            log_test("Scraper ping with valid token returns 200", True, 
+                    f"Tenant: {tenant.get('name')}, User: {user.get('email')}, Version: {version}")
+        else:
+            log_test("Scraper ping with valid token returns 200", False, 
+                    f"Missing required fields in response")
+    else:
+        log_test("Scraper ping with valid token returns 200", False, 
+                f"Status: {resp.status_code}")
+    
+    print("\n=== TEST 11: GET /api/clients WITH Bearer token ===")
+    resp = requests.get(f"{BASE_URL}/clients", 
+                       headers={"Authorization": f"Bearer {created_pat_token}"})
+    if resp.status_code == 200:
+        data = resp.json()
+        log_test("Bearer auth works for /api/clients", True, 
+                f"Found {len(data)} clients")
+    else:
+        log_test("Bearer auth works for /api/clients", False, 
+                f"Status: {resp.status_code}")
+    
+    print("\n=== TEST 12: GET /api/suppliers WITH Bearer token ===")
+    resp = requests.get(f"{BASE_URL}/suppliers", 
+                       headers={"Authorization": f"Bearer {created_pat_token}"})
+    if resp.status_code == 200:
+        data = resp.json()
+        log_test("Bearer auth works for /api/suppliers", True, 
+                f"Found {len(data)} suppliers")
+    else:
+        log_test("Bearer auth works for /api/suppliers", False, 
+                f"Status: {resp.status_code}")
+    
+    print("\n=== TEST 13: GET /api/boxes WITH Bearer token ===")
+    resp = requests.get(f"{BASE_URL}/boxes", 
+                       headers={"Authorization": f"Bearer {created_pat_token}"})
+    if resp.status_code == 200:
+        data = resp.json()
+        log_test("Bearer auth works for /api/boxes", True, 
+                f"Found {len(data)} boxes")
+    else:
+        log_test("Bearer auth works for /api/boxes", False, 
+                f"Status: {resp.status_code}")
+
+def test_scraper_ingest_flight():
+    """Test 14: Scraper ingest - flight ticket"""
+    global created_pat_token, created_client_id, created_supplier_id, created_ticket_id
+    
+    if not created_pat_token:
+        print("\n=== SKIPPING SCRAPER INGEST TESTS (no PAT token) ===")
+        return
+    
+    print("\n=== TEST 14: Create client and supplier for ingest tests ===")
+    # Create client
+    resp = session.post(f"{BASE_URL}/clients", json={
+        "name": "عميل اختبار الإضافة",
+        "phone": "777100100"
+    })
+    if resp.status_code == 200:
+        created_client_id = resp.json().get("id")
+        log_test("Create client for ingest", True, f"Client ID: {created_client_id}")
+    else:
+        log_test("Create client for ingest", False, f"Status: {resp.status_code}")
+        return
+    
+    # Create supplier
+    resp = session.post(f"{BASE_URL}/suppliers", json={
+        "name": "مورد اختبار الإضافة",
+        "phone": "777200200"
+    })
+    if resp.status_code == 200:
+        created_supplier_id = resp.json().get("id")
+        log_test("Create supplier for ingest", True, f"Supplier ID: {created_supplier_id}")
+    else:
+        log_test("Create supplier for ingest", False, f"Status: {resp.status_code}")
+        return
+    
+    print("\n=== TEST 15: POST /api/scraper/ingest (flight ticket) ===")
+    payload = {
+        "booking": {
+            "doc_type": "flight",
+            "pnr": "TEST-FL-01",
+            "carrier": "Yemenia",
+            "route_from": "JED",
+            "route_to": "ADE",
+            "ticket_no": "635 2412944105",
+            "flight_no": "IY123"
+        },
+        "traveler": {
+            "name_en": "TEST/USER",
+            "passport_no": "P12345"
+        },
+        "dates": {
+            "trip_date": "2026-08-15",
+            "depart_time": "10:00",
+            "arrive_time": "12:00",
+            "issued_at": "2026-07-15T10:00:00Z"
+        },
+        "financial": {
+            "amount": 150,
+            "currency": "USD"
+        },
+        "client_id": created_client_id,
+        "supplier_id": created_supplier_id,
+        "cost": 100,
+        "sale_price": 150,
+        "payment_method": "credit"
+    }
+    
+    resp = requests.post(f"{BASE_URL}/scraper/ingest", 
+                        json=payload,
+                        headers={"Authorization": f"Bearer {created_pat_token}"})
+    
+    if resp.status_code == 200:
+        data = resp.json()
+        ok = data.get("ok")
+        record_type = data.get("record_type")
+        record_id = data.get("record_id")
+        doc = data.get("doc", {})
+        
+        if ok and record_type == "ticket" and record_id:
+            created_ticket_id = record_id
+            pnr = doc.get("pnr")
+            passenger_name = doc.get("passenger_name")
+            route = doc.get("route")
+            cost = doc.get("cost")
+            sale_price = doc.get("sale_price")
+            commission = doc.get("commission")
+            
+            log_test("Scraper ingest flight ticket", True, 
+                    f"Record ID: {record_id}, PNR: {pnr}, Passenger: {passenger_name}, "
+                    f"Route: {route}, Cost: {cost}, Sale: {sale_price}, Commission: {commission}")
+        else:
+            log_test("Scraper ingest flight ticket", False, 
+                    f"Invalid response structure: {data}")
+    else:
+        log_test("Scraper ingest flight ticket", False, 
+                f"Status: {resp.status_code}, Response: {resp.text}")
+
+def test_scraper_ingest_bus():
+    """Test 16: Scraper ingest - bus ticket (travel_mode='land')"""
+    global created_pat_token, created_client_id, created_supplier_id
+    
+    if not created_pat_token or not created_client_id or not created_supplier_id:
+        print("\n=== SKIPPING BUS INGEST TEST (missing prerequisites) ===")
+        return
+    
+    print("\n=== TEST 16: POST /api/scraper/ingest (bus ticket) ===")
+    payload = {
+        "booking": {
+            "doc_type": "bus",
+            "pnr": "TEST-BUS-01",
+            "carrier": "شركة النقل البري",
+            "route_from": "صنعاء",
+            "route_to": "عدن"
+        },
+        "traveler": {
+            "name_ar": "مسافر اختبار",
+            "passport_no": "YE123456"
+        },
+        "dates": {
+            "trip_date": "2026-08-20",
+            "depart_time": "08:00",
+            "issued_at": "2026-07-15T10:00:00Z"
+        },
+        "financial": {
+            "amount": 50,
+            "currency": "SAR"
+        },
+        "client_id": created_client_id,
+        "supplier_id": created_supplier_id,
+        "cost": 30,
+        "sale_price": 50,
+        "payment_method": "credit"
+    }
+    
+    resp = requests.post(f"{BASE_URL}/scraper/ingest", 
+                        json=payload,
+                        headers={"Authorization": f"Bearer {created_pat_token}"})
+    
+    if resp.status_code == 200:
+        data = resp.json()
+        doc = data.get("doc", {})
+        travel_mode = doc.get("travel_mode")
+        
+        if travel_mode == "land":
+            log_test("Scraper ingest bus ticket (travel_mode='land')", True, 
+                    f"Travel mode: {travel_mode}, PNR: {doc.get('pnr')}")
+        else:
+            log_test("Scraper ingest bus ticket (travel_mode='land')", False, 
+                    f"Expected travel_mode='land', got '{travel_mode}'")
+    else:
+        log_test("Scraper ingest bus ticket (travel_mode='land')", False, 
+                f"Status: {resp.status_code}")
+
+def test_scraper_ingest_visa():
+    """Test 17: Scraper ingest - umrah visa"""
+    global created_pat_token, created_client_id, created_supplier_id, created_visa_id
+    
+    if not created_pat_token or not created_client_id or not created_supplier_id:
+        print("\n=== SKIPPING VISA INGEST TEST (missing prerequisites) ===")
+        return
+    
+    print("\n=== TEST 17: POST /api/scraper/ingest (umrah visa) ===")
+    payload = {
+        "booking": {
+            "doc_type": "umrah_visa",
+            "visa_no": "6169794577",
+            "application_no": "E821262038"
+        },
+        "traveler": {
+            "name_ar": "خديجة سعيد",
+            "passport_no": "16439690",
+            "nationality": "يمني"
+        },
+        "dates": {
+            "valid_from": "2026-07-17",
+            "valid_until": "2026-10-15",
+            "issued_at": "2026-07-15T10:00:00Z"
+        },
+        "financial": {
+            "amount": 800,
+            "currency": "SAR"
+        },
+        "client_id": created_client_id,
+        "supplier_id": created_supplier_id,
+        "cost": 500,
+        "sale_price": 800,
+        "payment_method": "credit"
+    }
+    
+    resp = requests.post(f"{BASE_URL}/scraper/ingest", 
+                        json=payload,
+                        headers={"Authorization": f"Bearer {created_pat_token}"})
+    
+    if resp.status_code == 200:
+        data = resp.json()
+        ok = data.get("ok")
+        record_type = data.get("record_type")
+        record_id = data.get("record_id")
+        doc = data.get("doc", {})
+        
+        if ok and record_type == "visa" and record_id:
+            created_visa_id = record_id
+            service_type = doc.get("service_type")
+            entry_date = doc.get("entry_date")
+            expected_exit_date = doc.get("expected_exit_date")
+            
+            if service_type == "تأشيرة عمرة":
+                log_test("Scraper ingest umrah visa", True, 
+                        f"Record ID: {record_id}, Service: {service_type}, "
+                        f"Entry: {entry_date}, Exit: {expected_exit_date}")
+            else:
+                log_test("Scraper ingest umrah visa", False, 
+                        f"Expected service_type='تأشيرة عمرة', got '{service_type}'")
+        else:
+            log_test("Scraper ingest umrah visa", False, 
+                    f"Invalid response structure: {data}")
+    else:
+        log_test("Scraper ingest umrah visa", False, 
+                f"Status: {resp.status_code}, Response: {resp.text}")
+
+def test_verify_ticket_created():
+    """Test 18: Verify ticket appears in GET /api/tickets"""
+    global created_ticket_id
+    
+    if not created_ticket_id:
+        print("\n=== SKIPPING TICKET VERIFICATION (no ticket created) ===")
+        return
+    
+    print("\n=== TEST 18: GET /api/tickets (verify ticket created) ===")
+    resp = session.get(f"{BASE_URL}/tickets")
+    if resp.status_code == 200:
+        tickets = resp.json()
+        found = next((t for t in tickets if t.get("id") == created_ticket_id), None)
+        if found:
+            log_test("Ticket appears in GET /api/tickets", True, 
+                    f"PNR: {found.get('pnr')}, Passenger: {found.get('passenger_name')}")
+        else:
+            log_test("Ticket appears in GET /api/tickets", False, 
+                    "Ticket not found in list")
+    else:
+        log_test("Ticket appears in GET /api/tickets", False, 
+                f"Status: {resp.status_code}")
+
+def test_verify_journal_entry():
+    """Test 19: Verify journal entry created for ticket"""
+    global created_ticket_id
+    
+    if not created_ticket_id:
+        print("\n=== SKIPPING JOURNAL ENTRY VERIFICATION (no ticket created) ===")
+        return
+    
+    print("\n=== TEST 19: GET /api/journal-entries (verify entry for ticket) ===")
+    resp = session.get(f"{BASE_URL}/journal-entries")
+    if resp.status_code == 200:
+        entries = resp.json()
+        found = next((e for e in entries if e.get("ref_type") == "ticket" and e.get("ref_id") == created_ticket_id), None)
+        if found:
+            lines = found.get("lines", [])
+            total_debit = sum(l.get("debit", 0) for l in lines)
+            total_credit = sum(l.get("credit", 0) for l in lines)
+            balanced = abs(total_debit - total_credit) < 0.01
+            
+            log_test("Journal entry created for ticket", True, 
+                    f"Ref type: {found.get('ref_type')}, Lines: {len(lines)}, "
+                    f"Debit: {total_debit}, Credit: {total_credit}, Balanced: {balanced}")
+        else:
+            log_test("Journal entry created for ticket", False, 
+                    "Journal entry not found")
+    else:
+        log_test("Journal entry created for ticket", False, 
+                f"Status: {resp.status_code}")
+
+def test_verify_balances():
+    """Test 20: Verify client and supplier balances updated"""
+    global created_client_id, created_supplier_id
+    
+    if not created_client_id or not created_supplier_id:
+        print("\n=== SKIPPING BALANCE VERIFICATION (missing client/supplier) ===")
+        return
+    
+    print("\n=== TEST 20: Verify client and supplier balances ===")
+    
+    # Check client balance
+    resp = session.get(f"{BASE_URL}/clients")
+    if resp.status_code == 200:
+        clients = resp.json()
+        client = next((c for c in clients if c.get("id") == created_client_id), None)
+        if client:
+            usd_balance = client.get("balances", {}).get("USD", 0)
+            sar_balance = client.get("balances", {}).get("SAR", 0)
+            log_test("Client balance updated", True, 
+                    f"USD: {usd_balance}, SAR: {sar_balance}")
+        else:
+            log_test("Client balance updated", False, "Client not found")
+    else:
+        log_test("Client balance updated", False, f"Status: {resp.status_code}")
+    
+    # Check supplier balance
+    resp = session.get(f"{BASE_URL}/suppliers")
+    if resp.status_code == 200:
+        suppliers = resp.json()
+        supplier = next((s for s in suppliers if s.get("id") == created_supplier_id), None)
+        if supplier:
+            usd_balance = supplier.get("balances", {}).get("USD", 0)
+            sar_balance = supplier.get("balances", {}).get("SAR", 0)
+            log_test("Supplier balance updated", True, 
+                    f"USD: {usd_balance}, SAR: {sar_balance}")
+        else:
+            log_test("Supplier balance updated", False, "Supplier not found")
+    else:
+        log_test("Supplier balance updated", False, f"Status: {resp.status_code}")
+
+def test_ingest_validation():
+    """Test 21-22: Scraper ingest validation errors"""
+    global created_pat_token
+    
+    if not created_pat_token:
+        print("\n=== SKIPPING VALIDATION TESTS (no PAT token) ===")
+        return
+    
+    print("\n=== TEST 21: POST /api/scraper/ingest without client_id ===")
+    payload = {
+        "booking": {"doc_type": "flight", "pnr": "TEST"},
+        "traveler": {"name_en": "TEST"},
+        "dates": {},
+        "financial": {"amount": 100, "currency": "USD"},
+        "supplier_id": "dummy-supplier-id",
+        "cost": 50,
+        "sale_price": 100
+    }
+    
+    resp = requests.post(f"{BASE_URL}/scraper/ingest", 
+                        json=payload,
+                        headers={"Authorization": f"Bearer {created_pat_token}"})
+    
+    if resp.status_code == 400:
+        error = resp.json().get("error", "")
+        if "client_id" in error.lower() or "العميل" in error:
+            log_test("Ingest without client_id returns 400", True, f"Error: {error}")
+        else:
+            log_test("Ingest without client_id returns 400", False, f"Wrong error: {error}")
+    else:
+        log_test("Ingest without client_id returns 400", False, 
+                f"Expected 400, got {resp.status_code}")
+    
+    print("\n=== TEST 22: POST /api/scraper/ingest with unsupported doc_type ===")
+    payload = {
+        "booking": {"doc_type": "unknown_type"},
+        "traveler": {"name_en": "TEST"},
+        "dates": {},
+        "financial": {"amount": 100, "currency": "USD"},
+        "client_id": "dummy-client-id",
+        "supplier_id": "dummy-supplier-id",
+        "cost": 50,
+        "sale_price": 100
+    }
+    
+    resp = requests.post(f"{BASE_URL}/scraper/ingest", 
+                        json=payload,
+                        headers={"Authorization": f"Bearer {created_pat_token}"})
+    
+    if resp.status_code == 400:
+        error = resp.json().get("error", "")
+        if "doc_type" in error.lower() or "غير مدعوم" in error or "المستند" in error:
+            log_test("Ingest with unsupported doc_type returns 400", True, f"Error: {error}")
+        else:
+            log_test("Ingest with unsupported doc_type returns 400", False, f"Wrong error: {error}")
+    else:
+        log_test("Ingest with unsupported doc_type returns 400", False, 
+                f"Expected 400, got {resp.status_code}")
+
+def test_regression():
+    """Test 23-24: Regression tests"""
+    print("\n=== TEST 23: GET /api/packages/comparison (v3.7 regression) ===")
+    resp = session.get(f"{BASE_URL}/packages/comparison")
+    if resp.status_code == 200:
+        data = resp.json()
+        if "period" in data and "rows" in data and "totals" in data:
+            log_test("v3.7 packages comparison still works", True, 
+                    f"Period: {data.get('period')}, Rows: {len(data.get('rows', []))}")
+        else:
+            log_test("v3.7 packages comparison still works", False, 
+                    "Missing required fields in response")
+    else:
+        log_test("v3.7 packages comparison still works", False, 
+                f"Status: {resp.status_code}")
+    
+    print("\n=== TEST 24: GET /api/packages (v3.6 regression) ===")
+    resp = session.get(f"{BASE_URL}/packages")
+    if resp.status_code == 200:
+        packages = resp.json()
+        log_test("v3.6 packages CRUD still works", True, 
+                f"Found {len(packages)} packages")
+    else:
+        log_test("v3.6 packages CRUD still works", False, 
+                f"Status: {resp.status_code}")
+
+def print_summary():
+    """Print test summary"""
+    print("\n" + "="*60)
+    print("TEST SUMMARY")
+    print("="*60)
+    
+    passed = sum(1 for t in test_results if t["passed"])
+    failed = sum(1 for t in test_results if not t["passed"])
+    total = len(test_results)
+    
+    print(f"\nTotal: {total} tests")
+    print(f"✅ Passed: {passed}")
+    print(f"❌ Failed: {failed}")
+    print(f"Success Rate: {(passed/total*100):.1f}%")
+    
+    if failed > 0:
+        print("\n" + "="*60)
+        print("FAILED TESTS:")
+        print("="*60)
+        for t in test_results:
+            if not t["passed"]:
+                print(f"❌ {t['name']}")
+                if t["details"]:
+                    print(f"   {t['details']}")
+    
+    print("\n" + "="*60)
+
+def main():
+    """Main test runner"""
+    print("="*60)
+    print("v3.8 BACKEND TESTING — PATs + Scraper Ingest + Bearer Auth")
+    print("="*60)
+    print(f"Base URL: {BASE_URL}")
+    print(f"Credentials: {OWNER_EMAIL} / {OWNER_PASSWORD}")
+    print("="*60)
+    
+    try:
+        # Login
+        login()
+        
+        # Run tests
+        test_health()
+        test_pat_crud()
+        test_pat_revoke()
+        test_bearer_auth()
+        test_scraper_ingest_flight()
+        test_scraper_ingest_bus()
+        test_scraper_ingest_visa()
+        test_verify_ticket_created()
+        test_verify_journal_entry()
+        test_verify_balances()
+        test_ingest_validation()
+        test_regression()
+        
+        # Print summary
+        print_summary()
+        
+        # Exit with appropriate code
+        failed = sum(1 for t in test_results if not t["passed"])
+        sys.exit(0 if failed == 0 else 1)
+        
+    except Exception as e:
+        print(f"\n❌ FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

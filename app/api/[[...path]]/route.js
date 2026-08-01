@@ -2,6 +2,7 @@ import { MongoClient } from 'mongodb'
 import { v4 as uuidv4 } from 'uuid'
 import { NextResponse } from 'next/server'
 import bcrypt from 'bcryptjs'
+import crypto from 'crypto'
 
 // ---------- MongoDB ----------
 let client, db
@@ -261,6 +262,31 @@ async function getSession(request, db) {
     impersonated_by_email: session.impersonated_by_email 
   }
 }
+// v3.8 — PAT (Personal Access Token) helpers for Chrome Extension
+function hashPat(token) { return crypto.createHash('sha256').update(token).digest('hex') }
+function generatePat() {
+  // rhl_pat_<32 hex chars> (128-bit entropy)
+  const raw = crypto.randomBytes(24).toString('base64url').replace(/[^A-Za-z0-9]/g, '').slice(0, 32).padEnd(32, 'x')
+  return `rhl_pat_${raw}`
+}
+async function getPatSession(request, db) {
+  // Support Authorization: Bearer <pat> for Chrome Extension / API clients
+  const auth = request.headers.get('authorization') || ''
+  const m = auth.match(/^Bearer\s+(rhl_pat_[A-Za-z0-9]+)$/i)
+  if (!m) return null
+  const token = m[1]
+  const hash = hashPat(token)
+  const pat = await db.collection('pats').findOne({ token_hash: hash, revoked_at: null })
+  if (!pat) return null
+  const user = await db.collection('users').findOne({ id: pat.user_id })
+  if (!user || !user.active) return null
+  let tenant = null
+  if (user.tenant_id) tenant = await db.collection('tenants').findOne({ id: user.tenant_id })
+  if (tenant && tenant.status !== 'active') return { pat, user, tenant, blocked: true }
+  // Update last-used timestamp (fire-and-forget)
+  db.collection('pats').updateOne({ id: pat.id }, { $set: { last_used_at: new Date() } }).catch(() => {})
+  return { pat, user, tenant, isPat: true }
+}
 function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, tenant_id: u.tenant_id, active: u.active, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
 function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price } : null }
 
@@ -401,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.7',
+          version: '3.8',
           db: 'connected',
         })
       } catch (e) {
@@ -487,7 +513,12 @@ async function handleRoute(request, { params }) {
     }
 
     // Everything below requires session (except /auth/me which returns null gracefully)
-    const sess = await getSession(request, db)
+    // v3.8 — Support Bearer PAT auth in addition to cookie session (for Chrome Extension / API clients)
+    let sess = await getSession(request, db)
+    if (!sess) {
+      const patSess = await getPatSession(request, db)
+      if (patSess) sess = patSess
+    }
 
     if (route === '/auth/me' && method === 'GET') {
       if (!sess) return ok({ user: null, tenant: null })
@@ -1091,6 +1122,122 @@ async function handleRoute(request, { params }) {
       await db.collection('refunds').insertOne(refundDoc)
       const { _id, ...rest } = refundDoc
       return ok(rest)
+    }
+
+    // ============ v3.8 — PATs (Personal Access Tokens for Chrome Extension) ============
+    if (route === '/pats' && method === 'GET') {
+      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — للمالك فقط', 403)
+      const list = await db.collection('pats').find({ tenant_id: T }).sort({ created_at: -1 }).toArray()
+      return ok(list.map(p => ({
+        id: p.id, name: p.name, prefix: p.prefix,
+        created_at: p.created_at, last_used_at: p.last_used_at || null,
+        revoked_at: p.revoked_at || null,
+      })))
+    }
+    if (route === '/pats' && method === 'POST') {
+      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.isPat) return bad('لا يمكن إنشاء PAT جديد باستخدام PAT — سجّل دخولاً من الواجهة', 403)
+      const b = await request.json().catch(() => ({}))
+      const name = String(b.name || '').trim() || 'إضافة المتصفح'
+      const activeCount = await db.collection('pats').countDocuments({ tenant_id: T, revoked_at: null })
+      if (activeCount >= 5) return bad('الحد الأقصى 5 رموز نشطة — احذف رمزاً قديماً أولاً')
+      const token = generatePat()
+      const doc = {
+        id: uuidv4(), tenant_id: T, user_id: sess.user.id,
+        name, token_hash: hashPat(token), prefix: token.slice(0, 16),
+        created_at: new Date(), last_used_at: null, revoked_at: null,
+      }
+      await db.collection('pats').insertOne(doc)
+      // Return the full token ONCE — client must copy immediately
+      return ok({
+        id: doc.id, name: doc.name, token, prefix: doc.prefix,
+        created_at: doc.created_at,
+        warning: 'انسخ الرمز الآن — لن يظهر مرة أخرى بعد إغلاق هذه النافذة',
+      })
+    }
+    const patDelMatch = route.match(/^\/pats\/([^/]+)$/)
+    if (patDelMatch && method === 'DELETE') {
+      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — للمالك فقط', 403)
+      await db.collection('pats').updateOne(
+        { id: patDelMatch[1], tenant_id: T },
+        { $set: { revoked_at: new Date() } }
+      )
+      return ok({ success: true })
+    }
+
+    // ============ v3.8 — SCRAPER INGEST (Chrome Extension endpoint) ============
+    // Verifies PAT works, then routes to createTicket / createVisa based on doc_type.
+    if (route === '/scraper/ping' && method === 'GET') {
+      // Simple health/auth check used by the extension to verify the PAT.
+      return ok({
+        ok: true, tenant: { id: T, name: sess.tenant?.name || null },
+        user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
+        version: '3.8',
+      })
+    }
+    if (route === '/scraper/ingest' && method === 'POST') {
+      const b = await request.json()
+      const traveler = b.traveler || {}
+      const booking = b.booking || {}
+      const dates = b.dates || {}
+      const financial = b.financial || {}
+      const docType = String(booking.doc_type || '').toLowerCase()
+      if (!docType) return bad('doc_type مطلوب')
+      if (!b.client_id || !b.supplier_id) return bad('العميل والمورد مطلوبان (client_id + supplier_id)')
+      const currency = CURRENCIES.includes(financial.currency) ? financial.currency : 'USD'
+      const amount = Number(financial.amount) || 0
+      const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+      const passengerName = traveler.name_ar || traveler.name_en || ''
+      // Route to ticket or visa creator
+      if (docType === 'flight' || docType === 'bus') {
+        const payload = {
+          client_id: b.client_id, supplier_id: b.supplier_id,
+          currency, cost: Number(b.cost) || 0, sale_price: amount || Number(b.sale_price) || 0,
+          payment_method: paymentMethod, box_id: b.box_id || null,
+          date: dates.issued_at || new Date().toISOString(),
+          pnr: booking.pnr || booking.ticket_no || '', ticket_number: booking.ticket_no || '',
+          flight_number: booking.flight_no || '',
+          route: [booking.route_from, booking.route_to].filter(Boolean).join(' → '),
+          carrier_name: booking.carrier || '',
+          passenger_name: passengerName, passport_no: traveler.passport_no || '',
+          passenger_phone: traveler.phone || '', passenger_whatsapp: traveler.whatsapp || traveler.phone || '',
+          travel_date: dates.trip_date || null,
+          departure_time: dates.depart_time || '',
+          arrival_time: dates.arrive_time || '',
+          travel_mode: docType === 'bus' ? 'land' : 'air',
+          exchange_rate: Number(b.exchange_rate) || 1,
+        }
+        const r = await createTicket(db, T, payload)
+        if (r.error) return bad(r.error)
+        return ok({ ok: true, record_type: 'ticket', record_id: r.doc.id, doc: r.doc, source: b.source_url || null })
+      }
+      if (docType === 'umrah_visa' || docType === 'visit_visa' || docType === 'work_visa' || docType === 'security_approval') {
+        const svcMap = {
+          umrah_visa: 'تأشيرة عمرة',
+          visit_visa: 'تأشيرة زيارة',
+          work_visa: 'تأشيرة عمل',
+          security_approval: 'موافقة أمنية',
+        }
+        const payload = {
+          client_id: b.client_id, supplier_id: b.supplier_id,
+          currency, cost: Number(b.cost) || 0, sale_price: amount || Number(b.sale_price) || 0,
+          payment_method: paymentMethod, box_id: b.box_id || null,
+          date: dates.issued_at || new Date().toISOString(),
+          service_type: svcMap[docType],
+          passenger_name: passengerName, passport_no: traveler.passport_no || '',
+          nationality: traveler.nationality || '',
+          passenger_phone: traveler.phone || '', passenger_whatsapp: traveler.whatsapp || traveler.phone || '',
+          entry_date: dates.valid_from || null,
+          expected_exit_date: dates.valid_until || null,
+          exchange_rate: Number(b.exchange_rate) || 1,
+          // Preserve source metadata as attachment_url hint
+          attachment_url: b.source_url || '',
+        }
+        const r = await createVisa(db, T, payload)
+        if (r.error) return bad(r.error)
+        return ok({ ok: true, record_type: 'visa', record_id: r.doc.id, doc: r.doc, source: b.source_url || null })
+      }
+      return bad(`نوع المستند "${docType}" غير مدعوم بعد`)
     }
 
     // ============ v3.6 — PACKAGES & TOURS (MVP) ============

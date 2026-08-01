@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <title>Rahaal — سحب إلى رحّال</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="header">
+    <div class="logo">🕋</div>
+    <div class="brand">
+      <div class="title">Rahaal Scraper</div>
+      <div class="subtitle">قارئ رحّال الآلي</div>
+    </div>
+  </div>
+
+  <div id="screen-connect" class="screen">
+    <div class="section-title">🔐 ربط الإضافة برحّال</div>
+    <div class="help">
+      1. افتح رحّال ← <b>إعدادات المكتب</b> ← <b>إضافة المتصفح</b><br>
+      2. اضغط "إنشاء رمز جديد" وانسخ الـ Token<br>
+      3. الصقه هنا:
+    </div>
+    <label>عنوان الخادم (URL)</label>
+    <input id="api-url" type="url" placeholder="https://your-rahal.example.com" dir="ltr">
+    <label>الرمز الشخصي (PAT)</label>
+    <input id="pat-token" type="password" placeholder="rhl_pat_xxxxxxxxxxxx" dir="ltr">
+    <button id="btn-connect" class="primary">فحص الاتصال والحفظ</button>
+    <div id="connect-status" class="status"></div>
+  </div>
+
+  <div id="screen-ready" class="screen hidden">
+    <div class="connected-badge">✅ متصل بـ <span id="tenant-name">—</span></div>
+    <div class="section-title">📄 المستند الحالي</div>
+    <div id="detected-info" class="detected">
+      <div class="detected-empty">افتح صفحة تذكرة أو تأشيرة، ثم اضغط أدناه</div>
+    </div>
+    <button id="btn-scan" class="primary">🔍 قراءة المستند من الصفحة</button>
+    <button id="btn-open-widget" class="secondary hidden">🚀 سحب إلى رحّال</button>
+    <div class="footer-actions">
+      <a href="#" id="btn-reset" class="link">إعادة ضبط الرمز</a>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
