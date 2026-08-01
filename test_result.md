@@ -4548,6 +4548,35 @@ backend:
           **SCRAPER INGEST - BUS TICKET (1/1 PASSED)**
           20. ✅ POST /api/scraper/ingest (bus ticket):
               - doc_type="bus" → travel_mode="land" ✓
+
+
+# ============================================================
+# v3.8 Phase 2 — Chrome Extension Parsers (v1.1.0)
+# ============================================================
+
+extension:
+  - task: "v3.8 Phase 2 — 6 Parsers (Yemenia + Fly Aden + Security×2 + Albaraka + KSA e-Visa)"
+    implemented: true
+    working: true
+    file: "/app/chrome-extension/content-script.js"
+    tested_via: "node test-parsers.js (9/9 fixtures pass)"
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Enhanced content-script.js with 6 specific parsers + 1 generic-airline fallback:
+          1. yemenia            → IY flights (EN passenger names LASTNAME/FIRSTNAME format)
+          2. flyaden            → Fly Aden e-tickets
+          3. security-approval-type1 → Ethiopia/Egypt approvals with ET flight numbers
+          4. security-approval-type2 → Egypt Type 2 approvals (رقم موافقة only)
+          5. albaraka-bus       → Al-Baraka Bus tickets (Arabic route names, SAR)
+          6. ksa-evisa          → KSA MOFA/Enjaz for umrah/visit/work visas (detected by content)
+          + generic-airline fallback
+          Added utilities: Arabic + English month parsing (parseDate), time parsing (parseTime),
+          currency detection (USD/SAR/YER).
+          Validation: /app/chrome-extension/test-parsers.js runs 9 fixtures matching user's exact
+          field samples (from all 9 sample documents) — 9/9 PASS.
+          Extension rebuilt to /app/public/rahal-extension.zip (14.4 KB) — version bumped to 1.1.0.
               - PNR="TEST-BUS-01", carrier="شركة النقل البري" ✓
               - Ticket created with travel_mode="land" correctly ✓
           
