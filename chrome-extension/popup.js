@@ -19,7 +19,9 @@ function setStatus(msg, ok) { const s = el('connect-status'); s.textContent = ms
 function isPdfUrl(url) {
   if (!url) return false;
   const lower = url.toLowerCase();
-  return lower.endsWith('.pdf') || lower.includes('.pdf?') || lower.includes('/pdf/') || lower.includes('printpdf') || lower.includes('/print/');
+  return lower.endsWith('.pdf') || lower.includes('.pdf?') || lower.includes('/pdf/')
+      || lower.includes('printpdf') || lower.includes('printticket') || lower.includes('printtickets')
+      || lower.includes('/print/') || lower.includes('/print?') || lower.includes('printinvoice');
 }
 
 async function detectPageType() {
