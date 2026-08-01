@@ -1,723 +1,628 @@
 #!/usr/bin/env python3
 """
-v3.8 Backend Testing — PATs + Scraper Ingest + Bearer Auth
-Test credentials: owner@demo.com / Demo@2025
+v3.9 Backend Testing Script for Rahaal ERP
+Tests: Gmail-only Signup + Deferred Referral Bonus
 """
 
 import requests
 import json
-import sys
-from datetime import datetime, timedelta
+import time
+from datetime import datetime
 
 # Base URL from environment
 BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
 
-# Test credentials
-OWNER_EMAIL = "owner@demo.com"
-OWNER_PASSWORD = "Demo@2025"
+# Super Admin credentials
+SUPER_ADMIN_EMAIL = "admin@targetmedia.com"
+SUPER_ADMIN_PASSWORD = "Target@2025"
 
-# Global session
-session = requests.Session()
-session.headers.update({"Content-Type": "application/json"})
-
-# Test state
+# Test results tracking
 test_results = []
-created_pat_token = None
-created_client_id = None
-created_supplier_id = None
-created_ticket_id = None
-created_visa_id = None
 
-def log_test(name, passed, details=""):
+def log_test(test_name, passed, details=""):
     """Log test result"""
     status = "✅ PASSED" if passed else "❌ FAILED"
-    print(f"{status} - {name}")
+    print(f"{status} - {test_name}")
     if details:
         print(f"  Details: {details}")
-    test_results.append({"name": name, "passed": passed, "details": details})
-
-def login():
-    """Login as owner"""
-    print("\n=== LOGIN ===")
-    resp = session.post(f"{BASE_URL}/auth/login", json={
-        "email": OWNER_EMAIL,
-        "password": OWNER_PASSWORD
+    test_results.append({
+        "test": test_name,
+        "passed": passed,
+        "details": details
     })
-    if resp.status_code == 200:
-        data = resp.json()
-        log_test("Login as owner", True, f"User: {data.get('user', {}).get('email')}")
-        return data
-    else:
-        log_test("Login as owner", False, f"Status: {resp.status_code}, Response: {resp.text}")
-        sys.exit(1)
-
-def test_health():
-    """Test 1: Health endpoint returns version 3.8"""
-    print("\n=== TEST 1: HEALTH CHECK ===")
-    resp = session.get(f"{BASE_URL}/health")
-    if resp.status_code == 200:
-        data = resp.json()
-        version = data.get("version")
-        if version == "3.8":
-            log_test("Health version 3.8", True, f"Version: {version}")
-        else:
-            log_test("Health version 3.8", False, f"Expected '3.8', got '{version}'")
-    else:
-        log_test("Health version 3.8", False, f"Status: {resp.status_code}")
-
-def test_pat_crud():
-    """Test 2-6: PAT CRUD operations"""
-    global created_pat_token
-    
-    print("\n=== TEST 2: GET /api/pats (initial list) ===")
-    resp = session.get(f"{BASE_URL}/pats")
-    if resp.status_code == 200:
-        data = resp.json()
-        initial_count = len(data)
-        log_test("GET /api/pats returns list", True, f"Found {initial_count} existing PATs")
-    else:
-        log_test("GET /api/pats returns list", False, f"Status: {resp.status_code}")
-        return
-    
-    print("\n=== TEST 3: POST /api/pats (create token) ===")
-    resp = session.post(f"{BASE_URL}/pats", json={"name": "test-machine-1"})
-    if resp.status_code == 200:
-        data = resp.json()
-        token = data.get("token")
-        prefix = data.get("prefix")
-        warning = data.get("warning")
-        
-        if token and token.startswith("rhl_pat_") and len(token) >= 40:
-            log_test("POST /api/pats creates token", True, 
-                    f"Token: {token[:20]}..., Prefix: {prefix}, Warning: {warning}")
-            created_pat_token = token
-        else:
-            log_test("POST /api/pats creates token", False, 
-                    f"Invalid token format: {token}")
-    else:
-        log_test("POST /api/pats creates token", False, f"Status: {resp.status_code}")
-        return
-    
-    print("\n=== TEST 4: GET /api/pats (verify token appears with prefix only) ===")
-    resp = session.get(f"{BASE_URL}/pats")
-    if resp.status_code == 200:
-        data = resp.json()
-        found = False
-        for pat in data:
-            if pat.get("prefix") == prefix:
-                found = True
-                has_token_field = "token" in pat
-                if not has_token_field:
-                    log_test("PAT list shows prefix, not full token", True, 
-                            f"Prefix: {pat.get('prefix')}, Name: {pat.get('name')}")
-                else:
-                    log_test("PAT list shows prefix, not full token", False, 
-                            "Full token leaked in list response")
-                break
-        if not found:
-            log_test("PAT list shows prefix, not full token", False, "New PAT not found in list")
-    else:
-        log_test("PAT list shows prefix, not full token", False, f"Status: {resp.status_code}")
-    
-    print("\n=== TEST 5: Create 4 more PATs (total 5 active) ===")
-    success_count = 0
-    for i in range(2, 6):
-        resp = session.post(f"{BASE_URL}/pats", json={"name": f"test-machine-{i}"})
-        if resp.status_code == 200:
-            success_count += 1
-    
-    if success_count == 4:
-        log_test("Create 4 more PATs (total 5)", True, f"Created {success_count} additional PATs")
-    else:
-        log_test("Create 4 more PATs (total 5)", False, f"Only created {success_count} PATs")
-    
-    print("\n=== TEST 6: Try creating 6th PAT (should fail with 400) ===")
-    resp = session.post(f"{BASE_URL}/pats", json={"name": "test-machine-6"})
-    if resp.status_code == 400:
-        error = resp.json().get("error", "")
-        if "5" in error or "الحد الأقصى" in error:
-            log_test("6th PAT creation blocked", True, f"Error: {error}")
-        else:
-            log_test("6th PAT creation blocked", False, f"Wrong error message: {error}")
-    else:
-        log_test("6th PAT creation blocked", False, f"Expected 400, got {resp.status_code}")
-
-def test_pat_revoke():
-    """Test 7: DELETE /api/pats/:id (revoke)"""
-    print("\n=== TEST 7: DELETE /api/pats/:id (revoke token) ===")
-    
-    # Get list of PATs
-    resp = session.get(f"{BASE_URL}/pats")
-    if resp.status_code != 200:
-        log_test("DELETE /api/pats/:id", False, "Could not fetch PAT list")
-        return
-    
-    pats = resp.json()
-    if not pats:
-        log_test("DELETE /api/pats/:id", False, "No PATs to revoke")
-        return
-    
-    # Revoke the first one
-    pat_id = pats[0].get("id")
-    resp = session.delete(f"{BASE_URL}/pats/{pat_id}")
-    if resp.status_code == 200:
-        # Verify revoked_at is set
-        resp = session.get(f"{BASE_URL}/pats")
-        if resp.status_code == 200:
-            updated_pats = resp.json()
-            revoked_pat = next((p for p in updated_pats if p.get("id") == pat_id), None)
-            if revoked_pat and revoked_pat.get("revoked_at"):
-                log_test("DELETE /api/pats/:id sets revoked_at", True, 
-                        f"Revoked at: {revoked_pat.get('revoked_at')}")
-            else:
-                log_test("DELETE /api/pats/:id sets revoked_at", False, 
-                        "revoked_at not set")
-        else:
-            log_test("DELETE /api/pats/:id sets revoked_at", False, 
-                    "Could not verify revoked_at")
-    else:
-        log_test("DELETE /api/pats/:id sets revoked_at", False, 
-                f"Status: {resp.status_code}")
-
-def test_bearer_auth():
-    """Test 8-11: Bearer authentication with PAT"""
-    global created_pat_token
-    
-    if not created_pat_token:
-        print("\n=== SKIPPING BEARER AUTH TESTS (no PAT token) ===")
-        return
-    
-    print("\n=== TEST 8: GET /api/scraper/ping WITHOUT Authorization ===")
-    resp = requests.get(f"{BASE_URL}/scraper/ping")
-    if resp.status_code == 401:
-        log_test("Scraper ping without auth returns 401", True)
-    else:
-        log_test("Scraper ping without auth returns 401", False, 
-                f"Expected 401, got {resp.status_code}")
-    
-    print("\n=== TEST 9: GET /api/scraper/ping WITH invalid Bearer token ===")
-    resp = requests.get(f"{BASE_URL}/scraper/ping", 
-                       headers={"Authorization": "Bearer rhl_pat_invalid123456789012345678"})
-    if resp.status_code == 401:
-        log_test("Scraper ping with invalid token returns 401", True)
-    else:
-        log_test("Scraper ping with invalid token returns 401", False, 
-                f"Expected 401, got {resp.status_code}")
-    
-    print("\n=== TEST 10: GET /api/scraper/ping WITH valid Bearer token ===")
-    resp = requests.get(f"{BASE_URL}/scraper/ping", 
-                       headers={"Authorization": f"Bearer {created_pat_token}"})
-    if resp.status_code == 200:
-        data = resp.json()
-        ok = data.get("ok")
-        tenant = data.get("tenant", {})
-        user = data.get("user", {})
-        version = data.get("version")
-        
-        if ok and tenant.get("id") and user.get("id") and version == "3.8":
-            log_test("Scraper ping with valid token returns 200", True, 
-                    f"Tenant: {tenant.get('name')}, User: {user.get('email')}, Version: {version}")
-        else:
-            log_test("Scraper ping with valid token returns 200", False, 
-                    f"Missing required fields in response")
-    else:
-        log_test("Scraper ping with valid token returns 200", False, 
-                f"Status: {resp.status_code}")
-    
-    print("\n=== TEST 11: GET /api/clients WITH Bearer token ===")
-    resp = requests.get(f"{BASE_URL}/clients", 
-                       headers={"Authorization": f"Bearer {created_pat_token}"})
-    if resp.status_code == 200:
-        data = resp.json()
-        log_test("Bearer auth works for /api/clients", True, 
-                f"Found {len(data)} clients")
-    else:
-        log_test("Bearer auth works for /api/clients", False, 
-                f"Status: {resp.status_code}")
-    
-    print("\n=== TEST 12: GET /api/suppliers WITH Bearer token ===")
-    resp = requests.get(f"{BASE_URL}/suppliers", 
-                       headers={"Authorization": f"Bearer {created_pat_token}"})
-    if resp.status_code == 200:
-        data = resp.json()
-        log_test("Bearer auth works for /api/suppliers", True, 
-                f"Found {len(data)} suppliers")
-    else:
-        log_test("Bearer auth works for /api/suppliers", False, 
-                f"Status: {resp.status_code}")
-    
-    print("\n=== TEST 13: GET /api/boxes WITH Bearer token ===")
-    resp = requests.get(f"{BASE_URL}/boxes", 
-                       headers={"Authorization": f"Bearer {created_pat_token}"})
-    if resp.status_code == 200:
-        data = resp.json()
-        log_test("Bearer auth works for /api/boxes", True, 
-                f"Found {len(data)} boxes")
-    else:
-        log_test("Bearer auth works for /api/boxes", False, 
-                f"Status: {resp.status_code}")
-
-def test_scraper_ingest_flight():
-    """Test 14: Scraper ingest - flight ticket"""
-    global created_pat_token, created_client_id, created_supplier_id, created_ticket_id
-    
-    if not created_pat_token:
-        print("\n=== SKIPPING SCRAPER INGEST TESTS (no PAT token) ===")
-        return
-    
-    print("\n=== TEST 14: Create client and supplier for ingest tests ===")
-    # Create client
-    resp = session.post(f"{BASE_URL}/clients", json={
-        "name": "عميل اختبار الإضافة",
-        "phone": "777100100"
-    })
-    if resp.status_code == 200:
-        created_client_id = resp.json().get("id")
-        log_test("Create client for ingest", True, f"Client ID: {created_client_id}")
-    else:
-        log_test("Create client for ingest", False, f"Status: {resp.status_code}")
-        return
-    
-    # Create supplier
-    resp = session.post(f"{BASE_URL}/suppliers", json={
-        "name": "مورد اختبار الإضافة",
-        "phone": "777200200"
-    })
-    if resp.status_code == 200:
-        created_supplier_id = resp.json().get("id")
-        log_test("Create supplier for ingest", True, f"Supplier ID: {created_supplier_id}")
-    else:
-        log_test("Create supplier for ingest", False, f"Status: {resp.status_code}")
-        return
-    
-    print("\n=== TEST 15: POST /api/scraper/ingest (flight ticket) ===")
-    payload = {
-        "booking": {
-            "doc_type": "flight",
-            "pnr": "TEST-FL-01",
-            "carrier": "Yemenia",
-            "route_from": "JED",
-            "route_to": "ADE",
-            "ticket_no": "635 2412944105",
-            "flight_no": "IY123"
-        },
-        "traveler": {
-            "name_en": "TEST/USER",
-            "passport_no": "P12345"
-        },
-        "dates": {
-            "trip_date": "2026-08-15",
-            "depart_time": "10:00",
-            "arrive_time": "12:00",
-            "issued_at": "2026-07-15T10:00:00Z"
-        },
-        "financial": {
-            "amount": 150,
-            "currency": "USD"
-        },
-        "client_id": created_client_id,
-        "supplier_id": created_supplier_id,
-        "cost": 100,
-        "sale_price": 150,
-        "payment_method": "credit"
-    }
-    
-    resp = requests.post(f"{BASE_URL}/scraper/ingest", 
-                        json=payload,
-                        headers={"Authorization": f"Bearer {created_pat_token}"})
-    
-    if resp.status_code == 200:
-        data = resp.json()
-        ok = data.get("ok")
-        record_type = data.get("record_type")
-        record_id = data.get("record_id")
-        doc = data.get("doc", {})
-        
-        if ok and record_type == "ticket" and record_id:
-            created_ticket_id = record_id
-            pnr = doc.get("pnr")
-            passenger_name = doc.get("passenger_name")
-            route = doc.get("route")
-            cost = doc.get("cost")
-            sale_price = doc.get("sale_price")
-            commission = doc.get("commission")
-            
-            log_test("Scraper ingest flight ticket", True, 
-                    f"Record ID: {record_id}, PNR: {pnr}, Passenger: {passenger_name}, "
-                    f"Route: {route}, Cost: {cost}, Sale: {sale_price}, Commission: {commission}")
-        else:
-            log_test("Scraper ingest flight ticket", False, 
-                    f"Invalid response structure: {data}")
-    else:
-        log_test("Scraper ingest flight ticket", False, 
-                f"Status: {resp.status_code}, Response: {resp.text}")
-
-def test_scraper_ingest_bus():
-    """Test 16: Scraper ingest - bus ticket (travel_mode='land')"""
-    global created_pat_token, created_client_id, created_supplier_id
-    
-    if not created_pat_token or not created_client_id or not created_supplier_id:
-        print("\n=== SKIPPING BUS INGEST TEST (missing prerequisites) ===")
-        return
-    
-    print("\n=== TEST 16: POST /api/scraper/ingest (bus ticket) ===")
-    payload = {
-        "booking": {
-            "doc_type": "bus",
-            "pnr": "TEST-BUS-01",
-            "carrier": "شركة النقل البري",
-            "route_from": "صنعاء",
-            "route_to": "عدن"
-        },
-        "traveler": {
-            "name_ar": "مسافر اختبار",
-            "passport_no": "YE123456"
-        },
-        "dates": {
-            "trip_date": "2026-08-20",
-            "depart_time": "08:00",
-            "issued_at": "2026-07-15T10:00:00Z"
-        },
-        "financial": {
-            "amount": 50,
-            "currency": "SAR"
-        },
-        "client_id": created_client_id,
-        "supplier_id": created_supplier_id,
-        "cost": 30,
-        "sale_price": 50,
-        "payment_method": "credit"
-    }
-    
-    resp = requests.post(f"{BASE_URL}/scraper/ingest", 
-                        json=payload,
-                        headers={"Authorization": f"Bearer {created_pat_token}"})
-    
-    if resp.status_code == 200:
-        data = resp.json()
-        doc = data.get("doc", {})
-        travel_mode = doc.get("travel_mode")
-        
-        if travel_mode == "land":
-            log_test("Scraper ingest bus ticket (travel_mode='land')", True, 
-                    f"Travel mode: {travel_mode}, PNR: {doc.get('pnr')}")
-        else:
-            log_test("Scraper ingest bus ticket (travel_mode='land')", False, 
-                    f"Expected travel_mode='land', got '{travel_mode}'")
-    else:
-        log_test("Scraper ingest bus ticket (travel_mode='land')", False, 
-                f"Status: {resp.status_code}")
-
-def test_scraper_ingest_visa():
-    """Test 17: Scraper ingest - umrah visa"""
-    global created_pat_token, created_client_id, created_supplier_id, created_visa_id
-    
-    if not created_pat_token or not created_client_id or not created_supplier_id:
-        print("\n=== SKIPPING VISA INGEST TEST (missing prerequisites) ===")
-        return
-    
-    print("\n=== TEST 17: POST /api/scraper/ingest (umrah visa) ===")
-    payload = {
-        "booking": {
-            "doc_type": "umrah_visa",
-            "visa_no": "6169794577",
-            "application_no": "E821262038"
-        },
-        "traveler": {
-            "name_ar": "خديجة سعيد",
-            "passport_no": "16439690",
-            "nationality": "يمني"
-        },
-        "dates": {
-            "valid_from": "2026-07-17",
-            "valid_until": "2026-10-15",
-            "issued_at": "2026-07-15T10:00:00Z"
-        },
-        "financial": {
-            "amount": 800,
-            "currency": "SAR"
-        },
-        "client_id": created_client_id,
-        "supplier_id": created_supplier_id,
-        "cost": 500,
-        "sale_price": 800,
-        "payment_method": "credit"
-    }
-    
-    resp = requests.post(f"{BASE_URL}/scraper/ingest", 
-                        json=payload,
-                        headers={"Authorization": f"Bearer {created_pat_token}"})
-    
-    if resp.status_code == 200:
-        data = resp.json()
-        ok = data.get("ok")
-        record_type = data.get("record_type")
-        record_id = data.get("record_id")
-        doc = data.get("doc", {})
-        
-        if ok and record_type == "visa" and record_id:
-            created_visa_id = record_id
-            service_type = doc.get("service_type")
-            entry_date = doc.get("entry_date")
-            expected_exit_date = doc.get("expected_exit_date")
-            
-            if service_type == "تأشيرة عمرة":
-                log_test("Scraper ingest umrah visa", True, 
-                        f"Record ID: {record_id}, Service: {service_type}, "
-                        f"Entry: {entry_date}, Exit: {expected_exit_date}")
-            else:
-                log_test("Scraper ingest umrah visa", False, 
-                        f"Expected service_type='تأشيرة عمرة', got '{service_type}'")
-        else:
-            log_test("Scraper ingest umrah visa", False, 
-                    f"Invalid response structure: {data}")
-    else:
-        log_test("Scraper ingest umrah visa", False, 
-                f"Status: {resp.status_code}, Response: {resp.text}")
-
-def test_verify_ticket_created():
-    """Test 18: Verify ticket appears in GET /api/tickets"""
-    global created_ticket_id
-    
-    if not created_ticket_id:
-        print("\n=== SKIPPING TICKET VERIFICATION (no ticket created) ===")
-        return
-    
-    print("\n=== TEST 18: GET /api/tickets (verify ticket created) ===")
-    resp = session.get(f"{BASE_URL}/tickets")
-    if resp.status_code == 200:
-        tickets = resp.json()
-        found = next((t for t in tickets if t.get("id") == created_ticket_id), None)
-        if found:
-            log_test("Ticket appears in GET /api/tickets", True, 
-                    f"PNR: {found.get('pnr')}, Passenger: {found.get('passenger_name')}")
-        else:
-            log_test("Ticket appears in GET /api/tickets", False, 
-                    "Ticket not found in list")
-    else:
-        log_test("Ticket appears in GET /api/tickets", False, 
-                f"Status: {resp.status_code}")
-
-def test_verify_journal_entry():
-    """Test 19: Verify journal entry created for ticket"""
-    global created_ticket_id
-    
-    if not created_ticket_id:
-        print("\n=== SKIPPING JOURNAL ENTRY VERIFICATION (no ticket created) ===")
-        return
-    
-    print("\n=== TEST 19: GET /api/journal-entries (verify entry for ticket) ===")
-    resp = session.get(f"{BASE_URL}/journal-entries")
-    if resp.status_code == 200:
-        entries = resp.json()
-        found = next((e for e in entries if e.get("ref_type") == "ticket" and e.get("ref_id") == created_ticket_id), None)
-        if found:
-            lines = found.get("lines", [])
-            total_debit = sum(l.get("debit", 0) for l in lines)
-            total_credit = sum(l.get("credit", 0) for l in lines)
-            balanced = abs(total_debit - total_credit) < 0.01
-            
-            log_test("Journal entry created for ticket", True, 
-                    f"Ref type: {found.get('ref_type')}, Lines: {len(lines)}, "
-                    f"Debit: {total_debit}, Credit: {total_credit}, Balanced: {balanced}")
-        else:
-            log_test("Journal entry created for ticket", False, 
-                    "Journal entry not found")
-    else:
-        log_test("Journal entry created for ticket", False, 
-                f"Status: {resp.status_code}")
-
-def test_verify_balances():
-    """Test 20: Verify client and supplier balances updated"""
-    global created_client_id, created_supplier_id
-    
-    if not created_client_id or not created_supplier_id:
-        print("\n=== SKIPPING BALANCE VERIFICATION (missing client/supplier) ===")
-        return
-    
-    print("\n=== TEST 20: Verify client and supplier balances ===")
-    
-    # Check client balance
-    resp = session.get(f"{BASE_URL}/clients")
-    if resp.status_code == 200:
-        clients = resp.json()
-        client = next((c for c in clients if c.get("id") == created_client_id), None)
-        if client:
-            usd_balance = client.get("balances", {}).get("USD", 0)
-            sar_balance = client.get("balances", {}).get("SAR", 0)
-            log_test("Client balance updated", True, 
-                    f"USD: {usd_balance}, SAR: {sar_balance}")
-        else:
-            log_test("Client balance updated", False, "Client not found")
-    else:
-        log_test("Client balance updated", False, f"Status: {resp.status_code}")
-    
-    # Check supplier balance
-    resp = session.get(f"{BASE_URL}/suppliers")
-    if resp.status_code == 200:
-        suppliers = resp.json()
-        supplier = next((s for s in suppliers if s.get("id") == created_supplier_id), None)
-        if supplier:
-            usd_balance = supplier.get("balances", {}).get("USD", 0)
-            sar_balance = supplier.get("balances", {}).get("SAR", 0)
-            log_test("Supplier balance updated", True, 
-                    f"USD: {usd_balance}, SAR: {sar_balance}")
-        else:
-            log_test("Supplier balance updated", False, "Supplier not found")
-    else:
-        log_test("Supplier balance updated", False, f"Status: {resp.status_code}")
-
-def test_ingest_validation():
-    """Test 21-22: Scraper ingest validation errors"""
-    global created_pat_token
-    
-    if not created_pat_token:
-        print("\n=== SKIPPING VALIDATION TESTS (no PAT token) ===")
-        return
-    
-    print("\n=== TEST 21: POST /api/scraper/ingest without client_id ===")
-    payload = {
-        "booking": {"doc_type": "flight", "pnr": "TEST"},
-        "traveler": {"name_en": "TEST"},
-        "dates": {},
-        "financial": {"amount": 100, "currency": "USD"},
-        "supplier_id": "dummy-supplier-id",
-        "cost": 50,
-        "sale_price": 100
-    }
-    
-    resp = requests.post(f"{BASE_URL}/scraper/ingest", 
-                        json=payload,
-                        headers={"Authorization": f"Bearer {created_pat_token}"})
-    
-    if resp.status_code == 400:
-        error = resp.json().get("error", "")
-        if "client_id" in error.lower() or "العميل" in error:
-            log_test("Ingest without client_id returns 400", True, f"Error: {error}")
-        else:
-            log_test("Ingest without client_id returns 400", False, f"Wrong error: {error}")
-    else:
-        log_test("Ingest without client_id returns 400", False, 
-                f"Expected 400, got {resp.status_code}")
-    
-    print("\n=== TEST 22: POST /api/scraper/ingest with unsupported doc_type ===")
-    payload = {
-        "booking": {"doc_type": "unknown_type"},
-        "traveler": {"name_en": "TEST"},
-        "dates": {},
-        "financial": {"amount": 100, "currency": "USD"},
-        "client_id": "dummy-client-id",
-        "supplier_id": "dummy-supplier-id",
-        "cost": 50,
-        "sale_price": 100
-    }
-    
-    resp = requests.post(f"{BASE_URL}/scraper/ingest", 
-                        json=payload,
-                        headers={"Authorization": f"Bearer {created_pat_token}"})
-    
-    if resp.status_code == 400:
-        error = resp.json().get("error", "")
-        if "doc_type" in error.lower() or "غير مدعوم" in error or "المستند" in error:
-            log_test("Ingest with unsupported doc_type returns 400", True, f"Error: {error}")
-        else:
-            log_test("Ingest with unsupported doc_type returns 400", False, f"Wrong error: {error}")
-    else:
-        log_test("Ingest with unsupported doc_type returns 400", False, 
-                f"Expected 400, got {resp.status_code}")
-
-def test_regression():
-    """Test 23-24: Regression tests"""
-    print("\n=== TEST 23: GET /api/packages/comparison (v3.7 regression) ===")
-    resp = session.get(f"{BASE_URL}/packages/comparison")
-    if resp.status_code == 200:
-        data = resp.json()
-        if "period" in data and "rows" in data and "totals" in data:
-            log_test("v3.7 packages comparison still works", True, 
-                    f"Period: {data.get('period')}, Rows: {len(data.get('rows', []))}")
-        else:
-            log_test("v3.7 packages comparison still works", False, 
-                    "Missing required fields in response")
-    else:
-        log_test("v3.7 packages comparison still works", False, 
-                f"Status: {resp.status_code}")
-    
-    print("\n=== TEST 24: GET /api/packages (v3.6 regression) ===")
-    resp = session.get(f"{BASE_URL}/packages")
-    if resp.status_code == 200:
-        packages = resp.json()
-        log_test("v3.6 packages CRUD still works", True, 
-                f"Found {len(packages)} packages")
-    else:
-        log_test("v3.6 packages CRUD still works", False, 
-                f"Status: {resp.status_code}")
 
 def print_summary():
     """Print test summary"""
-    print("\n" + "="*60)
-    print("TEST SUMMARY")
-    print("="*60)
-    
-    passed = sum(1 for t in test_results if t["passed"])
-    failed = sum(1 for t in test_results if not t["passed"])
+    passed = sum(1 for r in test_results if r["passed"])
     total = len(test_results)
-    
-    print(f"\nTotal: {total} tests")
-    print(f"✅ Passed: {passed}")
-    print(f"❌ Failed: {failed}")
-    print(f"Success Rate: {(passed/total*100):.1f}%")
-    
-    if failed > 0:
-        print("\n" + "="*60)
-        print("FAILED TESTS:")
-        print("="*60)
-        for t in test_results:
-            if not t["passed"]:
-                print(f"❌ {t['name']}")
-                if t["details"]:
-                    print(f"   {t['details']}")
-    
-    print("\n" + "="*60)
+    print(f"\n{'='*60}")
+    print(f"TEST SUMMARY: {passed}/{total} PASSED")
+    print(f"{'='*60}")
+    for r in test_results:
+        status = "✅" if r["passed"] else "❌"
+        print(f"{status} {r['test']}")
+    print(f"{'='*60}\n")
 
-def main():
-    """Main test runner"""
-    print("="*60)
-    print("v3.8 BACKEND TESTING — PATs + Scraper Ingest + Bearer Auth")
-    print("="*60)
-    print(f"Base URL: {BASE_URL}")
-    print(f"Credentials: {OWNER_EMAIL} / {OWNER_PASSWORD}")
-    print("="*60)
-    
+def test_health_version():
+    """Test 1: Health endpoint returns version 3.9"""
     try:
-        # Login
-        login()
+        response = requests.get(f"{BASE_URL}/health", timeout=10)
+        data = response.json()
         
-        # Run tests
-        test_health()
-        test_pat_crud()
-        test_pat_revoke()
-        test_bearer_auth()
-        test_scraper_ingest_flight()
-        test_scraper_ingest_bus()
-        test_scraper_ingest_visa()
-        test_verify_ticket_created()
-        test_verify_journal_entry()
-        test_verify_balances()
-        test_ingest_validation()
-        test_regression()
+        if response.status_code == 200 and data.get("version") == "3.9":
+            log_test("Health version 3.9", True, f"Version: {data.get('version')}")
+            return True
+        else:
+            log_test("Health version 3.9", False, f"Expected version 3.9, got {data.get('version')}")
+            return False
+    except Exception as e:
+        log_test("Health version 3.9", False, f"Error: {str(e)}")
+        return False
+
+def test_gmail_only_yahoo():
+    """Test 2a: Non-Gmail signup (Yahoo) should be rejected"""
+    try:
+        payload = {
+            "name": "Test Office Yahoo",
+            "owner_name": "Test User Yahoo",
+            "owner_email": "testuser@yahoo.com",
+            "owner_password": "Pass@2025"
+        }
+        response = requests.post(f"{BASE_URL}/public/signup", json=payload, timeout=10)
         
-        # Print summary
-        print_summary()
+        if response.status_code == 400:
+            error_text = response.json().get("error", "")
+            if "Gmail" in error_text or "gmail" in error_text.lower():
+                log_test("Gmail-only: Yahoo rejected", True, f"Error: {error_text}")
+                return True
+            else:
+                log_test("Gmail-only: Yahoo rejected", False, f"Wrong error message: {error_text}")
+                return False
+        else:
+            log_test("Gmail-only: Yahoo rejected", False, f"Expected 400, got {response.status_code}")
+            return False
+    except Exception as e:
+        log_test("Gmail-only: Yahoo rejected", False, f"Error: {str(e)}")
+        return False
+
+def test_gmail_only_hotmail():
+    """Test 2b: Non-Gmail signup (Hotmail) should be rejected"""
+    try:
+        payload = {
+            "name": "Test Office Hotmail",
+            "owner_name": "Test User Hotmail",
+            "owner_email": "testuser@hotmail.com",
+            "owner_password": "Pass@2025"
+        }
+        response = requests.post(f"{BASE_URL}/public/signup", json=payload, timeout=10)
         
-        # Exit with appropriate code
-        failed = sum(1 for t in test_results if not t["passed"])
-        sys.exit(0 if failed == 0 else 1)
+        if response.status_code == 400:
+            error_text = response.json().get("error", "")
+            if "Gmail" in error_text or "gmail" in error_text.lower():
+                log_test("Gmail-only: Hotmail rejected", True, f"Error: {error_text}")
+                return True
+            else:
+                log_test("Gmail-only: Hotmail rejected", False, f"Wrong error message: {error_text}")
+                return False
+        else:
+            log_test("Gmail-only: Hotmail rejected", False, f"Expected 400, got {response.status_code}")
+            return False
+    except Exception as e:
+        log_test("Gmail-only: Hotmail rejected", False, f"Error: {str(e)}")
+        return False
+
+def test_gmail_alias_rejected():
+    """Test 2c: Gmail with + alias should be rejected"""
+    try:
+        payload = {
+            "name": "Test Office Alias",
+            "owner_name": "Test User Alias",
+            "owner_email": "testuser+alias@gmail.com",
+            "owner_password": "Pass@2025"
+        }
+        response = requests.post(f"{BASE_URL}/public/signup", json=payload, timeout=10)
+        
+        if response.status_code == 400:
+            error_text = response.json().get("error", "")
+            if "+" in error_text or "alias" in error_text.lower() or "gmail" in error_text.lower():
+                log_test("Gmail-only: Alias rejected", True, f"Error: {error_text}")
+                return True
+            else:
+                log_test("Gmail-only: Alias rejected", False, f"Wrong error message: {error_text}")
+                return False
+        else:
+            log_test("Gmail-only: Alias rejected", False, f"Expected 400, got {response.status_code}")
+            return False
+    except Exception as e:
+        log_test("Gmail-only: Alias rejected", False, f"Error: {str(e)}")
+        return False
+
+def test_valid_gmail_signup():
+    """Test 2d: Valid Gmail signup should succeed"""
+    try:
+        timestamp = int(time.time())
+        email = f"rahal.test.{timestamp}@gmail.com"
+        
+        payload = {
+            "name": f"Test Office {timestamp}",
+            "owner_name": "Test User Valid",
+            "owner_email": email,
+            "owner_password": "Pass@2025"
+        }
+        response = requests.post(f"{BASE_URL}/public/signup", json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("tenant") and data.get("tenant", {}).get("id"):
+                tenant_id = data["tenant"]["id"]
+                referral_code = data["tenant"].get("referral_code", "")
+                log_test("Gmail-only: Valid Gmail accepted", True, 
+                        f"Tenant ID: {tenant_id}, Referral Code: {referral_code}")
+                return True, tenant_id, referral_code, email
+            else:
+                log_test("Gmail-only: Valid Gmail accepted", False, "No tenant in response")
+                return False, None, None, None
+        else:
+            log_test("Gmail-only: Valid Gmail accepted", False, 
+                    f"Expected 200, got {response.status_code}: {response.text}")
+            return False, None, None, None
+    except Exception as e:
+        log_test("Gmail-only: Valid Gmail accepted", False, f"Error: {str(e)}")
+        return False, None, None, None
+
+def test_deferred_referral_flow():
+    """Test 3: Deferred referral bonus flow"""
+    try:
+        # Step 1: Create tenant A with valid Gmail
+        timestamp_a = int(time.time())
+        email_a = f"rahal.refa.{timestamp_a}@gmail.com"
+        
+        payload_a = {
+            "name": f"Tenant A {timestamp_a}",
+            "owner_name": "Owner A",
+            "owner_email": email_a,
+            "owner_password": "Pass@2025"
+        }
+        response_a = requests.post(f"{BASE_URL}/public/signup", json=payload_a, timeout=10)
+        
+        if response_a.status_code != 200:
+            log_test("Deferred Referral: Signup A", False, f"Failed to create tenant A: {response_a.text}")
+            return False
+        
+        data_a = response_a.json()
+        tenant_a_id = data_a["tenant"]["id"]
+        referral_code_a = data_a["tenant"].get("referral_code", "")
+        
+        if not referral_code_a:
+            log_test("Deferred Referral: Signup A", False, "No referral code in response")
+            return False
+        
+        log_test("Deferred Referral: Signup A", True, 
+                f"Tenant A ID: {tenant_a_id}, Referral Code: {referral_code_a}")
+        
+        # Step 2: Create tenant B with referral code from A
+        time.sleep(1)  # Ensure different timestamp
+        timestamp_b = int(time.time())
+        email_b = f"rahal.refb.{timestamp_b}@gmail.com"
+        
+        payload_b = {
+            "name": f"Tenant B {timestamp_b}",
+            "owner_name": "Owner B",
+            "owner_email": email_b,
+            "owner_password": "Pass@2025",
+            "referral_code": referral_code_a
+        }
+        response_b = requests.post(f"{BASE_URL}/public/signup", json=payload_b, timeout=10)
+        
+        if response_b.status_code != 200:
+            log_test("Deferred Referral: Signup B with referral", False, 
+                    f"Failed to create tenant B: {response_b.text}")
+            return False
+        
+        data_b = response_b.json()
+        tenant_b_id = data_b["tenant"]["id"]
+        referral_applied = data_b.get("referral_applied", False)
+        
+        if not referral_applied:
+            log_test("Deferred Referral: Signup B with referral", False, 
+                    "referral_applied not true in response")
+            return False
+        
+        log_test("Deferred Referral: Signup B with referral", True, 
+                f"Tenant B ID: {tenant_b_id}, referral_applied: {referral_applied}")
+        
+        # Step 3: Login as super admin
+        login_payload = {
+            "email": SUPER_ADMIN_EMAIL,
+            "password": SUPER_ADMIN_PASSWORD
+        }
+        login_response = requests.post(f"{BASE_URL}/auth/login", json=login_payload, timeout=10)
+        
+        if login_response.status_code != 200:
+            log_test("Deferred Referral: Super admin login", False, 
+                    f"Failed to login: {login_response.text}")
+            return False
+        
+        # Get session cookie
+        session_cookie = login_response.cookies.get("rahaal_session")
+        if not session_cookie:
+            log_test("Deferred Referral: Super admin login", False, "No session cookie")
+            return False
+        
+        log_test("Deferred Referral: Super admin login", True, "Session cookie obtained")
+        
+        # Step 4: Check tenant A BEFORE payment confirmation
+        headers = {"Cookie": f"rahaal_session={session_cookie}"}
+        tenants_response = requests.get(f"{BASE_URL}/admin/tenants", headers=headers, timeout=10)
+        
+        if tenants_response.status_code != 200:
+            log_test("Deferred Referral: Check A before payment", False, 
+                    f"Failed to get tenants: {tenants_response.text}")
+            return False
+        
+        tenants_data = tenants_response.json()
+        # Handle both list and dict responses
+        if isinstance(tenants_data, dict):
+            tenants = tenants_data.get("tenants", [])
+        else:
+            tenants = tenants_data
+        
+        tenant_a = next((t for t in tenants if t["id"] == tenant_a_id), None)
+        
+        if not tenant_a:
+            log_test("Deferred Referral: Check A before payment", False, "Tenant A not found")
+            return False
+        
+        # Verify BEFORE payment confirmation
+        referral_stats = tenant_a.get("referral_stats", {})
+        journal_quota = tenant_a.get("journal_quota", {})
+        pending_referrals = referral_stats.get("pending_referrals", [])
+        
+        signups_before = referral_stats.get("signups", 0)
+        activations_before = referral_stats.get("activations", 0)
+        bonus_earned_before = referral_stats.get("bonus_earned", 0)
+        quota_limit_before = journal_quota.get("limit", 0)
+        
+        # Check pending_referrals
+        pending_entry = next((p for p in pending_referrals if p.get("referred_tenant") == tenant_b_id), None)
+        
+        checks_before = []
+        checks_before.append(f"signups={signups_before} (expected ≥1)")
+        checks_before.append(f"activations={activations_before} (expected 0)")
+        checks_before.append(f"bonus_earned={bonus_earned_before} (expected 0)")
+        checks_before.append(f"quota.limit={quota_limit_before} (expected 30)")
+        checks_before.append(f"pending_referrals entry exists: {pending_entry is not None}")
+        if pending_entry:
+            checks_before.append(f"pending_referrals.paid={pending_entry.get('paid', None)} (expected false)")
+        
+        all_checks_pass = (
+            signups_before >= 1 and
+            activations_before == 0 and
+            bonus_earned_before == 0 and
+            quota_limit_before == 30 and
+            pending_entry is not None and
+            pending_entry.get("paid") == False
+        )
+        
+        if all_checks_pass:
+            log_test("Deferred Referral: Check A before payment", True, 
+                    ", ".join(checks_before))
+        else:
+            log_test("Deferred Referral: Check A before payment", False, 
+                    ", ".join(checks_before))
+            return False
+        
+        # Step 5: Confirm payment for tenant B
+        confirm_response = requests.post(
+            f"{BASE_URL}/admin/tenants/{tenant_b_id}/confirm-payment",
+            headers=headers,
+            timeout=10
+        )
+        
+        if confirm_response.status_code != 200:
+            log_test("Deferred Referral: Confirm payment", False, 
+                    f"Failed to confirm payment: {confirm_response.text}")
+            return False
+        
+        confirm_data = confirm_response.json()
+        referrer_bonus = confirm_data.get("referrer_bonus", {})
+        bonus_added = referrer_bonus.get("bonus_added", 0)
+        
+        if bonus_added != 50:
+            log_test("Deferred Referral: Confirm payment", False, 
+                    f"Expected bonus_added=50, got {bonus_added}")
+            return False
+        
+        log_test("Deferred Referral: Confirm payment", True, 
+                f"bonus_added={bonus_added}")
+        
+        # Step 6: Check tenant A AFTER payment confirmation
+        tenants_response_after = requests.get(f"{BASE_URL}/admin/tenants", headers=headers, timeout=10)
+        
+        if tenants_response_after.status_code != 200:
+            log_test("Deferred Referral: Check A after payment", False, 
+                    f"Failed to get tenants: {tenants_response_after.text}")
+            return False
+        
+        tenants_data_after = tenants_response_after.json()
+        # Handle both list and dict responses
+        if isinstance(tenants_data_after, dict):
+            tenants_after = tenants_data_after.get("tenants", [])
+        else:
+            tenants_after = tenants_data_after
+        
+        tenant_a_after = next((t for t in tenants_after if t["id"] == tenant_a_id), None)
+        
+        if not tenant_a_after:
+            log_test("Deferred Referral: Check A after payment", False, "Tenant A not found")
+            return False
+        
+        # Verify AFTER payment confirmation
+        referral_stats_after = tenant_a_after.get("referral_stats", {})
+        journal_quota_after = tenant_a_after.get("journal_quota", {})
+        pending_referrals_after = referral_stats_after.get("pending_referrals", [])
+        
+        signups_after = referral_stats_after.get("signups", 0)
+        activations_after = referral_stats_after.get("activations", 0)
+        bonus_earned_after = referral_stats_after.get("bonus_earned", 0)
+        quota_limit_after = journal_quota_after.get("limit", 0)
+        
+        # Check pending_referrals entry is now paid
+        pending_entry_after = next((p for p in pending_referrals_after if p.get("referred_tenant") == tenant_b_id), None)
+        
+        checks_after = []
+        checks_after.append(f"quota.limit={quota_limit_after} (expected 80)")
+        checks_after.append(f"activations={activations_after} (expected 1)")
+        checks_after.append(f"bonus_earned={bonus_earned_after} (expected 50)")
+        if pending_entry_after:
+            checks_after.append(f"pending_referrals.paid={pending_entry_after.get('paid', None)} (expected true)")
+        else:
+            checks_after.append("pending_referrals entry not found")
+        
+        # Check top_ups array
+        top_ups = journal_quota_after.get("top_ups", [])
+        referral_top_up = next((t for t in top_ups if t.get("by") == "referral_activation"), None)
+        if referral_top_up:
+            checks_after.append(f"top_ups entry with by='referral_activation' and amount={referral_top_up.get('amount', 0)}")
+        else:
+            checks_after.append("top_ups entry with by='referral_activation' NOT FOUND")
+        
+        all_checks_pass_after = (
+            quota_limit_after == 80 and
+            activations_after == 1 and
+            bonus_earned_after == 50 and
+            pending_entry_after is not None and
+            pending_entry_after.get("paid") == True and
+            referral_top_up is not None and
+            referral_top_up.get("amount") == 50
+        )
+        
+        if all_checks_pass_after:
+            log_test("Deferred Referral: Check A after payment", True, 
+                    ", ".join(checks_after))
+            return True
+        else:
+            log_test("Deferred Referral: Check A after payment", False, 
+                    ", ".join(checks_after))
+            return False
         
     except Exception as e:
-        print(f"\n❌ FATAL ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        log_test("Deferred Referral Flow", False, f"Error: {str(e)}")
+        return False
+
+def test_regression_v38_pats():
+    """Test 4: Regression - v3.8 PATs still work"""
+    try:
+        # Login as demo owner
+        login_payload = {
+            "email": "owner@demo.com",
+            "password": "Demo@2025"
+        }
+        login_response = requests.post(f"{BASE_URL}/auth/login", json=login_payload, timeout=10)
+        
+        if login_response.status_code != 200:
+            log_test("Regression: v3.8 PATs", False, f"Failed to login: {login_response.text}")
+            return False
+        
+        session_cookie = login_response.cookies.get("rahaal_session")
+        headers = {"Cookie": f"rahaal_session={session_cookie}"}
+        
+        # Get existing PATs and delete one if at limit
+        pats_response = requests.get(f"{BASE_URL}/pats", headers=headers, timeout=10)
+        if pats_response.status_code == 200:
+            existing_pats = pats_response.json()
+            active_pats = [p for p in existing_pats if not p.get("revoked_at")]
+            if len(active_pats) >= 5:
+                # Delete the oldest active PAT
+                oldest_pat = active_pats[0]
+                requests.delete(f"{BASE_URL}/pats/{oldest_pat['id']}", headers=headers, timeout=10)
+        
+        # Create a PAT
+        pat_payload = {"name": f"Test PAT v3.9 {int(time.time())}"}
+        pat_response = requests.post(f"{BASE_URL}/pats", json=pat_payload, headers=headers, timeout=10)
+        
+        if pat_response.status_code != 200:
+            log_test("Regression: v3.8 PATs", False, f"Failed to create PAT: {pat_response.text}")
+            return False
+        
+        pat_data = pat_response.json()
+        token = pat_data.get("token", "")
+        
+        if not token or not token.startswith("rhl_pat_"):
+            log_test("Regression: v3.8 PATs", False, f"Invalid token format: {token}")
+            return False
+        
+        # Test Bearer auth with scraper/ping
+        bearer_headers = {"Authorization": f"Bearer {token}"}
+        ping_response = requests.get(f"{BASE_URL}/scraper/ping", headers=bearer_headers, timeout=10)
+        
+        if ping_response.status_code == 200:
+            ping_data = ping_response.json()
+            if ping_data.get("ok") and ping_data.get("version") == "3.9":
+                log_test("Regression: v3.8 PATs", True, 
+                        f"PAT created and Bearer auth working, version={ping_data.get('version')}")
+                return True
+            else:
+                log_test("Regression: v3.8 PATs", False, 
+                        f"Unexpected ping response: {ping_data}")
+                return False
+        else:
+            log_test("Regression: v3.8 PATs", False, 
+                    f"Ping failed with status {ping_response.status_code}")
+            return False
+        
+    except Exception as e:
+        log_test("Regression: v3.8 PATs", False, f"Error: {str(e)}")
+        return False
+
+def test_regression_v37_packages():
+    """Test 5: Regression - v3.7 packages/comparison still works"""
+    try:
+        # Login as demo owner
+        login_payload = {
+            "email": "owner@demo.com",
+            "password": "Demo@2025"
+        }
+        login_response = requests.post(f"{BASE_URL}/auth/login", json=login_payload, timeout=10)
+        
+        if login_response.status_code != 200:
+            log_test("Regression: v3.7 packages/comparison", False, 
+                    f"Failed to login: {login_response.text}")
+            return False
+        
+        session_cookie = login_response.cookies.get("rahaal_session")
+        headers = {"Cookie": f"rahaal_session={session_cookie}"}
+        
+        # Test packages/comparison endpoint
+        comparison_response = requests.get(f"{BASE_URL}/packages/comparison", 
+                                          headers=headers, timeout=10)
+        
+        if comparison_response.status_code == 200:
+            data = comparison_response.json()
+            if "period" in data and "rows" in data and "totals" in data:
+                log_test("Regression: v3.7 packages/comparison", True, 
+                        f"Comparison endpoint working, found {len(data.get('rows', []))} packages")
+                return True
+            else:
+                log_test("Regression: v3.7 packages/comparison", False, 
+                        f"Missing expected fields in response")
+                return False
+        else:
+            log_test("Regression: v3.7 packages/comparison", False, 
+                    f"Expected 200, got {comparison_response.status_code}")
+            return False
+        
+    except Exception as e:
+        log_test("Regression: v3.7 packages/comparison", False, f"Error: {str(e)}")
+        return False
+
+def test_regression_v36_packages():
+    """Test 6: Regression - v3.6 packages still work"""
+    try:
+        # Login as demo owner
+        login_payload = {
+            "email": "owner@demo.com",
+            "password": "Demo@2025"
+        }
+        login_response = requests.post(f"{BASE_URL}/auth/login", json=login_payload, timeout=10)
+        
+        if login_response.status_code != 200:
+            log_test("Regression: v3.6 packages", False, f"Failed to login: {login_response.text}")
+            return False
+        
+        session_cookie = login_response.cookies.get("rahaal_session")
+        headers = {"Cookie": f"rahaal_session={session_cookie}"}
+        
+        # Test packages endpoint
+        packages_response = requests.get(f"{BASE_URL}/packages", headers=headers, timeout=10)
+        
+        if packages_response.status_code == 200:
+            packages = packages_response.json()
+            if isinstance(packages, list):
+                log_test("Regression: v3.6 packages", True, 
+                        f"Packages endpoint working, found {len(packages)} packages")
+                return True
+            else:
+                log_test("Regression: v3.6 packages", False, "Response is not a list")
+                return False
+        else:
+            log_test("Regression: v3.6 packages", False, 
+                    f"Expected 200, got {packages_response.status_code}")
+            return False
+        
+    except Exception as e:
+        log_test("Regression: v3.6 packages", False, f"Error: {str(e)}")
+        return False
+
+def test_regression_v35_refunds():
+    """Test 7: Regression - v3.5 refunds still work"""
+    try:
+        # Login as demo owner
+        login_payload = {
+            "email": "owner@demo.com",
+            "password": "Demo@2025"
+        }
+        login_response = requests.post(f"{BASE_URL}/auth/login", json=login_payload, timeout=10)
+        
+        if login_response.status_code != 200:
+            log_test("Regression: v3.5 refunds", False, f"Failed to login: {login_response.text}")
+            return False
+        
+        session_cookie = login_response.cookies.get("rahaal_session")
+        headers = {"Cookie": f"rahaal_session={session_cookie}"}
+        
+        # Test refunds endpoint
+        refunds_response = requests.get(f"{BASE_URL}/refunds", headers=headers, timeout=10)
+        
+        if refunds_response.status_code == 200:
+            refunds = refunds_response.json()
+            if isinstance(refunds, list):
+                log_test("Regression: v3.5 refunds", True, 
+                        f"Refunds endpoint working, found {len(refunds)} refunds")
+                return True
+            else:
+                log_test("Regression: v3.5 refunds", False, "Response is not a list")
+                return False
+        else:
+            log_test("Regression: v3.5 refunds", False, 
+                    f"Expected 200, got {refunds_response.status_code}")
+            return False
+        
+    except Exception as e:
+        log_test("Regression: v3.5 refunds", False, f"Error: {str(e)}")
+        return False
+
+def main():
+    """Run all tests"""
+    print("\n" + "="*60)
+    print("v3.9 BACKEND TESTING - Rahaal ERP")
+    print("Gmail-only Signup + Deferred Referral Bonus")
+    print("="*60 + "\n")
+    
+    # Test 1: Health version
+    print("\n--- Test 1: Health Version Check ---")
+    test_health_version()
+    
+    # Test 2: Gmail-only signup enforcement
+    print("\n--- Test 2: Gmail-only Signup Enforcement ---")
+    test_gmail_only_yahoo()
+    test_gmail_only_hotmail()
+    test_gmail_alias_rejected()
+    test_valid_gmail_signup()
+    
+    # Test 3: Deferred referral bonus flow
+    print("\n--- Test 3: Deferred Referral Bonus Flow ---")
+    test_deferred_referral_flow()
+    
+    # Test 4-7: Regression tests
+    print("\n--- Test 4-7: Regression Tests ---")
+    test_regression_v38_pats()
+    test_regression_v37_packages()
+    test_regression_v36_packages()
+    test_regression_v35_refunds()
+    
+    # Print summary
+    print_summary()
 
 if __name__ == "__main__":
     main()

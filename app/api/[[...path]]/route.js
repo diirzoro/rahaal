@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.8',
+          version: '3.9',
           db: 'connected',
         })
       } catch (e) {
@@ -440,6 +440,13 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       if (!b.name || !b.owner_email || !b.owner_password || !b.owner_name) return bad('الاسم الكامل، اسم المكتب، البريد وكلمة المرور مطلوبة')
       const email = String(b.owner_email).toLowerCase().trim()
+      // v3.9 — Restrict signup to real Gmail addresses to prevent fake/duplicate accounts.
+      // (Full Google OAuth verification will be added later; this is the interim enforcement.)
+      if (!/^[a-z0-9._%+-]+@gmail\.com$/.test(email)) {
+        return bad('يجب استخدام بريد Gmail حقيقي فقط (@gmail.com). سيتم دعم تسجيل الدخول بحساب Google قريباً.')
+      }
+      // Also block +alias patterns to prevent duplicate signups from same Gmail (Gmail treats a+b@gmail = a@gmail)
+      if (email.includes('+')) return bad('بريد Gmail يجب أن يكون بدون رمز + (بدون aliases)')
       if (await db.collection('users').findOne({ email })) return bad('البريد الإلكتروني مستخدم بالفعل')
       const slug = (b.slug || b.name).toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 40) + '-' + uuidv4().slice(0, 4)
       let referredBy = null
@@ -460,12 +467,13 @@ async function handleRoute(request, { params }) {
       }
       await db.collection('tenants').insertOne(tenant)
       if (referredBy) {
-        // v2.8 — +50 immediately to referrer on signup (simplified from +15/+50 two-phase)
+        // v3.9 — Only TRACK the signup; the +50 quota bonus is granted later when
+        // super admin activates the paid subscription (see /subscriptions PATCH → paid state).
         await db.collection('tenants').updateOne(
           { id: referredBy },
           {
-            $inc: { 'journal_quota.limit': 50, 'referral_stats.signups': 1, 'referral_stats.bonus_earned': 50 },
-            $push: { 'journal_quota.top_ups': { amount: 50, date: new Date(), by: 'referral_signup', referred_tenant: tenant.id } }
+            $inc: { 'referral_stats.signups': 1 },
+            $push: { 'referral_stats.pending_referrals': { referred_tenant: tenant.id, referred_at: new Date(), bonus_amount: 50, paid: false } }
           }
         )
       }
@@ -616,12 +624,18 @@ async function handleRoute(request, { params }) {
         await db.collection('tenants').updateOne({ id: tid }, { $set: { activation_confirmed: true, activation_confirmed_at: new Date(), subscription: 'paid' } })
         let referrerBonus = null
         if (t.referred_by) {
+          // v3.9 — grant referrer +50 quota ONLY when the referred tenant confirms actual payment
           await db.collection('tenants').updateOne(
             { id: t.referred_by },
             {
               $inc: { 'journal_quota.limit': 50, 'referral_stats.activations': 1, 'referral_stats.bonus_earned': 50 },
               $push: { 'journal_quota.top_ups': { amount: 50, date: new Date(), by: 'referral_activation', referred_tenant: tid } }
             }
+          )
+          // Also mark the pending_referrals entry as paid
+          await db.collection('tenants').updateOne(
+            { id: t.referred_by, 'referral_stats.pending_referrals.referred_tenant': tid },
+            { $set: { 'referral_stats.pending_referrals.$.paid': true, 'referral_stats.pending_referrals.$.paid_at': new Date() } }
           )
           const ref = await db.collection('tenants').findOne({ id: t.referred_by })
           referrerBonus = { referrer_id: ref.id, referrer_name: ref.name, bonus_added: 50 }
@@ -1172,7 +1186,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.8',
+        version: '3.9',
       })
     }
     if (route === '/scraper/ingest' && method === 'POST') {

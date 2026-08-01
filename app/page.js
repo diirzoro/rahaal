@@ -5,7 +5,7 @@ import { toast } from 'sonner'
 import * as XLSX from 'xlsx'
 import {
   Plane, FileBadge2, LayoutDashboard, Users, Building2, ReceiptText, Wallet,
-  ArrowDownLeft, ArrowUpRight, BookOpenText, BarChart3, PieChart as PieIcon,
+  ArrowDownLeft, ArrowUpRight, ArrowRight, BookOpenText, BarChart3, PieChart as PieIcon,
   Plus, Search, Calendar, TrendingUp, DollarSign, Sparkles, LogOut,
   Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
   Building, Settings, Upload, FileSpreadsheet, CheckCircle2, XCircle,
@@ -177,10 +177,17 @@ function RahaalFooter({ dark = false }) {
   )
 }
 
-function LoginPage({ onLogin }) {
+function LoginPage({ onLogin, onBack, initialSignup }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
+
+  // If user came here from "اشترك الآن", redirect to /signup route (which exists)
+  useEffect(() => {
+    if (initialSignup && typeof window !== 'undefined') {
+      window.location.href = '/signup'
+    }
+  }, [initialSignup])
 
   const submit = async (e) => {
     e?.preventDefault()
@@ -198,6 +205,11 @@ function LoginPage({ onLogin }) {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[#0f1e4d] via-[#1e3a8a] to-[#0f1e4d] p-4">
       <div className="absolute inset-0 opacity-25" style={{ backgroundImage: 'radial-gradient(circle at 20% 20%, rgba(249,115,22,0.35), transparent 45%), radial-gradient(circle at 80% 80%, rgba(30,64,175,0.4), transparent 45%)' }} />
       <div className="relative w-full max-w-md animate-fade-in">
+        {onBack && (
+          <button onClick={onBack} className="mb-4 text-slate-300 hover:text-white text-sm font-semibold flex items-center gap-2">
+            <ArrowRight className="w-4 h-4" /> الصفحة الرئيسية
+          </button>
+        )}
         <div className="text-center mb-6">
           <RahaalLogo size="lg" variant="light" />
           <p className="text-slate-300 text-sm mt-2">نظام محاسبة مكاتب السفريات السحابي</p>
@@ -5802,10 +5814,267 @@ function ManualJournalDialog({ open, onOpenChange, onSaved, record }) {
 }
 
 // ================================================================
+// v3.9 — TARGET MEDIA / RAHAAL PUBLIC LANDING PAGE
+// ================================================================
+function LandingPage({ onLoginClick, onSignupClick }) {
+  const [openMobile, setOpenMobile] = useState(false)
+  const features = [
+    { icon: '💱', title: 'محاسبة متعدّدة العملات', desc: 'قيد مزدوج آلي بـ USD / SAR / YER مع أسعار صرف يومية وتقارير موحّدة.', color: 'from-blue-500 to-cyan-500' },
+    { icon: '✈️', title: 'إدارة التذاكر والحجوزات', desc: 'إصدار تذاكر جوي وبري، طباعة احترافية، ومطابقة مع الموردين لحظياً.', color: 'from-orange-500 to-red-500' },
+    { icon: '🛂', title: 'تأشيرات وموافقات', desc: 'إدارة تأشيرات العمرة والزيارة والعمل والموافقات الأمنية مع تنبيهات الصلاحية.', color: 'from-emerald-500 to-teal-500' },
+    { icon: '🕋', title: 'الباكجات والبرامج السياحية', desc: 'إنشاء باكجات كاملة مع تكاليف المكونات وتقارير ربحية لحظية عند إغلاق الباكج.', color: 'from-fuchsia-500 to-pink-500' },
+    { icon: '📊', title: 'تقارير مالية ذكية', desc: 'ميزانية عمومية، أرباح وخسائر، كشف حساب تفاعلي، ومقارنة ربحية الباكجات.', color: 'from-indigo-500 to-blue-500' },
+    { icon: '📱', title: 'تكامل واتساب ذكي', desc: 'إرسال كشوف الحسابات والتذاكر عبر واتساب بقالب ديناميكي حسب نوع الرحلة.', color: 'from-green-500 to-emerald-500' },
+    { icon: '💸', title: 'الإحالة والإحصائيات', desc: 'نظام إحالة يمنحك 50 قيد مجاني مكافأة عن كل مكتب مشترك يدفع فعلياً.', color: 'from-amber-500 to-orange-500' },
+    { icon: '👥', title: 'صلاحيات ومستخدمون', desc: 'دور المالك والموظفين مع صلاحيات دقيقة على كل شاشة وعملية.', color: 'from-slate-500 to-slate-700' },
+  ]
+  const pricing = [
+    { tier: 'Silver', price: '25$', period: 'شهرياً', tag: 'للبدء', color: 'from-slate-400 to-slate-600', bullets: ['30 قيد محاسبي / شهر', 'مستخدم واحد + فرع واحد', 'كل الوحدات الأساسية', 'دعم عبر واتساب'] },
+    { tier: 'Gold', price: '150$', period: 'شهرياً', tag: 'الأكثر مبيعاً 🔥', color: 'from-amber-500 to-orange-600', highlight: true, bullets: ['قيود غير محدودة', 'مستخدمون وفروع بلا حدود', 'إضافة المتصفح 🕋', 'دعم فوري 24/7'] },
+    { tier: 'Gold Annual', price: '1,500$', period: 'سنوياً (وفّر شهرين)', tag: 'الأفضل قيمة', color: 'from-purple-500 to-fuchsia-600', bullets: ['كل مزايا Gold الشهري', 'شهران مجاناً', 'أولوية الميزات الجديدة', 'استشارة محاسبية شهرية'] },
+  ]
+  const heroImg = 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=1200&q=80'
+  const extImg = 'https://images.unsplash.com/photo-1526628953301-3e589a6a8b74?w=1200&q=80'
+  const dashImg = 'https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=1200&q=80'
+
+  return (
+    <div className="min-h-screen bg-white text-slate-900 font-sans" dir="rtl">
+      {/* ===== NAVBAR ===== */}
+      <header className="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-slate-200">
+        <div className="max-w-7xl mx-auto px-4 lg:px-8 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl grad-brand flex items-center justify-center text-white text-xl font-black shadow">ر</div>
+            <div>
+              <div className="font-extrabold text-slate-900">Rahaal <span className="text-blue-700">رحّال</span></div>
+              <div className="text-[10px] text-slate-500 -mt-0.5">by Target Media</div>
+            </div>
+          </div>
+          <nav className="hidden md:flex items-center gap-6 text-sm font-semibold text-slate-700">
+            <a href="#features" className="hover:text-blue-700">المزايا</a>
+            <a href="#extension" className="hover:text-blue-700">إضافة المتصفح</a>
+            <a href="#pricing" className="hover:text-blue-700">الأسعار</a>
+            <a href="#contact" className="hover:text-blue-700">تواصل</a>
+          </nav>
+          <div className="flex items-center gap-2">
+            <button onClick={onLoginClick} className="hidden sm:inline-flex px-4 py-2 rounded-lg font-semibold text-blue-700 hover:bg-blue-50 text-sm">تسجيل الدخول</button>
+            <button onClick={onSignupClick} className="grad-brand text-white px-4 py-2 rounded-lg font-bold text-sm shadow-md hover:shadow-lg transition">اشترك الآن</button>
+            <button className="md:hidden p-2 rounded hover:bg-slate-100" onClick={() => setOpenMobile(!openMobile)}>☰</button>
+          </div>
+        </div>
+        {openMobile && (
+          <div className="md:hidden bg-white border-t border-slate-200 px-4 py-3 space-y-2 text-sm">
+            <a href="#features" onClick={() => setOpenMobile(false)} className="block py-2 border-b">المزايا</a>
+            <a href="#extension" onClick={() => setOpenMobile(false)} className="block py-2 border-b">إضافة المتصفح</a>
+            <a href="#pricing" onClick={() => setOpenMobile(false)} className="block py-2 border-b">الأسعار</a>
+            <a href="#contact" onClick={() => setOpenMobile(false)} className="block py-2">تواصل</a>
+            <button onClick={onLoginClick} className="block w-full text-right py-2 text-blue-700 font-semibold">تسجيل الدخول</button>
+          </div>
+        )}
+      </header>
+
+      {/* ===== HERO ===== */}
+      <section className="relative overflow-hidden bg-gradient-to-br from-blue-50 via-white to-orange-50 pt-16 pb-24">
+        <div className="absolute inset-0 opacity-30" style={{ backgroundImage: 'radial-gradient(circle at 20% 30%, rgba(30,64,175,0.15) 0, transparent 50%), radial-gradient(circle at 80% 70%, rgba(249,115,22,0.15) 0, transparent 50%)' }} />
+        <div className="relative max-w-7xl mx-auto px-4 lg:px-8 grid grid-cols-1 lg:grid-cols-2 gap-10 items-center">
+          <div>
+            <div className="inline-flex items-center gap-2 bg-white border border-blue-200 text-blue-700 px-3 py-1 rounded-full text-xs font-bold mb-4 shadow-sm">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" /> v3.8 مُتاح الآن مع إضافة المتصفح
+            </div>
+            <h1 className="text-4xl md:text-5xl lg:text-6xl font-black leading-tight text-slate-900">
+              نظام <span className="bg-gradient-to-l from-blue-700 to-orange-500 bg-clip-text text-transparent">رحّال</span> ERP<br />
+              <span className="text-slate-700 text-3xl md:text-4xl lg:text-5xl">للمكاتب السياحية الحديثة</span>
+            </h1>
+            <p className="mt-5 text-lg text-slate-600 leading-8 max-w-xl">
+              منظومة محاسبية متكاملة للمكاتب السياحية بعملات متعدّدة — تذاكر وتأشيرات وباكجات وتقارير مالية ذكية،
+              مع <b>إضافة كروم</b> تسحب بيانات التذاكر تلقائياً بضغطة زر.
+            </p>
+            <div className="mt-8 flex flex-wrap gap-3">
+              <button onClick={onSignupClick} className="grad-brand text-white px-6 py-3 rounded-xl font-bold shadow-lg hover:shadow-xl transition text-base flex items-center gap-2">
+                🚀 ابدأ تجربتك المجانية
+              </button>
+              <button onClick={onLoginClick} className="bg-white text-slate-800 border-2 border-slate-200 px-6 py-3 rounded-xl font-bold hover:border-blue-500 hover:text-blue-700 transition">
+                تسجيل الدخول
+              </button>
+            </div>
+            <div className="mt-8 grid grid-cols-3 gap-4 max-w-md">
+              <div><div className="text-2xl font-black text-blue-700">3+</div><div className="text-xs text-slate-500">عملات</div></div>
+              <div><div className="text-2xl font-black text-orange-600">9</div><div className="text-xs text-slate-500">Parsers</div></div>
+              <div><div className="text-2xl font-black text-emerald-600">24/7</div><div className="text-xs text-slate-500">دعم</div></div>
+            </div>
+          </div>
+          <div className="relative">
+            <div className="absolute -inset-4 bg-gradient-to-l from-blue-600/20 to-orange-500/20 rounded-3xl blur-3xl" />
+            <img src={heroImg} alt="Rahaal Dashboard" className="relative rounded-2xl shadow-2xl border-4 border-white w-full" />
+            <div className="absolute -bottom-6 -left-6 bg-white rounded-xl shadow-xl border p-4 flex items-center gap-3 hidden sm:flex">
+              <div className="w-10 h-10 rounded-lg bg-emerald-100 flex items-center justify-center text-xl">✅</div>
+              <div>
+                <div className="text-xs font-bold text-slate-900">قيد محاسبي جديد</div>
+                <div className="text-[10px] text-slate-500">تذكرة IY123 · تم القيد تلقائياً</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ===== FEATURES ===== */}
+      <section id="features" className="py-20 bg-white">
+        <div className="max-w-7xl mx-auto px-4 lg:px-8">
+          <div className="text-center max-w-3xl mx-auto mb-14">
+            <div className="text-sm font-bold text-blue-700 uppercase tracking-wider mb-2">المزايا الأساسية</div>
+            <h2 className="text-3xl md:text-4xl font-black text-slate-900">كل ما يحتاجه مكتبك السياحي — في نظام واحد</h2>
+            <p className="mt-3 text-slate-600 text-lg">من إصدار التذكرة، إلى القيد المحاسبي، إلى تقرير الأرباح — كل شيء يعمل بسلاسة.</p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+            {features.map((f, i) => (
+              <div key={i} className="bg-white border border-slate-200 rounded-2xl p-5 hover:shadow-xl hover:border-blue-300 hover:-translate-y-1 transition-all group">
+                <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${f.color} flex items-center justify-center text-2xl mb-4 group-hover:scale-110 transition`}>{f.icon}</div>
+                <h3 className="font-bold text-slate-900 mb-1">{f.title}</h3>
+                <p className="text-sm text-slate-600 leading-6">{f.desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ===== CHROME EXTENSION SHOWCASE ===== */}
+      <section id="extension" className="py-24 bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 text-white relative overflow-hidden">
+        <div className="absolute inset-0 opacity-20" style={{ backgroundImage: 'radial-gradient(circle at 30% 20%, rgba(249,115,22,0.3), transparent 40%), radial-gradient(circle at 70% 80%, rgba(30,64,175,0.4), transparent 40%)' }} />
+        <div className="relative max-w-7xl mx-auto px-4 lg:px-8 grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
+          <div>
+            <div className="inline-flex items-center gap-2 bg-orange-500/20 text-orange-300 border border-orange-500/40 px-3 py-1 rounded-full text-xs font-bold mb-4">🆕 جديد v3.8</div>
+            <h2 className="text-4xl md:text-5xl font-black mb-5 leading-tight">
+              🕋 <span className="bg-gradient-to-l from-orange-400 to-red-400 bg-clip-text text-transparent">قارئ رحّال الآلي</span><br />
+              للمتصفح
+            </h2>
+            <p className="text-lg text-slate-300 leading-8 mb-6">
+              إضافة كروم ذكية تسحب بيانات التذاكر والتأشيرات تلقائياً من صفحات <b className="text-white">اليمنية، Fly Aden، KSA e-Visa، البركة للنقل، والموافقات الأمنية</b> — وتُنشئ القيد المحاسبي وسند القبض بضغطة زر واحدة.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6 text-sm">
+              {['9 نماذج مستندات مدعومة', 'سحب آمن عبر PAT شخصي', 'يعمل مع بوابات الطيران والتأشيرات', 'قيد محاسبي فوري + سند قبض'].map((x, i) => (
+                <div key={i} className="flex items-center gap-2 text-slate-200"><span className="text-emerald-400">✓</span> {x}</div>
+              ))}
+            </div>
+            <button onClick={onSignupClick} className="bg-white text-blue-950 px-6 py-3 rounded-xl font-black hover:bg-orange-100 transition shadow-lg">
+              اشترك واستفد من الإضافة →
+            </button>
+          </div>
+          <div className="relative">
+            <div className="absolute -inset-6 bg-gradient-to-l from-orange-500/30 to-blue-500/30 rounded-3xl blur-3xl" />
+            <img src={extImg} alt="Chrome Extension" className="relative rounded-2xl shadow-2xl border-4 border-white/10 w-full" />
+          </div>
+        </div>
+      </section>
+
+      {/* ===== SCREENSHOTS STRIP ===== */}
+      <section className="py-16 bg-slate-50">
+        <div className="max-w-7xl mx-auto px-4 lg:px-8">
+          <div className="text-center mb-10">
+            <h2 className="text-3xl font-black text-slate-900">لوحات وشاشات مدروسة</h2>
+            <p className="text-slate-600 mt-2">تجربة استخدام سلسة بواجهة عربية RTL كاملة</p>
+          </div>
+          <div className="relative rounded-2xl overflow-hidden shadow-2xl border-8 border-white bg-white">
+            <img src={dashImg} alt="Dashboard preview" className="w-full" />
+          </div>
+        </div>
+      </section>
+
+      {/* ===== PRICING ===== */}
+      <section id="pricing" className="py-24 bg-white">
+        <div className="max-w-7xl mx-auto px-4 lg:px-8">
+          <div className="text-center max-w-3xl mx-auto mb-14">
+            <div className="text-sm font-bold text-orange-600 uppercase tracking-wider mb-2">خطط الاشتراك</div>
+            <h2 className="text-3xl md:text-4xl font-black text-slate-900">خطط تناسب مكتبك — ابدأ مجاناً</h2>
+            <p className="mt-3 text-slate-600 text-lg">جرّب النظام مجاناً لمدة 30 قيد محاسبي، ثم اختر خطة تناسبك.</p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+            {pricing.map((p, i) => (
+              <div key={i} className={`relative rounded-2xl p-6 border-2 ${p.highlight ? 'border-orange-500 bg-gradient-to-br from-orange-50 to-white shadow-2xl scale-105' : 'border-slate-200 bg-white hover:shadow-xl'} transition`}>
+                {p.highlight && <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-gradient-to-l from-orange-500 to-red-500 text-white text-xs font-black px-3 py-1 rounded-full shadow">{p.tag}</div>}
+                <div className={`inline-block bg-gradient-to-br ${p.color} text-white px-3 py-1 rounded-lg text-xs font-bold mb-3`}>{p.tier}</div>
+                <div className="flex items-baseline gap-1 mb-1">
+                  <span className="text-4xl font-black text-slate-900">{p.price}</span>
+                </div>
+                <div className="text-sm text-slate-500 mb-5">{p.period}</div>
+                <ul className="space-y-2 mb-6 text-sm">
+                  {p.bullets.map((b, j) => (<li key={j} className="flex items-start gap-2"><span className="text-emerald-500 font-bold">✓</span><span className="text-slate-700">{b}</span></li>))}
+                </ul>
+                <button onClick={onSignupClick} className={`w-full py-3 rounded-xl font-bold transition ${p.highlight ? 'grad-brand text-white shadow-md hover:shadow-lg' : 'bg-slate-900 text-white hover:bg-slate-800'}`}>
+                  اختر هذه الخطة
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="text-center mt-8 text-sm text-slate-500">🎁 نظام إحالة: احصل على 50 قيد مجاني عن كل مكتب تدعوه ويشترك فعلياً</div>
+        </div>
+      </section>
+
+      {/* ===== FINAL CTA ===== */}
+      <section id="contact" className="py-24 bg-gradient-to-l from-blue-700 via-blue-600 to-orange-500 text-white relative overflow-hidden">
+        <div className="absolute inset-0 opacity-20" style={{ backgroundImage: 'radial-gradient(circle at 50% 50%, white, transparent 60%)' }} />
+        <div className="relative max-w-4xl mx-auto px-4 lg:px-8 text-center">
+          <h2 className="text-4xl md:text-5xl font-black mb-4">جاهز لتحويل مكتبك رقمياً؟</h2>
+          <p className="text-lg text-blue-100 mb-8 max-w-2xl mx-auto">
+            انضم إلى المكاتب السياحية التي تدير أعمالها اليومية بذكاء عبر رحّال — بضغطة زر واحدة.
+          </p>
+          <div className="flex flex-wrap justify-center gap-3">
+            <button onClick={onSignupClick} className="bg-white text-blue-900 px-8 py-4 rounded-xl font-black text-lg shadow-2xl hover:scale-105 transition">
+              🚀 اشترك الآن — مجاناً
+            </button>
+            <a href="https://wa.me/966500000000" target="_blank" rel="noopener noreferrer" className="bg-emerald-500 hover:bg-emerald-600 text-white px-8 py-4 rounded-xl font-black text-lg shadow-2xl hover:scale-105 transition flex items-center gap-2">
+              💬 تواصل عبر واتساب
+            </a>
+          </div>
+        </div>
+      </section>
+
+      {/* ===== FOOTER ===== */}
+      <footer className="bg-slate-950 text-slate-400 py-12">
+        <div className="max-w-7xl mx-auto px-4 lg:px-8 grid grid-cols-2 md:grid-cols-4 gap-8 text-sm">
+          <div className="col-span-2">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-xl grad-brand flex items-center justify-center text-white font-black">ر</div>
+              <div>
+                <div className="text-white font-extrabold">Rahaal ERP</div>
+                <div className="text-xs">by Target Media</div>
+              </div>
+            </div>
+            <p className="text-sm leading-7">
+              منظومة محاسبية متكاملة للمكاتب السياحية — تذاكر، تأشيرات، باكجات، تقارير مالية، وإضافة متصفح ذكية.
+            </p>
+          </div>
+          <div>
+            <div className="text-white font-bold mb-3">النظام</div>
+            <ul className="space-y-2">
+              <li><a href="#features" className="hover:text-white">المزايا</a></li>
+              <li><a href="#extension" className="hover:text-white">إضافة المتصفح</a></li>
+              <li><a href="#pricing" className="hover:text-white">الأسعار</a></li>
+            </ul>
+          </div>
+          <div>
+            <div className="text-white font-bold mb-3">تواصل</div>
+            <ul className="space-y-2">
+              <li><a href="https://wa.me/966500000000" target="_blank" rel="noopener noreferrer" className="hover:text-white">📱 واتساب</a></li>
+              <li><a href="mailto:info@targetmedia.com" className="hover:text-white">✉️ info@targetmedia.com</a></li>
+              <li><button onClick={onLoginClick} className="hover:text-white">🔐 تسجيل الدخول</button></li>
+            </ul>
+          </div>
+        </div>
+        <div className="max-w-7xl mx-auto px-4 lg:px-8 mt-8 pt-6 border-t border-slate-800 flex flex-wrap justify-between text-xs">
+          <div>© {new Date().getFullYear()} Target Media. جميع الحقوق محفوظة.</div>
+          <div>Rahaal ERP v3.8 · صُنع بحب للمكاتب السياحية 🕋</div>
+        </div>
+      </footer>
+    </div>
+  )
+}
+
+// ================================================================
 // ROOT APP
 // ================================================================
 function App() {
   const [auth, setAuth] = useState({ loading: true, user: null, tenant: null, settings: null })
+  // v3.9 — When not authenticated, show LandingPage by default; user can toggle to LoginPage or Signup
+  const [publicView, setPublicView] = useState('landing') // 'landing' | 'login' | 'signup'
 
   const refreshMe = useCallback(async () => {
     try {
@@ -5823,6 +6092,7 @@ function App() {
   const logout = async () => {
     try { await api('/auth/logout', { method: 'POST' }) } catch {}
     setAuth({ loading: false, user: null, tenant: null, settings: null })
+    setPublicView('landing')
     toast.success('تم تسجيل الخروج')
   }
 
@@ -5832,7 +6102,12 @@ function App() {
     </div>
   )
 
-  if (!auth.user) return <LoginPage onLogin={onLogin} />
+  if (!auth.user) {
+    if (publicView === 'login' || publicView === 'signup') {
+      return <LoginPage onLogin={onLogin} initialSignup={publicView === 'signup'} onBack={() => setPublicView('landing')} />
+    }
+    return <LandingPage onLoginClick={() => setPublicView('login')} onSignupClick={() => setPublicView('signup')} />
+  }
 
   return (
     <AuthCtx.Provider value={{ ...auth, refreshMe, logout }}>

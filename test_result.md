@@ -4919,3 +4919,248 @@ agent_communication:
       
       **CONCLUSION:**
       Backend v3.8 is production-ready. Chrome Extension foundation fully implemented with secure PAT authentication, unified scraper ingest endpoint supporting flight/bus tickets and umrah visas, proper journal entry creation, and accurate balance updates. All 27 tests passed with 100% success rate.
+
+
+
+# ============================================================
+# v3.9 — Landing Page + Referral Condition + Gmail-only Signup
+# ============================================================
+
+backend:
+  - task: "v3.9 Deferred Referral Bonus + Gmail-only Signup"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          v3.9 backend changes:
+          - Health version bumped to "3.9".
+          - Signup restricted to @gmail.com addresses (regex validated, aliases with + blocked).
+          - Referral bonus is now DEFERRED: on signup only signup count is incremented and
+            a `pending_referrals` entry is pushed. The +50 quota is granted to the referrer
+            ONLY when super admin confirms payment via /admin/tenants/:id/confirm-payment,
+            which now also flips the pending_referrals entry to paid.
+          Backward compatible: schema still exposes journal_quota top-ups.
+
+frontend:
+  - task: "v3.9 Target Media Landing Page + Login Back Button"
+    implemented: true
+    working: true
+    file: "/app/app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Verified visually via screenshot on http://localhost:3000/:
+          - Sticky nav with Rahaal logo + Target Media subtitle + Login/Signup CTAs
+          - Hero section with gradient headline, feature stats (3+ currencies, 9 parsers, 24/7)
+          - Live floating card overlay "قيد محاسبي جديد — IY123"
+          - Features grid (8 cards with gradient icons)
+          - Chrome Extension dark showcase section with 4 checklists
+          - Screenshots strip on slate background
+          - Pricing (Silver / Gold / Gold Annual) with highlighted "الأكثر مبيعاً" badge on Gold
+          - Final CTA gradient section with WhatsApp button
+          - Footer with 4 columns (brand + nav + contact + copyright)
+          App() root now routes:
+            - loading → spinner
+            - !user → LandingPage (default) or LoginPage (when user clicks "تسجيل الدخول") or /signup redirect
+            - user → SuperAdminPanel or TenantApp
+
+test_plan:
+  current_focus:
+    - "v3.9 Deferred Referral Bonus + Gmail-only Signup"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      v3.9 backend changes to test:
+      1. GET /api/health → version should be "3.9".
+      2. Gmail-only signup enforcement:
+         - POST /api/public/signup with owner_email="user@yahoo.com" → 400 with Arabic error mentioning Gmail.
+         - POST /api/public/signup with owner_email="user+alias@gmail.com" → 400 with Arabic error about + aliases.
+         - POST /api/public/signup with owner_email="valid.user@gmail.com" and other required fields → 200, tenant created.
+      3. Deferred referral bonus:
+         - Signup A (as owner_a@gmail.com) → get their referral_code from response/db.
+         - Signup B (as owner_b@gmail.com) with `referral_code`=A's code → 200.
+         - Check tenant A: referral_stats.signups==1, journal_quota.limit UNCHANGED (still 30, no +50),
+           pending_referrals contains an entry with tenant B's id and paid=false.
+         - As super admin, POST /api/admin/tenants/{tenant_b_id}/confirm-payment → 200.
+         - Re-check tenant A: journal_quota.limit=80 (30 + 50), referral_stats.activations==1, bonus_earned==50,
+           pending_referrals entry now has paid=true.
+      4. Regression: v3.8 PATs + scraper ingest still work; v3.7 packages/comparison still works.
+      Use owner@demo.com / Demo@2025 for existing owner login; use admin@targetmedia.com / Target@2025 for super admin.
+
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED (15/15 tests) - v3.9 backend fully functional:
+          
+          **HEALTH CHECK (1/1 PASSED)**
+          1. ✅ GET /api/health returns version="3.9" exactly
+          
+          **GMAIL-ONLY SIGNUP ENFORCEMENT (4/4 PASSED)**
+          2. ✅ POST /api/public/signup with owner_email="user@yahoo.com" → 400:
+             - Error message: "يجب استخدام بريد Gmail حقيقي فقط (@gmail.com). سيتم دعم تسجيل الدخول بحساب Google قريباً."
+             - Non-Gmail addresses correctly rejected
+          
+          3. ✅ POST /api/public/signup with owner_email="user@hotmail.com" → 400:
+             - Error message: "يجب استخدام بريد Gmail حقيقي فقط (@gmail.com). سيتم دعم تسجيل الدخول بحساب Google قريباً."
+             - Non-Gmail addresses correctly rejected
+          
+          4. ✅ POST /api/public/signup with owner_email="user+alias@gmail.com" → 400:
+             - Error message: "بريد Gmail يجب أن يكون بدون رمز + (بدون aliases)"
+             - Gmail aliases with + correctly rejected to prevent duplicate signups
+          
+          5. ✅ POST /api/public/signup with owner_email="valid.user@gmail.com" → 200:
+             - Tenant created successfully with auto-login cookie
+             - Response includes tenant object with id and referral_code
+             - Valid Gmail addresses accepted
+          
+          **DEFERRED REFERRAL BONUS FLOW (6/6 PASSED)**
+          6. ✅ Signup Tenant A with unique Gmail address:
+             - Tenant A created successfully
+             - Referral code generated and returned in response
+             - Initial quota.limit = 30 (not 500 as in v2.8)
+          
+          7. ✅ Signup Tenant B with referral_code from A:
+             - Tenant B created successfully
+             - Response includes referral_applied: true
+             - Tenant B linked to referrer A
+          
+          8. ✅ Super admin login successful:
+             - Session cookie obtained
+             - Can access /api/admin/tenants endpoint
+          
+          9. ✅ Check Tenant A BEFORE payment confirmation:
+             - referral_stats.signups = 1 (incremented) ✓
+             - referral_stats.activations = 0 (not incremented yet) ✓
+             - referral_stats.bonus_earned = 0 (no bonus yet) ✓
+             - journal_quota.limit = 30 (UNCHANGED, no +50 yet) ✓
+             - referral_stats.pending_referrals contains entry for Tenant B ✓
+             - pending_referrals entry has paid = false ✓
+             - CRITICAL: Bonus is DEFERRED until payment confirmation
+          
+          10. ✅ POST /api/admin/tenants/{tenant_b_id}/confirm-payment → 200:
+              - Response includes referrer_bonus.bonus_added = 50 ✓
+              - Payment confirmation successful
+          
+          11. ✅ Check Tenant A AFTER payment confirmation:
+              - journal_quota.limit = 80 (30 + 50 added) ✓
+              - referral_stats.activations = 1 (incremented) ✓
+              - referral_stats.bonus_earned = 50 (bonus granted) ✓
+              - pending_referrals entry for B now has paid = true ✓
+              - journal_quota.top_ups contains entry with by='referral_activation' and amount=50 ✓
+              - CRITICAL: Bonus granted ONLY after payment confirmation
+          
+          **REGRESSION TESTS (4/4 PASSED)**
+          12. ✅ v3.8 PATs still work:
+              - POST /api/pats creates token with format rhl_pat_<32 chars>
+              - GET /api/scraper/ping with Bearer token returns 200
+              - Response includes version="3.9" (updated from 3.8)
+              - Bearer authentication working correctly
+          
+          13. ✅ v3.7 packages/comparison still works:
+              - GET /api/packages/comparison returns correct structure
+              - Found 5 packages with period, top, rows, totals
+              - Comparison endpoint functional
+          
+          14. ✅ v3.6 packages still work:
+              - GET /api/packages returns list of packages
+              - Found 5 packages
+              - Packages CRUD functional
+          
+          15. ✅ v3.5 refunds still work:
+              - GET /api/refunds returns list of refunds
+              - Found 3 refunds
+              - Refunds module functional
+          
+          **CRITICAL VERIFICATIONS:**
+          ✅ Health endpoint version bumped to 3.9
+          ✅ Gmail-only signup enforced with regex validation
+          ✅ Gmail aliases with + blocked to prevent duplicate accounts
+          ✅ Non-Gmail addresses (yahoo, hotmail) rejected with Arabic error
+          ✅ Valid Gmail addresses accepted and tenant created
+          ✅ Referral bonus is DEFERRED (not granted immediately on signup)
+          ✅ Signup increments referral_stats.signups but NOT quota.limit
+          ✅ pending_referrals entry created with paid=false on signup
+          ✅ confirm-payment endpoint grants +50 quota to referrer
+          ✅ confirm-payment updates pending_referrals entry to paid=true
+          ✅ confirm-payment increments activations and bonus_earned
+          ✅ top_ups array includes entry with by='referral_activation'
+          ✅ New tenant default quota is 30 (not 500)
+          ✅ Scraper/ping endpoint version updated to 3.9
+          ✅ All v3.8, v3.7, v3.6, v3.5 features still working
+          
+          **MINOR FIX APPLIED:**
+          - Updated /api/scraper/ping endpoint version from '3.8' to '3.9' for consistency
+          
+          Backend v3.9 is production-ready. Gmail-only signup enforcement working correctly with proper validation. Deferred referral bonus flow fully functional with accurate tracking and payment confirmation mechanism.
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      ✅ v3.9 BACKEND TESTING COMPLETED — ALL 15 TESTS PASSED (100% SUCCESS RATE)
+      
+      Comprehensive test suite executed for v3.9 backend changes (Gmail-only Signup + Deferred Referral Bonus):
+      
+      **Test Results: 15/15 PASSED**
+      
+      **SUMMARY BY FEATURE:**
+      
+      1. ✅ Health Check (1/1) - Version 3.9 confirmed
+      2. ✅ Gmail-only Signup Enforcement (4/4) - Yahoo, Hotmail, aliases rejected; valid Gmail accepted
+      3. ✅ Deferred Referral Bonus Flow (6/6) - Signup tracking, payment confirmation, bonus grant all working
+      4. ✅ Regression Tests (4/4) - v3.8 PATs, v3.7 comparison, v3.6 packages, v3.5 refunds all working
+      
+      **KEY HIGHLIGHTS:**
+      
+      ✅ **Gmail-only Signup:**
+      - Regex validation: /^[a-z0-9._%+-]+@gmail\.com$/
+      - Non-Gmail addresses (yahoo.com, hotmail.com) rejected with Arabic error
+      - Gmail aliases with + rejected with Arabic error about aliases
+      - Valid Gmail addresses accepted and tenant created with auto-login
+      
+      ✅ **Deferred Referral Bonus:**
+      - Signup A creates tenant with referral_code and quota.limit=30
+      - Signup B with referral_code increments A's referral_stats.signups
+      - pending_referrals entry created with {referred_tenant: B_id, paid: false}
+      - Quota.limit remains 30 (NO immediate +50 bonus)
+      - Super admin POST /admin/tenants/{B_id}/confirm-payment grants +50 to A
+      - After confirmation: quota.limit=80, activations=1, bonus_earned=50, paid=true
+      - top_ups array includes entry with by='referral_activation' and amount=50
+      
+      ✅ **Data Integrity:**
+      - New tenant default quota: 30 (changed from 500 in v2.8)
+      - Referral bonus: +50 (deferred until payment confirmation)
+      - All referral_stats fields tracked correctly (signups, activations, bonus_earned)
+      - pending_referrals array maintains audit trail with paid status
+      
+      ✅ **Regression:**
+      - v3.8 PATs working with Bearer auth (version updated to 3.9)
+      - v3.7 packages/comparison working (5 packages found)
+      - v3.6 packages CRUD working (5 packages found)
+      - v3.5 refunds working (3 refunds found)
+      - All previous features remain functional
+      
+      **MINOR FIX APPLIED DURING TESTING:**
+      - Updated /api/scraper/ping endpoint version from '3.8' to '3.9' for consistency
+      
+      **CONCLUSION:**
+      Backend v3.9 is production-ready. Gmail-only signup enforcement prevents fake/duplicate accounts. Deferred referral bonus ensures referrers only get rewarded when referred tenants actually pay, improving business model sustainability. All 15 tests passed with 100% success rate.
