@@ -2959,17 +2959,21 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
 
 function PartiesScreen({ kind }) {
   const cfg = kind === 'clients' ? { title: 'العملاء', icon: Users, grad: 'grad-purple' } : { title: 'الموردون والوكلاء', icon: Building2, grad: 'grad-gold' }
+  const defaultParent = kind === 'clients' ? '1301' : '2101'
+  const parentType = kind === 'clients' ? 'asset' : 'liability'
   const [rows, setRows] = useState([])
+  const [accounts, setAccounts] = useState([])
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [q, setQ] = useState('')
-  const [form, setForm] = useState({ name: '', phone: '', whatsapp: '', address: '', email: '', notes: '' })
+  const [form, setForm] = useState({ name: '', phone: '', whatsapp: '', address: '', email: '', notes: '', parent_code: defaultParent })
   const load = async () => { try { setRows(await api(`/${kind}`)) } catch (e) { toast.error(e.message) } }
-  useEffect(() => { load() }, [kind])
+  const loadAccounts = async () => { try { setAccounts(await api('/accounts')) } catch (_) {} }
+  useEffect(() => { load(); loadAccounts() }, [kind])
   useEffect(() => {
     if (!open) return
-    if (editing) setForm({ name: editing.name || '', phone: editing.phone || '', whatsapp: editing.whatsapp || editing.phone || '', address: editing.address || '', email: editing.email || '', notes: editing.notes || '' })
-    else setForm({ name: '', phone: '', whatsapp: '', address: '', email: '', notes: '' })
+    if (editing) setForm({ name: editing.name || '', phone: editing.phone || '', whatsapp: editing.whatsapp || editing.phone || '', address: editing.address || '', email: editing.email || '', notes: editing.notes || '', parent_code: editing.parent_code || defaultParent })
+    else setForm({ name: '', phone: '', whatsapp: '', address: '', email: '', notes: '', parent_code: defaultParent })
   }, [open, editing])
   const save = async () => {
     if (!form.name) return toast.error('الاسم مطلوب')
@@ -2985,6 +2989,8 @@ function PartiesScreen({ kind }) {
     catch (e) { toast.error(e.message) }
   }
   const filtered = rows.filter(r => !q || r.name.includes(q) || (r.phone || '').includes(q))
+  // Eligible parents: accounts of matching type (asset for clients, liability for suppliers) that are groups
+  const parentOptions = accounts.filter(a => a.type === parentType && a.is_group)
   return (
     <div className="space-y-6">
       <TopBar title={cfg.title} subtitle={`إجمالي: ${rows.length}`}
@@ -3026,6 +3032,21 @@ function PartiesScreen({ kind }) {
             <Field label="📱 رقم واتساب"><Input dir="ltr" value={form.whatsapp} onChange={e => setForm({ ...form, whatsapp: e.target.value })} placeholder="اختياري — يستخدم الهاتف افتراضياً" /></Field>
             <div className="md:col-span-2"><Field label="📍 العنوان"><Input value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder="المدينة، الحي، الشارع..." /></Field></div>
             <div className="md:col-span-2"><Field label="✉️ البريد الإلكتروني"><Input dir="ltr" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} /></Field></div>
+            <div className="md:col-span-2">
+              <Field label={`🌲 الحساب الأب (شجرة الحسابات)`}>
+                <Select value={form.parent_code} onValueChange={(v) => setForm({ ...form, parent_code: v })}>
+                  <SelectTrigger><SelectValue placeholder="اختر الحساب الأب" /></SelectTrigger>
+                  <SelectContent>
+                    {parentOptions.map(a => (
+                      <SelectItem key={a.code} value={a.code}>
+                        {a.code} — {a.name_ar}{a.code === defaultParent ? ' ⭐ افتراضي' : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+              <div className="text-xs text-slate-500 mt-1">سيندرج {kind === 'clients' ? 'العميل' : 'المورد'} كحساب فرعي تحت هذا الأب في شجرة الحسابات.</div>
+            </div>
             <div className="md:col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></Field></div>
           </div>
           <DialogFooter>
@@ -3039,11 +3060,18 @@ function PartiesScreen({ kind }) {
 }
 
 function BoxesScreen() {
-  const [rows, setRows] = useState([]); const [open, setOpen] = useState(false)
+  const [rows, setRows] = useState([]); const [accounts, setAccounts] = useState([]); const [open, setOpen] = useState(false)
   const [name, setName] = useState(''); const [type, setType] = useState('cash')
+  const [parentCode, setParentCode] = useState('1101')
   const load = async () => { try { setRows(await api('/boxes')) } catch (e) { toast.error(e.message) } }
-  useEffect(() => { load() }, [])
-  const save = async () => { if (!name) return toast.error('الاسم مطلوب'); try { await api('/boxes', { method: 'POST', body: { name_ar: name, type } }); setName(''); setOpen(false); load() } catch (e) { toast.error(e.message) } }
+  const loadAccounts = async () => { try { setAccounts(await api('/accounts')) } catch (_) {} }
+  useEffect(() => { load(); loadAccounts() }, [])
+  // Update default parent when type changes
+  useEffect(() => { setParentCode(type === 'cash' ? '1101' : '1201') }, [type])
+  const save = async () => { if (!name) return toast.error('الاسم مطلوب'); try { await api('/boxes', { method: 'POST', body: { name_ar: name, type, parent_code: parentCode } }); setName(''); setOpen(false); load() } catch (e) { toast.error(e.message) } }
+  const defaultParent = type === 'cash' ? '1101' : '1201'
+  // Eligible parents for boxes/banks: asset accounts that are groups
+  const parentOptions = accounts.filter(a => a.type === 'asset' && a.is_group)
   return (
     <div className="space-y-6">
       <TopBar title="الصناديق والبنوك" subtitle="أرصدة الصناديق النقدية والحسابات البنكية"
@@ -3054,7 +3082,7 @@ function BoxesScreen() {
             <CardContent className="p-4">
               <div className="flex items-center gap-3 mb-3">
                 <div className={`w-11 h-11 rounded-xl flex items-center justify-center ${b.type === 'cash' ? 'grad-gold' : 'grad-brand'}`}>{b.type === 'cash' ? <Wallet className="w-5 h-5 text-white" /> : <Landmark className="w-5 h-5 text-white" />}</div>
-                <div><div className="font-bold text-slate-800">{b.name_ar}</div><div className="text-xs text-slate-500">{b.type === 'cash' ? 'صندوق نقدي' : 'حساب بنكي'}</div></div>
+                <div><div className="font-bold text-slate-800">{b.name_ar}</div><div className="text-xs text-slate-500">{b.type === 'cash' ? 'صندوق نقدي' : 'حساب بنكي'} {b.parent_code && <span className="ml-1 font-mono text-[10px] text-slate-400">· {b.parent_code}</span>}</div></div>
               </div>
               <Separator className="my-2" />
               <div className="space-y-1">{CURRENCIES.map(c => (<div key={c} className="flex items-center justify-between text-sm"><span className="text-xs text-slate-500">{c}</span><span className={`font-bold ${(b.balances?.[c] || 0) >= 0 ? 'text-slate-800' : 'text-rose-600'}`}>{fmt(b.balances?.[c] || 0, c)}</span></div>))}</div>
@@ -3065,7 +3093,31 @@ function BoxesScreen() {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent dir="rtl">
           <DialogHeader><DialogTitle>إضافة صندوق / بنك</DialogTitle></DialogHeader>
-          <div className="space-y-3"><Field label="الاسم" required><Input value={name} onChange={e => setName(e.target.value)} /></Field><Field label="النوع"><Select value={type} onValueChange={setType}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cash">صندوق نقدي</SelectItem><SelectItem value="bank">بنك</SelectItem></SelectContent></Select></Field></div>
+          <div className="space-y-3">
+            <Field label="الاسم" required><Input value={name} onChange={e => setName(e.target.value)} /></Field>
+            <Field label="النوع">
+              <Select value={type} onValueChange={setType}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="cash">صندوق نقدي</SelectItem>
+                  <SelectItem value="bank">بنك</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="🌲 الحساب الأب (شجرة الحسابات)">
+              <Select value={parentCode} onValueChange={setParentCode}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {parentOptions.map(a => (
+                    <SelectItem key={a.code} value={a.code}>
+                      {a.code} — {a.name_ar}{a.code === defaultParent ? ' ⭐ افتراضي' : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <div className="text-xs text-slate-500 mt-1">افتراضي: {type === 'cash' ? 'الصناديق (1101)' : 'الحسابات البنكية (1201)'} — يمكن تغييره.</div>
+            </Field>
+          </div>
           <DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>إلغاء</Button><Button onClick={save} className="grad-gold text-white">حفظ</Button></DialogFooter>
         </DialogContent>
       </Dialog>

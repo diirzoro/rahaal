@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.2',
+          version: '3.9.3',
           db: 'connected',
         })
       } catch (e) {
@@ -1575,7 +1575,8 @@ async function handleRoute(request, { params }) {
     if (route === '/clients' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم العميل مطلوب')
-      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', balances: emptyBalances(), created_at: new Date() }
+      const parent_code = String(b.parent_code || '1301') // v3.9.3 — default to العملاء (مدينون)
+      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', parent_code, balances: emptyBalances(), created_at: new Date() }
       await db.collection('clients').insertOne(doc)
       const { _id, ...rest } = doc; return ok(rest)
     }
@@ -1584,7 +1585,7 @@ async function handleRoute(request, { params }) {
     if (clientIdMatch && method === 'PUT') {
       const b = await request.json()
       const upd = {}
-      for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes']) if (b[k] !== undefined) upd[k] = b[k]
+      for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes', 'parent_code']) if (b[k] !== undefined) upd[k] = b[k]
       await db.collection('clients').updateOne({ id: clientIdMatch[1], tenant_id: T }, { $set: upd })
       return ok({ success: true })
     }
@@ -1604,7 +1605,8 @@ async function handleRoute(request, { params }) {
     if (route === '/suppliers' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم المورد مطلوب')
-      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', balances: emptyBalances(), created_at: new Date() }
+      const parent_code = String(b.parent_code || '2101') // v3.9.3 — default to الموردون والوكلاء (دائنون)
+      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', parent_code, balances: emptyBalances(), created_at: new Date() }
       await db.collection('suppliers').insertOne(doc)
       const { _id, ...rest } = doc; return ok(rest)
     }
@@ -1613,7 +1615,7 @@ async function handleRoute(request, { params }) {
     if (supIdMatch && method === 'PUT') {
       const b = await request.json()
       const upd = {}
-      for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes']) if (b[k] !== undefined) upd[k] = b[k]
+      for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes', 'parent_code']) if (b[k] !== undefined) upd[k] = b[k]
       await db.collection('suppliers').updateOne({ id: supIdMatch[1], tenant_id: T }, { $set: upd })
       return ok({ success: true })
     }
@@ -1632,7 +1634,10 @@ async function handleRoute(request, { params }) {
     if (route === '/boxes' && method === 'POST') {
       const b = await request.json()
       if (!b.name_ar) return bad('اسم الصندوق مطلوب')
-      const doc = { id: uuidv4(), tenant_id: T, name_ar: b.name_ar, type: b.type || 'cash', balances: emptyBalances(), created_at: new Date() }
+      const type = b.type || 'cash'
+      const defaultParent = type === 'cash' ? '1101' : '1201' // 1101=صندوق, 1201=حسابات بنكية
+      const parent_code = String(b.parent_code || defaultParent)
+      const doc = { id: uuidv4(), tenant_id: T, name_ar: b.name_ar, type, parent_code, balances: emptyBalances(), created_at: new Date() }
       await db.collection('boxes').insertOne(doc)
       const { _id, ...rest } = doc; return ok(rest)
     }
