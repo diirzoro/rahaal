@@ -989,12 +989,13 @@ function TicketsScreen() {
     return null // all
   }, [dateRange])
   const filteredByDate = React.useMemo(() => {
-    if (!dateRangeBounds) return tickets
-    return tickets.filter(t => { const d = new Date(t.date); return d >= dateRangeBounds.from && d <= dateRangeBounds.to })
+    const safe = (tickets || []).filter(Boolean)
+    if (!dateRangeBounds) return safe
+    return safe.filter(t => { const d = new Date(t?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to })
   }, [tickets, dateRangeBounds])
   const filtered = applyFilter(filteredByDate, filter)
-  const selected = filtered.find(t => t.id === selectedId)
-  const allSelected = filtered.length > 0 && filtered.every(t => selectedIds.has(t.id))
+  const selected = filtered.find(t => t?.id === selectedId)
+  const allSelected = filtered.length > 0 && filtered.every(t => selectedIds.has(t?.id))
   const toggleAll = () => { if (allSelected) setSelectedIds(new Set()); else setSelectedIds(new Set(filtered.map(t => t.id))) }
   const toggleOne = (id) => { const s = new Set(selectedIds); if (s.has(id)) s.delete(id); else s.add(id); setSelectedIds(s) }
   const handleDelete = async () => {
@@ -2571,10 +2572,14 @@ function VisasScreen() {
     if (dateRange.preset === 'custom' && dateRange.from) { const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date(); return { from: f, to: t } }
     return null
   }, [dateRange])
-  const filteredByDate = React.useMemo(() => { if (!dateRangeBounds) return visas; return visas.filter(v => { const d = new Date(v.date); return d >= dateRangeBounds.from && d <= dateRangeBounds.to }) }, [visas, dateRangeBounds])
+  const filteredByDate = React.useMemo(() => {
+    const safe = (visas || []).filter(Boolean)
+    if (!dateRangeBounds) return safe
+    return safe.filter(v => { const d = new Date(v?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to })
+  }, [visas, dateRangeBounds])
   const filtered = applyFilter(filteredByDate, filter)
-  const selected = filtered.find(v => v.id === selectedId)
-  const allSelected = filtered.length > 0 && filtered.every(v => selectedIds.has(v.id))
+  const selected = filtered.find(v => v?.id === selectedId)
+  const allSelected = filtered.length > 0 && filtered.every(v => selectedIds.has(v?.id))
   const toggleAll = () => { if (allSelected) setSelectedIds(new Set()); else setSelectedIds(new Set(filtered.map(v => v.id))) }
   const toggleOne = (id) => { const s = new Set(selectedIds); if (s.has(id)) s.delete(id); else s.add(id); setSelectedIds(s) }
   const handleAdd = () => { setEditing(null); setOpenManual(true) }
@@ -2837,31 +2842,53 @@ function ServicesScreen() {
   const [serviceTypes, setServiceTypes] = useState([])
   const [clients, setClients] = useState([])
   const [suppliers, setSuppliers] = useState([])
+  const [boxes, setBoxes] = useState([]) // v3.9.11
   const [openManual, setOpenManual] = useState(false)
   const [openTypes, setOpenTypes] = useState(false)
   const [openSearch, setOpenSearch] = useState(false)
+  const [openBulkEdit, setOpenBulkEdit] = useState(false) // v3.9.11
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
+  const [selectedIds, setSelectedIds] = useState(new Set()) // v3.9.11
+  const [dateRange, setDateRange] = useState({ preset: 'month', from: '', to: '' }) // v3.9.11
   const [editing, setEditing] = useState(null)
   const [refundTarget, setRefundTarget] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
-      const [sv, st, c, s, r] = await Promise.all([
-        api('/services'), api('/service-types'), api('/clients'), api('/suppliers'), api('/rates')
+      const [sv, st, c, s, r, bx] = await Promise.all([
+        api('/services'), api('/service-types'), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])
       ])
-      setServices(sv); setServiceTypes(st); setClients(c); setSuppliers(s); setRates(r.rates)
+      setServices(sv); setServiceTypes(st); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
     } catch (e) { toast.error(e.message) }
   }
   useEffect(() => { load() }, [])
-  const filtered = applyFilter(services, filter)
-  const selected = filtered.find(v => v.id === selectedId)
+  const dateRangeBounds = React.useMemo(() => {
+    const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
+    if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
+    if (dateRange.preset === 'month') { const d = new Date(today.getFullYear(), today.getMonth(), 1); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
+    if (dateRange.preset === 'custom' && dateRange.from) { const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date(); return { from: f, to: t } }
+    return null
+  }, [dateRange])
+  const filteredByDate = React.useMemo(() => { if (!dateRangeBounds) return (services || []).filter(Boolean); return (services || []).filter(Boolean).filter(v => { const d = new Date(v?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to }) }, [services, dateRangeBounds])
+  const filtered = applyFilter(filteredByDate, filter)
+  const selected = filtered.find(v => v?.id === selectedId)
+  const allSelected = filtered.length > 0 && filtered.every(v => selectedIds.has(v.id))
+  const toggleAll = () => { if (allSelected) setSelectedIds(new Set()); else setSelectedIds(new Set(filtered.map(v => v.id))) }
+  const toggleOne = (id) => { const s = new Set(selectedIds); if (s.has(id)) s.delete(id); else s.add(id); setSelectedIds(s) }
   const handleAdd = () => { setEditing(null); setOpenManual(true) }
   const handleEdit = () => { if (!selected) return toast.error('اختر خدمة أولاً'); setEditing(selected); setOpenManual(true) }
   const handleDelete = async () => {
     if (!selectedId) return
     if (!confirm('حذف هذه الخدمة وعكس القيد المحاسبي؟')) return
     try { await api(`/services/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const handleBulkDelete = async () => {
+    const ids = Array.from(selectedIds); if (ids.length === 0) return toast.error('لم يتم اختيار أي سجل')
+    if (!confirm(`حذف ${ids.length} خدمة وعكس قيودها المحاسبية دفعة واحدة؟`)) return
+    try { const r = await api('/services/bulk-delete', { method: 'POST', body: { ids } }); toast.success(`✅ تم حذف ${r.deleted}${r.failed ? ` • فشل ${r.failed}` : ''}`); setSelectedIds(new Set()); setSelectedId(null); load() }
     catch (e) { toast.error(e.message) }
   }
   const handlePrintTable = () => {
@@ -2906,13 +2933,37 @@ function ServicesScreen() {
           <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
         </div>
       )}
+      {/* v3.9.11 — Date range + Bulk actions */}
+      <div className="flex flex-wrap items-center gap-2 p-3 bg-white border border-slate-200 rounded-lg">
+        <span className="text-xs font-bold text-slate-600 flex items-center gap-1">📅 عرض:</span>
+        {[{ k: 'today', l: 'اليوم' }, { k: 'week', l: 'آخر ٧ أيام' }, { k: 'month', l: 'هذا الشهر' }, { k: 'all', l: 'الكل' }, { k: 'custom', l: 'مخصص' }].map(p => (
+          <button key={p.k} onClick={() => setDateRange({ ...dateRange, preset: p.k })}
+            className={`px-3 py-1 rounded-md text-xs font-semibold border ${dateRange.preset === p.k ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}>{p.l}</button>
+        ))}
+        {dateRange.preset === 'custom' && (
+          <>
+            <input type="date" value={dateRange.from} onChange={e => setDateRange({ ...dateRange, from: e.target.value })} className="text-xs border rounded px-2 py-1" />
+            <span className="text-xs">إلى</span>
+            <input type="date" value={dateRange.to} onChange={e => setDateRange({ ...dateRange, to: e.target.value })} className="text-xs border rounded px-2 py-1" />
+          </>
+        )}
+        {selectedIds.size > 0 && (
+          <div className="mr-auto flex items-center gap-2">
+            <span className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">✓ محدد: {selectedIds.size}</span>
+            <Button size="sm" onClick={() => setOpenBulkEdit(true)} className="gap-1 text-xs bg-blue-600 hover:bg-blue-700 text-white">✏️ تعديل المحدد ({selectedIds.size})</Button>
+            <Button size="sm" variant="destructive" onClick={handleBulkDelete} className="gap-1 text-xs">🗑️ حذف المحدد ({selectedIds.size})</Button>
+            <Button size="sm" variant="outline" onClick={() => setSelectedIds(new Set())} className="text-xs">إلغاء التحديد</Button>
+          </div>
+        )}
+      </div>
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><Briefcase className="w-5 h-5 text-orange-600" /> سجل الخدمات ({filtered.length}{filter ? ` من ${services.length}` : ''})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Briefcase className="w-5 h-5 text-orange-600" /> سجل الخدمات ({filtered.length}{(filter || dateRangeBounds) ? ` من ${services.length}` : ''})</CardTitle></CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-10"><input type="checkbox" checked={allSelected} onChange={toggleAll} title="تحديد الكل" /></TableHead>
                   <TableHead className="w-8"></TableHead>
                   <TableHead>التاريخ</TableHead><TableHead>نوع الخدمة</TableHead>
                   <TableHead>المستفيد</TableHead><TableHead>الرقم المرجعي</TableHead>
@@ -2923,21 +2974,22 @@ function ServicesScreen() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.length === 0 && <TableRow><TableCell colSpan={12} className="text-center text-slate-400 py-8">{filter ? 'لا نتائج للفلتر' : 'لا توجد خدمات — أضف خدمة جديدة من الأعلى'}</TableCell></TableRow>}
+                {filtered.length === 0 && <TableRow><TableCell colSpan={13} className="text-center text-slate-400 py-8">{filter || dateRangeBounds ? 'لا نتائج ضمن الفلتر/النطاق' : 'لا توجد خدمات — أضف خدمة جديدة من الأعلى'}</TableCell></TableRow>}
                 {filtered.map(v => (
-                  <TableRow key={v.id} className={selectedId === v.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={() => setSelectedId(v.id === selectedId ? null : v.id)}>
-                    <TableCell><input type="radio" checked={selectedId === v.id} onChange={() => setSelectedId(v.id)} /></TableCell>
-                    <TableCell className="text-xs">{fmtDate(v.date)}</TableCell>
-                    <TableCell><Badge className="bg-orange-100 text-orange-800 hover:bg-orange-100 border border-orange-200">{v.service_type}</Badge></TableCell>
-                    <TableCell>{v.beneficiary_name || '—'}</TableCell>
-                    <TableCell className="font-mono text-xs">{v.reference_no || '—'}</TableCell>
-                    <TableCell>{v.client_name}</TableCell>
-                    <TableCell>{v.supplier_name}</TableCell>
-                    <TableCell>{v.payment_method === 'cash' ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">💵 نقد</Badge> : <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">🕓 آجل</Badge>}</TableCell>
-                    <TableCell><Badge variant="outline">{v.currency}</Badge></TableCell>
-                    <TableCell className="text-left font-semibold">{fmt(v.cost, v.currency)}</TableCell>
-                    <TableCell className="text-left font-semibold">{fmt(v.sale_price, v.currency)}</TableCell>
-                    <TableCell className="text-left font-bold text-emerald-600">{fmt(v.commission, v.currency)}</TableCell>
+                  <TableRow key={v?.id} className={selectedIds.has(v?.id) ? 'bg-rose-50' : selectedId === v?.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={(e) => { if (e.target.tagName === 'INPUT') return; setSelectedId(v?.id === selectedId ? null : v?.id) }}>
+                    <TableCell><input type="checkbox" checked={selectedIds.has(v?.id)} onChange={() => toggleOne(v?.id)} onClick={e => e.stopPropagation()} /></TableCell>
+                    <TableCell><input type="radio" checked={selectedId === v?.id} onChange={() => setSelectedId(v?.id)} onClick={e => e.stopPropagation()} /></TableCell>
+                    <TableCell className="text-xs">{fmtDate(v?.date)}</TableCell>
+                    <TableCell><Badge className="bg-orange-100 text-orange-800 hover:bg-orange-100 border border-orange-200">{v?.service_type || '—'}</Badge></TableCell>
+                    <TableCell>{v?.beneficiary_name || '—'}</TableCell>
+                    <TableCell className="font-mono text-xs">{v?.reference_no || '—'}</TableCell>
+                    <TableCell>{v?.client_name || '—'}</TableCell>
+                    <TableCell>{v?.supplier_name || '—'}</TableCell>
+                    <TableCell>{v?.payment_method === 'cash' ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">💵 نقد</Badge> : <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">🕓 آجل</Badge>}</TableCell>
+                    <TableCell><Badge variant="outline">{v?.currency || '—'}</Badge></TableCell>
+                    <TableCell className="text-left font-semibold">{fmt(v?.cost, v?.currency)}</TableCell>
+                    <TableCell className="text-left font-semibold">{fmt(v?.sale_price, v?.currency)}</TableCell>
+                    <TableCell className="text-left font-bold text-emerald-600">{fmt(v?.commission, v?.currency)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -2945,6 +2997,7 @@ function ServicesScreen() {
           </div>
         </CardContent>
       </Card>
+      <BulkEditDialog open={openBulkEdit} onOpenChange={setOpenBulkEdit} kind="services" ids={Array.from(selectedIds)} suppliers={suppliers} boxes={boxes} onDone={() => { load(); setOpenBulkEdit(false); setSelectedIds(new Set()) }} />
       <ServiceDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }}
         clients={clients} suppliers={suppliers} rates={rates} serviceTypes={serviceTypes} record={editing}
         onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل الخدمة وعكس القيد السابق' : 'تم حفظ الخدمة') }} />
@@ -4864,13 +4917,16 @@ function PackagesScreen() {
   const [reportPkg, setReportPkg] = useState(null)
   const [comparePeriod, setComparePeriod] = useState(null) // null | 'all' | 'month' | 'year'
   const [extendPkg, setExtendPkg] = useState(null)
+  // v3.9.11 — Bulk operations for packages
+  const [selectedIds, setSelectedIds] = useState(new Set())
+  const [dateRange, setDateRange] = useState({ preset: 'all', from: '', to: '' })
   const load = () => {
     api('/packages').then(setPackages).catch(e => toast.error(e.message))
     api('/packages/comparison?period=month').then(setLeaderboard).catch(() => {})
   }
   useEffect(() => { load() }, [])
   const closePkg = async (p) => {
-    if (!confirm(`إغلاق الباكج "${p.name}"؟ (لن يمكن إضافة تسجيلات جديدة)`)) return
+    if (!confirm(`إغلاق الباكج "${p?.name}"؟ (لن يمكن إضافة تسجيلات جديدة)`)) return
     try { await api(`/packages/${p.id}`, { method: 'PATCH', body: { status: 'closed' } }); toast.success('تم إغلاق الباكج'); load() }
     catch (e) { toast.error(e.message) }
   }
@@ -4879,13 +4935,39 @@ function PackagesScreen() {
     catch (e) { toast.error(e.message) }
   }
   const delPkg = async (p) => {
-    if (!confirm(`حذف الباكج "${p.name}"؟`)) return
+    if (!confirm(`حذف الباكج "${p?.name}"؟`)) return
     try { await api(`/packages/${p.id}`, { method: 'DELETE' }); toast.success('تم الحذف'); load() }
     catch (e) { toast.error(e.message) }
   }
-  const openPackages = packages.filter(p => p.status !== 'closed')
-  const closedPackages = packages.filter(p => p.status === 'closed')
+  const dateBounds = React.useMemo(() => {
+    const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
+    if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
+    if (dateRange.preset === 'month') { const d = new Date(today.getFullYear(), today.getMonth(), 1); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
+    if (dateRange.preset === 'custom' && dateRange.from) { const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date(); return { from: f, to: t } }
+    return null
+  }, [dateRange])
+  const safePackages = (packages || []).filter(Boolean)
+  const filteredPackages = React.useMemo(() => {
+    if (!dateBounds) return safePackages
+    return safePackages.filter(p => { const d = new Date(p?.start_date || p?.created_at); return !isNaN(d) && d >= dateBounds.from && d <= dateBounds.to })
+  }, [safePackages, dateBounds])
+  const openPackages = filteredPackages.filter(p => p?.status !== 'closed')
+  const closedPackages = filteredPackages.filter(p => p?.status === 'closed')
   const top = leaderboard?.top
+  const toggleOne = (id) => { const s = new Set(selectedIds); if (s.has(id)) s.delete(id); else s.add(id); setSelectedIds(s) }
+  const handleBulkDelete = async () => {
+    const ids = Array.from(selectedIds); if (ids.length === 0) return toast.error('لم يتم اختيار أي باكج')
+    if (!confirm(`حذف ${ids.length} باكج دفعة واحدة؟ (لن يتم حذف الباكجات التي بها تسجيلات)`)) return
+    try { const r = await api('/packages/bulk-delete', { method: 'POST', body: { ids } }); toast.success(`✅ تم حذف ${r.deleted}${r.failed ? ` • فشل ${r.failed} (بسبب وجود حجوزات)` : ''}`); setSelectedIds(new Set()); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const handleBulkClose = async (status) => {
+    const ids = Array.from(selectedIds); if (ids.length === 0) return toast.error('لم يتم اختيار أي باكج')
+    if (!confirm(`${status === 'closed' ? 'إغلاق' : 'إعادة فتح'} ${ids.length} باكج دفعة واحدة؟`)) return
+    try { const r = await api('/packages/bulk-close', { method: 'POST', body: { ids, status } }); toast.success(`✅ تم تحديث ${r.updated} باكج`); setSelectedIds(new Set()); load() }
+    catch (e) { toast.error(e.message) }
+  }
   return (
     <div className="space-y-4">
       <TopBar title="الباكجات والبرامج السياحية" subtitle={`${openPackages.length} باكج نشط • ${closedPackages.length} أرشيف`}
@@ -4927,17 +5009,41 @@ function PackagesScreen() {
           </CardContent>
         </Card>
       )}
+      {/* v3.9.11 — Date range + Bulk actions bar */}
+      <div className="flex flex-wrap items-center gap-2 p-3 bg-white border border-slate-200 rounded-lg">
+        <span className="text-xs font-bold text-slate-600 flex items-center gap-1">📅 عرض:</span>
+        {[{ k: 'all', l: 'الكل' }, { k: 'today', l: 'اليوم' }, { k: 'week', l: 'آخر ٧ أيام' }, { k: 'month', l: 'هذا الشهر' }, { k: 'custom', l: 'مخصص' }].map(p => (
+          <button key={p.k} onClick={() => setDateRange({ ...dateRange, preset: p.k })}
+            className={`px-3 py-1 rounded-md text-xs font-semibold border ${dateRange.preset === p.k ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}>{p.l}</button>
+        ))}
+        {dateRange.preset === 'custom' && (
+          <>
+            <input type="date" value={dateRange.from} onChange={e => setDateRange({ ...dateRange, from: e.target.value })} className="text-xs border rounded px-2 py-1" />
+            <span className="text-xs">إلى</span>
+            <input type="date" value={dateRange.to} onChange={e => setDateRange({ ...dateRange, to: e.target.value })} className="text-xs border rounded px-2 py-1" />
+          </>
+        )}
+        {selectedIds.size > 0 && (
+          <div className="mr-auto flex items-center gap-2">
+            <span className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">✓ محدد: {selectedIds.size}</span>
+            <Button size="sm" onClick={() => handleBulkClose('closed')} className="gap-1 text-xs bg-orange-600 hover:bg-orange-700 text-white">🔒 إغلاق المحدد</Button>
+            <Button size="sm" onClick={() => handleBulkClose('open')} className="gap-1 text-xs bg-emerald-600 hover:bg-emerald-700 text-white">🔓 فتح المحدد</Button>
+            <Button size="sm" variant="destructive" onClick={handleBulkDelete} className="gap-1 text-xs">🗑️ حذف المحدد ({selectedIds.size})</Button>
+            <Button size="sm" variant="outline" onClick={() => setSelectedIds(new Set())} className="text-xs">إلغاء التحديد</Button>
+          </div>
+        )}
+      </div>
       <div>
         <div className="text-sm font-bold text-slate-700 mb-2">🟢 الباكجات المفتوحة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {openPackages.map(p => <PkgCard key={p.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} onExtend={() => setExtendPkg(p)} />)}
-          {openPackages.length === 0 && <div className="col-span-full text-center text-slate-400 py-8 text-sm">لا توجد باكجات مفتوحة — أنشئ باكج جديد</div>}
+          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} onExtend={() => setExtendPkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
+          {openPackages.length === 0 && <div className="col-span-full text-center text-slate-400 py-8 text-sm">{dateBounds ? 'لا نتائج ضمن النطاق التاريخي' : 'لا توجد باكجات مفتوحة — أنشئ باكج جديد'}</div>}
         </div>
       </div>
       {closedPackages.length > 0 && <div>
         <div className="text-sm font-bold text-slate-500 mt-6 mb-2">🗄️ أرشيف الباكجات المغلقة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {closedPackages.map(p => <PkgCard key={p.id} p={p} closed onOpen={() => setDetailsPkg(p)} onReopen={() => reopenPkg(p)} onReport={() => setReportPkg(p)} />)}
+          {closedPackages.map(p => <PkgCard key={p?.id} p={p} closed onOpen={() => setDetailsPkg(p)} onReopen={() => reopenPkg(p)} onReport={() => setReportPkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
         </div>
       </div>}
       <PackageDialog open={open} onOpenChange={v => { setOpen(v); if (!v) setEditing(null) }} record={editing} onSaved={load} />
@@ -5109,22 +5215,27 @@ function PackageCompareDialog({ initialPeriod = 'all', onClose }) {
   )
 }
 
-function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onExtend, closed }) {
-  const typeL = PACKAGE_TYPES.find(t => t.v === p.package_type)?.l || p.package_type
+function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onExtend, closed, selectable, selected, onToggleSelect }) {
+  const typeL = PACKAGE_TYPES.find(t => t.v === p?.package_type)?.l || p?.package_type || '—'
   return (
-    <Card className={`overflow-hidden hover:shadow-md transition ${closed ? 'opacity-70' : ''}`}>
+    <Card className={`overflow-hidden hover:shadow-md transition ${closed ? 'opacity-70' : ''} ${selected ? 'ring-2 ring-rose-400' : ''}`}>
       <div className={closed ? 'h-1 bg-slate-400' : 'h-1 grad-brand'} />
       <CardContent className="p-4 space-y-2">
         <div className="flex items-start justify-between">
-          <div>
-            <div className="font-bold text-slate-800">{p.name}</div>
-            <div className="text-xs text-slate-500">{typeL}</div>
+          <div className="flex items-start gap-2">
+            {selectable && (
+              <input type="checkbox" checked={!!selected} onChange={onToggleSelect} onClick={e => e.stopPropagation()} className="mt-1 w-4 h-4 accent-rose-600" title="تحديد للحذف الجماعي" />
+            )}
+            <div>
+              <div className="font-bold text-slate-800">{p?.name || '—'}</div>
+              <div className="text-xs text-slate-500">{typeL}</div>
+            </div>
           </div>
           <Badge className={closed ? 'bg-slate-200 text-slate-600 hover:bg-slate-200' : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100'}>{closed ? 'مغلق' : 'مفتوح'}</Badge>
         </div>
         <div className="text-xs text-slate-500 space-y-0.5">
-          {p.start_date && <div>📅 من {fmtDate(p.start_date)} {p.end_date && `→ ${fmtDate(p.end_date)}`}</div>}
-          <div>🧩 {p.components_count || 0} مكوّن • 👥 {p.bookings_count || 0} مسجل</div>
+          {p?.start_date && <div>📅 من {fmtDate(p.start_date)} {p?.end_date && `→ ${fmtDate(p.end_date)}`}</div>}
+          <div>🧩 {p?.components_count || 0} مكوّن • 👥 {p?.bookings_count || 0} مسجل</div>
         </div>
         <div className="flex flex-wrap gap-1 pt-2 border-t">
           <Button size="sm" variant="outline" onClick={onOpen} className="h-7 px-2 text-xs gap-1"><FileBadge2 className="w-3 h-3" /> المكونات والتسجيل</Button>
@@ -5133,7 +5244,7 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
           {!closed && onEdit && <Button size="sm" variant="ghost" onClick={onEdit} className="h-7 px-2 text-xs"><Pencil className="w-3 h-3" /></Button>}
           {!closed && onClose && <Button size="sm" variant="ghost" onClick={onClose} className="h-7 px-2 text-xs text-orange-600">إغلاق</Button>}
           {closed && onReopen && <Button size="sm" variant="ghost" onClick={onReopen} className="h-7 px-2 text-xs text-emerald-600">فتح</Button>}
-          {!closed && onDelete && p.bookings_count === 0 && <Button size="sm" variant="ghost" onClick={onDelete} className="h-7 px-2 text-xs text-rose-600"><Trash2 className="w-3 h-3" /></Button>}
+          {!closed && onDelete && (p?.bookings_count || 0) === 0 && <Button size="sm" variant="ghost" onClick={onDelete} className="h-7 px-2 text-xs text-rose-600"><Trash2 className="w-3 h-3" /></Button>}
         </div>
       </CardContent>
     </Card>

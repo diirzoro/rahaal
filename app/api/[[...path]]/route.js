@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.10',
+          version: '3.9.11',
           db: 'connected',
         })
       } catch (e) {
@@ -1195,7 +1195,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.10',
+        version: '3.9.11',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
@@ -1988,6 +1988,35 @@ async function handleRoute(request, { params }) {
 
     // Journal entries
     if (route === '/journal-entries' && method === 'GET') return ok(clean(await db.collection('journal_entries').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+
+    // v3.9.11 — Packages bulk operations
+    if (route === '/packages/bulk-delete' && method === 'POST') {
+      const body = await request.json()
+      const ids = Array.isArray(body.ids) ? body.ids : []
+      if (ids.length === 0) return bad('لم يتم اختيار أي باكج')
+      let deleted = 0, failed = 0
+      const errors = []
+      for (const id of ids) {
+        try {
+          const pkg = await db.collection('packages').findOne({ id, tenant_id: T })
+          if (!pkg) { failed++; errors.push({ id, error: 'غير موجود' }); continue }
+          // Prevent delete if bookings exist
+          const bookingsCount = await db.collection('package_bookings').countDocuments({ package_id: id, tenant_id: T })
+          if (bookingsCount > 0) { failed++; errors.push({ id, error: `يوجد ${bookingsCount} حجز مرتبط — أزلها أولاً` }); continue }
+          await db.collection('packages').deleteOne({ id, tenant_id: T })
+          deleted++
+        } catch (e) { failed++; errors.push({ id, error: e.message }) }
+      }
+      return ok({ ok: true, deleted, failed, errors })
+    }
+    if (route === '/packages/bulk-close' && method === 'POST') {
+      const body = await request.json()
+      const ids = Array.isArray(body.ids) ? body.ids : []
+      if (ids.length === 0) return bad('لم يتم اختيار أي باكج')
+      const status = body.status === 'open' ? 'open' : 'closed'
+      const r = await db.collection('packages').updateMany({ id: { $in: ids }, tenant_id: T }, { $set: { status, updated_at: new Date() } })
+      return ok({ ok: true, updated: r.modifiedCount, status })
+    }
 
     // v3.9.9 — Bulk delete for tickets/visas/services/vouchers/fx (reverses balances + JEs per row)
     const bulkDelMatch = route.match(/^\/(tickets|visas|services|vouchers|fx)\/bulk-delete$/)
