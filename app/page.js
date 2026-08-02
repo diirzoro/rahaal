@@ -962,6 +962,8 @@ function TicketsScreen() {
   const [openSearch, setOpenSearch] = useState(false)
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
+  const [selectedIds, setSelectedIds] = useState(new Set()) // v3.9.9 — multi-select
+  const [dateRange, setDateRange] = useState({ preset: 'month', from: '', to: '' }) // v3.9.9
   const [editing, setEditing] = useState(null)
   const [refundTarget, setRefundTarget] = useState(null)
   const [rates, setRates] = useState(null)
@@ -972,13 +974,42 @@ function TicketsScreen() {
     } catch (e) { toast.error(e.message) }
   }
   useEffect(() => { load() }, [])
-  const filtered = applyFilter(tickets, filter)
+  // v3.9.9 — Date range computation from preset
+  const dateRangeBounds = React.useMemo(() => {
+    const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
+    if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
+    if (dateRange.preset === 'month') { const d = new Date(today.getFullYear(), today.getMonth(), 1); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
+    if (dateRange.preset === 'custom' && dateRange.from) {
+      const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date()
+      return { from: f, to: t }
+    }
+    return null // all
+  }, [dateRange])
+  const filteredByDate = React.useMemo(() => {
+    if (!dateRangeBounds) return tickets
+    return tickets.filter(t => { const d = new Date(t.date); return d >= dateRangeBounds.from && d <= dateRangeBounds.to })
+  }, [tickets, dateRangeBounds])
+  const filtered = applyFilter(filteredByDate, filter)
   const selected = filtered.find(t => t.id === selectedId)
+  const allSelected = filtered.length > 0 && filtered.every(t => selectedIds.has(t.id))
+  const toggleAll = () => { if (allSelected) setSelectedIds(new Set()); else setSelectedIds(new Set(filtered.map(t => t.id))) }
+  const toggleOne = (id) => { const s = new Set(selectedIds); if (s.has(id)) s.delete(id); else s.add(id); setSelectedIds(s) }
   const handleDelete = async () => {
     if (!selectedId) return
     if (!confirm('حذف هذه التذكرة وعكس القيد المحاسبي؟')) return
     try { await api(`/tickets/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
     catch (e) { toast.error(e.message) }
+  }
+  const handleBulkDelete = async () => {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) return toast.error('لم يتم اختيار أي تذكرة')
+    if (!confirm(`حذف ${ids.length} تذكرة وعكس قيودها المحاسبية دفعة واحدة؟ لا يمكن التراجع.`)) return
+    try {
+      const r = await api('/tickets/bulk-delete', { method: 'POST', body: { ids } })
+      toast.success(`✅ تم حذف ${r.deleted}${r.failed ? ` • فشل ${r.failed}` : ''}`)
+      setSelectedIds(new Set()); setSelectedId(null); load()
+    } catch (e) { toast.error(e.message) }
   }
   const handleEdit = () => {
     if (!selected) return toast.error('اختر تذكرة أولاً')
@@ -1028,12 +1059,41 @@ function TicketsScreen() {
           <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
         </div>
       )}
+      {/* v3.9.9 — Date range presets + Bulk actions bar */}
+      <div className="flex flex-wrap items-center gap-2 p-3 bg-white border border-slate-200 rounded-lg">
+        <span className="text-xs font-bold text-slate-600 flex items-center gap-1">📅 عرض:</span>
+        {[
+          { k: 'today', l: 'اليوم' },
+          { k: 'week', l: 'آخر ٧ أيام' },
+          { k: 'month', l: 'هذا الشهر' },
+          { k: 'all', l: 'الكل' },
+          { k: 'custom', l: 'مخصص' },
+        ].map(p => (
+          <button key={p.k} onClick={() => setDateRange({ ...dateRange, preset: p.k })}
+            className={`px-3 py-1 rounded-md text-xs font-semibold border ${dateRange.preset === p.k ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}>{p.l}</button>
+        ))}
+        {dateRange.preset === 'custom' && (
+          <>
+            <input type="date" value={dateRange.from} onChange={e => setDateRange({ ...dateRange, from: e.target.value })} className="text-xs border rounded px-2 py-1" />
+            <span className="text-xs">إلى</span>
+            <input type="date" value={dateRange.to} onChange={e => setDateRange({ ...dateRange, to: e.target.value })} className="text-xs border rounded px-2 py-1" />
+          </>
+        )}
+        {selectedIds.size > 0 && (
+          <div className="mr-auto flex items-center gap-2">
+            <span className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">✓ محدد: {selectedIds.size}</span>
+            <Button size="sm" variant="destructive" onClick={handleBulkDelete} className="gap-1 text-xs">🗑️ حذف المحدد ({selectedIds.size})</Button>
+            <Button size="sm" variant="outline" onClick={() => setSelectedIds(new Set())} className="text-xs">إلغاء التحديد</Button>
+          </div>
+        )}
+      </div>
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><Plane className="w-5 h-5 text-sky-600" /> سجل التذاكر ({filtered.length}{filter ? ` من ${tickets.length}` : ''})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Plane className="w-5 h-5 text-sky-600" /> سجل التذاكر ({filtered.length}{(filter || dateRangeBounds) ? ` من ${tickets.length}` : ''})</CardTitle></CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
             <Table>
               <TableHeader><TableRow>
+                <TableHead className="w-10"><input type="checkbox" checked={allSelected} onChange={toggleAll} title="تحديد الكل" /></TableHead>
                 <TableHead className="w-8"></TableHead><TableHead>التاريخ</TableHead><TableHead>PNR</TableHead>
                 <TableHead>خط السير</TableHead><TableHead>المسافر</TableHead>
                 <TableHead>🚌 الشركة الناقلة</TableHead>
@@ -1043,10 +1103,11 @@ function TicketsScreen() {
                 <TableHead className="text-left text-emerald-600">عمولة</TableHead>
               </TableRow></TableHeader>
               <TableBody>
-                {filtered.length === 0 && <TableRow><TableCell colSpan={13} className="text-center text-slate-400 py-8">{filter ? 'لا نتائج للفلتر' : 'لا توجد تذاكر'}</TableCell></TableRow>}
+                {filtered.length === 0 && <TableRow><TableCell colSpan={14} className="text-center text-slate-400 py-8">{filter || dateRangeBounds ? 'لا نتائج ضمن الفلتر/النطاق التاريخي' : 'لا توجد تذاكر'}</TableCell></TableRow>}
                 {filtered.map(t => (
-                  <TableRow key={t.id} className={selectedId === t.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={() => setSelectedId(t.id === selectedId ? null : t.id)}>
-                    <TableCell><input type="radio" checked={selectedId === t.id} onChange={() => setSelectedId(t.id)} /></TableCell>
+                  <TableRow key={t.id} className={selectedIds.has(t.id) ? 'bg-rose-50' : selectedId === t.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={(e) => { if (e.target.tagName === 'INPUT') return; setSelectedId(t.id === selectedId ? null : t.id) }}>
+                    <TableCell><input type="checkbox" checked={selectedIds.has(t.id)} onChange={() => toggleOne(t.id)} onClick={e => e.stopPropagation()} /></TableCell>
+                    <TableCell><input type="radio" checked={selectedId === t.id} onChange={() => setSelectedId(t.id)} onClick={e => e.stopPropagation()} /></TableCell>
                     <TableCell className="text-xs">{fmtDate(t.date)}</TableCell>
                     <TableCell className="font-mono text-xs">{t.pnr || '—'}</TableCell>
                     <TableCell className="text-xs">{t.route || '—'}</TableCell>
@@ -1090,6 +1151,7 @@ function TicketsScreen() {
 }
 
 function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
+  const { user } = useAuth() // v3.9.9 — for default_box_id & lock_box
   const isEdit = !!record
   const emptyForm = {
     date: todayISO(), currency: 'USD', exchange_rate: 1, client_id: '', supplier_id: '',
@@ -1139,7 +1201,7 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
   }, [open, record])
   useEffect(() => { if (rates && form.currency && !isEdit) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
   useEffect(() => { if (open) api('/boxes').then(setBoxes).catch(()=>{}) }, [open])
-  useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: boxes[0].id })) }, [form.payment_method, boxes])
+  useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: (user?.default_box_id && boxes.find(b => b.id === user.default_box_id)) ? user.default_box_id : boxes[0].id })) }, [form.payment_method, boxes, user])
   const commission = useMemo(() => (Number(form.sale_price) || 0) - (Number(form.cost) || 0), [form.sale_price, form.cost])
   const submit = async () => {
     if (!form.client_id || !form.supplier_id) return toast.error('اختر حساب القبض والمورد')
@@ -1276,7 +1338,7 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
             </div>
             {form.payment_method === 'cash' && (
               <div className="flex-1">
-                <Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })}>
+                <Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}>
                   <SelectTrigger><SelectValue placeholder="اختر الصندوق/البنك" /></SelectTrigger>
                   <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent>
                 </Select>
@@ -1973,9 +2035,10 @@ function BulkImportDialog({ open, onOpenChange, kind, onDone }) {
     setLoading(true)
     try {
       const buf = await f.arrayBuffer()
-      const wb = XLSX.read(buf, { type: 'array' })
+      // v3.9.9 — cellDates:true converts Excel serial dates to real JS Date objects
+      const wb = XLSX.read(buf, { type: 'array', cellDates: true, dateNF: 'yyyy-mm-dd' })
       const ws = wb.Sheets[wb.SheetNames[0]]
-      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' })
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false, dateNF: 'yyyy-mm-dd' })
       if (rows.length === 0) { toast.error('الملف فارغ'); setLoading(false); return }
       const hd = Object.keys(rows[0])
       setHeaders(hd); setRawRows(rows)
@@ -1985,13 +2048,45 @@ function BulkImportDialog({ open, onOpenChange, kind, onDone }) {
     finally { setLoading(false) }
   }
 
+  // v3.9.9 — Robust date parser: accepts JS Date, ISO, DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY, YYYY-MM-DD, and Excel serial numbers
+  const parseDateFlexible = (val) => {
+    if (val === null || val === undefined || val === '') return ''
+    if (val instanceof Date && !isNaN(val)) return val.toISOString().slice(0, 10)
+    // Excel serial number (numeric, 1 = 1900-01-01)
+    if (typeof val === 'number' && val > 59) {
+      const excelEpoch = new Date(Date.UTC(1899, 11, 30))
+      const d = new Date(excelEpoch.getTime() + val * 86400000)
+      if (!isNaN(d)) return d.toISOString().slice(0, 10)
+    }
+    const s = String(val).trim()
+    if (!s) return ''
+    // YYYY-MM-DD or YYYY/MM/DD
+    let m = s.match(/^(\d{4})[\-\/](\d{1,2})[\-\/](\d{1,2})/)
+    if (m) return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`
+    // DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+    m = s.match(/^(\d{1,2})[\-\/\.](\d{1,2})[\-\/\.](\d{2,4})/)
+    if (m) {
+      const yyyy = m[3].length === 2 ? (Number(m[3]) > 50 ? '19' + m[3] : '20' + m[3]) : m[3]
+      return `${yyyy}-${String(m[2]).padStart(2,'0')}-${String(m[1]).padStart(2,'0')}`
+    }
+    // Fallback: try Date constructor (handles ISO with time, etc.)
+    const d = new Date(s)
+    if (!isNaN(d) && d.getFullYear() > 1971) return d.toISOString().slice(0, 10)
+    return ''
+  }
+
   const buildNormalized = (autoFix = false) => {
     return rawRows.map(r => {
       const out = {}
       for (const f of fields) {
         const col = mapping[f.key]
         let val = col ? r[col] : ''
-        if (val instanceof Date) val = val.toISOString().slice(0, 10)
+        // v3.9.9 — Robust date parsing for any date field
+        if (f.type === 'date' || /_date$|^date$/i.test(f.key)) {
+          val = parseDateFlexible(val)
+        } else if (val instanceof Date) {
+          val = val.toISOString().slice(0, 10)
+        }
         // Auto-fix: trim whitespace on strings
         if (autoFix && typeof val === 'string') val = val.trim().replace(/\s+/g, ' ')
         out[f.key] = val === undefined ? '' : val
@@ -2260,6 +2355,8 @@ function VisasScreen() {
   const [openSearch, setOpenSearch] = useState(false)
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
+  const [selectedIds, setSelectedIds] = useState(new Set())
+  const [dateRange, setDateRange] = useState({ preset: 'month', from: '', to: '' })
   const [editing, setEditing] = useState(null)
   const [refundTarget, setRefundTarget] = useState(null)
   const [rates, setRates] = useState(null)
@@ -2270,8 +2367,20 @@ function VisasScreen() {
     } catch (e) { toast.error(e.message) }
   }
   useEffect(() => { load() }, [])
-  const filtered = applyFilter(visas, filter)
+  const dateRangeBounds = React.useMemo(() => {
+    const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
+    if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
+    if (dateRange.preset === 'month') { const d = new Date(today.getFullYear(), today.getMonth(), 1); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
+    if (dateRange.preset === 'custom' && dateRange.from) { const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date(); return { from: f, to: t } }
+    return null
+  }, [dateRange])
+  const filteredByDate = React.useMemo(() => { if (!dateRangeBounds) return visas; return visas.filter(v => { const d = new Date(v.date); return d >= dateRangeBounds.from && d <= dateRangeBounds.to }) }, [visas, dateRangeBounds])
+  const filtered = applyFilter(filteredByDate, filter)
   const selected = filtered.find(v => v.id === selectedId)
+  const allSelected = filtered.length > 0 && filtered.every(v => selectedIds.has(v.id))
+  const toggleAll = () => { if (allSelected) setSelectedIds(new Set()); else setSelectedIds(new Set(filtered.map(v => v.id))) }
+  const toggleOne = (id) => { const s = new Set(selectedIds); if (s.has(id)) s.delete(id); else s.add(id); setSelectedIds(s) }
   const handleAdd = () => { setEditing(null); setOpenManual(true) }
   const handleEdit = () => { if (!selected) return toast.error('اختر خدمة أولاً'); setEditing(selected); setOpenManual(true) }
   const handleDelete = async () => {
@@ -2279,6 +2388,16 @@ function VisasScreen() {
     if (!confirm('حذف هذه الخدمة/التأشيرة وعكس القيد المحاسبي؟')) return
     try { await api(`/visas/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
     catch (e) { toast.error(e.message) }
+  }
+  const handleBulkDelete = async () => {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) return toast.error('لم يتم اختيار أي سجل')
+    if (!confirm(`حذف ${ids.length} تأشيرة/خدمة وعكس قيودها المحاسبية دفعة واحدة؟`)) return
+    try {
+      const r = await api('/visas/bulk-delete', { method: 'POST', body: { ids } })
+      toast.success(`✅ تم حذف ${r.deleted}${r.failed ? ` • فشل ${r.failed}` : ''}`)
+      setSelectedIds(new Set()); setSelectedId(null); load()
+    } catch (e) { toast.error(e.message) }
   }
   const handlePrintVoucher = () => {
     if (!selected) return toast.error('اختر سجلاً أولاً')
@@ -2322,13 +2441,36 @@ function VisasScreen() {
           <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
         </div>
       )}
+      {/* v3.9.9 — Date range + Bulk actions */}
+      <div className="flex flex-wrap items-center gap-2 p-3 bg-white border border-slate-200 rounded-lg">
+        <span className="text-xs font-bold text-slate-600 flex items-center gap-1">📅 عرض:</span>
+        {[{ k: 'today', l: 'اليوم' }, { k: 'week', l: 'آخر ٧ أيام' }, { k: 'month', l: 'هذا الشهر' }, { k: 'all', l: 'الكل' }, { k: 'custom', l: 'مخصص' }].map(p => (
+          <button key={p.k} onClick={() => setDateRange({ ...dateRange, preset: p.k })}
+            className={`px-3 py-1 rounded-md text-xs font-semibold border ${dateRange.preset === p.k ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}>{p.l}</button>
+        ))}
+        {dateRange.preset === 'custom' && (
+          <>
+            <input type="date" value={dateRange.from} onChange={e => setDateRange({ ...dateRange, from: e.target.value })} className="text-xs border rounded px-2 py-1" />
+            <span className="text-xs">إلى</span>
+            <input type="date" value={dateRange.to} onChange={e => setDateRange({ ...dateRange, to: e.target.value })} className="text-xs border rounded px-2 py-1" />
+          </>
+        )}
+        {selectedIds.size > 0 && (
+          <div className="mr-auto flex items-center gap-2">
+            <span className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">✓ محدد: {selectedIds.size}</span>
+            <Button size="sm" variant="destructive" onClick={handleBulkDelete} className="gap-1 text-xs">🗑️ حذف المحدد ({selectedIds.size})</Button>
+            <Button size="sm" variant="outline" onClick={() => setSelectedIds(new Set())} className="text-xs">إلغاء التحديد</Button>
+          </div>
+        )}
+      </div>
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><FileBadge2 className="w-5 h-5 text-emerald-600" /> سجل التأشيرات ({filtered.length}{filter ? ` من ${visas.length}` : ''})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><FileBadge2 className="w-5 h-5 text-emerald-600" /> سجل التأشيرات ({filtered.length}{(filter || dateRangeBounds) ? ` من ${visas.length}` : ''})</CardTitle></CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-10"><input type="checkbox" checked={allSelected} onChange={toggleAll} title="تحديد الكل" /></TableHead>
                   <TableHead className="w-8"></TableHead>
                   <TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>المسافر</TableHead>
                   <TableHead>الجواز</TableHead><TableHead>الجنسية</TableHead><TableHead>حساب القبض</TableHead>
@@ -2338,10 +2480,11 @@ function VisasScreen() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.length === 0 && <TableRow><TableCell colSpan={13} className="text-center text-slate-400 py-8">{filter ? 'لا نتائج للفلتر' : 'لا توجد خدمات'}</TableCell></TableRow>}
+                {filtered.length === 0 && <TableRow><TableCell colSpan={14} className="text-center text-slate-400 py-8">{filter || dateRangeBounds ? 'لا نتائج ضمن الفلتر/النطاق' : 'لا توجد خدمات'}</TableCell></TableRow>}
                 {filtered.map(v => (
-                  <TableRow key={v.id} className={selectedId === v.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={() => setSelectedId(v.id === selectedId ? null : v.id)}>
-                    <TableCell><input type="radio" checked={selectedId === v.id} onChange={() => setSelectedId(v.id)} /></TableCell>
+                  <TableRow key={v.id} className={selectedIds.has(v.id) ? 'bg-rose-50' : selectedId === v.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={(e) => { if (e.target.tagName === 'INPUT') return; setSelectedId(v.id === selectedId ? null : v.id) }}>
+                    <TableCell><input type="checkbox" checked={selectedIds.has(v.id)} onChange={() => toggleOne(v.id)} onClick={e => e.stopPropagation()} /></TableCell>
+                    <TableCell><input type="radio" checked={selectedId === v.id} onChange={() => setSelectedId(v.id)} onClick={e => e.stopPropagation()} /></TableCell>
                     <TableCell className="text-xs">{fmtDate(v.date)}</TableCell>
                     <TableCell><Badge variant="secondary">{v.service_type}</Badge></TableCell>
                     <TableCell>{v.passenger_name || '—'}</TableCell>
@@ -2379,6 +2522,7 @@ function VisasScreen() {
 }
 
 function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
+  const { user } = useAuth() // v3.9.9
   const isEdit = !!record
   const emptyForm = { date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', entry_date: '', expected_exit_date: '', passenger_phone: '', passenger_whatsapp: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }
   const [form, setForm] = useState(emptyForm)
@@ -2406,7 +2550,7 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
   }, [open, record])
   useEffect(() => { if (rates && !isEdit) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
   useEffect(() => { if (open) api('/boxes').then(setBoxes).catch(()=>{}) }, [open])
-  useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: boxes[0].id })) }, [form.payment_method, boxes])
+  useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: (user?.default_box_id && boxes.find(b => b.id === user.default_box_id)) ? user.default_box_id : boxes[0].id })) }, [form.payment_method, boxes, user])
   const commission = (Number(form.sale_price) || 0) - (Number(form.cost) || 0)
   const submit = async () => {
     if (!form.client_id || !form.supplier_id) return toast.error('اختر حساب القبض والمورد')
@@ -2465,7 +2609,7 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
               <button type="button" onClick={() => setForm({ ...form, payment_method: 'cash' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'cash' ? 'bg-emerald-500 text-white border-emerald-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-emerald-400'}`}>💵 نقد</button>
             </div>
             {form.payment_method === 'cash' && (
-              <div className="flex-1"><Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })}><SelectTrigger><SelectValue placeholder="اختر الصندوق/البنك" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></div>
+              <div className="flex-1"><Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}><SelectTrigger><SelectValue placeholder="اختر الصندوق/البنك" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></div>
             )}
           </div>
           <div className="bg-gradient-to-l from-emerald-50 to-blue-50 border rounded-xl p-4 mt-2">
@@ -2622,6 +2766,7 @@ function ServicesScreen() {
 }
 
 function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceTypes, onSaved, record }) {
+  const { user } = useAuth() // v3.9.9
   const isEdit = !!record
   const activeTypes = (serviceTypes || []).filter(t => t.active !== false)
   const emptyForm = {
@@ -2653,7 +2798,7 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
   }, [open, record])
   useEffect(() => { if (rates && !isEdit) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
   useEffect(() => { if (open) api('/boxes').then(setBoxes).catch(()=>{}) }, [open])
-  useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: boxes[0].id })) }, [form.payment_method, boxes])
+  useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: (user?.default_box_id && boxes.find(b => b.id === user.default_box_id)) ? user.default_box_id : boxes[0].id })) }, [form.payment_method, boxes, user])
   const commission = (Number(form.sale_price) || 0) - (Number(form.cost) || 0)
   const submit = async () => {
     if (!form.client_id) return toast.error('اختر حساب القبض')
@@ -2712,7 +2857,7 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
             <button type="button" onClick={() => setForm({ ...form, payment_method: 'cash' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'cash' ? 'bg-emerald-500 text-white border-emerald-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-emerald-400'}`}>💵 نقد</button>
           </div>
           {form.payment_method === 'cash' && (
-            <div className="flex-1"><Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })}><SelectTrigger><SelectValue placeholder="اختر الصندوق/البنك" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></div>
+            <div className="flex-1"><Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}><SelectTrigger><SelectValue placeholder="اختر الصندوق/البنك" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></div>
           )}
         </div>
         <div className="bg-gradient-to-l from-orange-50 to-amber-50 border rounded-xl p-4 mt-2">
@@ -2946,7 +3091,7 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
           ) : (
             <Field label={mode === 'receipt' ? 'المستلم من' : 'المدفوع إلى'} required><Select value={form.party_id} onValueChange={v => setForm({ ...form, party_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{list.map(x => <SelectItem key={x.id} value={x.id}>{x.name}</SelectItem>)}</SelectContent></Select></Field>
           )}
-          <Field label="الصندوق/البنك" required><Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent></Select></Field>
+          <Field label="الصندوق/البنك" required><Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent></Select></Field>
           <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="المبلغ" required><Input type="number" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
           <Field label="طريقة الدفع"><Input value={form.method} onChange={e => setForm({ ...form, method: e.target.value })} placeholder="نقدي / حوالة" /></Field>
@@ -4063,8 +4208,16 @@ const PERMISSION_GROUPS = [
 function PermissionsDialog({ target, onClose, onSaved }) {
   const [perms, setPerms] = useState({})
   const [saving, setSaving] = useState(false)
+  const [boxes, setBoxes] = useState([]) // v3.9.9
+  const [defaultBoxId, setDefaultBoxId] = useState('')
+  const [lockBox, setLockBox] = useState(false)
   useEffect(() => {
-    if (target) setPerms(target.permissions || {})
+    if (target) {
+      setPerms(target.permissions || {})
+      setDefaultBoxId(target.default_box_id || '')
+      setLockBox(!!target.lock_box)
+      api('/boxes').then(setBoxes).catch(() => {})
+    }
   }, [target])
   const setKey = (k, v) => setPerms(p => ({ ...p, [k]: v }))
   const setAll = (val) => {
@@ -4075,7 +4228,7 @@ function PermissionsDialog({ target, onClose, onSaved }) {
   const save = async () => {
     try {
       setSaving(true)
-      await api(`/tenant/users/${target.id}`, { method: 'PATCH', body: { permissions: perms } })
+      await api(`/tenant/users/${target.id}`, { method: 'PATCH', body: { permissions: perms, default_box_id: defaultBoxId || null, lock_box: lockBox } })
       onSaved && onSaved()
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
@@ -4089,6 +4242,24 @@ function PermissionsDialog({ target, onClose, onSaved }) {
           </DialogTitle>
           <DialogDescription>حدد بالضبط ما يستطيع هذا الموظف فعله. المالك دائماً لديه صلاحيات كاملة (لا يحتاج ضبط).</DialogDescription>
         </DialogHeader>
+        {/* v3.9.9 — Default cash box for cashiers */}
+        <div className="border-2 border-emerald-200 rounded-lg p-3 bg-emerald-50 mb-3">
+          <div className="font-bold text-sm text-emerald-800 mb-2 flex items-center gap-2">💵 الصندوق الافتراضي للكاشير</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-end">
+            <div>
+              <label className="text-xs font-semibold text-slate-700 block mb-1">الصندوق الافتراضي (يُختار تلقائياً عند البيع النقدي)</label>
+              <select value={defaultBoxId} onChange={e => setDefaultBoxId(e.target.value)} className="w-full text-sm border rounded px-2 py-1.5 bg-white">
+                <option value="">— بدون تعيين —</option>
+                {boxes.map(b => <option key={b.id} value={b.id}>{b.name_ar || b.name} · {b.type === 'cash' ? '💵 صندوق' : '🏦 بنك'} · {b.currency}</option>)}
+              </select>
+            </div>
+            <label className="flex items-center gap-2 p-2 bg-white border rounded cursor-pointer text-sm">
+              <input type="checkbox" checked={lockBox} onChange={e => setLockBox(e.target.checked)} className="w-4 h-4 accent-rose-600" />
+              <span className={lockBox ? 'font-bold text-rose-700' : 'text-slate-600'}>🔒 قفل تغيير الصندوق (لضمان مطابقة الوردية)</span>
+            </label>
+          </div>
+          <div className="text-[11px] text-slate-500 mt-2">عند تفعيل القفل، سيُعرض صندوق الموظف فقط في شاشات البيع النقدي بدون إمكانية تغييره.</div>
+        </div>
         <div className="flex gap-2 mb-2 pb-2 border-b">
           <Button size="sm" variant="outline" onClick={() => setAll(true)} className="text-xs gap-1"><Power className="w-3 h-3 text-emerald-600" /> منح جميع الصلاحيات</Button>
           <Button size="sm" variant="outline" onClick={() => setAll(false)} className="text-xs gap-1"><Power className="w-3 h-3 text-rose-600" /> إلغاء جميع الصلاحيات</Button>

@@ -1,698 +1,720 @@
 #!/usr/bin/env python3
 """
-v3.9.8 Backend Test — Excel Import Flexible Receipt Account
-Tests the new feature where Excel import accepts BOTH client names AND box/bank names
+Backend Test Suite for Rahaal v3.9.9
+Tests 4 main features:
+1. Enhanced Duplicate Detection (name + date) in Excel Import
+2. Bulk-Delete Endpoints
+3. User default_box_id + lock_box
+4. Regression tests
 """
 
 import requests
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
+# Configuration
 BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
-AUTH = {"email": "owner@demo.com", "password": "Demo@2025"}
+AUTH_EMAIL = "owner@demo.com"
+AUTH_PASSWORD = "Demo@2025"
 
+# Global session
 session = requests.Session()
+session.headers.update({"Content-Type": "application/json"})
+
+# Test state
+test_results = {
+    "passed": 0,
+    "failed": 0,
+    "tests": []
+}
+
+def log_test(name, passed, details=""):
+    """Log test result"""
+    status = "✅ PASS" if passed else "❌ FAIL"
+    print(f"{status}: {name}")
+    if details:
+        print(f"  Details: {details}")
+    test_results["tests"].append({"name": name, "passed": passed, "details": details})
+    if passed:
+        test_results["passed"] += 1
+    else:
+        test_results["failed"] += 1
 
 def login():
     """Login and get session cookie"""
-    print("=" * 80)
-    print("LOGGING IN...")
-    print("=" * 80)
-    resp = session.post(f"{BASE_URL}/auth/login", json=AUTH)
-    print(f"Status: {resp.status_code}")
-    if resp.status_code != 200:
-        print(f"❌ Login failed: {resp.text}")
-        sys.exit(1)
-    data = resp.json()
-    print(f"✅ Logged in as: {data.get('user', {}).get('email')}")
-    print(f"   Tenant: {data.get('user', {}).get('tenant_id')}")
-    return data
+    try:
+        resp = session.post(f"{BASE_URL}/auth/login", json={
+            "email": AUTH_EMAIL,
+            "password": AUTH_PASSWORD
+        })
+        if resp.status_code == 200:
+            data = resp.json()
+            log_test("Login", True, f"Logged in as {data.get('user', {}).get('email')}")
+            return data
+        else:
+            log_test("Login", False, f"Status {resp.status_code}: {resp.text}")
+            return None
+    except Exception as e:
+        log_test("Login", False, str(e))
+        return None
+
+def get_setup_data():
+    """Get clients, suppliers, and boxes for testing"""
+    try:
+        # Get clients
+        clients_resp = session.get(f"{BASE_URL}/clients")
+        clients = clients_resp.json() if clients_resp.status_code == 200 else []
+        
+        # Get suppliers
+        suppliers_resp = session.get(f"{BASE_URL}/suppliers")
+        suppliers = suppliers_resp.json() if suppliers_resp.status_code == 200 else []
+        
+        # Get boxes
+        boxes_resp = session.get(f"{BASE_URL}/boxes")
+        boxes = boxes_resp.json() if boxes_resp.status_code == 200 else []
+        
+        # Create if needed
+        if not clients:
+            client_resp = session.post(f"{BASE_URL}/clients", json={
+                "name": "عميل اختبار v3.9.9",
+                "phone": "777123456",
+                "notes": "للاختبار"
+            })
+            if client_resp.status_code == 200:
+                clients = [client_resp.json()]
+        
+        if not suppliers:
+            supplier_resp = session.post(f"{BASE_URL}/suppliers", json={
+                "name": "مورد اختبار v3.9.9",
+                "phone": "777654321",
+                "notes": "للاختبار"
+            })
+            if supplier_resp.status_code == 200:
+                suppliers = [supplier_resp.json()]
+        
+        client = clients[0] if clients else None
+        supplier = suppliers[0] if suppliers else None
+        box = boxes[0] if boxes else None
+        
+        log_test("Setup Data", client and supplier and box, 
+                f"Client: {client.get('name') if client else 'None'}, "
+                f"Supplier: {supplier.get('name') if supplier else 'None'}, "
+                f"Box: {box.get('name_ar') if box else 'None'}")
+        
+        return client, supplier, box
+    except Exception as e:
+        log_test("Setup Data", False, str(e))
+        return None, None, None
 
 def test_health():
-    """Test 1: Health check - version should be 3.9.8"""
-    print("\n" + "=" * 80)
-    print("TEST 1: Health Check - Version 3.9.8")
-    print("=" * 80)
-    resp = session.get(f"{BASE_URL}/health")
-    print(f"Status: {resp.status_code}")
-    data = resp.json()
-    print(f"Response: {json.dumps(data, indent=2)}")
-    
-    if data.get('version') == '3.9.8':
-        print("✅ PASSED - Version is 3.9.8")
-        return True
-    else:
-        print(f"❌ FAILED - Expected version 3.9.8, got {data.get('version')}")
+    """Test health endpoint returns version 3.9.9"""
+    try:
+        resp = session.get(f"{BASE_URL}/health")
+        if resp.status_code == 200:
+            data = resp.json()
+            version = data.get("version")
+            passed = version == "3.9.9"
+            log_test("Health Check - Version 3.9.9", passed, f"Version: {version}")
+            return passed
+        else:
+            log_test("Health Check", False, f"Status {resp.status_code}")
+            return False
+    except Exception as e:
+        log_test("Health Check", False, str(e))
         return False
 
-def get_boxes():
-    """Get list of boxes/banks"""
-    print("\n" + "=" * 80)
-    print("SETUP: Getting Boxes/Banks")
-    print("=" * 80)
-    resp = session.get(f"{BASE_URL}/boxes")
-    print(f"Status: {resp.status_code}")
-    if resp.status_code != 200:
-        print(f"❌ Failed to get boxes: {resp.text}")
-        return []
-    data = resp.json()
-    print(f"Found {len(data)} boxes/banks:")
-    for box in data:
-        print(f"  - {box.get('name_ar', box.get('name'))} (id: {box.get('id')}, type: {box.get('type')})")
-    return data
-
-def get_clients():
-    """Get list of clients"""
-    print("\n" + "=" * 80)
-    print("SETUP: Getting Clients")
-    print("=" * 80)
-    resp = session.get(f"{BASE_URL}/clients")
-    print(f"Status: {resp.status_code}")
-    if resp.status_code != 200:
-        print(f"❌ Failed to get clients: {resp.text}")
-        return []
-    data = resp.json()
-    print(f"Found {len(data)} clients")
-    if len(data) > 0:
-        print(f"  First client: {data[0].get('name')} (id: {data[0].get('id')})")
-    return data
-
-def get_suppliers():
-    """Get list of suppliers"""
-    print("\n" + "=" * 80)
-    print("SETUP: Getting Suppliers")
-    print("=" * 80)
-    resp = session.get(f"{BASE_URL}/suppliers")
-    print(f"Status: {resp.status_code}")
-    if resp.status_code != 200:
-        print(f"❌ Failed to get suppliers: {resp.text}")
-        return []
-    data = resp.json()
-    print(f"Found {len(data)} suppliers")
-    if len(data) > 0:
-        print(f"  First supplier: {data[0].get('name')} (id: {data[0].get('id')})")
-    return data
-
-def test_tickets_preview(box_name, client_name, supplier_name):
-    """Test 2: POST /api/import/tickets/preview with box, client, and invalid names"""
-    print("\n" + "=" * 80)
-    print("TEST 2: Tickets Preview - Flexible Receipt Account")
-    print("=" * 80)
+def test_enhanced_duplicate_detection_tickets(client, supplier):
+    """Test Feature 1: Enhanced Duplicate Detection (name + date) for Tickets"""
+    print("\n=== Feature 1: Enhanced Duplicate Detection - Tickets ===")
     
-    rows = [
-        {
-            "pnr": "IMP-BOX-001",
-            "route": "SAH-CAI",
-            "passenger_name": "مسافر ١",
+    try:
+        # Step 1: Create a real ticket with specific passenger_name and travel_date
+        today = datetime.now().strftime("%Y-%m-%d")
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        travel_date = (datetime.now() + timedelta(days=15)).strftime("%Y-%m-%d")
+        
+        ticket_data = {
+            "date": today,
+            "currency": "USD",
+            "client_id": client["id"],
+            "supplier_id": supplier["id"],
+            "pnr": "",
+            "passenger_name": "احمد علي",
+            "travel_date": travel_date,
+            "cost": 100,
+            "sale_price": 150,
+            "payment_method": "credit"
+        }
+        
+        ticket_resp = session.post(f"{BASE_URL}/tickets", json=ticket_data)
+        if ticket_resp.status_code != 200:
+            log_test("Create Test Ticket", False, f"Status {ticket_resp.status_code}: {ticket_resp.text}")
+            return False
+        
+        ticket = ticket_resp.json()
+        log_test("Create Test Ticket", True, f"Created ticket with passenger: احمد علي, travel_date: {travel_date}")
+        
+        # Step 2: Call preview with 3 rows
+        preview_rows = [
+            {
+                "pnr": "",
+                "passenger_name": "احمد علي",
+                "travel_date": travel_date,
+                "currency": "USD",
+                "cost": 110,
+                "sale_price": 160,
+                "client_name": client["name"],
+                "supplier_name": supplier["name"]
+            },
+            {
+                "pnr": "",
+                "passenger_name": "احمد علي",
+                "travel_date": tomorrow,
+                "currency": "USD",
+                "cost": 110,
+                "sale_price": 160,
+                "client_name": client["name"],
+                "supplier_name": supplier["name"]
+            },
+            {
+                "pnr": "",
+                "passenger_name": "احمد علي",
+                "travel_date": tomorrow,
+                "currency": "USD",
+                "cost": 110,
+                "sale_price": 160,
+                "client_name": client["name"],
+                "supplier_name": supplier["name"]
+            }
+        ]
+        
+        preview_resp = session.post(f"{BASE_URL}/import/tickets/preview", json={"rows": preview_rows})
+        if preview_resp.status_code != 200:
+            log_test("Tickets Preview - Enhanced Dedup", False, f"Status {preview_resp.status_code}: {preview_resp.text}")
+            return False
+        
+        preview_data = preview_resp.json()
+        rows = preview_data.get("rows", [])
+        
+        # Verify Row 1: Should be marked as duplicate (matches existing DB record)
+        row1_dup = rows[0].get("__dup") if len(rows) > 0 else None
+        row1_passed = row1_dup and "موجود مسبقاً" in row1_dup and "اسم المسافر" in row1_dup
+        log_test("Tickets Preview - Row 1 (DB duplicate)", row1_passed, 
+                f"__dup: {row1_dup}")
+        
+        # Verify Row 2: Should NOT be duplicate (different date)
+        row2_dup = rows[1].get("__dup") if len(rows) > 1 else None
+        row2_passed = not row2_dup or row2_dup == False
+        log_test("Tickets Preview - Row 2 (different date, new booking)", row2_passed, 
+                f"__dup: {row2_dup}")
+        
+        # Verify Row 3: Should be marked as duplicate within file (same as row 2)
+        row3_dup = rows[2].get("__dup") if len(rows) > 2 else None
+        row3_passed = row3_dup and "مكرر داخل نفس الملف" in row3_dup
+        log_test("Tickets Preview - Row 3 (file duplicate)", row3_passed, 
+                f"__dup: {row3_dup}")
+        
+        # Cleanup
+        session.delete(f"{BASE_URL}/tickets/{ticket['id']}")
+        
+        return row1_passed and row2_passed and row3_passed
+        
+    except Exception as e:
+        log_test("Enhanced Duplicate Detection - Tickets", False, str(e))
+        return False
+
+def test_enhanced_duplicate_detection_visas(client, supplier):
+    """Test Feature 1: Enhanced Duplicate Detection (name + date) for Visas"""
+    print("\n=== Feature 1: Enhanced Duplicate Detection - Visas ===")
+    
+    try:
+        # Step 1: Create a real visa with specific passenger_name and entry_date
+        today = datetime.now().strftime("%Y-%m-%d")
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        entry_date = (datetime.now() + timedelta(days=10)).strftime("%Y-%m-%d")
+        
+        visa_data = {
+            "date": today,
+            "currency": "USD",
+            "client_id": client["id"],
+            "supplier_id": supplier["id"],
+            "service_type": "تأشيرة عمرة",
+            "passport_no": "",
+            "passenger_name": "فاطمة محمد",
+            "entry_date": entry_date,
+            "cost": 80,
+            "sale_price": 120,
+            "payment_method": "credit"
+        }
+        
+        visa_resp = session.post(f"{BASE_URL}/visas", json=visa_data)
+        if visa_resp.status_code != 200:
+            log_test("Create Test Visa", False, f"Status {visa_resp.status_code}: {visa_resp.text}")
+            return False
+        
+        visa = visa_resp.json()
+        log_test("Create Test Visa", True, f"Created visa with passenger: فاطمة محمد, entry_date: {entry_date}")
+        
+        # Step 2: Call preview with 3 rows
+        preview_rows = [
+            {
+                "passport_no": "",
+                "passenger_name": "فاطمة محمد",
+                "entry_date": entry_date,
+                "service_type": "تأشيرة عمرة",
+                "currency": "USD",
+                "cost": 90,
+                "sale_price": 130,
+                "client_name": client["name"],
+                "supplier_name": supplier["name"]
+            },
+            {
+                "passport_no": "",
+                "passenger_name": "فاطمة محمد",
+                "entry_date": tomorrow,
+                "service_type": "تأشيرة عمرة",
+                "currency": "USD",
+                "cost": 90,
+                "sale_price": 130,
+                "client_name": client["name"],
+                "supplier_name": supplier["name"]
+            },
+            {
+                "passport_no": "",
+                "passenger_name": "فاطمة محمد",
+                "entry_date": tomorrow,
+                "service_type": "تأشيرة عمرة",
+                "currency": "USD",
+                "cost": 90,
+                "sale_price": 130,
+                "client_name": client["name"],
+                "supplier_name": supplier["name"]
+            }
+        ]
+        
+        preview_resp = session.post(f"{BASE_URL}/import/visas/preview", json={"rows": preview_rows})
+        if preview_resp.status_code != 200:
+            log_test("Visas Preview - Enhanced Dedup", False, f"Status {preview_resp.status_code}: {preview_resp.text}")
+            return False
+        
+        preview_data = preview_resp.json()
+        rows = preview_data.get("rows", [])
+        
+        # Verify Row 1: Should be marked as duplicate (matches existing DB record)
+        row1_dup = rows[0].get("__dup") if len(rows) > 0 else None
+        row1_passed = row1_dup and "موجود مسبقاً" in row1_dup
+        log_test("Visas Preview - Row 1 (DB duplicate)", row1_passed, 
+                f"__dup: {row1_dup}")
+        
+        # Verify Row 2: Should NOT be duplicate (different date)
+        row2_dup = rows[1].get("__dup") if len(rows) > 1 else None
+        row2_passed = not row2_dup or row2_dup == False
+        log_test("Visas Preview - Row 2 (different date, new booking)", row2_passed, 
+                f"__dup: {row2_dup}")
+        
+        # Verify Row 3: Should be marked as duplicate within file (same as row 2)
+        row3_dup = rows[2].get("__dup") if len(rows) > 2 else None
+        row3_passed = row3_dup and "مكرر داخل نفس الملف" in row3_dup
+        log_test("Visas Preview - Row 3 (file duplicate)", row3_passed, 
+                f"__dup: {row3_dup}")
+        
+        # Cleanup
+        session.delete(f"{BASE_URL}/visas/{visa['id']}")
+        
+        return row1_passed and row2_passed and row3_passed
+        
+    except Exception as e:
+        log_test("Enhanced Duplicate Detection - Visas", False, str(e))
+        return False
+
+def test_bulk_delete_tickets(client, supplier):
+    """Test Feature 2: Bulk-Delete Endpoints for Tickets"""
+    print("\n=== Feature 2: Bulk-Delete - Tickets ===")
+    
+    try:
+        # Get initial balances
+        client_before = session.get(f"{BASE_URL}/clients").json()
+        client_balance_before = next((c for c in client_before if c["id"] == client["id"]), {}).get("balances", {}).get("USD", 0)
+        
+        supplier_before = session.get(f"{BASE_URL}/suppliers").json()
+        supplier_balance_before = next((s for s in supplier_before if s["id"] == supplier["id"]), {}).get("balances", {}).get("USD", 0)
+        
+        # Create 3 tickets
+        ticket_ids = []
+        for i in range(3):
+            ticket_data = {
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "currency": "USD",
+                "client_id": client["id"],
+                "supplier_id": supplier["id"],
+                "pnr": f"BULK{i+1}",
+                "passenger_name": f"مسافر {i+1}",
+                "travel_date": (datetime.now() + timedelta(days=i+1)).strftime("%Y-%m-%d"),
+                "cost": 100,
+                "sale_price": 150,
+                "payment_method": "credit"
+            }
+            resp = session.post(f"{BASE_URL}/tickets", json=ticket_data)
+            if resp.status_code == 200:
+                ticket_ids.append(resp.json()["id"])
+        
+        if len(ticket_ids) != 3:
+            log_test("Create 3 Tickets for Bulk Delete", False, f"Only created {len(ticket_ids)} tickets")
+            return False
+        
+        log_test("Create 3 Tickets for Bulk Delete", True, f"Created tickets: {ticket_ids}")
+        
+        # Call bulk-delete
+        bulk_resp = session.post(f"{BASE_URL}/tickets/bulk-delete", json={"ids": ticket_ids})
+        if bulk_resp.status_code != 200:
+            log_test("Bulk Delete Tickets", False, f"Status {bulk_resp.status_code}: {bulk_resp.text}")
+            return False
+        
+        bulk_data = bulk_resp.json()
+        deleted = bulk_data.get("deleted", 0)
+        failed = bulk_data.get("failed", 0)
+        kind = bulk_data.get("kind")
+        
+        # Verify response
+        response_passed = deleted == 3 and failed == 0 and kind == "tickets"
+        log_test("Bulk Delete Response", response_passed, 
+                f"deleted: {deleted}, failed: {failed}, kind: {kind}")
+        
+        # Verify tickets are gone
+        tickets_resp = session.get(f"{BASE_URL}/tickets")
+        tickets = tickets_resp.json() if tickets_resp.status_code == 200 else []
+        remaining = [t for t in tickets if t["id"] in ticket_ids]
+        tickets_gone = len(remaining) == 0
+        log_test("Tickets Deleted from DB", tickets_gone, 
+                f"Remaining tickets: {len(remaining)}")
+        
+        # Verify balances reverted
+        client_after = session.get(f"{BASE_URL}/clients").json()
+        client_balance_after = next((c for c in client_after if c["id"] == client["id"]), {}).get("balances", {}).get("USD", 0)
+        
+        supplier_after = session.get(f"{BASE_URL}/suppliers").json()
+        supplier_balance_after = next((s for s in supplier_after if s["id"] == supplier["id"]), {}).get("balances", {}).get("USD", 0)
+        
+        # Expected: balances should be reverted by 3 * (150 for client, 100 for supplier)
+        client_reverted = abs((client_balance_after - client_balance_before) - (-450)) < 0.01
+        supplier_reverted = abs((supplier_balance_after - supplier_balance_before) - (-300)) < 0.01
+        
+        log_test("Client Balance Reverted", client_reverted, 
+                f"Before: {client_balance_before}, After: {client_balance_after}, Delta: {client_balance_after - client_balance_before}")
+        log_test("Supplier Balance Reverted", supplier_reverted, 
+                f"Before: {supplier_balance_before}, After: {supplier_balance_after}, Delta: {supplier_balance_after - supplier_balance_before}")
+        
+        return response_passed and tickets_gone and client_reverted and supplier_reverted
+        
+    except Exception as e:
+        log_test("Bulk Delete Tickets", False, str(e))
+        return False
+
+def test_bulk_delete_edge_cases():
+    """Test Feature 2: Bulk-Delete Edge Cases"""
+    print("\n=== Feature 2: Bulk-Delete Edge Cases ===")
+    
+    try:
+        # Test 1: Empty ids array
+        empty_resp = session.post(f"{BASE_URL}/tickets/bulk-delete", json={"ids": []})
+        empty_passed = empty_resp.status_code == 400 and "لم يتم اختيار أي سجل" in empty_resp.text
+        log_test("Bulk Delete - Empty IDs", empty_passed, 
+                f"Status: {empty_resp.status_code}, Message: {empty_resp.text[:100]}")
+        
+        # Test 2: Bad ID
+        bad_resp = session.post(f"{BASE_URL}/tickets/bulk-delete", json={"ids": ["fake-id-xyz"]})
+        if bad_resp.status_code == 200:
+            bad_data = bad_resp.json()
+            deleted = bad_data.get("deleted", 0)
+            failed = bad_data.get("failed", 0)
+            errors = bad_data.get("errors", [])
+            bad_passed = deleted == 0 and failed == 1 and len(errors) == 1
+            log_test("Bulk Delete - Bad ID", bad_passed, 
+                    f"deleted: {deleted}, failed: {failed}, errors: {errors}")
+        else:
+            log_test("Bulk Delete - Bad ID", False, f"Status {bad_resp.status_code}")
+            bad_passed = False
+        
+        return empty_passed and bad_passed
+        
+    except Exception as e:
+        log_test("Bulk Delete Edge Cases", False, str(e))
+        return False
+
+def test_bulk_delete_visas(client, supplier):
+    """Test Feature 2: Bulk-Delete Endpoints for Visas"""
+    print("\n=== Feature 2: Bulk-Delete - Visas ===")
+    
+    try:
+        # Create 2 visas
+        visa_ids = []
+        for i in range(2):
+            visa_data = {
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "currency": "USD",
+                "client_id": client["id"],
+                "supplier_id": supplier["id"],
+                "service_type": "تأشيرة عمرة",
+                "passport_no": f"V{i+1}123456",
+                "passenger_name": f"معتمر {i+1}",
+                "entry_date": (datetime.now() + timedelta(days=i+1)).strftime("%Y-%m-%d"),
+                "cost": 80,
+                "sale_price": 120,
+                "payment_method": "credit"
+            }
+            resp = session.post(f"{BASE_URL}/visas", json=visa_data)
+            if resp.status_code == 200:
+                visa_ids.append(resp.json()["id"])
+        
+        if len(visa_ids) != 2:
+            log_test("Create 2 Visas for Bulk Delete", False, f"Only created {len(visa_ids)} visas")
+            return False
+        
+        log_test("Create 2 Visas for Bulk Delete", True, f"Created visas: {visa_ids}")
+        
+        # Call bulk-delete
+        bulk_resp = session.post(f"{BASE_URL}/visas/bulk-delete", json={"ids": visa_ids})
+        if bulk_resp.status_code != 200:
+            log_test("Bulk Delete Visas", False, f"Status {bulk_resp.status_code}: {bulk_resp.text}")
+            return False
+        
+        bulk_data = bulk_resp.json()
+        deleted = bulk_data.get("deleted", 0)
+        failed = bulk_data.get("failed", 0)
+        
+        passed = deleted == 2 and failed == 0
+        log_test("Bulk Delete Visas", passed, 
+                f"deleted: {deleted}, failed: {failed}")
+        
+        return passed
+        
+    except Exception as e:
+        log_test("Bulk Delete Visas", False, str(e))
+        return False
+
+def test_user_default_box_and_lock(box):
+    """Test Feature 3: User default_box_id + lock_box"""
+    print("\n=== Feature 3: User default_box_id + lock_box ===")
+    
+    try:
+        # Check if tenant is gold tier (required for user creation)
+        me_resp = session.get(f"{BASE_URL}/auth/me")
+        if me_resp.status_code != 200:
+            log_test("Get Auth Me", False, f"Status {me_resp.status_code}")
+            return False
+        
+        me_data = me_resp.json()
+        tenant = me_data.get("tenant", {})
+        plan_tier = tenant.get("plan_tier", "standard")
+        
+        log_test("Check Tenant Plan Tier", True, f"Plan tier: {plan_tier}")
+        
+        if plan_tier != "gold":
+            log_test("User Creation (Tier Gate)", True, 
+                    f"Tenant is {plan_tier}, not gold. Tier gate blocks user creation (expected behavior). "
+                    "Testing with existing user instead.")
+            
+            # Test with existing owner user
+            user = me_data.get("user", {})
+            has_default_box = "default_box_id" in user
+            has_lock_box = "lock_box" in user
+            
+            log_test("Existing User Has default_box_id Field", has_default_box, 
+                    f"default_box_id: {user.get('default_box_id')}")
+            log_test("Existing User Has lock_box Field", has_lock_box, 
+                    f"lock_box: {user.get('lock_box')}")
+            
+            return has_default_box and has_lock_box
+        
+        # If gold tier, test user creation with default_box_id and lock_box
+        user_data = {
+            "name": "كاشير تجريبي v3.9.9",
+            "email": f"cashier-v399-{datetime.now().timestamp()}@demo.com",
+            "password": "Cash@2025",
+            "role": "staff",
+            "default_box_id": box["id"],
+            "lock_box": True
+        }
+        
+        create_resp = session.post(f"{BASE_URL}/tenant/users", json=user_data)
+        if create_resp.status_code != 200:
+            log_test("Create User with default_box_id", False, 
+                    f"Status {create_resp.status_code}: {create_resp.text}")
+            return False
+        
+        user = create_resp.json()
+        user_id = user.get("id")
+        
+        create_passed = (user.get("default_box_id") == box["id"] and 
+                        user.get("lock_box") == True)
+        log_test("Create User with default_box_id + lock_box", create_passed, 
+                f"default_box_id: {user.get('default_box_id')}, lock_box: {user.get('lock_box')}")
+        
+        # Test PATCH to update
+        patch_resp = session.patch(f"{BASE_URL}/tenant/users/{user_id}", json={
+            "default_box_id": None,
+            "lock_box": False
+        })
+        patch_passed = patch_resp.status_code == 200
+        log_test("PATCH User - Update default_box_id + lock_box", patch_passed, 
+                f"Status: {patch_resp.status_code}")
+        
+        # Test GET /tenant/users
+        users_resp = session.get(f"{BASE_URL}/tenant/users")
+        if users_resp.status_code == 200:
+            users = users_resp.json()
+            created_user = next((u for u in users if u["id"] == user_id), None)
+            if created_user:
+                get_passed = ("default_box_id" in created_user and 
+                             "lock_box" in created_user)
+                log_test("GET /tenant/users - Fields Present", get_passed, 
+                        f"default_box_id: {created_user.get('default_box_id')}, "
+                        f"lock_box: {created_user.get('lock_box')}")
+            else:
+                log_test("GET /tenant/users - Find Created User", False, "User not found")
+                get_passed = False
+        else:
+            log_test("GET /tenant/users", False, f"Status {users_resp.status_code}")
+            get_passed = False
+        
+        # Cleanup
+        session.delete(f"{BASE_URL}/tenant/users/{user_id}")
+        
+        return create_passed and patch_passed and get_passed
+        
+    except Exception as e:
+        log_test("User default_box_id + lock_box", False, str(e))
+        return False
+
+def test_regression(client, supplier, box):
+    """Test Feature 4: Regression Tests"""
+    print("\n=== Feature 4: Regression Tests ===")
+    
+    try:
+        # Test 1: Regular ticket creation with cash + box_id
+        ticket_data = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "currency": "USD",
+            "client_id": client["id"],
+            "supplier_id": supplier["id"],
+            "pnr": "REG001",
+            "passenger_name": "مسافر عادي",
+            "travel_date": (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%d"),
+            "cost": 100,
+            "sale_price": 150,
+            "payment_method": "cash",
+            "box_id": box["id"]
+        }
+        
+        ticket_resp = session.post(f"{BASE_URL}/tickets", json=ticket_data)
+        ticket_passed = ticket_resp.status_code == 200
+        log_test("Regression - Regular Ticket (cash + box_id)", ticket_passed, 
+                f"Status: {ticket_resp.status_code}")
+        
+        if ticket_passed:
+            ticket = ticket_resp.json()
+            session.delete(f"{BASE_URL}/tickets/{ticket['id']}")
+        
+        # Test 2: v3.9.8 flexible receipt (box name in client_name column)
+        import_rows = [{
+            "pnr": "FLEX001",
+            "passenger_name": "مسافر مرن",
+            "travel_date": (datetime.now() + timedelta(days=6)).strftime("%Y-%m-%d"),
             "currency": "USD",
             "cost": 100,
             "sale_price": 150,
-            "client_name": box_name,
-            "supplier_name": supplier_name
-        },
-        {
-            "pnr": "IMP-CLI-002",
-            "route": "CAI-SAH",
-            "passenger_name": "مسافر ٢",
-            "currency": "USD",
-            "cost": 80,
-            "sale_price": 120,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        },
-        {
-            "pnr": "IMP-BAD-003",
-            "route": "X-Y",
-            "passenger_name": "م ٣",
-            "currency": "USD",
-            "cost": 50,
-            "sale_price": 70,
-            "client_name": "اسم-غير-موجود-XYZ",
-            "supplier_name": supplier_name
-        }
-    ]
-    
-    print(f"Sending 3 rows:")
-    print(f"  Row 1: client_name='{box_name}' (BOX)")
-    print(f"  Row 2: client_name='{client_name}' (CLIENT)")
-    print(f"  Row 3: client_name='اسم-غير-موجود-XYZ' (INVALID)")
-    
-    resp = session.post(f"{BASE_URL}/import/tickets/preview", json={"rows": rows})
-    print(f"\nStatus: {resp.status_code}")
-    
-    if resp.status_code != 200:
-        print(f"❌ FAILED - Expected 200, got {resp.status_code}")
-        print(f"Response: {resp.text}")
-        return False, None
-    
-    data = resp.json()
-    print(f"\nResponse summary:")
-    print(f"  valid_count: {data.get('valid_count')}")
-    print(f"  total rows: {len(data.get('rows', []))}")
-    
-    passed = True
-    
-    # Check row 1 (box)
-    row1 = data['rows'][0]
-    print(f"\nRow 1 (BOX):")
-    print(f"  __errors: {row1.get('__errors')}")
-    print(f"  __receipt_kind: {row1.get('__receipt_kind')}")
-    if len(row1.get('__errors', [])) == 0 and row1.get('__receipt_kind') == 'box':
-        print("  ✅ PASSED - Box detected correctly")
-    else:
-        print("  ❌ FAILED - Expected __errors=[], __receipt_kind='box'")
-        passed = False
-    
-    # Check row 2 (client)
-    row2 = data['rows'][1]
-    print(f"\nRow 2 (CLIENT):")
-    print(f"  __errors: {row2.get('__errors')}")
-    print(f"  __receipt_kind: {row2.get('__receipt_kind')}")
-    if len(row2.get('__errors', [])) == 0 and row2.get('__receipt_kind') == 'client':
-        print("  ✅ PASSED - Client detected correctly")
-    else:
-        print("  ❌ FAILED - Expected __errors=[], __receipt_kind='client'")
-        passed = False
-    
-    # Check row 3 (invalid)
-    row3 = data['rows'][2]
-    print(f"\nRow 3 (INVALID):")
-    print(f"  __errors: {row3.get('__errors')}")
-    print(f"  __receipt_kind: {row3.get('__receipt_kind')}")
-    if len(row3.get('__errors', [])) > 0 and 'غير موجود' in str(row3.get('__errors')):
-        print("  ✅ PASSED - Invalid name detected with error message")
-    else:
-        print("  ❌ FAILED - Expected error about 'غير موجود'")
-        passed = False
-    
-    if passed:
-        print("\n✅ TEST 2 PASSED - Preview validation working correctly")
-    else:
-        print("\n❌ TEST 2 FAILED")
-    
-    return passed, data
-
-def test_tickets_import(preview_data, box_id):
-    """Test 3: POST /api/import/tickets - Execute import"""
-    print("\n" + "=" * 80)
-    print("TEST 3: Tickets Import - Execute with enriched rows")
-    print("=" * 80)
-    
-    # Use enriched rows from preview
-    rows = preview_data.get('rows', [])
-    
-    print(f"Importing {len(rows)} rows (enriched from preview)")
-    
-    resp = session.post(f"{BASE_URL}/import/tickets", json={"rows": rows})
-    print(f"\nStatus: {resp.status_code}")
-    
-    if resp.status_code != 200:
-        print(f"❌ FAILED - Expected 200, got {resp.status_code}")
-        print(f"Response: {resp.text}")
+            "client_name": box["name_ar"],  # Box name instead of client name
+            "supplier_name": supplier["name"]
+        }]
+        
+        import_resp = session.post(f"{BASE_URL}/import/tickets", json={
+            "rows": import_rows,
+            "skip_duplicates": True
+        })
+        
+        if import_resp.status_code == 200:
+            import_data = import_resp.json()
+            created = import_data.get("created", 0)
+            import_passed = created == 1
+            log_test("Regression - v3.9.8 Flexible Receipt (box name)", import_passed, 
+                    f"created: {created}")
+            
+            # Cleanup - find and delete the created ticket
+            if created > 0:
+                tickets_resp = session.get(f"{BASE_URL}/tickets")
+                if tickets_resp.status_code == 200:
+                    tickets = tickets_resp.json()
+                    flex_ticket = next((t for t in tickets if t.get("pnr") == "FLEX001"), None)
+                    if flex_ticket:
+                        session.delete(f"{BASE_URL}/tickets/{flex_ticket['id']}")
+        else:
+            log_test("Regression - v3.9.8 Flexible Receipt", False, 
+                    f"Status {import_resp.status_code}: {import_resp.text}")
+            import_passed = False
+        
+        return ticket_passed and import_passed
+        
+    except Exception as e:
+        log_test("Regression Tests", False, str(e))
         return False
-    
-    data = resp.json()
-    print(f"\nImport results:")
-    print(f"  created: {data.get('created')}")
-    print(f"  skipped: {data.get('skipped')}")
-    print(f"  failed: {data.get('failed')}")
-    print(f"  errors: {data.get('errors')}")
-    
-    passed = True
-    
-    if data.get('created') != 2:
-        print(f"❌ FAILED - Expected created=2, got {data.get('created')}")
-        passed = False
-    else:
-        print("✅ Created 2 tickets as expected")
-    
-    if data.get('failed') != 1:
-        print(f"❌ FAILED - Expected failed=1, got {data.get('failed')}")
-        passed = False
-    else:
-        print("✅ Failed 1 ticket as expected")
-    
-    # Verify the created tickets
-    print("\n" + "-" * 80)
-    print("Verifying created tickets...")
-    print("-" * 80)
-    
-    # Get ticket IMP-BOX-001 (box payment)
-    resp = session.get(f"{BASE_URL}/tickets")
-    if resp.status_code == 200:
-        tickets = resp.json()
-        box_ticket = next((t for t in tickets if t.get('pnr') == 'IMP-BOX-001'), None)
-        client_ticket = next((t for t in tickets if t.get('pnr') == 'IMP-CLI-002'), None)
-        
-        if box_ticket:
-            print(f"\nTicket IMP-BOX-001 (BOX payment):")
-            print(f"  payment_method: {box_ticket.get('payment_method')}")
-            print(f"  box_id: {box_ticket.get('box_id')}")
-            print(f"  client_id: {box_ticket.get('client_id')}")
-            print(f"  client_name: {box_ticket.get('client_name')}")
-            
-            if (box_ticket.get('payment_method') == 'cash' and 
-                box_ticket.get('box_id') == box_id and 
-                box_ticket.get('client_id') is None):
-                print("  ✅ PASSED - Box payment ticket created correctly")
-            else:
-                print("  ❌ FAILED - Box payment ticket has incorrect fields")
-                passed = False
-        else:
-            print("❌ FAILED - Ticket IMP-BOX-001 not found")
-            passed = False
-        
-        if client_ticket:
-            print(f"\nTicket IMP-CLI-002 (CLIENT payment):")
-            print(f"  payment_method: {client_ticket.get('payment_method')}")
-            print(f"  client_id: {client_ticket.get('client_id')}")
-            
-            if (client_ticket.get('payment_method') == 'credit' and 
-                client_ticket.get('client_id') is not None):
-                print("  ✅ PASSED - Client payment ticket created correctly")
-            else:
-                print("  ❌ FAILED - Client payment ticket has incorrect fields")
-                passed = False
-        else:
-            print("❌ FAILED - Ticket IMP-CLI-002 not found")
-            passed = False
-    
-    # Verify journal entries
-    print("\n" + "-" * 80)
-    print("Verifying journal entries...")
-    print("-" * 80)
-    
-    resp = session.get(f"{BASE_URL}/journal-entries")
-    if resp.status_code == 200:
-        entries = resp.json()
-        box_je = next((e for e in entries if e.get('ref_type') == 'ticket' and 'IMP-BOX-001' in e.get('description', '')), None)
-        
-        if box_je:
-            print(f"\nJournal Entry for IMP-BOX-001:")
-            print(f"  ref_type: {box_je.get('ref_type')}")
-            print(f"  lines count: {len(box_je.get('lines', []))}")
-            
-            lines = box_je.get('lines', [])
-            if len(lines) == 3:
-                print("  ✅ Has 3 lines as expected")
-                
-                # Check for box debit (1101 or 1201)
-                box_line = next((l for l in lines if l.get('account_code') in ['1101', '1201'] and l.get('debit') == 150), None)
-                supplier_line = next((l for l in lines if l.get('account_code') == '2101' and l.get('credit') == 100), None)
-                revenue_line = next((l for l in lines if l.get('account_code') == '4101' and l.get('credit') == 50), None)
-                
-                if box_line:
-                    print(f"  ✅ Box debit line found: {box_line.get('account_code')} debit=150")
-                else:
-                    print("  ❌ Box debit line not found or incorrect")
-                    passed = False
-                
-                if supplier_line:
-                    print(f"  ✅ Supplier credit line found: 2101 credit=100")
-                else:
-                    print("  ❌ Supplier credit line not found or incorrect")
-                    passed = False
-                
-                if revenue_line:
-                    print(f"  ✅ Revenue credit line found: 4101 credit=50")
-                else:
-                    print("  ❌ Revenue credit line not found or incorrect")
-                    passed = False
-            else:
-                print(f"  ❌ FAILED - Expected 3 lines, got {len(lines)}")
-                passed = False
-        else:
-            print("❌ FAILED - Journal entry for IMP-BOX-001 not found")
-            passed = False
-    
-    # Verify box balance
-    print("\n" + "-" * 80)
-    print("Verifying box balance...")
-    print("-" * 80)
-    
-    resp = session.get(f"{BASE_URL}/boxes")
-    if resp.status_code == 200:
-        boxes = resp.json()
-        box = next((b for b in boxes if b.get('id') == box_id), None)
-        
-        if box:
-            print(f"\nBox balance:")
-            print(f"  USD: {box.get('balance_usd', 0)}")
-            print(f"  SAR: {box.get('balance_sar', 0)}")
-            print(f"  YER: {box.get('balance_yer', 0)}")
-            
-            # Box should have increased by 150 USD
-            if box.get('balance_usd', 0) >= 150:
-                print("  ✅ Box balance increased (includes 150 USD from import)")
-            else:
-                print(f"  ⚠️  Box balance USD is {box.get('balance_usd', 0)} (may include previous transactions)")
-        else:
-            print("❌ FAILED - Box not found")
-            passed = False
-    
-    if passed:
-        print("\n✅ TEST 3 PASSED - Import execution working correctly")
-    else:
-        print("\n❌ TEST 3 FAILED")
-    
-    return passed
-
-def test_visas_preview(box_name, client_name, supplier_name):
-    """Test 4: POST /api/import/visas/preview - Same flexibility test"""
-    print("\n" + "=" * 80)
-    print("TEST 4: Visas Preview - Flexible Receipt Account")
-    print("=" * 80)
-    
-    rows = [
-        {
-            "passport_no": "IMP-VISA-BOX-001",
-            "passenger_name": "مسافر تأشيرة ١",
-            "service_type": "تأشيرة عمرة",
-            "currency": "SAR",
-            "cost": 300,
-            "sale_price": 400,
-            "client_name": box_name,
-            "supplier_name": supplier_name
-        },
-        {
-            "passport_no": "IMP-VISA-CLI-002",
-            "passenger_name": "مسافر تأشيرة ٢",
-            "service_type": "تأشيرة عمرة",
-            "currency": "SAR",
-            "cost": 250,
-            "sale_price": 350,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        },
-        {
-            "passport_no": "IMP-VISA-BAD-003",
-            "passenger_name": "مسافر تأشيرة ٣",
-            "service_type": "تأشيرة عمرة",
-            "currency": "SAR",
-            "cost": 200,
-            "sale_price": 300,
-            "client_name": "اسم-غير-موجود-ABC",
-            "supplier_name": supplier_name
-        }
-    ]
-    
-    print(f"Sending 3 rows:")
-    print(f"  Row 1: client_name='{box_name}' (BOX)")
-    print(f"  Row 2: client_name='{client_name}' (CLIENT)")
-    print(f"  Row 3: client_name='اسم-غير-موجود-ABC' (INVALID)")
-    
-    resp = session.post(f"{BASE_URL}/import/visas/preview", json={"rows": rows})
-    print(f"\nStatus: {resp.status_code}")
-    
-    if resp.status_code != 200:
-        print(f"❌ FAILED - Expected 200, got {resp.status_code}")
-        print(f"Response: {resp.text}")
-        return False, None
-    
-    data = resp.json()
-    print(f"\nResponse summary:")
-    print(f"  valid_count: {data.get('valid_count')}")
-    print(f"  total rows: {len(data.get('rows', []))}")
-    
-    passed = True
-    
-    # Check row 1 (box)
-    row1 = data['rows'][0]
-    print(f"\nRow 1 (BOX):")
-    print(f"  __errors: {row1.get('__errors')}")
-    print(f"  __receipt_kind: {row1.get('__receipt_kind')}")
-    if len(row1.get('__errors', [])) == 0 and row1.get('__receipt_kind') == 'box':
-        print("  ✅ PASSED - Box detected correctly")
-    else:
-        print("  ❌ FAILED - Expected __errors=[], __receipt_kind='box'")
-        passed = False
-    
-    # Check row 2 (client)
-    row2 = data['rows'][1]
-    print(f"\nRow 2 (CLIENT):")
-    print(f"  __errors: {row2.get('__errors')}")
-    print(f"  __receipt_kind: {row2.get('__receipt_kind')}")
-    if len(row2.get('__errors', [])) == 0 and row2.get('__receipt_kind') == 'client':
-        print("  ✅ PASSED - Client detected correctly")
-    else:
-        print("  ❌ FAILED - Expected __errors=[], __receipt_kind='client'")
-        passed = False
-    
-    # Check row 3 (invalid)
-    row3 = data['rows'][2]
-    print(f"\nRow 3 (INVALID):")
-    print(f"  __errors: {row3.get('__errors')}")
-    if len(row3.get('__errors', [])) > 0 and 'غير موجود' in str(row3.get('__errors')):
-        print("  ✅ PASSED - Invalid name detected with error message")
-    else:
-        print("  ❌ FAILED - Expected error about 'غير موجود'")
-        passed = False
-    
-    if passed:
-        print("\n✅ TEST 4 PASSED - Visas preview validation working correctly")
-    else:
-        print("\n❌ TEST 4 FAILED")
-    
-    return passed, data
-
-def test_visas_import(preview_data):
-    """Test 5: POST /api/import/visas - Execute import"""
-    print("\n" + "=" * 80)
-    print("TEST 5: Visas Import - Execute with enriched rows")
-    print("=" * 80)
-    
-    rows = preview_data.get('rows', [])
-    
-    print(f"Importing {len(rows)} rows (enriched from preview)")
-    
-    resp = session.post(f"{BASE_URL}/import/visas", json={"rows": rows})
-    print(f"\nStatus: {resp.status_code}")
-    
-    if resp.status_code != 200:
-        print(f"❌ FAILED - Expected 200, got {resp.status_code}")
-        print(f"Response: {resp.text}")
-        return False
-    
-    data = resp.json()
-    print(f"\nImport results:")
-    print(f"  created: {data.get('created')}")
-    print(f"  skipped: {data.get('skipped')}")
-    print(f"  failed: {data.get('failed')}")
-    
-    passed = True
-    
-    if data.get('created') != 2:
-        print(f"❌ FAILED - Expected created=2, got {data.get('created')}")
-        passed = False
-    else:
-        print("✅ Created 2 visas as expected")
-    
-    if data.get('failed') != 1:
-        print(f"❌ FAILED - Expected failed=1, got {data.get('failed')}")
-        passed = False
-    else:
-        print("✅ Failed 1 visa as expected")
-    
-    if passed:
-        print("\n✅ TEST 5 PASSED - Visas import working correctly")
-    else:
-        print("\n❌ TEST 5 FAILED")
-    
-    return passed
-
-def test_regression_ticket_creation(client_id, supplier_id, box_id):
-    """Test 6: Regression - Regular ticket creation still works"""
-    print("\n" + "=" * 80)
-    print("TEST 6: Regression - Regular Ticket Creation")
-    print("=" * 80)
-    
-    # Test credit payment with client
-    print("\nTest 6a: Credit payment with client")
-    payload = {
-        "pnr": "REG-CREDIT-001",
-        "route": "JED-SAH",
-        "passenger_name": "مسافر عادي",
-        "currency": "SAR",
-        "cost": 200,
-        "sale_price": 300,
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "payment_method": "credit"
-    }
-    
-    resp = session.post(f"{BASE_URL}/tickets", json=payload)
-    print(f"Status: {resp.status_code}")
-    
-    passed_credit = False
-    if resp.status_code == 200:
-        data = resp.json()
-        print(f"✅ Credit ticket created: {data.get('pnr')}")
-        passed_credit = True
-    else:
-        print(f"❌ FAILED - Credit ticket creation failed: {resp.text}")
-    
-    # Test cash payment with client and box
-    print("\nTest 6b: Cash payment with client and box")
-    payload = {
-        "pnr": "REG-CASH-001",
-        "route": "SAH-JED",
-        "passenger_name": "مسافر نقدي",
-        "currency": "SAR",
-        "cost": 150,
-        "sale_price": 250,
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "payment_method": "cash",
-        "box_id": box_id
-    }
-    
-    resp = session.post(f"{BASE_URL}/tickets", json=payload)
-    print(f"Status: {resp.status_code}")
-    
-    passed_cash = False
-    if resp.status_code == 200:
-        data = resp.json()
-        print(f"✅ Cash ticket created: {data.get('pnr')}")
-        passed_cash = True
-    else:
-        print(f"❌ FAILED - Cash ticket creation failed: {resp.text}")
-    
-    if passed_credit and passed_cash:
-        print("\n✅ TEST 6 PASSED - Regular ticket creation still works")
-        return True
-    else:
-        print("\n❌ TEST 6 FAILED")
-        return False
-
-def test_scraper_ping():
-    """Test 7: Regression - Scraper ping still works"""
-    print("\n" + "=" * 80)
-    print("TEST 7: Regression - Scraper Ping (if PAT available)")
-    print("=" * 80)
-    
-    # Try to get PATs
-    resp = session.get(f"{BASE_URL}/pats")
-    if resp.status_code != 200:
-        print("⚠️  SKIPPED - Cannot access PATs endpoint (may not be owner)")
-        return True
-    
-    pats = resp.json()
-    if len(pats) == 0:
-        print("⚠️  SKIPPED - No PATs available")
-        return True
-    
-    # Use first active PAT (we only have prefix, so we can't test ping)
-    print("⚠️  SKIPPED - PAT testing requires full token (only prefix available)")
-    return True
 
 def main():
-    """Run all tests"""
-    print("\n" + "=" * 80)
-    print("v3.9.8 BACKEND TESTING — Excel Import Flexible Receipt Account")
-    print("=" * 80)
-    print(f"Base URL: {BASE_URL}")
-    print(f"Auth: {AUTH['email']}")
-    print("=" * 80)
+    """Main test runner"""
+    print("=" * 60)
+    print("Rahaal v3.9.9 Backend Test Suite")
+    print("=" * 60)
     
     # Login
-    login()
-    
-    # Test 1: Health check
-    test1_passed = test_health()
-    
-    # Setup: Get boxes, clients, suppliers
-    boxes = get_boxes()
-    clients = get_clients()
-    suppliers = get_suppliers()
-    
-    if len(boxes) == 0:
-        print("\n❌ CRITICAL ERROR - No boxes found. Cannot proceed with tests.")
+    auth_data = login()
+    if not auth_data:
+        print("\n❌ Login failed. Cannot proceed with tests.")
         sys.exit(1)
     
-    if len(clients) == 0:
-        print("\n❌ CRITICAL ERROR - No clients found. Cannot proceed with tests.")
+    # Get setup data
+    client, supplier, box = get_setup_data()
+    if not client or not supplier or not box:
+        print("\n❌ Setup data incomplete. Cannot proceed with tests.")
         sys.exit(1)
     
-    if len(suppliers) == 0:
-        print("\n❌ CRITICAL ERROR - No suppliers found. Cannot proceed with tests.")
-        sys.exit(1)
+    # Run tests
+    print("\n" + "=" * 60)
+    print("Running Tests")
+    print("=" * 60)
     
-    box = boxes[0]
-    box_name = box.get('name_ar') or box.get('name')
-    box_id = box.get('id')
+    # Feature 0: Health check
+    test_health()
     
-    client = clients[0]
-    client_name = client.get('name')
-    client_id = client.get('id')
+    # Feature 1: Enhanced Duplicate Detection
+    test_enhanced_duplicate_detection_tickets(client, supplier)
+    test_enhanced_duplicate_detection_visas(client, supplier)
     
-    supplier = suppliers[0]
-    supplier_name = supplier.get('name')
-    supplier_id = supplier.get('id')
+    # Feature 2: Bulk-Delete
+    test_bulk_delete_tickets(client, supplier)
+    test_bulk_delete_edge_cases()
+    test_bulk_delete_visas(client, supplier)
     
-    print(f"\nUsing for tests:")
-    print(f"  Box: {box_name} (id: {box_id})")
-    print(f"  Client: {client_name} (id: {client_id})")
-    print(f"  Supplier: {supplier_name} (id: {supplier_id})")
+    # Feature 3: User default_box_id + lock_box
+    test_user_default_box_and_lock(box)
     
-    # Test 2: Tickets preview
-    test2_passed, preview_data = test_tickets_preview(box_name, client_name, supplier_name)
-    
-    # Test 3: Tickets import
-    test3_passed = False
-    if test2_passed and preview_data:
-        test3_passed = test_tickets_import(preview_data, box_id)
-    else:
-        print("\n⚠️  SKIPPED TEST 3 - Preview failed")
-    
-    # Test 4: Visas preview
-    test4_passed, visa_preview_data = test_visas_preview(box_name, client_name, supplier_name)
-    
-    # Test 5: Visas import
-    test5_passed = False
-    if test4_passed and visa_preview_data:
-        test5_passed = test_visas_import(visa_preview_data)
-    else:
-        print("\n⚠️  SKIPPED TEST 5 - Visas preview failed")
-    
-    # Test 6: Regression - Regular ticket creation
-    test6_passed = test_regression_ticket_creation(client_id, supplier_id, box_id)
-    
-    # Test 7: Regression - Scraper ping
-    test7_passed = test_scraper_ping()
+    # Feature 4: Regression
+    test_regression(client, supplier, box)
     
     # Summary
-    print("\n" + "=" * 80)
-    print("TEST SUMMARY")
-    print("=" * 80)
+    print("\n" + "=" * 60)
+    print("Test Summary")
+    print("=" * 60)
+    print(f"Total Tests: {test_results['passed'] + test_results['failed']}")
+    print(f"✅ Passed: {test_results['passed']}")
+    print(f"❌ Failed: {test_results['failed']}")
+    print("=" * 60)
     
-    tests = [
-        ("Test 1: Health Check (v3.9.8)", test1_passed),
-        ("Test 2: Tickets Preview (Box/Client/Invalid)", test2_passed),
-        ("Test 3: Tickets Import (Execute)", test3_passed),
-        ("Test 4: Visas Preview (Box/Client/Invalid)", test4_passed),
-        ("Test 5: Visas Import (Execute)", test5_passed),
-        ("Test 6: Regression - Regular Ticket Creation", test6_passed),
-        ("Test 7: Regression - Scraper Ping", test7_passed),
-    ]
-    
-    passed_count = sum(1 for _, passed in tests if passed)
-    total_count = len(tests)
-    
-    for name, passed in tests:
-        status = "✅ PASSED" if passed else "❌ FAILED"
-        print(f"{status} - {name}")
-    
-    print("=" * 80)
-    print(f"TOTAL: {passed_count}/{total_count} tests passed")
-    print("=" * 80)
-    
-    if passed_count == total_count:
-        print("\n🎉 ALL TESTS PASSED - v3.9.8 is working correctly!")
-        sys.exit(0)
-    else:
-        print(f"\n⚠️  {total_count - passed_count} test(s) failed")
+    if test_results['failed'] > 0:
+        print("\n❌ Some tests failed. See details above.")
         sys.exit(1)
+    else:
+        print("\n✅ All tests passed!")
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()

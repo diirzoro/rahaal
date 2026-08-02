@@ -287,7 +287,7 @@ async function getPatSession(request, db) {
   db.collection('pats').updateOne({ id: pat.id }, { $set: { last_used_at: new Date() } }).catch(() => {})
   return { pat, user, tenant, isPat: true }
 }
-function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, tenant_id: u.tenant_id, active: u.active, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
+function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
 function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price } : null }
 
 // Referral helpers
@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.8',
+          version: '3.9.9',
           db: 'connected',
         })
       } catch (e) {
@@ -795,7 +795,7 @@ async function handleRoute(request, { params }) {
     if (route === '/tenant/users' && method === 'GET') {
       if (sess.user.role !== 'owner') return bad('غير مصرح', 403)
       const users = await db.collection('users').find(tf).sort({ created_at: 1 }).toArray()
-      return ok(users.map(u => ({ id: u.id, email: u.email, name: u.name, role: u.role, active: u.active, created_at: u.created_at, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } })))
+      return ok(users.map(u => ({ id: u.id, email: u.email, name: u.name, role: u.role, active: u.active, created_at: u.created_at, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } })))
     }
     if (route === '/tenant/users' && method === 'POST') {
       if (sess.user.role !== 'owner') return bad('غير مصرح', 403)
@@ -816,10 +816,13 @@ async function handleRoute(request, { params }) {
         role: b.role || 'staff', active: true, password_hash: bcrypt.hashSync(b.password, 8),
         // v3.4 — Default limited permissions on new employees
         permissions: b.permissions ? { ...DEFAULT_STAFF_PERMISSIONS, ...b.permissions } : { ...DEFAULT_STAFF_PERMISSIONS },
+        // v3.9.9 — Optional default cash box + lock flag for the employee/cashier
+        default_box_id: b.default_box_id || null,
+        lock_box: !!b.lock_box,
         created_at: new Date(),
       }
       await db.collection('users').insertOne(doc)
-      return ok({ id: doc.id, email: doc.email, name: doc.name, role: doc.role, active: doc.active, permissions: doc.permissions })
+      return ok({ id: doc.id, email: doc.email, name: doc.name, role: doc.role, active: doc.active, permissions: doc.permissions, default_box_id: doc.default_box_id, lock_box: doc.lock_box })
     }
     const userIdMatch = route.match(/^\/tenant\/users\/([^/]+)$/)
     if (userIdMatch && method === 'PATCH') {
@@ -836,6 +839,9 @@ async function handleRoute(request, { params }) {
         for (const k of Object.keys(DEFAULT_STAFF_PERMISSIONS)) sanitized[k] = !!b.permissions[k]
         upd.permissions = sanitized
       }
+      // v3.9.9 — Update default box + lock flag
+      if (b.default_box_id !== undefined) upd.default_box_id = b.default_box_id || null
+      if (b.lock_box !== undefined) upd.lock_box = !!b.lock_box
       await db.collection('users').updateOne({ id: userIdMatch[1], tenant_id: T }, { $set: upd })
       return ok({ success: true })
     }
@@ -1189,7 +1195,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.8',
+        version: '3.9.9',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
@@ -1796,6 +1802,16 @@ async function handleRoute(request, { params }) {
       const pnrs = rows.map(r => r.pnr).filter(Boolean)
       const existing = await db.collection('tickets').find({ tenant_id: T, pnr: { $in: pnrs } }).project({ pnr: 1 }).toArray()
       const existingSet = new Set(existing.map(x => x.pnr))
+      // v3.9.9 — Name+Date dedup (main key for offices without PNR)
+      const nameDateKeys = rows.map(r => `${String(r.passenger_name || '').trim().toLowerCase()}|${String(r.travel_date || r.date || '').slice(0, 10)}`).filter(k => !k.startsWith('|'))
+      const existingByNameDate = new Set()
+      if (nameDateKeys.length) {
+        const existingTix = await db.collection('tickets').find({ tenant_id: T, passenger_name: { $in: rows.map(r => String(r.passenger_name || '').trim()).filter(Boolean) } }).project({ passenger_name: 1, travel_date: 1, date: 1 }).toArray()
+        for (const t of existingTix) {
+          const d = t.travel_date ? new Date(t.travel_date).toISOString().slice(0, 10) : (t.date ? new Date(t.date).toISOString().slice(0, 10) : '')
+          existingByNameDate.add(`${String(t.passenger_name || '').trim().toLowerCase()}|${d}`)
+        }
+      }
       // v3.9.8 — Flexible receipt account: allow clients OR boxes/banks (cash)
       const allClients = await db.collection('clients').find({ tenant_id: T }).project({ name: 1 }).toArray()
       const allSuppliers = await db.collection('suppliers').find({ tenant_id: T }).project({ name: 1 }).toArray()
@@ -1804,6 +1820,7 @@ async function handleRoute(request, { params }) {
       const supplierSet = new Set(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
       const boxSet = new Set(allBoxes.flatMap(x => [String(x.name_ar || '').trim().toLowerCase(), String(x.name || '').trim().toLowerCase()].filter(Boolean)))
       const seenInBatch = new Set()
+      const seenNameDateInBatch = new Set()
       const validated = rows.map((r, i) => {
         const errors = []
         if (!r.currency || !CURRENCIES.includes(r.currency)) errors.push('العملة غير صالحة')
@@ -1820,9 +1837,19 @@ async function handleRoute(request, { params }) {
         if (!r.supplier_name) errors.push('اسم المورد مطلوب')
         else if (!supplierSet.has(String(r.supplier_name).trim().toLowerCase())) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
         let dup = false
-        if (r.pnr && existingSet.has(r.pnr)) dup = 'موجود مسبقاً في قاعدة البيانات'
-        if (r.pnr && seenInBatch.has(r.pnr)) dup = 'مكرر داخل نفس الملف'
+        // 1) PNR-based dedup (when PNR is provided)
+        if (r.pnr && existingSet.has(r.pnr)) dup = 'موجود مسبقاً في قاعدة البيانات (PNR)'
+        if (r.pnr && seenInBatch.has(r.pnr)) dup = 'مكرر داخل نفس الملف (PNR)'
         if (r.pnr) seenInBatch.add(r.pnr)
+        // 2) Name+Date dedup (main check for offices without PNR)
+        if (!dup && r.passenger_name) {
+          const nd = `${String(r.passenger_name).trim().toLowerCase()}|${String(r.travel_date || r.date || '').slice(0, 10)}`
+          if (nd !== '|' && !nd.endsWith('|')) {
+            if (existingByNameDate.has(nd)) dup = 'موجود مسبقاً (اسم المسافر + التاريخ)'
+            else if (seenNameDateInBatch.has(nd)) dup = 'مكرر داخل نفس الملف (اسم + تاريخ)'
+            else seenNameDateInBatch.add(nd)
+          }
+        }
         return { ...r, __row: i + 1, __errors: errors, __dup: dup, __receipt_kind: receiptKind, __commission: (Number(r.sale_price) || 0) - (Number(r.cost) || 0) }
       })
       const totals = validated.reduce((acc, r) => {
@@ -1864,6 +1891,16 @@ async function handleRoute(request, { params }) {
       const passports = rows.map(r => r.passport_no).filter(Boolean)
       const existing = await db.collection('visas').find({ tenant_id: T, passport_no: { $in: passports } }).project({ passport_no: 1 }).toArray()
       const existingSet = new Set(existing.map(x => x.passport_no))
+      // v3.9.9 — Name+Date dedup (main key)
+      const existingByNameDate = new Set()
+      const names = rows.map(r => String(r.passenger_name || '').trim()).filter(Boolean)
+      if (names.length) {
+        const existingVisas = await db.collection('visas').find({ tenant_id: T, passenger_name: { $in: names } }).project({ passenger_name: 1, entry_date: 1, date: 1 }).toArray()
+        for (const v of existingVisas) {
+          const d = v.entry_date ? new Date(v.entry_date).toISOString().slice(0, 10) : (v.date ? new Date(v.date).toISOString().slice(0, 10) : '')
+          existingByNameDate.add(`${String(v.passenger_name || '').trim().toLowerCase()}|${d}`)
+        }
+      }
       // v3.9.8 — Flexible receipt account
       const allClients = await db.collection('clients').find({ tenant_id: T }).project({ name: 1 }).toArray()
       const allSuppliers = await db.collection('suppliers').find({ tenant_id: T }).project({ name: 1 }).toArray()
@@ -1872,6 +1909,7 @@ async function handleRoute(request, { params }) {
       const supplierSet = new Set(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
       const boxSet = new Set(allBoxes.flatMap(x => [String(x.name_ar || '').trim().toLowerCase(), String(x.name || '').trim().toLowerCase()].filter(Boolean)))
       const seenInBatch = new Set()
+      const seenNameDateInBatch = new Set()
       const validated = rows.map((r, i) => {
         const errors = []
         if (!r.currency || !CURRENCIES.includes(r.currency)) errors.push('العملة غير صالحة')
@@ -1889,8 +1927,17 @@ async function handleRoute(request, { params }) {
         else if (!supplierSet.has(String(r.supplier_name).trim().toLowerCase())) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
         let dup = false
         if (r.passport_no && existingSet.has(r.passport_no)) dup = 'رقم الجواز موجود مسبقاً'
-        if (r.passport_no && seenInBatch.has(r.passport_no)) dup = 'مكرر داخل الملف'
+        if (r.passport_no && seenInBatch.has(r.passport_no)) dup = 'مكرر داخل الملف (جواز)'
         if (r.passport_no) seenInBatch.add(r.passport_no)
+        // Name+Date dedup
+        if (!dup && r.passenger_name) {
+          const nd = `${String(r.passenger_name).trim().toLowerCase()}|${String(r.entry_date || r.date || '').slice(0, 10)}`
+          if (nd !== '|' && !nd.endsWith('|')) {
+            if (existingByNameDate.has(nd)) dup = 'موجود مسبقاً (اسم المعتمر + التاريخ)'
+            else if (seenNameDateInBatch.has(nd)) dup = 'مكرر داخل نفس الملف (اسم + تاريخ)'
+            else seenNameDateInBatch.add(nd)
+          }
+        }
         return { ...r, __row: i + 1, __errors: errors, __dup: dup, __receipt_kind: receiptKind, __commission: (Number(r.sale_price) || 0) - (Number(r.cost) || 0) }
       })
       const totals = validated.reduce((acc, r) => {
@@ -1941,6 +1988,62 @@ async function handleRoute(request, { params }) {
 
     // Journal entries
     if (route === '/journal-entries' && method === 'GET') return ok(clean(await db.collection('journal_entries').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+
+    // v3.9.9 — Bulk delete for tickets/visas/services/vouchers/fx (reverses balances + JEs per row)
+    const bulkDelMatch = route.match(/^\/(tickets|visas|services|vouchers|fx)\/bulk-delete$/)
+    if (bulkDelMatch && method === 'POST') {
+      const [_, kind] = bulkDelMatch
+      const coll = kind === 'fx' ? 'currency_exchanges' : kind
+      const body = await request.json()
+      const ids = Array.isArray(body.ids) ? body.ids : []
+      if (ids.length === 0) return bad('لم يتم اختيار أي سجل')
+      if (ids.length > 500) return bad('الحد الأقصى للحذف الجماعي 500 سجل في المرة')
+      let deleted = 0, failed = 0
+      const errors = []
+      for (const docId of ids) {
+        try {
+          const doc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
+          if (!doc) { failed++; errors.push({ id: docId, error: 'غير موجود' }); continue }
+          const je = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
+          if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
+            if (doc.payment_method === 'cash' && doc.box_id) {
+              await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
+            } else if (doc.client_id) {
+              await updateBalance(db, 'clients', { id: doc.client_id, tenant_id: T }, doc.currency, -doc.sale_price)
+            }
+            if (doc.supplier_id) await updateBalance(db, 'suppliers', { id: doc.supplier_id, tenant_id: T }, doc.currency, -doc.cost)
+          } else if (kind === 'vouchers') {
+            if (doc.type === 'receipt') {
+              await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.amount)
+              if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
+              if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+            } else {
+              await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, +doc.amount)
+              if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
+              if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+            }
+          } else if (kind === 'fx') {
+            if (doc.type === 'buy') {
+              await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, -doc.amount)
+              await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, +doc.counter_amount)
+            } else {
+              await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, +doc.amount)
+              await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, -doc.counter_amount)
+            }
+          }
+          if (je) {
+            await db.collection('journal_entries').deleteOne({ id: je.id })
+            await db.collection('tenants').updateOne({ id: T }, { $inc: { 'journal_quota.used': -1 } })
+          }
+          await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
+          deleted++
+        } catch (e) {
+          failed++
+          errors.push({ id: docId, error: e.message })
+        }
+      }
+      return ok({ success: true, deleted, failed, errors, kind })
+    }
 
     // Universal DELETE for transactional records (reverses JE + balances + decrements quota)
     const delMatch = route.match(/^\/(tickets|visas|services|vouchers|fx)\/([^/]+)$/)
