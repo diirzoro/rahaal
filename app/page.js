@@ -957,8 +957,10 @@ function TicketsScreen() {
   const [tickets, setTickets] = useState([])
   const [clients, setClients] = useState([])
   const [suppliers, setSuppliers] = useState([])
+  const [boxes, setBoxes] = useState([]) // v3.9.10 — for bulk edit
   const [openManual, setOpenManual] = useState(false)
   const [openBulk, setOpenBulk] = useState(false)
+  const [openBulkEdit, setOpenBulkEdit] = useState(false) // v3.9.10
   const [openSearch, setOpenSearch] = useState(false)
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
@@ -969,8 +971,8 @@ function TicketsScreen() {
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
-      const [t, c, s, r] = await Promise.all([api('/tickets'), api('/clients'), api('/suppliers'), api('/rates')])
-      setTickets(t); setClients(c); setSuppliers(s); setRates(r.rates)
+      const [t, c, s, r, bx] = await Promise.all([api('/tickets'), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])])
+      setTickets(t); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
     } catch (e) { toast.error(e.message) }
   }
   useEffect(() => { load() }, [])
@@ -1082,6 +1084,7 @@ function TicketsScreen() {
         {selectedIds.size > 0 && (
           <div className="mr-auto flex items-center gap-2">
             <span className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">✓ محدد: {selectedIds.size}</span>
+            <Button size="sm" onClick={() => setOpenBulkEdit(true)} className="gap-1 text-xs bg-blue-600 hover:bg-blue-700 text-white">✏️ تعديل المحدد ({selectedIds.size})</Button>
             <Button size="sm" variant="destructive" onClick={handleBulkDelete} className="gap-1 text-xs">🗑️ حذف المحدد ({selectedIds.size})</Button>
             <Button size="sm" variant="outline" onClick={() => setSelectedIds(new Set())} className="text-xs">إلغاء التحديد</Button>
           </div>
@@ -1138,6 +1141,7 @@ function TicketsScreen() {
         onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل التذكرة وعكس القيد السابق تلقائياً' : 'تم حفظ التذكرة وإنشاء القيد المحاسبي تلقائياً') }} />
       <RefundDialog open={!!refundTarget} onOpenChange={v => !v && setRefundTarget(null)} record={refundTarget} refType="ticket" onSaved={() => { setRefundTarget(null); load() }} />
       <BulkImportDialog open={openBulk} onOpenChange={setOpenBulk} kind="tickets" onDone={() => { load(); setOpenBulk(false) }} />
+      <BulkEditDialog open={openBulkEdit} onOpenChange={setOpenBulkEdit} kind="tickets" ids={Array.from(selectedIds)} suppliers={suppliers} boxes={boxes} onDone={() => { load(); setOpenBulkEdit(false); setSelectedIds(new Set()) }} />
       <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
         fields={[
           { key: 'pnr', label: 'رقم التذكرة (PNR)' }, { key: 'passenger_name', label: 'اسم المسافر' },
@@ -2029,6 +2033,61 @@ function BulkImportDialog({ open, onOpenChange, kind, onDone }) {
   const reset = () => { setStep(1); setFile(null); setRawRows([]); setHeaders([]); setMapping({}); setPreview(null); setResult(null) }
   useEffect(() => { if (!open) reset() }, [open])
 
+  // v3.9.10 — Excel template download with actual client/supplier/box names as reference
+  const downloadTemplate = async () => {
+    try {
+      const [clientsList, suppliersList, boxesList] = await Promise.all([
+        api('/clients').catch(() => []),
+        api('/suppliers').catch(() => []),
+        api('/boxes').catch(() => []),
+      ])
+      const wb = XLSX.utils.book_new()
+      // Sheet 1: Template with headers + 1 example row
+      const headers = fields.map(f => f.label)
+      const example = fields.map(f => {
+        if (f.key === 'date' || f.key === 'travel_date' || f.key === 'entry_date') return todayISO()
+        if (f.key === 'currency') return 'USD'
+        if (f.key === 'client_name') return clientsList[0]?.name || boxesList[0]?.name_ar || 'اسم العميل أو الصندوق'
+        if (f.key === 'supplier_name') return suppliersList[0]?.name || 'اسم المورد'
+        if (f.key === 'cost') return 100
+        if (f.key === 'sale_price') return 150
+        if (f.key === 'passenger_name') return 'مثال: أحمد علي'
+        if (f.key === 'passport_no') return 'MK000001'
+        if (f.key === 'nationality') return 'يمني'
+        if (f.key === 'route') return 'SAH-CAI'
+        if (f.key === 'pnr') return 'ABC123'
+        if (f.key === 'service_type') return 'تأشيرة عمرة'
+        return ''
+      })
+      const ws1 = XLSX.utils.aoa_to_sheet([headers, example])
+      ws1['!cols'] = headers.map(() => ({ wch: 18 }))
+      XLSX.utils.book_append_sheet(wb, ws1, 'البيانات')
+
+      // Sheet 2: Reference — Clients
+      const clientsRows = [['اسم العميل (انسخ منها إلى حساب القبض)']].concat(clientsList.map(c => [c.name]))
+      const ws2 = XLSX.utils.aoa_to_sheet(clientsRows)
+      ws2['!cols'] = [{ wch: 30 }]
+      XLSX.utils.book_append_sheet(wb, ws2, 'العملاء')
+
+      // Sheet 3: Reference — Boxes/Banks (for cash sales)
+      const boxesRows = [['اسم الصندوق/البنك (انسخ منها إلى حساب القبض للبيع النقدي)', 'النوع', 'العملة']]
+        .concat(boxesList.map(b => [b.name_ar || b.name, b.type === 'cash' ? 'صندوق' : 'بنك', b.currency || '-']))
+      const ws3 = XLSX.utils.aoa_to_sheet(boxesRows)
+      ws3['!cols'] = [{ wch: 30 }, { wch: 12 }, { wch: 8 }]
+      XLSX.utils.book_append_sheet(wb, ws3, 'الصناديق_والبنوك')
+
+      // Sheet 4: Reference — Suppliers
+      const suppliersRows = [['اسم المورد']].concat(suppliersList.map(s => [s.name]))
+      const ws4 = XLSX.utils.aoa_to_sheet(suppliersRows)
+      ws4['!cols'] = [{ wch: 30 }]
+      XLSX.utils.book_append_sheet(wb, ws4, 'الموردون')
+
+      const filename = `قالب_استيراد_${kind === 'tickets' ? 'التذاكر' : 'التأشيرات'}_رحّال.xlsx`
+      XLSX.writeFile(wb, filename)
+      toast.success('✅ تم تنزيل القالب — اطلع على صفحات "العملاء" و"الصناديق_والبنوك" و"الموردون" لنسخ الأسماء الصحيحة')
+    } catch (e) { toast.error('خطأ في إنشاء القالب: ' + e.message) }
+  }
+
   const handleFile = async (f) => {
     if (!f) return
     setFile(f)
@@ -2155,6 +2214,18 @@ function BulkImportDialog({ open, onOpenChange, kind, onDone }) {
         {/* Step 1: Upload */}
         {step === 1 && (
           <div className="space-y-4">
+            {/* v3.9.10 — Download Excel template button */}
+            <div className="p-3 rounded-lg bg-gradient-to-l from-emerald-50 to-teal-50 border-2 border-emerald-200">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="text-sm">
+                  <div className="font-bold text-emerald-800">📥 لا تعرف كيف تُنسّق الملف؟</div>
+                  <div className="text-xs text-slate-700 mt-1">نزّل القالب الجاهز — يحتوي على أسماء العملاء والصناديق والموردين المسجّلين بالنظام لتسهيل الملء وتفادي الأخطاء.</div>
+                </div>
+                <Button onClick={downloadTemplate} variant="outline" className="bg-white border-emerald-500 text-emerald-700 hover:bg-emerald-50 gap-2 font-bold">
+                  <FileSpreadsheet className="w-4 h-4" /> 📥 تنزيل قالب Excel جاهز
+                </Button>
+              </div>
+            </div>
             <div className="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center bg-slate-50">
               <FileSpreadsheet className="w-14 h-14 text-emerald-500 mx-auto mb-3" />
               <div className="font-bold text-slate-700 mb-1">اسحب ملف Excel/CSV هنا أو اضغط للاختيار</div>
@@ -2340,6 +2411,129 @@ function StatMini({ label, value, color }) {
   return <div className={`rounded-lg p-3 ${color}`}><div className="text-xs">{label}</div><div className="text-xl font-extrabold">{value}</div></div>
 }
 
+// v3.9.10 — Bulk Edit Dialog for Tickets/Visas
+function BulkEditDialog({ open, onOpenChange, kind, ids, suppliers, boxes, onDone }) {
+  const [changeSupplier, setChangeSupplier] = useState(false)
+  const [changeDate, setChangeDate] = useState(false)
+  const [changePayment, setChangePayment] = useState(false)
+  const [supplierId, setSupplierId] = useState('')
+  const [newDate, setNewDate] = useState(todayISO())
+  const [paymentMethod, setPaymentMethod] = useState('credit')
+  const [boxId, setBoxId] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [result, setResult] = useState(null)
+
+  useEffect(() => {
+    if (!open) { setChangeSupplier(false); setChangeDate(false); setChangePayment(false); setSupplierId(''); setNewDate(todayISO()); setPaymentMethod('credit'); setBoxId(''); setResult(null) }
+  }, [open])
+
+  const submit = async () => {
+    if (!changeSupplier && !changeDate && !changePayment) return toast.error('اختر حقلاً واحداً على الأقل للتعديل')
+    if (changeSupplier && !supplierId) return toast.error('اختر المورد')
+    if (changePayment && paymentMethod === 'cash' && !boxId) return toast.error('اختر الصندوق للبيع النقدي')
+    const changes = {}
+    if (changeSupplier) changes.supplier_id = supplierId
+    if (changeDate) changes.date = newDate
+    if (changePayment) {
+      changes.payment_method = paymentMethod
+      if (paymentMethod === 'cash') changes.box_id = boxId
+    }
+    if (!confirm(`تعديل ${ids.length} سجل — سيتم عكس القيود القديمة وإنشاء قيود جديدة. متابعة؟`)) return
+    try {
+      setSaving(true)
+      const r = await api(`/${kind}/bulk-edit`, { method: 'POST', body: { ids, changes } })
+      setResult(r)
+      if (r.updated > 0) toast.success(`✅ تم تعديل ${r.updated}${r.failed ? ` • فشل ${r.failed}` : ''}`)
+      else if (r.failed > 0) toast.error(`❌ فشل تعديل ${r.failed} سجل`)
+      onDone && onDone()
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent dir="rtl" className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-xl">
+            <Pencil className="w-5 h-5 text-blue-600" /> تعديل جماعي — {ids.length} {kind === 'tickets' ? 'تذكرة' : 'خدمة/تأشيرة'}
+          </DialogTitle>
+          <DialogDescription>حدّد الحقول التي تريد تغييرها فقط. الحقول غير المحدّدة تبقى كما هي.</DialogDescription>
+        </DialogHeader>
+
+        {result ? (
+          <div className="space-y-3">
+            <div className={`p-4 rounded-lg border-2 ${result.updated > 0 ? 'bg-emerald-50 border-emerald-300' : 'bg-rose-50 border-rose-300'}`}>
+              <div className="font-bold text-lg">{result.updated > 0 ? '✅ تم' : '❌ فشل'}</div>
+              <div className="text-sm mt-1">✔️ نجح: <b>{result.updated}</b></div>
+              <div className="text-sm">❌ فشل: <b>{result.failed}</b></div>
+            </div>
+            {result.errors?.length > 0 && (
+              <div className="max-h-40 overflow-y-auto bg-slate-50 p-2 rounded text-xs">
+                {result.errors.slice(0, 20).map((e, i) => <div key={i} className="p-1 border-b">🔴 {e.id?.slice(0, 8)}: {e.error}</div>)}
+              </div>
+            )}
+            <Button onClick={() => onOpenChange(false)} className="w-full">إغلاق</Button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {/* Supplier */}
+            <div className={`p-3 rounded-lg border-2 ${changeSupplier ? 'border-blue-400 bg-blue-50' : 'border-slate-200 bg-slate-50'}`}>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={changeSupplier} onChange={e => setChangeSupplier(e.target.checked)} className="w-4 h-4 accent-blue-600" />
+                <span className="font-bold text-sm">تغيير المورد</span>
+              </label>
+              {changeSupplier && (
+                <Select value={supplierId} onValueChange={setSupplierId}>
+                  <SelectTrigger className="mt-2"><SelectValue placeholder="اختر المورد الجديد" /></SelectTrigger>
+                  <SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
+                </Select>
+              )}
+            </div>
+            {/* Date */}
+            <div className={`p-3 rounded-lg border-2 ${changeDate ? 'border-blue-400 bg-blue-50' : 'border-slate-200 bg-slate-50'}`}>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={changeDate} onChange={e => setChangeDate(e.target.checked)} className="w-4 h-4 accent-blue-600" />
+                <span className="font-bold text-sm">تغيير التاريخ</span>
+              </label>
+              {changeDate && <Input type="date" value={newDate} onChange={e => setNewDate(e.target.value)} className="mt-2" />}
+            </div>
+            {/* Payment */}
+            <div className={`p-3 rounded-lg border-2 ${changePayment ? 'border-blue-400 bg-blue-50' : 'border-slate-200 bg-slate-50'}`}>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={changePayment} onChange={e => setChangePayment(e.target.checked)} className="w-4 h-4 accent-blue-600" />
+                <span className="font-bold text-sm">تغيير طريقة الدفع</span>
+              </label>
+              {changePayment && (
+                <div className="mt-2 space-y-2">
+                  <Select value={paymentMethod} onValueChange={setPaymentMethod}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="credit">آجل (على الحساب)</SelectItem>
+                      <SelectItem value="cash">نقدي (صندوق)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {paymentMethod === 'cash' && (
+                    <Select value={boxId} onValueChange={setBoxId}>
+                      <SelectTrigger><SelectValue placeholder="اختر الصندوق" /></SelectTrigger>
+                      <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar || b.name} · {b.currency}</SelectItem>)}</SelectContent>
+                    </Select>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 p-2 rounded">⚠️ سيتم عكس القيود المحاسبية القديمة تلقائياً وإنشاء قيود جديدة بالبيانات الجديدة.</div>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => onOpenChange(false)} className="flex-1">إلغاء</Button>
+              <Button onClick={submit} disabled={saving} className="flex-1 grad-blue text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : `تطبيق على ${ids.length} سجل`}</Button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+
+
 // ================================================================
 // VISAS SCREEN with Manual + Bulk import
 // ================================================================
@@ -2350,8 +2544,10 @@ function VisasScreen() {
   const [visas, setVisas] = useState([])
   const [clients, setClients] = useState([])
   const [suppliers, setSuppliers] = useState([])
+  const [boxes, setBoxes] = useState([]) // v3.9.10
   const [openManual, setOpenManual] = useState(false)
   const [openBulk, setOpenBulk] = useState(false)
+  const [openBulkEdit, setOpenBulkEdit] = useState(false) // v3.9.10
   const [openSearch, setOpenSearch] = useState(false)
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
@@ -2362,8 +2558,8 @@ function VisasScreen() {
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
-      const [v, c, s, r] = await Promise.all([api('/visas'), api('/clients'), api('/suppliers'), api('/rates')])
-      setVisas(v); setClients(c); setSuppliers(s); setRates(r.rates)
+      const [v, c, s, r, bx] = await Promise.all([api('/visas'), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])])
+      setVisas(v); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
     } catch (e) { toast.error(e.message) }
   }
   useEffect(() => { load() }, [])
@@ -2458,6 +2654,7 @@ function VisasScreen() {
         {selectedIds.size > 0 && (
           <div className="mr-auto flex items-center gap-2">
             <span className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">✓ محدد: {selectedIds.size}</span>
+            <Button size="sm" onClick={() => setOpenBulkEdit(true)} className="gap-1 text-xs bg-blue-600 hover:bg-blue-700 text-white">✏️ تعديل المحدد ({selectedIds.size})</Button>
             <Button size="sm" variant="destructive" onClick={handleBulkDelete} className="gap-1 text-xs">🗑️ حذف المحدد ({selectedIds.size})</Button>
             <Button size="sm" variant="outline" onClick={() => setSelectedIds(new Set())} className="text-xs">إلغاء التحديد</Button>
           </div>
@@ -2508,6 +2705,7 @@ function VisasScreen() {
         onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل الخدمة وعكس القيد السابق تلقائياً' : 'تم حفظ الخدمة') }} />
       <RefundDialog open={!!refundTarget} onOpenChange={v => !v && setRefundTarget(null)} record={refundTarget} refType="visa" onSaved={() => { setRefundTarget(null); load() }} />
       <BulkImportDialog open={openBulk} onOpenChange={setOpenBulk} kind="visas" onDone={() => { load(); setOpenBulk(false) }} />
+      <BulkEditDialog open={openBulkEdit} onOpenChange={setOpenBulkEdit} kind="visas" ids={Array.from(selectedIds)} suppliers={suppliers} boxes={boxes} onDone={() => { load(); setOpenBulkEdit(false); setSelectedIds(new Set()) }} />
       <UniversalSearchModal open={openSearch} onOpenChange={setOpenSearch}
         fields={[
           { key: 'passenger_name', label: 'اسم المسافر' }, { key: 'passport_no', label: 'رقم الجواز' },

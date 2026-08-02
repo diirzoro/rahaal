@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.9',
+          version: '3.9.10',
           db: 'connected',
         })
       } catch (e) {
@@ -1195,7 +1195,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.9',
+        version: '3.9.10',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
@@ -2043,6 +2043,61 @@ async function handleRoute(request, { params }) {
         }
       }
       return ok({ success: true, deleted, failed, errors, kind })
+    }
+
+    // v3.9.10 — Bulk edit for tickets/visas (partial updates on supplier, date, payment_method, box_id)
+    const bulkEditMatch = route.match(/^\/(tickets|visas|services)\/bulk-edit$/)
+    if (bulkEditMatch && method === 'POST') {
+      const [_, kind] = bulkEditMatch
+      const coll = kind
+      const body = await request.json()
+      const ids = Array.isArray(body.ids) ? body.ids : []
+      const changes = body.changes || {}
+      if (ids.length === 0) return bad('لم يتم اختيار أي سجل')
+      if (ids.length > 300) return bad('الحد الأقصى للتعديل الجماعي 300 سجل في المرة')
+      const allowed = ['supplier_id', 'date', 'payment_method', 'box_id', 'currency', 'exchange_rate']
+      const changeKeys = Object.keys(changes).filter(k => allowed.includes(k) && changes[k] !== undefined && changes[k] !== null && changes[k] !== '')
+      if (changeKeys.length === 0) return bad('لم يتم تحديد أي تغيير')
+      let updated = 0, failed = 0
+      const errors = []
+      for (const docId of ids) {
+        try {
+          const oldDoc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
+          if (!oldDoc) { failed++; errors.push({ id: docId, error: 'غير موجود' }); continue }
+          const oldJe = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
+          // Build new body from oldDoc + partial changes
+          const newBody = {
+            date: oldDoc.date, currency: oldDoc.currency, exchange_rate: oldDoc.exchange_rate,
+            client_id: oldDoc.client_id, supplier_id: oldDoc.supplier_id,
+            cost: oldDoc.cost, sale_price: oldDoc.sale_price, payment_method: oldDoc.payment_method,
+            box_id: oldDoc.box_id, client_name: oldDoc.client_name,
+            // preserve type-specific fields
+            pnr: oldDoc.pnr, route: oldDoc.route, ticket_number: oldDoc.ticket_number, passenger_name: oldDoc.passenger_name,
+            carrier: oldDoc.carrier, class: oldDoc.class,
+            passport_no: oldDoc.passport_no, nationality: oldDoc.nationality, service_type: oldDoc.service_type,
+            visa_type: oldDoc.visa_type, entry_date: oldDoc.entry_date, exit_date: oldDoc.exit_date,
+            travel_date: oldDoc.travel_date, notes: oldDoc.notes, description: oldDoc.description,
+          }
+          for (const k of changeKeys) newBody[k] = changes[k]
+          // If payment_method switching from credit->cash, require box_id
+          if (newBody.payment_method === 'cash' && !newBody.box_id) { failed++; errors.push({ id: docId, error: 'الدفع نقد يتطلب اختيار صندوق' }); continue }
+          if (newBody.payment_method === 'credit') newBody.box_id = null
+          // Reverse old effects
+          await reverseTransactionEffects(db, T, kind, oldDoc)
+          if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id })
+          await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
+          const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at }
+          let result
+          if (kind === 'tickets') result = await createTicket(db, T, newBody, opts)
+          else if (kind === 'visas') result = await createVisa(db, T, newBody, opts)
+          else if (kind === 'services') result = await createService(db, T, newBody, opts)
+          if (result.error) { failed++; errors.push({ id: docId, error: result.error }) } else updated++
+        } catch (e) {
+          failed++
+          errors.push({ id: docId, error: e.message })
+        }
+      }
+      return ok({ success: true, updated, failed, errors, kind })
     }
 
     // Universal DELETE for transactional records (reverses JE + balances + decrements quota)
