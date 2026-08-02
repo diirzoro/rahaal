@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Rahaal Scraper — قارئ رحّال",
-  "version": "1.3.2",
-  "description": "سحب تلقائي لبيانات التذاكر والتأشيرات إلى نظام رحّال ERP — يدعم الآن ملفات PDF",
+  "version": "1.4.0",
+  "description": "سحب تلقائي لبيانات التذاكر والتأشيرات إلى نظام رحّال ERP — يدعم PDF + حد التجربة المجانية (30)",
   "action": {
     "default_title": "Rahaal — سحب إلى رحّال",
     "default_popup": "popup.html",

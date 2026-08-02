@@ -10,7 +10,7 @@
     <div class="logo">🕋</div>
     <div class="brand">
       <div class="title">Rahaal Scraper</div>
-      <div class="subtitle">قارئ رحّال الآلي · v1.3.2</div>
+      <div class="subtitle">قارئ رحّال الآلي · v1.4.0</div>
     </div>
   </div>
 
@@ -31,6 +31,17 @@
 
   <div id="screen-ready" class="screen hidden">
     <div class="connected-badge">✅ متصل بـ <span id="tenant-name">—</span></div>
+
+    <!-- v1.4 — Quota / Trial Counter -->
+    <div id="quota-box" class="quota-box" style="display:none">
+      <div class="quota-header">
+        <span id="quota-label">🎁 التجربة المجانية</span>
+        <span id="quota-count" class="quota-count">—/30</span>
+      </div>
+      <div class="quota-bar"><div id="quota-bar-fill" class="quota-bar-fill"></div></div>
+      <div id="quota-msg" class="quota-msg"></div>
+    </div>
+
     <div class="section-title">📄 المستند الحالي</div>
     <div id="page-type-badge" class="page-type">🔍 جاري الفحص...</div>
     <div id="detected-info" class="detected">
@@ -39,7 +50,17 @@
     <button id="btn-scan" class="primary">🔍 قراءة الصفحة (HTML)</button>
     <button id="btn-scan-pdf" class="primary hidden" style="background: linear-gradient(90deg,#dc2626,#ea580c)">📕 قراءة PDF</button>
     <button id="btn-open-widget" class="secondary hidden">🚀 سحب إلى رحّال (فتح نافذة تأكيد)</button>
+
+    <!-- v1.4 — Upgrade CTA (shown when quota is exhausted) -->
+    <div id="upgrade-cta" class="upgrade-cta" style="display:none">
+      <div class="upgrade-title">⛔ انتهت القراءات المجانية (30/30)</div>
+      <div class="upgrade-text">لاستخدام غير محدود، يرجى تفعيل الاشتراك من لوحة رحّال (إعدادات المكتب ← الاشتراك).</div>
+      <button id="btn-open-rahal" class="primary" style="margin-top:8px">🌐 فتح لوحة رحّال</button>
+    </div>
+
     <div class="footer-actions">
+      <a href="#" id="btn-refresh-quota" class="link">🔄 تحديث الحصة</a>
+      &nbsp;·&nbsp;
       <a href="#" id="btn-reset" class="link">إعادة ضبط الرمز</a>
     </div>
   </div>

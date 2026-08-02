@@ -15,7 +15,12 @@ async function apiFetch(path, opts = {}) {
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(data.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 
@@ -34,11 +39,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } else if (msg.type === 'RAHAL_INGEST') {
         const result = await apiFetch('/scraper/ingest', { method: 'POST', body: msg.payload });
         sendResponse({ ok: true, data: result });
+      } else if (msg.type === 'RAHAL_PING') {
+        const result = await apiFetch('/scraper/ping');
+        sendResponse({ ok: true, data: result });
       } else {
         sendResponse({ ok: false, error: `unknown message: ${msg.type}` });
       }
     } catch (e) {
-      sendResponse({ ok: false, error: e.message });
+      sendResponse({ ok: false, error: e.message, status: e.status || 0, data: e.data || null });
     }
   })();
   return true; // keep message channel open for async response

@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.6',
+          version: '3.9.7',
           db: 'connected',
         })
       } catch (e) {
@@ -1182,14 +1182,29 @@ async function handleRoute(request, { params }) {
     // ============ v3.8 — SCRAPER INGEST (Chrome Extension endpoint) ============
     // Verifies PAT works, then routes to createTicket / createVisa based on doc_type.
     if (route === '/scraper/ping' && method === 'GET') {
-      // Simple health/auth check used by the extension to verify the PAT.
+      // v3.9.7 — Return usage/limit info for trial gating in the extension popup
+      const isPaid = sess.tenant?.subscription === 'paid' || !!sess.tenant?.activation_confirmed
+      const used = sess.tenant?.scraper_usage?.count || 0
+      const limit = 30
       return ok({
-        ok: true, tenant: { id: T, name: sess.tenant?.name || null },
+        ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9',
+        version: '3.9.7',
+        extension_min_version: '1.4.0',
+        usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
     }
     if (route === '/scraper/ingest' && method === 'POST') {
+      // v3.9.7 — enforce trial cap (30) for non-paid tenants
+      const isPaidT = sess.tenant?.subscription === 'paid' || !!sess.tenant?.activation_confirmed
+      if (!isPaidT) {
+        const usedT = sess.tenant?.scraper_usage?.count || 0
+        if (usedT >= 30) return cors(NextResponse.json({
+          error: 'انتهت قراءاتك المجانية (30/30). يرجى ترقية الباقة من نظام رحّال للاستخدام غير المحدود.',
+          quota_exceeded: true,
+          usage: { plan: 'trial', unlimited: false, used: usedT, limit: 30, remaining: 0 },
+        }, { status: 402 }))
+      }
       const b = await request.json()
       const traveler = b.traveler || {}
       const booking = b.booking || {}
@@ -1223,7 +1238,13 @@ async function handleRoute(request, { params }) {
         }
         const r = await createTicket(db, T, payload)
         if (r.error) return bad(r.error)
-        return ok({ ok: true, record_type: 'ticket', record_id: r.doc.id, doc: r.doc, source: b.source_url || null })
+        let usageOut = { plan: 'paid', unlimited: true, used: 0, limit: -1, remaining: -1 }
+        if (!isPaidT) {
+          await db.collection('tenants').updateOne({ id: T }, { $inc: { 'scraper_usage.count': 1 }, $set: { 'scraper_usage.last_at': new Date() } })
+          const usedNow = (sess.tenant?.scraper_usage?.count || 0) + 1
+          usageOut = { plan: 'trial', unlimited: false, used: usedNow, limit: 30, remaining: Math.max(0, 30 - usedNow) }
+        }
+        return ok({ ok: true, record_type: 'ticket', record_id: r.doc.id, doc: r.doc, source: b.source_url || null, usage: usageOut })
       }
       if (docType === 'umrah_visa' || docType === 'visit_visa' || docType === 'work_visa' || docType === 'security_approval') {
         const svcMap = {
@@ -1249,7 +1270,13 @@ async function handleRoute(request, { params }) {
         }
         const r = await createVisa(db, T, payload)
         if (r.error) return bad(r.error)
-        return ok({ ok: true, record_type: 'visa', record_id: r.doc.id, doc: r.doc, source: b.source_url || null })
+        let usageOut = { plan: 'paid', unlimited: true, used: 0, limit: -1, remaining: -1 }
+        if (!isPaidT) {
+          await db.collection('tenants').updateOne({ id: T }, { $inc: { 'scraper_usage.count': 1 }, $set: { 'scraper_usage.last_at': new Date() } })
+          const usedNow = (sess.tenant?.scraper_usage?.count || 0) + 1
+          usageOut = { plan: 'trial', unlimited: false, used: usedNow, limit: 30, remaining: Math.max(0, 30 - usedNow) }
+        }
+        return ok({ ok: true, record_type: 'visa', record_id: r.doc.id, doc: r.doc, source: b.source_url || null, usage: usageOut })
       }
       return bad(`نوع المستند "${docType}" غير مدعوم بعد`)
     }
