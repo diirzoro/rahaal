@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.7',
+          version: '3.9.8',
           db: 'connected',
         })
       } catch (e) {
@@ -1189,7 +1189,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.7',
+        version: '3.9.8',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
@@ -1796,26 +1796,34 @@ async function handleRoute(request, { params }) {
       const pnrs = rows.map(r => r.pnr).filter(Boolean)
       const existing = await db.collection('tickets').find({ tenant_id: T, pnr: { $in: pnrs } }).project({ pnr: 1 }).toArray()
       const existingSet = new Set(existing.map(x => x.pnr))
-      // v3.0 — Strict validation: mapped accounts MUST exist in Chart of Accounts (clients & suppliers)
+      // v3.9.8 — Flexible receipt account: allow clients OR boxes/banks (cash)
       const allClients = await db.collection('clients').find({ tenant_id: T }).project({ name: 1 }).toArray()
       const allSuppliers = await db.collection('suppliers').find({ tenant_id: T }).project({ name: 1 }).toArray()
+      const allBoxes = await db.collection('boxes').find({ tenant_id: T }).project({ id: 1, name: 1, name_ar: 1, type: 1 }).toArray()
       const clientSet = new Set(allClients.map(x => String(x.name).trim().toLowerCase()))
       const supplierSet = new Set(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
+      const boxSet = new Set(allBoxes.flatMap(x => [String(x.name_ar || '').trim().toLowerCase(), String(x.name || '').trim().toLowerCase()].filter(Boolean)))
       const seenInBatch = new Set()
       const validated = rows.map((r, i) => {
         const errors = []
         if (!r.currency || !CURRENCIES.includes(r.currency)) errors.push('العملة غير صالحة')
         if (r.cost === undefined || r.cost === '' || isNaN(Number(r.cost))) errors.push('التكلفة مطلوبة')
         if (r.sale_price === undefined || r.sale_price === '' || isNaN(Number(r.sale_price))) errors.push('سعر البيع مطلوب')
-        if (!r.client_name) errors.push('اسم العميل مطلوب')
-        else if (!clientSet.has(String(r.client_name).trim().toLowerCase())) errors.push(`خطأ استيراد: الحساب "${r.client_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
+        let receiptKind = null
+        if (!r.client_name) errors.push('حساب القبض مطلوب (عميل أو صندوق/بنك)')
+        else {
+          const key = String(r.client_name).trim().toLowerCase()
+          if (clientSet.has(key)) receiptKind = 'client'
+          else if (boxSet.has(key)) receiptKind = 'box'
+          else errors.push(`خطأ استيراد: حساب القبض "${r.client_name}" غير موجود (لا عميل ولا صندوق/بنك) — أضِفه يدوياً أولاً`)
+        }
         if (!r.supplier_name) errors.push('اسم المورد مطلوب')
         else if (!supplierSet.has(String(r.supplier_name).trim().toLowerCase())) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
         let dup = false
         if (r.pnr && existingSet.has(r.pnr)) dup = 'موجود مسبقاً في قاعدة البيانات'
         if (r.pnr && seenInBatch.has(r.pnr)) dup = 'مكرر داخل نفس الملف'
         if (r.pnr) seenInBatch.add(r.pnr)
-        return { ...r, __row: i + 1, __errors: errors, __dup: dup, __commission: (Number(r.sale_price) || 0) - (Number(r.cost) || 0) }
+        return { ...r, __row: i + 1, __errors: errors, __dup: dup, __receipt_kind: receiptKind, __commission: (Number(r.sale_price) || 0) - (Number(r.cost) || 0) }
       })
       const totals = validated.reduce((acc, r) => {
         const c = r.currency || 'USD'
@@ -1834,12 +1842,18 @@ async function handleRoute(request, { params }) {
       for (const r of rows) {
         if (skip && r.__dup) { skipped++; continue }
         if (r.__errors && r.__errors.length) { failed++; errors.push({ row: r.__row, errors: r.__errors }); continue }
-        // v3.0 — STRICT: no auto-creation. Look up by name; fail row if not found.
-        const cli = r.client_name ? await db.collection('clients').findOne({ tenant_id: T, name: String(r.client_name).trim() }) : null
+        // v3.9.8 — Receipt account may be a client (credit) OR a box/bank (cash)
+        const nameTrim = r.client_name ? String(r.client_name).trim() : ''
+        const cli = nameTrim ? await db.collection('clients').findOne({ tenant_id: T, name: nameTrim }) : null
+        let box = null
+        if (!cli && nameTrim) box = await db.collection('boxes').findOne({ tenant_id: T, $or: [{ name_ar: nameTrim }, { name: nameTrim }] })
         const sup = r.supplier_name ? await db.collection('suppliers').findOne({ tenant_id: T, name: String(r.supplier_name).trim() }) : null
-        if (!cli) { failed++; errors.push({ row: r.__row, errors: [`الحساب "${r.client_name}" غير موجود في دليل الحسابات`] }); continue }
+        if (!cli && !box) { failed++; errors.push({ row: r.__row, errors: [`حساب القبض "${r.client_name}" غير موجود (لا عميل ولا صندوق/بنك)`] }); continue }
         if (!sup) { failed++; errors.push({ row: r.__row, errors: [`المورد "${r.supplier_name}" غير موجود في دليل الحسابات`] }); continue }
-        const result = await createTicket(db, T, { ...r, client_id: cli.id, supplier_id: sup.id })
+        const payload = box
+          ? { ...r, client_id: null, client_name: nameTrim, supplier_id: sup.id, payment_method: 'cash', box_id: box.id }
+          : { ...r, client_id: cli.id, supplier_id: sup.id, payment_method: r.payment_method === 'cash' ? 'cash' : 'credit' }
+        const result = await createTicket(db, T, payload)
         if (result.error) { failed++; errors.push({ row: r.__row, errors: [result.error] }) } else created++
       }
       return ok({ created, skipped, failed, errors })
@@ -1850,26 +1864,34 @@ async function handleRoute(request, { params }) {
       const passports = rows.map(r => r.passport_no).filter(Boolean)
       const existing = await db.collection('visas').find({ tenant_id: T, passport_no: { $in: passports } }).project({ passport_no: 1 }).toArray()
       const existingSet = new Set(existing.map(x => x.passport_no))
-      // v3.0 — Strict validation
+      // v3.9.8 — Flexible receipt account
       const allClients = await db.collection('clients').find({ tenant_id: T }).project({ name: 1 }).toArray()
       const allSuppliers = await db.collection('suppliers').find({ tenant_id: T }).project({ name: 1 }).toArray()
+      const allBoxes = await db.collection('boxes').find({ tenant_id: T }).project({ id: 1, name: 1, name_ar: 1, type: 1 }).toArray()
       const clientSet = new Set(allClients.map(x => String(x.name).trim().toLowerCase()))
       const supplierSet = new Set(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
+      const boxSet = new Set(allBoxes.flatMap(x => [String(x.name_ar || '').trim().toLowerCase(), String(x.name || '').trim().toLowerCase()].filter(Boolean)))
       const seenInBatch = new Set()
       const validated = rows.map((r, i) => {
         const errors = []
         if (!r.currency || !CURRENCIES.includes(r.currency)) errors.push('العملة غير صالحة')
         if (r.cost === undefined || r.cost === '' || isNaN(Number(r.cost))) errors.push('التكلفة مطلوبة')
         if (r.sale_price === undefined || r.sale_price === '' || isNaN(Number(r.sale_price))) errors.push('سعر البيع مطلوب')
-        if (!r.client_name) errors.push('اسم العميل مطلوب')
-        else if (!clientSet.has(String(r.client_name).trim().toLowerCase())) errors.push(`خطأ استيراد: الحساب "${r.client_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
+        let receiptKind = null
+        if (!r.client_name) errors.push('حساب القبض مطلوب (عميل أو صندوق/بنك)')
+        else {
+          const key = String(r.client_name).trim().toLowerCase()
+          if (clientSet.has(key)) receiptKind = 'client'
+          else if (boxSet.has(key)) receiptKind = 'box'
+          else errors.push(`خطأ استيراد: حساب القبض "${r.client_name}" غير موجود (لا عميل ولا صندوق/بنك) — أضِفه يدوياً أولاً`)
+        }
         if (!r.supplier_name) errors.push('اسم المورد مطلوب')
         else if (!supplierSet.has(String(r.supplier_name).trim().toLowerCase())) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
         let dup = false
         if (r.passport_no && existingSet.has(r.passport_no)) dup = 'رقم الجواز موجود مسبقاً'
         if (r.passport_no && seenInBatch.has(r.passport_no)) dup = 'مكرر داخل الملف'
         if (r.passport_no) seenInBatch.add(r.passport_no)
-        return { ...r, __row: i + 1, __errors: errors, __dup: dup, __commission: (Number(r.sale_price) || 0) - (Number(r.cost) || 0) }
+        return { ...r, __row: i + 1, __errors: errors, __dup: dup, __receipt_kind: receiptKind, __commission: (Number(r.sale_price) || 0) - (Number(r.cost) || 0) }
       })
       const totals = validated.reduce((acc, r) => {
         const c = r.currency || 'USD'
@@ -1888,12 +1910,18 @@ async function handleRoute(request, { params }) {
       for (const r of rows) {
         if (skip && r.__dup) { skipped++; continue }
         if (r.__errors && r.__errors.length) { failed++; errors.push({ row: r.__row, errors: r.__errors }); continue }
-        // v3.0 — STRICT: no auto-creation
-        const cli = r.client_name ? await db.collection('clients').findOne({ tenant_id: T, name: String(r.client_name).trim() }) : null
+        // v3.9.8 — Receipt account may be a client (credit) OR a box/bank (cash)
+        const nameTrim = r.client_name ? String(r.client_name).trim() : ''
+        const cli = nameTrim ? await db.collection('clients').findOne({ tenant_id: T, name: nameTrim }) : null
+        let box = null
+        if (!cli && nameTrim) box = await db.collection('boxes').findOne({ tenant_id: T, $or: [{ name_ar: nameTrim }, { name: nameTrim }] })
         const sup = r.supplier_name ? await db.collection('suppliers').findOne({ tenant_id: T, name: String(r.supplier_name).trim() }) : null
-        if (!cli) { failed++; errors.push({ row: r.__row, errors: [`الحساب "${r.client_name}" غير موجود في دليل الحسابات`] }); continue }
+        if (!cli && !box) { failed++; errors.push({ row: r.__row, errors: [`حساب القبض "${r.client_name}" غير موجود (لا عميل ولا صندوق/بنك)`] }); continue }
         if (!sup) { failed++; errors.push({ row: r.__row, errors: [`المورد "${r.supplier_name}" غير موجود في دليل الحسابات`] }); continue }
-        const result = await createVisa(db, T, { ...r, client_id: cli.id, supplier_id: sup.id })
+        const payload = box
+          ? { ...r, client_id: null, client_name: nameTrim, supplier_id: sup.id, payment_method: 'cash', box_id: box.id }
+          : { ...r, client_id: cli.id, supplier_id: sup.id, payment_method: r.payment_method === 'cash' ? 'cash' : 'credit' }
+        const result = await createVisa(db, T, payload)
         if (result.error) { failed++; errors.push({ row: r.__row, errors: [result.error] }) } else created++
       }
       return ok({ created, skipped, failed, errors })
@@ -2046,14 +2074,16 @@ async function handleRoute(request, { params }) {
 
 // ================= Business logic =================
 async function createTicket(db, T, b, opts = {}) {
-  if (!b.client_id || !b.supplier_id) return { error: 'العميل والمورد مطلوبان' }
+  if (!b.supplier_id) return { error: 'المورد مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
+  const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+  if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
   const cost = Number(b.cost) || 0, sale = Number(b.sale_price) || 0
   const commission = +(sale - cost).toFixed(2)
-  const cli = await db.collection('clients').findOne({ id: b.client_id, tenant_id: T })
+  const cli = b.client_id ? await db.collection('clients').findOne({ id: b.client_id, tenant_id: T }) : null
   const sup = await db.collection('suppliers').findOne({ id: b.supplier_id, tenant_id: T })
-  if (!cli || !sup) return { error: 'العميل أو المورد غير موجود' }
-  const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+  if (!sup) return { error: 'المورد غير موجود' }
+  if (paymentMethod === 'credit' && !cli) return { error: 'العميل غير موجود' }
   let box = null
   if (paymentMethod === 'cash') {
     if (!b.box_id) return { error: 'اختر الصندوق/البنك للدفع النقدي' }
@@ -2063,7 +2093,8 @@ async function createTicket(db, T, b, opts = {}) {
   const doc = {
     id: opts.existingId || uuidv4(), tenant_id: T, date: new Date(b.date || Date.now()), currency: b.currency,
     exchange_rate: Number(b.exchange_rate) || 1,
-    client_id: cli.id, client_name: cli.name, supplier_id: sup.id, supplier_name: sup.name,
+    client_id: cli?.id || null, client_name: cli?.name || (paymentMethod === 'cash' ? (b.client_name || 'عميل نقدي') : ''),
+    supplier_id: sup.id, supplier_name: sup.name,
     pnr: b.pnr || '', route: b.route || '', passenger_name: b.passenger_name || '',
     passport_no: b.passport_no || '', travel_date: b.travel_date ? new Date(b.travel_date) : null,
     // v3.2 — Travel mode + departure time for smart WhatsApp templates
@@ -2104,21 +2135,23 @@ async function createTicket(db, T, b, opts = {}) {
   lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
   lines.push({ account_code: '4101', account_name: 'إيرادات عمولات التذاكر', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التذاكر', debit: 0, credit: commission })
   await createJournalEntry(db, T, {
-    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}حجز تذكرة ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} PNR ${doc.pnr || '-'} — ${cli.name}`,
+    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}حجز تذكرة ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} PNR ${doc.pnr || '-'} — ${cli?.name || doc.client_name || sup.name}`,
     ref_type: 'ticket', ref_id: doc.id, currency: b.currency, lines,
   }, { skipQuota: !!opts.skipQuota })
   const { _id, ...rest } = doc; return { doc: rest }
 }
 
 async function createVisa(db, T, b, opts = {}) {
-  if (!b.client_id || !b.supplier_id) return { error: 'العميل والمورد مطلوبان' }
+  if (!b.supplier_id) return { error: 'المورد مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
+  const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+  if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
   const cost = Number(b.cost) || 0, sale = Number(b.sale_price) || 0
   const commission = +(sale - cost).toFixed(2)
-  const cli = await db.collection('clients').findOne({ id: b.client_id, tenant_id: T })
+  const cli = b.client_id ? await db.collection('clients').findOne({ id: b.client_id, tenant_id: T }) : null
   const sup = await db.collection('suppliers').findOne({ id: b.supplier_id, tenant_id: T })
-  if (!cli || !sup) return { error: 'العميل أو المورد غير موجود' }
-  const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+  if (!sup) return { error: 'المورد غير موجود' }
+  if (paymentMethod === 'credit' && !cli) return { error: 'العميل غير موجود' }
   let box = null
   if (paymentMethod === 'cash') {
     if (!b.box_id) return { error: 'اختر الصندوق/البنك للدفع النقدي' }
@@ -2128,7 +2161,8 @@ async function createVisa(db, T, b, opts = {}) {
   const doc = {
     id: opts.existingId || uuidv4(), tenant_id: T, date: new Date(b.date || Date.now()), service_type: b.service_type || 'تأشيرة عمرة',
     currency: b.currency, exchange_rate: Number(b.exchange_rate) || 1,
-    client_id: cli.id, client_name: cli.name, supplier_id: sup.id, supplier_name: sup.name,
+    client_id: cli?.id || null, client_name: cli?.name || (paymentMethod === 'cash' ? (b.client_name || 'عميل نقدي') : ''),
+    supplier_id: sup.id, supplier_name: sup.name,
     passenger_name: b.passenger_name || '', passport_no: b.passport_no || '',
     nationality: b.nationality || '', attachment_url: b.attachment_url || '',
     // v3.2 — Phone / WhatsApp for direct-contact smart templates
@@ -2156,7 +2190,7 @@ async function createVisa(db, T, b, opts = {}) {
   lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
   lines.push({ account_code: '4102', account_name: 'إيرادات عمولات التأشيرات', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التأشيرات', debit: 0, credit: commission })
   await createJournalEntry(db, T, {
-    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.passenger_name || cli.name}`,
+    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.passenger_name || cli?.name || doc.client_name || sup.name}`,
     ref_type: 'visa', ref_id: doc.id, currency: b.currency, lines,
   }, { skipQuota: !!opts.skipQuota })
   const { _id, ...rest } = doc; return { doc: rest }

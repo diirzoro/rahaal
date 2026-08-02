@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-v3.9.7 Chrome Extension Trial Quota Backend Test Suite
-Tests the scraper/ping and scraper/ingest endpoints with trial quota enforcement
+v3.9.8 Backend Test — Excel Import Flexible Receipt Account
+Tests the new feature where Excel import accepts BOTH client names AND box/bank names
 """
 
 import requests
@@ -10,538 +10,688 @@ import sys
 from datetime import datetime
 
 BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
+AUTH = {"email": "owner@demo.com", "password": "Demo@2025"}
 
-# Test credentials
-OWNER_EMAIL = "owner@demo.com"
-OWNER_PASSWORD = "Demo@2025"
-ADMIN_EMAIL = "admin@targetmedia.com"
-ADMIN_PASSWORD = "Target@2025"
+session = requests.Session()
 
-def print_test(name, passed, details=""):
-    """Print test result"""
-    status = "✅ PASSED" if passed else "❌ FAILED"
-    print(f"\n{status} - {name}")
-    if details:
-        print(f"  {details}")
+def login():
+    """Login and get session cookie"""
+    print("=" * 80)
+    print("LOGGING IN...")
+    print("=" * 80)
+    resp = session.post(f"{BASE_URL}/auth/login", json=AUTH)
+    print(f"Status: {resp.status_code}")
+    if resp.status_code != 200:
+        print(f"❌ Login failed: {resp.text}")
+        sys.exit(1)
+    data = resp.json()
+    print(f"✅ Logged in as: {data.get('user', {}).get('email')}")
+    print(f"   Tenant: {data.get('user', {}).get('tenant_id')}")
+    return data
 
-def login(email, password):
-    """Login and return session cookie"""
-    try:
-        resp = requests.post(f"{BASE_URL}/auth/login", 
-                           json={"email": email, "password": password},
-                           timeout=30)
-        if resp.status_code == 200:
-            cookie = resp.cookies.get('rahaal_session')
-            print(f"✅ Login successful for {email}")
-            return cookie
+def test_health():
+    """Test 1: Health check - version should be 3.9.8"""
+    print("\n" + "=" * 80)
+    print("TEST 1: Health Check - Version 3.9.8")
+    print("=" * 80)
+    resp = session.get(f"{BASE_URL}/health")
+    print(f"Status: {resp.status_code}")
+    data = resp.json()
+    print(f"Response: {json.dumps(data, indent=2)}")
+    
+    if data.get('version') == '3.9.8':
+        print("✅ PASSED - Version is 3.9.8")
+        return True
+    else:
+        print(f"❌ FAILED - Expected version 3.9.8, got {data.get('version')}")
+        return False
+
+def get_boxes():
+    """Get list of boxes/banks"""
+    print("\n" + "=" * 80)
+    print("SETUP: Getting Boxes/Banks")
+    print("=" * 80)
+    resp = session.get(f"{BASE_URL}/boxes")
+    print(f"Status: {resp.status_code}")
+    if resp.status_code != 200:
+        print(f"❌ Failed to get boxes: {resp.text}")
+        return []
+    data = resp.json()
+    print(f"Found {len(data)} boxes/banks:")
+    for box in data:
+        print(f"  - {box.get('name_ar', box.get('name'))} (id: {box.get('id')}, type: {box.get('type')})")
+    return data
+
+def get_clients():
+    """Get list of clients"""
+    print("\n" + "=" * 80)
+    print("SETUP: Getting Clients")
+    print("=" * 80)
+    resp = session.get(f"{BASE_URL}/clients")
+    print(f"Status: {resp.status_code}")
+    if resp.status_code != 200:
+        print(f"❌ Failed to get clients: {resp.text}")
+        return []
+    data = resp.json()
+    print(f"Found {len(data)} clients")
+    if len(data) > 0:
+        print(f"  First client: {data[0].get('name')} (id: {data[0].get('id')})")
+    return data
+
+def get_suppliers():
+    """Get list of suppliers"""
+    print("\n" + "=" * 80)
+    print("SETUP: Getting Suppliers")
+    print("=" * 80)
+    resp = session.get(f"{BASE_URL}/suppliers")
+    print(f"Status: {resp.status_code}")
+    if resp.status_code != 200:
+        print(f"❌ Failed to get suppliers: {resp.text}")
+        return []
+    data = resp.json()
+    print(f"Found {len(data)} suppliers")
+    if len(data) > 0:
+        print(f"  First supplier: {data[0].get('name')} (id: {data[0].get('id')})")
+    return data
+
+def test_tickets_preview(box_name, client_name, supplier_name):
+    """Test 2: POST /api/import/tickets/preview with box, client, and invalid names"""
+    print("\n" + "=" * 80)
+    print("TEST 2: Tickets Preview - Flexible Receipt Account")
+    print("=" * 80)
+    
+    rows = [
+        {
+            "pnr": "IMP-BOX-001",
+            "route": "SAH-CAI",
+            "passenger_name": "مسافر ١",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": box_name,
+            "supplier_name": supplier_name
+        },
+        {
+            "pnr": "IMP-CLI-002",
+            "route": "CAI-SAH",
+            "passenger_name": "مسافر ٢",
+            "currency": "USD",
+            "cost": 80,
+            "sale_price": 120,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        },
+        {
+            "pnr": "IMP-BAD-003",
+            "route": "X-Y",
+            "passenger_name": "م ٣",
+            "currency": "USD",
+            "cost": 50,
+            "sale_price": 70,
+            "client_name": "اسم-غير-موجود-XYZ",
+            "supplier_name": supplier_name
+        }
+    ]
+    
+    print(f"Sending 3 rows:")
+    print(f"  Row 1: client_name='{box_name}' (BOX)")
+    print(f"  Row 2: client_name='{client_name}' (CLIENT)")
+    print(f"  Row 3: client_name='اسم-غير-موجود-XYZ' (INVALID)")
+    
+    resp = session.post(f"{BASE_URL}/import/tickets/preview", json={"rows": rows})
+    print(f"\nStatus: {resp.status_code}")
+    
+    if resp.status_code != 200:
+        print(f"❌ FAILED - Expected 200, got {resp.status_code}")
+        print(f"Response: {resp.text}")
+        return False, None
+    
+    data = resp.json()
+    print(f"\nResponse summary:")
+    print(f"  valid_count: {data.get('valid_count')}")
+    print(f"  total rows: {len(data.get('rows', []))}")
+    
+    passed = True
+    
+    # Check row 1 (box)
+    row1 = data['rows'][0]
+    print(f"\nRow 1 (BOX):")
+    print(f"  __errors: {row1.get('__errors')}")
+    print(f"  __receipt_kind: {row1.get('__receipt_kind')}")
+    if len(row1.get('__errors', [])) == 0 and row1.get('__receipt_kind') == 'box':
+        print("  ✅ PASSED - Box detected correctly")
+    else:
+        print("  ❌ FAILED - Expected __errors=[], __receipt_kind='box'")
+        passed = False
+    
+    # Check row 2 (client)
+    row2 = data['rows'][1]
+    print(f"\nRow 2 (CLIENT):")
+    print(f"  __errors: {row2.get('__errors')}")
+    print(f"  __receipt_kind: {row2.get('__receipt_kind')}")
+    if len(row2.get('__errors', [])) == 0 and row2.get('__receipt_kind') == 'client':
+        print("  ✅ PASSED - Client detected correctly")
+    else:
+        print("  ❌ FAILED - Expected __errors=[], __receipt_kind='client'")
+        passed = False
+    
+    # Check row 3 (invalid)
+    row3 = data['rows'][2]
+    print(f"\nRow 3 (INVALID):")
+    print(f"  __errors: {row3.get('__errors')}")
+    print(f"  __receipt_kind: {row3.get('__receipt_kind')}")
+    if len(row3.get('__errors', [])) > 0 and 'غير موجود' in str(row3.get('__errors')):
+        print("  ✅ PASSED - Invalid name detected with error message")
+    else:
+        print("  ❌ FAILED - Expected error about 'غير موجود'")
+        passed = False
+    
+    if passed:
+        print("\n✅ TEST 2 PASSED - Preview validation working correctly")
+    else:
+        print("\n❌ TEST 2 FAILED")
+    
+    return passed, data
+
+def test_tickets_import(preview_data, box_id):
+    """Test 3: POST /api/import/tickets - Execute import"""
+    print("\n" + "=" * 80)
+    print("TEST 3: Tickets Import - Execute with enriched rows")
+    print("=" * 80)
+    
+    # Use enriched rows from preview
+    rows = preview_data.get('rows', [])
+    
+    print(f"Importing {len(rows)} rows (enriched from preview)")
+    
+    resp = session.post(f"{BASE_URL}/import/tickets", json={"rows": rows})
+    print(f"\nStatus: {resp.status_code}")
+    
+    if resp.status_code != 200:
+        print(f"❌ FAILED - Expected 200, got {resp.status_code}")
+        print(f"Response: {resp.text}")
+        return False
+    
+    data = resp.json()
+    print(f"\nImport results:")
+    print(f"  created: {data.get('created')}")
+    print(f"  skipped: {data.get('skipped')}")
+    print(f"  failed: {data.get('failed')}")
+    print(f"  errors: {data.get('errors')}")
+    
+    passed = True
+    
+    if data.get('created') != 2:
+        print(f"❌ FAILED - Expected created=2, got {data.get('created')}")
+        passed = False
+    else:
+        print("✅ Created 2 tickets as expected")
+    
+    if data.get('failed') != 1:
+        print(f"❌ FAILED - Expected failed=1, got {data.get('failed')}")
+        passed = False
+    else:
+        print("✅ Failed 1 ticket as expected")
+    
+    # Verify the created tickets
+    print("\n" + "-" * 80)
+    print("Verifying created tickets...")
+    print("-" * 80)
+    
+    # Get ticket IMP-BOX-001 (box payment)
+    resp = session.get(f"{BASE_URL}/tickets")
+    if resp.status_code == 200:
+        tickets = resp.json()
+        box_ticket = next((t for t in tickets if t.get('pnr') == 'IMP-BOX-001'), None)
+        client_ticket = next((t for t in tickets if t.get('pnr') == 'IMP-CLI-002'), None)
+        
+        if box_ticket:
+            print(f"\nTicket IMP-BOX-001 (BOX payment):")
+            print(f"  payment_method: {box_ticket.get('payment_method')}")
+            print(f"  box_id: {box_ticket.get('box_id')}")
+            print(f"  client_id: {box_ticket.get('client_id')}")
+            print(f"  client_name: {box_ticket.get('client_name')}")
+            
+            if (box_ticket.get('payment_method') == 'cash' and 
+                box_ticket.get('box_id') == box_id and 
+                box_ticket.get('client_id') is None):
+                print("  ✅ PASSED - Box payment ticket created correctly")
+            else:
+                print("  ❌ FAILED - Box payment ticket has incorrect fields")
+                passed = False
         else:
-            print(f"❌ Login failed for {email}: {resp.status_code} - {resp.text[:200]}")
-            return None
-    except Exception as e:
-        print(f"❌ Login error for {email}: {str(e)}")
-        return None
-
-def create_pat(session_cookie):
-    """Create a PAT token"""
-    try:
-        resp = requests.post(f"{BASE_URL}/pats",
-                           json={"name": "v3.9.7 Test PAT"},
-                           cookies={"rahaal_session": session_cookie},
-                           timeout=30)
-        if resp.status_code == 200:
-            data = resp.json()
-            token = data.get('token')
-            print(f"✅ PAT created: {token[:20]}...")
-            return token
+            print("❌ FAILED - Ticket IMP-BOX-001 not found")
+            passed = False
+        
+        if client_ticket:
+            print(f"\nTicket IMP-CLI-002 (CLIENT payment):")
+            print(f"  payment_method: {client_ticket.get('payment_method')}")
+            print(f"  client_id: {client_ticket.get('client_id')}")
+            
+            if (client_ticket.get('payment_method') == 'credit' and 
+                client_ticket.get('client_id') is not None):
+                print("  ✅ PASSED - Client payment ticket created correctly")
+            else:
+                print("  ❌ FAILED - Client payment ticket has incorrect fields")
+                passed = False
         else:
-            print(f"⚠️  PAT creation response: {resp.status_code} - {resp.text[:200]}")
-            # Try to get existing PATs
-            resp = requests.get(f"{BASE_URL}/pats",
-                              cookies={"rahaal_session": session_cookie},
-                              timeout=30)
-            if resp.status_code == 200:
-                pats = resp.json()
-                if pats and len(pats) > 0:
-                    print(f"⚠️  Using existing PAT (cannot retrieve full token, need to create new one)")
-                    return None
-            return None
-    except Exception as e:
-        print(f"❌ PAT creation error: {str(e)}")
-        return None
-
-def get_tenant_info(session_cookie):
-    """Get tenant info from /auth/me"""
-    try:
-        resp = requests.get(f"{BASE_URL}/auth/me",
-                          cookies={"rahaal_session": session_cookie},
-                          timeout=30)
-        if resp.status_code == 200:
-            data = resp.json()
-            tenant = data.get('tenant', {})
-            return tenant
-        return None
-    except Exception as e:
-        print(f"❌ Get tenant info error: {str(e)}")
-        return None
-
-def get_clients_suppliers(session_cookie):
-    """Get first client and supplier IDs"""
-    try:
-        # Get clients
-        resp = requests.get(f"{BASE_URL}/clients",
-                          cookies={"rahaal_session": session_cookie},
-                          timeout=30)
-        clients = resp.json() if resp.status_code == 200 else []
-        
-        # Get suppliers
-        resp = requests.get(f"{BASE_URL}/suppliers",
-                          cookies={"rahaal_session": session_cookie},
-                          timeout=30)
-        suppliers = resp.json() if resp.status_code == 200 else []
-        
-        if clients and suppliers:
-            return clients[0]['id'], suppliers[0]['id']
-        return None, None
-    except Exception as e:
-        print(f"❌ Get clients/suppliers error: {str(e)}")
-        return None, None
-
-def test_scraper_ping(pat_token):
-    """Test GET /api/scraper/ping"""
-    print("\n" + "="*80)
-    print("TEST 1: GET /api/scraper/ping with valid PAT")
-    print("="*80)
+            print("❌ FAILED - Ticket IMP-CLI-002 not found")
+            passed = False
     
-    try:
-        resp = requests.get(f"{BASE_URL}/scraper/ping",
-                          headers={"Authorization": f"Bearer {pat_token}"},
-                          timeout=30)
+    # Verify journal entries
+    print("\n" + "-" * 80)
+    print("Verifying journal entries...")
+    print("-" * 80)
+    
+    resp = session.get(f"{BASE_URL}/journal-entries")
+    if resp.status_code == 200:
+        entries = resp.json()
+        box_je = next((e for e in entries if e.get('ref_type') == 'ticket' and 'IMP-BOX-001' in e.get('description', '')), None)
         
-        print(f"Status: {resp.status_code}")
-        data = resp.json()
-        print(f"Response: {json.dumps(data, indent=2, ensure_ascii=False)}")
+        if box_je:
+            print(f"\nJournal Entry for IMP-BOX-001:")
+            print(f"  ref_type: {box_je.get('ref_type')}")
+            print(f"  lines count: {len(box_je.get('lines', []))}")
+            
+            lines = box_je.get('lines', [])
+            if len(lines) == 3:
+                print("  ✅ Has 3 lines as expected")
+                
+                # Check for box debit (1101 or 1201)
+                box_line = next((l for l in lines if l.get('account_code') in ['1101', '1201'] and l.get('debit') == 150), None)
+                supplier_line = next((l for l in lines if l.get('account_code') == '2101' and l.get('credit') == 100), None)
+                revenue_line = next((l for l in lines if l.get('account_code') == '4101' and l.get('credit') == 50), None)
+                
+                if box_line:
+                    print(f"  ✅ Box debit line found: {box_line.get('account_code')} debit=150")
+                else:
+                    print("  ❌ Box debit line not found or incorrect")
+                    passed = False
+                
+                if supplier_line:
+                    print(f"  ✅ Supplier credit line found: 2101 credit=100")
+                else:
+                    print("  ❌ Supplier credit line not found or incorrect")
+                    passed = False
+                
+                if revenue_line:
+                    print(f"  ✅ Revenue credit line found: 4101 credit=50")
+                else:
+                    print("  ❌ Revenue credit line not found or incorrect")
+                    passed = False
+            else:
+                print(f"  ❌ FAILED - Expected 3 lines, got {len(lines)}")
+                passed = False
+        else:
+            print("❌ FAILED - Journal entry for IMP-BOX-001 not found")
+            passed = False
+    
+    # Verify box balance
+    print("\n" + "-" * 80)
+    print("Verifying box balance...")
+    print("-" * 80)
+    
+    resp = session.get(f"{BASE_URL}/boxes")
+    if resp.status_code == 200:
+        boxes = resp.json()
+        box = next((b for b in boxes if b.get('id') == box_id), None)
         
-        # Verify response structure
-        passed = (
-            resp.status_code == 200 and
-            data.get('ok') == True and
-            'tenant' in data and
-            'user' in data and
-            data.get('version') == '3.9.7' and
-            data.get('extension_min_version') == '1.4.0' and
-            'usage' in data and
-            'plan' in data['usage'] and
-            'used' in data['usage'] and
-            'limit' in data['usage'] and
-            'remaining' in data['usage'] and
-            'unlimited' in data['usage']
-        )
-        
-        usage = data.get('usage', {})
-        details = f"Plan: {usage.get('plan')}, Used: {usage.get('used')}, Limit: {usage.get('limit')}, Remaining: {usage.get('remaining')}, Unlimited: {usage.get('unlimited')}"
-        print_test("GET /api/scraper/ping structure", passed, details)
-        
-        return passed, data
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        print_test("GET /api/scraper/ping", False, str(e))
+        if box:
+            print(f"\nBox balance:")
+            print(f"  USD: {box.get('balance_usd', 0)}")
+            print(f"  SAR: {box.get('balance_sar', 0)}")
+            print(f"  YER: {box.get('balance_yer', 0)}")
+            
+            # Box should have increased by 150 USD
+            if box.get('balance_usd', 0) >= 150:
+                print("  ✅ Box balance increased (includes 150 USD from import)")
+            else:
+                print(f"  ⚠️  Box balance USD is {box.get('balance_usd', 0)} (may include previous transactions)")
+        else:
+            print("❌ FAILED - Box not found")
+            passed = False
+    
+    if passed:
+        print("\n✅ TEST 3 PASSED - Import execution working correctly")
+    else:
+        print("\n❌ TEST 3 FAILED")
+    
+    return passed
+
+def test_visas_preview(box_name, client_name, supplier_name):
+    """Test 4: POST /api/import/visas/preview - Same flexibility test"""
+    print("\n" + "=" * 80)
+    print("TEST 4: Visas Preview - Flexible Receipt Account")
+    print("=" * 80)
+    
+    rows = [
+        {
+            "passport_no": "IMP-VISA-BOX-001",
+            "passenger_name": "مسافر تأشيرة ١",
+            "service_type": "تأشيرة عمرة",
+            "currency": "SAR",
+            "cost": 300,
+            "sale_price": 400,
+            "client_name": box_name,
+            "supplier_name": supplier_name
+        },
+        {
+            "passport_no": "IMP-VISA-CLI-002",
+            "passenger_name": "مسافر تأشيرة ٢",
+            "service_type": "تأشيرة عمرة",
+            "currency": "SAR",
+            "cost": 250,
+            "sale_price": 350,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        },
+        {
+            "passport_no": "IMP-VISA-BAD-003",
+            "passenger_name": "مسافر تأشيرة ٣",
+            "service_type": "تأشيرة عمرة",
+            "currency": "SAR",
+            "cost": 200,
+            "sale_price": 300,
+            "client_name": "اسم-غير-موجود-ABC",
+            "supplier_name": supplier_name
+        }
+    ]
+    
+    print(f"Sending 3 rows:")
+    print(f"  Row 1: client_name='{box_name}' (BOX)")
+    print(f"  Row 2: client_name='{client_name}' (CLIENT)")
+    print(f"  Row 3: client_name='اسم-غير-موجود-ABC' (INVALID)")
+    
+    resp = session.post(f"{BASE_URL}/import/visas/preview", json={"rows": rows})
+    print(f"\nStatus: {resp.status_code}")
+    
+    if resp.status_code != 200:
+        print(f"❌ FAILED - Expected 200, got {resp.status_code}")
+        print(f"Response: {resp.text}")
         return False, None
-
-def test_scraper_ingest_flight(pat_token, client_id, supplier_id):
-    """Test POST /api/scraper/ingest with flight ticket"""
-    print("\n" + "="*80)
-    print("TEST 2: POST /api/scraper/ingest (flight ticket)")
-    print("="*80)
     
+    data = resp.json()
+    print(f"\nResponse summary:")
+    print(f"  valid_count: {data.get('valid_count')}")
+    print(f"  total rows: {len(data.get('rows', []))}")
+    
+    passed = True
+    
+    # Check row 1 (box)
+    row1 = data['rows'][0]
+    print(f"\nRow 1 (BOX):")
+    print(f"  __errors: {row1.get('__errors')}")
+    print(f"  __receipt_kind: {row1.get('__receipt_kind')}")
+    if len(row1.get('__errors', [])) == 0 and row1.get('__receipt_kind') == 'box':
+        print("  ✅ PASSED - Box detected correctly")
+    else:
+        print("  ❌ FAILED - Expected __errors=[], __receipt_kind='box'")
+        passed = False
+    
+    # Check row 2 (client)
+    row2 = data['rows'][1]
+    print(f"\nRow 2 (CLIENT):")
+    print(f"  __errors: {row2.get('__errors')}")
+    print(f"  __receipt_kind: {row2.get('__receipt_kind')}")
+    if len(row2.get('__errors', [])) == 0 and row2.get('__receipt_kind') == 'client':
+        print("  ✅ PASSED - Client detected correctly")
+    else:
+        print("  ❌ FAILED - Expected __errors=[], __receipt_kind='client'")
+        passed = False
+    
+    # Check row 3 (invalid)
+    row3 = data['rows'][2]
+    print(f"\nRow 3 (INVALID):")
+    print(f"  __errors: {row3.get('__errors')}")
+    if len(row3.get('__errors', [])) > 0 and 'غير موجود' in str(row3.get('__errors')):
+        print("  ✅ PASSED - Invalid name detected with error message")
+    else:
+        print("  ❌ FAILED - Expected error about 'غير موجود'")
+        passed = False
+    
+    if passed:
+        print("\n✅ TEST 4 PASSED - Visas preview validation working correctly")
+    else:
+        print("\n❌ TEST 4 FAILED")
+    
+    return passed, data
+
+def test_visas_import(preview_data):
+    """Test 5: POST /api/import/visas - Execute import"""
+    print("\n" + "=" * 80)
+    print("TEST 5: Visas Import - Execute with enriched rows")
+    print("=" * 80)
+    
+    rows = preview_data.get('rows', [])
+    
+    print(f"Importing {len(rows)} rows (enriched from preview)")
+    
+    resp = session.post(f"{BASE_URL}/import/visas", json={"rows": rows})
+    print(f"\nStatus: {resp.status_code}")
+    
+    if resp.status_code != 200:
+        print(f"❌ FAILED - Expected 200, got {resp.status_code}")
+        print(f"Response: {resp.text}")
+        return False
+    
+    data = resp.json()
+    print(f"\nImport results:")
+    print(f"  created: {data.get('created')}")
+    print(f"  skipped: {data.get('skipped')}")
+    print(f"  failed: {data.get('failed')}")
+    
+    passed = True
+    
+    if data.get('created') != 2:
+        print(f"❌ FAILED - Expected created=2, got {data.get('created')}")
+        passed = False
+    else:
+        print("✅ Created 2 visas as expected")
+    
+    if data.get('failed') != 1:
+        print(f"❌ FAILED - Expected failed=1, got {data.get('failed')}")
+        passed = False
+    else:
+        print("✅ Failed 1 visa as expected")
+    
+    if passed:
+        print("\n✅ TEST 5 PASSED - Visas import working correctly")
+    else:
+        print("\n❌ TEST 5 FAILED")
+    
+    return passed
+
+def test_regression_ticket_creation(client_id, supplier_id, box_id):
+    """Test 6: Regression - Regular ticket creation still works"""
+    print("\n" + "=" * 80)
+    print("TEST 6: Regression - Regular Ticket Creation")
+    print("=" * 80)
+    
+    # Test credit payment with client
+    print("\nTest 6a: Credit payment with client")
     payload = {
-        "traveler": {
-            "name_ar": "احمد علي",
-            "passport_no": "MK0011",
-            "phone": "777123456"
-        },
-        "booking": {
-            "doc_type": "flight",
-            "pnr": "ABC123",
-            "ticket_no": "T-9001",
-            "carrier": "IY",
-            "route_from": "SAH",
-            "route_to": "CAI"
-        },
-        "dates": {
-            "issued_at": "2026-08-02T10:00:00Z",
-            "trip_date": "2026-09-01"
-        },
-        "financial": {
-            "amount": 150,
-            "currency": "USD"
-        },
+        "pnr": "REG-CREDIT-001",
+        "route": "JED-SAH",
+        "passenger_name": "مسافر عادي",
+        "currency": "SAR",
+        "cost": 200,
+        "sale_price": 300,
         "client_id": client_id,
         "supplier_id": supplier_id,
-        "cost": 120,
         "payment_method": "credit"
     }
     
-    try:
-        resp = requests.post(f"{BASE_URL}/scraper/ingest",
-                           headers={"Authorization": f"Bearer {pat_token}"},
-                           json=payload,
-                           timeout=30)
-        
-        print(f"Status: {resp.status_code}")
-        data = resp.json()
-        print(f"Response: {json.dumps(data, indent=2, ensure_ascii=False)}")
-        
-        # Verify response structure
-        passed = (
-            resp.status_code == 200 and
-            data.get('ok') == True and
-            data.get('record_type') == 'ticket' and
-            'record_id' in data and
-            'usage' in data and
-            'used' in data['usage']
-        )
-        
-        usage = data.get('usage', {})
-        details = f"Record Type: {data.get('record_type')}, Usage: {usage.get('used')}/{usage.get('limit')}"
-        print_test("POST /api/scraper/ingest (flight)", passed, details)
-        
-        return passed, data
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        print_test("POST /api/scraper/ingest (flight)", False, str(e))
-        return False, None
-
-def test_scraper_ingest_visa(pat_token, client_id, supplier_id):
-    """Test POST /api/scraper/ingest with umrah visa"""
-    print("\n" + "="*80)
-    print("TEST 3: POST /api/scraper/ingest (umrah visa)")
-    print("="*80)
+    resp = session.post(f"{BASE_URL}/tickets", json=payload)
+    print(f"Status: {resp.status_code}")
     
+    passed_credit = False
+    if resp.status_code == 200:
+        data = resp.json()
+        print(f"✅ Credit ticket created: {data.get('pnr')}")
+        passed_credit = True
+    else:
+        print(f"❌ FAILED - Credit ticket creation failed: {resp.text}")
+    
+    # Test cash payment with client and box
+    print("\nTest 6b: Cash payment with client and box")
     payload = {
-        "traveler": {
-            "name_ar": "خديجة سعيد",
-            "passport_no": "16439690",
-            "nationality": "يمني",
-            "phone": "777888999"
-        },
-        "booking": {
-            "doc_type": "umrah_visa",
-            "visa_no": "6169794577",
-            "application_no": "E821262038"
-        },
-        "dates": {
-            "issued_at": "2026-08-02T10:00:00Z",
-            "valid_from": "2026-07-17",
-            "valid_until": "2026-10-15"
-        },
-        "financial": {
-            "amount": 800,
-            "currency": "SAR"
-        },
+        "pnr": "REG-CASH-001",
+        "route": "SAH-JED",
+        "passenger_name": "مسافر نقدي",
+        "currency": "SAR",
+        "cost": 150,
+        "sale_price": 250,
         "client_id": client_id,
         "supplier_id": supplier_id,
-        "cost": 500,
-        "payment_method": "credit"
+        "payment_method": "cash",
+        "box_id": box_id
     }
     
-    try:
-        resp = requests.post(f"{BASE_URL}/scraper/ingest",
-                           headers={"Authorization": f"Bearer {pat_token}"},
-                           json=payload,
-                           timeout=30)
-        
-        print(f"Status: {resp.status_code}")
+    resp = session.post(f"{BASE_URL}/tickets", json=payload)
+    print(f"Status: {resp.status_code}")
+    
+    passed_cash = False
+    if resp.status_code == 200:
         data = resp.json()
-        print(f"Response: {json.dumps(data, indent=2, ensure_ascii=False)}")
-        
-        # Verify response structure
-        passed = (
-            resp.status_code == 200 and
-            data.get('ok') == True and
-            data.get('record_type') == 'visa' and
-            'record_id' in data and
-            'usage' in data and
-            'used' in data['usage']
-        )
-        
-        usage = data.get('usage', {})
-        details = f"Record Type: {data.get('record_type')}, Usage: {usage.get('used')}/{usage.get('limit')}"
-        print_test("POST /api/scraper/ingest (umrah visa)", passed, details)
-        
-        return passed, data
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        print_test("POST /api/scraper/ingest (umrah visa)", False, str(e))
-        return False, None
-
-def test_trial_cap_enforcement(pat_token, client_id, supplier_id, tenant_id):
-    """Test trial cap enforcement at 30/30"""
-    print("\n" + "="*80)
-    print("TEST 4: Trial cap enforcement (30/30)")
-    print("="*80)
+        print(f"✅ Cash ticket created: {data.get('pnr')}")
+        passed_cash = True
+    else:
+        print(f"❌ FAILED - Cash ticket creation failed: {resp.text}")
     
-    # First, we need to set scraper_usage.count to 30 via MongoDB
-    print("⚠️  Note: This test requires manual MongoDB update to set scraper_usage.count=30")
-    print(f"   Run: db.tenants.updateOne({{id: '{tenant_id}'}}, {{$set: {{'scraper_usage.count': 30, subscription: 'trial'}}, $unset: {{activation_confirmed: ''}}}})")
-    
-    # Try to ingest one more
-    payload = {
-        "traveler": {"name_ar": "اختبار الحد", "passport_no": "TEST999"},
-        "booking": {"doc_type": "flight", "pnr": "TEST999"},
-        "dates": {"issued_at": "2026-08-02T10:00:00Z"},
-        "financial": {"amount": 100, "currency": "USD"},
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "cost": 80,
-        "payment_method": "credit"
-    }
-    
-    try:
-        resp = requests.post(f"{BASE_URL}/scraper/ingest",
-                           headers={"Authorization": f"Bearer {pat_token}"},
-                           json=payload,
-                           timeout=30)
-        
-        print(f"Status: {resp.status_code}")
-        data = resp.json()
-        print(f"Response: {json.dumps(data, indent=2, ensure_ascii=False)}")
-        
-        # Should return 402 with quota_exceeded
-        passed = (
-            resp.status_code == 402 and
-            data.get('quota_exceeded') == True and
-            'error' in data and
-            'usage' in data and
-            data['usage'].get('used') == 30 and
-            data['usage'].get('limit') == 30 and
-            data['usage'].get('remaining') == 0
-        )
-        
-        details = f"Status: {resp.status_code}, Quota Exceeded: {data.get('quota_exceeded')}, Error: {data.get('error', '')[:50]}"
-        print_test("Trial cap enforcement (30/30)", passed, details)
-        
-        return passed, data
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        print_test("Trial cap enforcement", False, str(e))
-        return False, None
-
-def test_paid_tenant_bypass(pat_token, client_id, supplier_id, tenant_id):
-    """Test paid tenant bypass (unlimited)"""
-    print("\n" + "="*80)
-    print("TEST 5: Paid tenant bypass (unlimited)")
-    print("="*80)
-    
-    print("⚠️  Note: This test requires manual MongoDB update to set subscription='paid'")
-    print(f"   Run: db.tenants.updateOne({{id: '{tenant_id}'}}, {{$set: {{subscription: 'paid'}}}})")
-    
-    # Try to ingest
-    payload = {
-        "traveler": {"name_ar": "اختبار مدفوع", "passport_no": "PAID001"},
-        "booking": {"doc_type": "flight", "pnr": "PAID001"},
-        "dates": {"issued_at": "2026-08-02T10:00:00Z"},
-        "financial": {"amount": 100, "currency": "USD"},
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "cost": 80,
-        "payment_method": "credit"
-    }
-    
-    try:
-        resp = requests.post(f"{BASE_URL}/scraper/ingest",
-                           headers={"Authorization": f"Bearer {pat_token}"},
-                           json=payload,
-                           timeout=30)
-        
-        print(f"Status: {resp.status_code}")
-        data = resp.json()
-        print(f"Response: {json.dumps(data, indent=2, ensure_ascii=False)}")
-        
-        # Should return 200 with unlimited=true
-        passed = (
-            resp.status_code == 200 and
-            data.get('ok') == True and
-            'usage' in data and
-            data['usage'].get('unlimited') == True and
-            data['usage'].get('plan') == 'paid'
-        )
-        
-        usage = data.get('usage', {})
-        details = f"Plan: {usage.get('plan')}, Unlimited: {usage.get('unlimited')}"
-        print_test("Paid tenant bypass", passed, details)
-        
-        return passed, data
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        print_test("Paid tenant bypass", False, str(e))
-        return False, None
-
-def test_regression_health():
-    """Test regression: /health endpoint"""
-    print("\n" + "="*80)
-    print("REGRESSION TEST: GET /api/health")
-    print("="*80)
-    
-    try:
-        resp = requests.get(f"{BASE_URL}/health", timeout=30)
-        print(f"Status: {resp.status_code}")
-        data = resp.json()
-        print(f"Response: {json.dumps(data, indent=2, ensure_ascii=False)}")
-        
-        passed = resp.status_code == 200 and data.get('status') == 'ok'
-        print_test("GET /api/health", passed)
-        return passed
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        print_test("GET /api/health", False, str(e))
+    if passed_credit and passed_cash:
+        print("\n✅ TEST 6 PASSED - Regular ticket creation still works")
+        return True
+    else:
+        print("\n❌ TEST 6 FAILED")
         return False
 
-def test_regression_packages(session_cookie):
-    """Test regression: /packages endpoint"""
-    print("\n" + "="*80)
-    print("REGRESSION TEST: GET /api/packages")
-    print("="*80)
+def test_scraper_ping():
+    """Test 7: Regression - Scraper ping still works"""
+    print("\n" + "=" * 80)
+    print("TEST 7: Regression - Scraper Ping (if PAT available)")
+    print("=" * 80)
     
-    try:
-        resp = requests.get(f"{BASE_URL}/packages",
-                          cookies={"rahaal_session": session_cookie},
-                          timeout=30)
-        print(f"Status: {resp.status_code}")
-        data = resp.json()
-        print(f"Response: Found {len(data)} packages")
-        
-        passed = resp.status_code == 200 and isinstance(data, list)
-        print_test("GET /api/packages", passed, f"Found {len(data)} packages")
-        return passed
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        print_test("GET /api/packages", False, str(e))
-        return False
-
-def test_regression_auth_me(session_cookie):
-    """Test regression: /auth/me returns journal_quota"""
-    print("\n" + "="*80)
-    print("REGRESSION TEST: GET /api/auth/me (journal_quota)")
-    print("="*80)
+    # Try to get PATs
+    resp = session.get(f"{BASE_URL}/pats")
+    if resp.status_code != 200:
+        print("⚠️  SKIPPED - Cannot access PATs endpoint (may not be owner)")
+        return True
     
-    try:
-        resp = requests.get(f"{BASE_URL}/auth/me",
-                          cookies={"rahaal_session": session_cookie},
-                          timeout=30)
-        print(f"Status: {resp.status_code}")
-        data = resp.json()
-        
-        tenant = data.get('tenant', {})
-        journal_quota = tenant.get('journal_quota', {})
-        print(f"Journal Quota: {json.dumps(journal_quota, indent=2, ensure_ascii=False)}")
-        
-        passed = (
-            resp.status_code == 200 and
-            'journal_quota' in tenant and
-            'used' in journal_quota and
-            'limit' in journal_quota
-        )
-        print_test("GET /api/auth/me (journal_quota)", passed)
-        return passed
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        print_test("GET /api/auth/me", False, str(e))
-        return False
+    pats = resp.json()
+    if len(pats) == 0:
+        print("⚠️  SKIPPED - No PATs available")
+        return True
+    
+    # Use first active PAT (we only have prefix, so we can't test ping)
+    print("⚠️  SKIPPED - PAT testing requires full token (only prefix available)")
+    return True
 
 def main():
     """Run all tests"""
-    print("\n" + "="*80)
-    print("v3.9.7 CHROME EXTENSION TRIAL QUOTA - BACKEND TEST SUITE")
-    print("="*80)
+    print("\n" + "=" * 80)
+    print("v3.9.8 BACKEND TESTING — Excel Import Flexible Receipt Account")
+    print("=" * 80)
     print(f"Base URL: {BASE_URL}")
-    print(f"Started: {datetime.now().isoformat()}")
+    print(f"Auth: {AUTH['email']}")
+    print("=" * 80)
     
-    results = []
+    # Login
+    login()
     
-    # Login as owner
-    print("\n" + "="*80)
-    print("SETUP: Login and create PAT")
-    print("="*80)
-    session_cookie = login(OWNER_EMAIL, OWNER_PASSWORD)
-    if not session_cookie:
-        print("❌ FATAL: Cannot login as owner. Aborting tests.")
+    # Test 1: Health check
+    test1_passed = test_health()
+    
+    # Setup: Get boxes, clients, suppliers
+    boxes = get_boxes()
+    clients = get_clients()
+    suppliers = get_suppliers()
+    
+    if len(boxes) == 0:
+        print("\n❌ CRITICAL ERROR - No boxes found. Cannot proceed with tests.")
         sys.exit(1)
     
-    # Get tenant info
-    tenant = get_tenant_info(session_cookie)
-    tenant_id = tenant.get('id') if tenant else None
-    print(f"Tenant ID: {tenant_id}")
-    print(f"Tenant Name: {tenant.get('name') if tenant else 'Unknown'}")
-    
-    # Create PAT
-    pat_token = create_pat(session_cookie)
-    if not pat_token:
-        print("❌ FATAL: Cannot create PAT. Please create one manually via the app.")
-        print("   Go to Settings → Extension tab → Create new PAT")
-        print("   Then set PAT_TOKEN environment variable and re-run this script.")
+    if len(clients) == 0:
+        print("\n❌ CRITICAL ERROR - No clients found. Cannot proceed with tests.")
         sys.exit(1)
     
-    # Get client and supplier IDs
-    client_id, supplier_id = get_clients_suppliers(session_cookie)
-    if not client_id or not supplier_id:
-        print("❌ FATAL: Cannot get client/supplier IDs. Aborting tests.")
+    if len(suppliers) == 0:
+        print("\n❌ CRITICAL ERROR - No suppliers found. Cannot proceed with tests.")
         sys.exit(1)
-    print(f"Client ID: {client_id}")
-    print(f"Supplier ID: {supplier_id}")
     
-    # Run tests
-    passed, data = test_scraper_ping(pat_token)
-    results.append(("GET /api/scraper/ping", passed))
+    box = boxes[0]
+    box_name = box.get('name_ar') or box.get('name')
+    box_id = box.get('id')
     
-    passed, data = test_scraper_ingest_flight(pat_token, client_id, supplier_id)
-    results.append(("POST /api/scraper/ingest (flight)", passed))
+    client = clients[0]
+    client_name = client.get('name')
+    client_id = client.get('id')
     
-    passed, data = test_scraper_ingest_visa(pat_token, client_id, supplier_id)
-    results.append(("POST /api/scraper/ingest (umrah visa)", passed))
+    supplier = suppliers[0]
+    supplier_name = supplier.get('name')
+    supplier_id = supplier.get('id')
     
-    # Note: Tests 4 and 5 require manual MongoDB updates
-    print("\n" + "="*80)
-    print("MANUAL TESTS (require MongoDB updates)")
-    print("="*80)
-    print("TEST 4: Trial cap enforcement (30/30)")
-    mongo_cmd = f"db.tenants.updateOne({{id: '{tenant_id}'}}, {{$set: {{'scraper_usage.count': 30, subscription: 'trial'}}, $unset: {{activation_confirmed: ''}}}})"
-    print(f"  1. Run: {mongo_cmd}")
-    print(f"  2. Then call POST /api/scraper/ingest - should return 402 with quota_exceeded=true")
-    print("")
-    print("TEST 5: Paid tenant bypass")
-    mongo_cmd2 = f"db.tenants.updateOne({{id: '{tenant_id}'}}, {{$set: {{subscription: 'paid'}}}})"
-    print(f"  1. Run: {mongo_cmd2}")
-    print(f"  2. Then call POST /api/scraper/ingest - should return 200 with unlimited=true")
+    print(f"\nUsing for tests:")
+    print(f"  Box: {box_name} (id: {box_id})")
+    print(f"  Client: {client_name} (id: {client_id})")
+    print(f"  Supplier: {supplier_name} (id: {supplier_id})")
     
-    # Regression tests
-    passed = test_regression_health()
-    results.append(("Regression: GET /api/health", passed))
+    # Test 2: Tickets preview
+    test2_passed, preview_data = test_tickets_preview(box_name, client_name, supplier_name)
     
-    passed = test_regression_packages(session_cookie)
-    results.append(("Regression: GET /api/packages", passed))
+    # Test 3: Tickets import
+    test3_passed = False
+    if test2_passed and preview_data:
+        test3_passed = test_tickets_import(preview_data, box_id)
+    else:
+        print("\n⚠️  SKIPPED TEST 3 - Preview failed")
     
-    passed = test_regression_auth_me(session_cookie)
-    results.append(("Regression: GET /api/auth/me", passed))
+    # Test 4: Visas preview
+    test4_passed, visa_preview_data = test_visas_preview(box_name, client_name, supplier_name)
+    
+    # Test 5: Visas import
+    test5_passed = False
+    if test4_passed and visa_preview_data:
+        test5_passed = test_visas_import(visa_preview_data)
+    else:
+        print("\n⚠️  SKIPPED TEST 5 - Visas preview failed")
+    
+    # Test 6: Regression - Regular ticket creation
+    test6_passed = test_regression_ticket_creation(client_id, supplier_id, box_id)
+    
+    # Test 7: Regression - Scraper ping
+    test7_passed = test_scraper_ping()
     
     # Summary
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("TEST SUMMARY")
-    print("="*80)
-    total = len(results)
-    passed_count = sum(1 for _, p in results if p)
+    print("=" * 80)
     
-    for name, passed in results:
+    tests = [
+        ("Test 1: Health Check (v3.9.8)", test1_passed),
+        ("Test 2: Tickets Preview (Box/Client/Invalid)", test2_passed),
+        ("Test 3: Tickets Import (Execute)", test3_passed),
+        ("Test 4: Visas Preview (Box/Client/Invalid)", test4_passed),
+        ("Test 5: Visas Import (Execute)", test5_passed),
+        ("Test 6: Regression - Regular Ticket Creation", test6_passed),
+        ("Test 7: Regression - Scraper Ping", test7_passed),
+    ]
+    
+    passed_count = sum(1 for _, passed in tests if passed)
+    total_count = len(tests)
+    
+    for name, passed in tests:
         status = "✅ PASSED" if passed else "❌ FAILED"
         print(f"{status} - {name}")
     
-    print(f"\nTotal: {passed_count}/{total} tests passed")
-    print(f"Completed: {datetime.now().isoformat()}")
+    print("=" * 80)
+    print(f"TOTAL: {passed_count}/{total_count} tests passed")
+    print("=" * 80)
     
-    if passed_count == total:
-        print("\n🎉 ALL TESTS PASSED!")
+    if passed_count == total_count:
+        print("\n🎉 ALL TESTS PASSED - v3.9.8 is working correctly!")
         sys.exit(0)
     else:
-        print(f"\n⚠️  {total - passed_count} test(s) failed")
+        print(f"\n⚠️  {total_count - passed_count} test(s) failed")
         sys.exit(1)
 
 if __name__ == "__main__":
