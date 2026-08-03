@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useMemo, useState, useCallback, useRef, createContext, useContext } from 'react'
+import React, { useEffect, useMemo, useState, useCallback, useRef, createContext, useContext } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import * as XLSX from 'xlsx'
@@ -31,6 +31,45 @@ import { Switch } from '@/components/ui/switch'
 
 // ================================================================
 // UTILS + AUTH
+
+// v3.9.13 — Error Boundary to isolate crashes in individual tab sections
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null } }
+  static getDerivedStateFromError(error) { return { hasError: true, error } }
+  componentDidCatch(error, info) { console.error('[ErrorBoundary]', this.props.tabName, error, info) }
+  reset = () => this.setState({ hasError: false, error: null })
+  render() {
+    if (this.state.hasError) {
+      const msg = String(this.state.error?.message || this.state.error || 'خطأ غير متوقع')
+      return (
+        <div className="p-6 md:p-10">
+          <div className="max-w-2xl mx-auto bg-white border-2 border-rose-200 rounded-xl shadow-lg overflow-hidden">
+            <div className="bg-gradient-to-l from-rose-500 to-orange-500 px-6 py-4 text-white">
+              <div className="text-xl font-bold">⚠️ حدث خطأ في هذا القسم</div>
+              <div className="text-xs opacity-90 mt-1">{this.props.tabName || 'قسم'} — لا داعي للقلق، باقي الأقسام تعمل بشكل طبيعي</div>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="p-3 bg-slate-50 border rounded-lg text-xs font-mono text-slate-700 break-all max-h-32 overflow-y-auto">{msg}</div>
+              <div className="text-sm text-slate-600">💡 قد يكون السبب سجلاً قديماً ينقصه حقل ضروري. جرّب:</div>
+              <ul className="text-sm text-slate-600 space-y-1 mr-4 list-disc">
+                <li>الضغط على "إعادة المحاولة" أدناه</li>
+                <li>الانتقال إلى قسم آخر ثم العودة</li>
+                <li>إبلاغ الإدارة بلقطة شاشة إذا استمرت المشكلة</li>
+              </ul>
+              <div className="flex gap-2 pt-2">
+                <button onClick={this.reset} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded-lg">🔄 إعادة المحاولة</button>
+                <button onClick={() => window.location.reload()} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-2 rounded-lg">↻ تحديث الصفحة</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+
 // ================================================================
 const CUR_SYMBOL = { USD: '$', SAR: 'ر.س', YER: 'ر.ي' }
 const CUR_NAME = { USD: 'دولار أمريكي', SAR: 'ريال سعودي', YER: 'ريال يمني' }
@@ -5865,22 +5904,22 @@ function TenantApp() {
           <Button variant="ghost" onClick={logout} className="gap-2 text-slate-500 hover:text-rose-600"><LogOut className="w-4 h-4" /> خروج</Button>
         </div>
         <QuotaBanner quota={tenant?.journal_quota} />
-        {tab === 'dashboard' && <Dashboard setTab={setTab} />}
-        {tab === 'tickets' && <TicketsScreen />}
-        {tab === 'visas' && <VisasScreen />}
-        {tab === 'services' && <ServicesScreen />}
-        {tab === 'packages' && <PackagesScreen />}
-        {tab === 'fx' && <FxScreen />}
-        {tab === 'receipt' && <VoucherScreen mode="receipt" />}
-        {tab === 'payment' && <VoucherScreen mode="payment" />}
-        {tab === 'clients' && <PartiesScreen kind="clients" />}
-        {tab === 'suppliers' && <PartiesScreen kind="suppliers" />}
-        {tab === 'boxes' && <BoxesScreen />}
-        {tab === 'chart' && <ChartScreen />}
-        {tab === 'journal' && <JournalScreen />}
-        {tab === 'reports' && <ReportsScreen />}
-        {tab === 'settings' && user.role === 'owner' && <OfficeSettings />}
-        {tab === 'affiliate' && <AffiliateScreen />}
+        {tab === 'dashboard' && <ErrorBoundary tabName="لوحة التحكم"><Dashboard setTab={setTab} /></ErrorBoundary>}
+        {tab === 'tickets' && <ErrorBoundary tabName="حجز التذاكر"><TicketsScreen /></ErrorBoundary>}
+        {tab === 'visas' && <ErrorBoundary tabName="التأشيرات والخدمات"><VisasScreen /></ErrorBoundary>}
+        {tab === 'services' && <ErrorBoundary tabName="الخدمات"><ServicesScreen /></ErrorBoundary>}
+        {tab === 'packages' && <ErrorBoundary tabName="الباكجات والبرامج"><PackagesScreen /></ErrorBoundary>}
+        {tab === 'fx' && <ErrorBoundary tabName="صرافة العملات"><FxScreen /></ErrorBoundary>}
+        {tab === 'receipt' && <ErrorBoundary tabName="سند القبض"><VoucherScreen mode="receipt" /></ErrorBoundary>}
+        {tab === 'payment' && <ErrorBoundary tabName="سند الصرف"><VoucherScreen mode="payment" /></ErrorBoundary>}
+        {tab === 'clients' && <ErrorBoundary tabName="العملاء"><PartiesScreen kind="clients" /></ErrorBoundary>}
+        {tab === 'suppliers' && <ErrorBoundary tabName="الموردون"><PartiesScreen kind="suppliers" /></ErrorBoundary>}
+        {tab === 'boxes' && <ErrorBoundary tabName="الصناديق والبنوك"><BoxesScreen /></ErrorBoundary>}
+        {tab === 'chart' && <ErrorBoundary tabName="الدليل المحاسبي"><ChartScreen /></ErrorBoundary>}
+        {tab === 'journal' && <ErrorBoundary tabName="قيود اليومية"><JournalScreen /></ErrorBoundary>}
+        {tab === 'reports' && <ErrorBoundary tabName="التقارير المالية"><ReportsScreen /></ErrorBoundary>}
+        {tab === 'settings' && user.role === 'owner' && <ErrorBoundary tabName="إعدادات المكتب"><OfficeSettings /></ErrorBoundary>}
+        {tab === 'affiliate' && <ErrorBoundary tabName="التسويق بالعمولة"><AffiliateScreen /></ErrorBoundary>}
 
         {/* v2.8.1 — Global footer with contact + Target Media badge */}
         <div className="mt-8 pt-4 border-t border-slate-200 text-center text-xs text-slate-500 space-y-2">
