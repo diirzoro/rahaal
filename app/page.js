@@ -6998,8 +6998,75 @@ function App() {
 
   return (
     <AuthCtx.Provider value={{ ...auth, refreshMe, logout }}>
-      {auth.user.role === 'super_admin' ? <SuperAdminPanel /> : <TenantApp />}
+      {auth.user.role === 'super_admin' ? <AdminRelocationNotice logout={logout} user={auth.user} /> : <TenantApp />}
     </AuthCtx.Provider>
+  )
+}
+
+// v3.9.15 — Admin panel relocated to Target Media Holding dashboard.
+// SuperAdminPanel remains in codebase but is no longer routed. API endpoints /api/admin/* stay live for the external holding dashboard.
+function AdminRelocationNotice({ logout, user }) {
+  return (
+    <div dir="rtl" className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 p-4">
+      <div className="max-w-2xl w-full bg-white rounded-2xl shadow-2xl overflow-hidden">
+        {/* Target Media Header */}
+        <div className="grad-brand p-8 text-center text-white relative overflow-hidden">
+          <div className="absolute inset-0 opacity-10" style={{ backgroundImage: 'radial-gradient(circle at 20% 30%, white 1px, transparent 1px), radial-gradient(circle at 80% 70%, white 1px, transparent 1px)', backgroundSize: '30px 30px' }} />
+          <div className="relative">
+            <div className="inline-flex items-center gap-3 mb-3">
+              <div className="w-14 h-14 rounded-2xl bg-white/20 backdrop-blur flex items-center justify-center text-3xl shadow-lg">🏢</div>
+              <div className="text-right">
+                <div className="text-2xl font-extrabold tracking-tight">Target Media</div>
+                <div className="text-xs opacity-90">تارجت ميديا للاستثمار والتقنية</div>
+              </div>
+            </div>
+            <div className="text-3xl font-black mt-4">🔗 لوحة الإدارة انتقلت</div>
+            <div className="text-sm opacity-95 mt-2">مركز التحكم الرئيسي — Target Media Holding Dashboard</div>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="p-8 space-y-5">
+          <div className="p-5 rounded-xl bg-gradient-to-l from-blue-50 to-emerald-50 border-r-4 border-blue-600">
+            <div className="font-bold text-lg text-slate-800 mb-2">📢 إشعار مهم</div>
+            <div className="text-slate-700 leading-relaxed">
+              <b>لوحة إدارة المنظومة انتقلت بالكامل</b> إلى <b className="text-blue-700">تارجت ميديا القابضة</b>. يرجى استخدام <b>اللوحة الرئيسية الموحّدة</b> لإدارة:
+            </div>
+            <ul className="mt-3 space-y-1 mr-4 text-sm text-slate-700 list-disc">
+              <li>🏢 <b>المكاتب المشتركة</b> في رحّال</li>
+              <li>💳 <b>الاشتراكات والباقات</b> والأرصدة</li>
+              <li>📣 <b>الإعلانات والحملات التسويقية</b></li>
+              <li>🤝 <b>التسويق بالعمولة والإحالات</b></li>
+              <li>⚙️ <b>الإعدادات العامة</b> للمنظومة</li>
+            </ul>
+          </div>
+
+          <div className="p-4 rounded-lg bg-slate-50 border border-slate-200 text-sm text-slate-600">
+            <div className="font-bold text-slate-800 mb-1">🔧 للفريق التقني:</div>
+            جميع الـ API Endpoints تحت <span className="font-mono bg-white px-2 py-0.5 rounded border text-blue-700">/api/admin/*</span> تعمل بشكل كامل وتستقبل الاتصالات من لوحة تارجت ميديا القابضة.
+          </div>
+
+          <div className="p-4 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-900">
+            💡 <b>الحساب الحالي:</b> {user?.name || user?.email} · دور: {user?.role === 'super_admin' ? 'سوبر أدمن' : user?.role}
+            <br />
+            <span className="text-xs">تطبيق رحّال أصبح مخصصاً بالكامل للواجهات التشغيلية (المكاتب، العملاء، الحجوزات). لإدارة المنظومة، الرجاء الدخول من لوحة تارجت ميديا القابضة.</span>
+          </div>
+
+          <div className="flex flex-col md:flex-row gap-3 pt-2">
+            <button onClick={logout} className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-lg transition flex items-center justify-center gap-2">
+              🚪 تسجيل الخروج
+            </button>
+            <a href="https://targetmediagrp.com" target="_blank" rel="noopener" className="flex-1 py-3 px-4 grad-brand text-white font-bold rounded-lg transition flex items-center justify-center gap-2 hover:opacity-90">
+              🌐 زيارة Target Media
+            </a>
+          </div>
+
+          <div className="text-center text-xs text-slate-400 pt-2 border-t">
+            v3.9.15 · تم توحيد الإدارة تحت تارجت ميديا القابضة
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }
 
