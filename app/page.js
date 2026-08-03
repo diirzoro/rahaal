@@ -977,7 +977,7 @@ function TicketsScreen() {
   }
   useEffect(() => { load() }, [])
   // v3.9.9 — Date range computation from preset
-  const dateRangeBounds = React.useMemo(() => {
+  const dateRangeBounds = useMemo(() => {
     const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
     if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
     if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
@@ -988,7 +988,7 @@ function TicketsScreen() {
     }
     return null // all
   }, [dateRange])
-  const filteredByDate = React.useMemo(() => {
+  const filteredByDate = useMemo(() => {
     const safe = (tickets || []).filter(Boolean)
     if (!dateRangeBounds) return safe
     return safe.filter(t => { const d = new Date(t?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to })
@@ -2564,7 +2564,7 @@ function VisasScreen() {
     } catch (e) { toast.error(e.message) }
   }
   useEffect(() => { load() }, [])
-  const dateRangeBounds = React.useMemo(() => {
+  const dateRangeBounds = useMemo(() => {
     const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
     if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
     if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
@@ -2572,7 +2572,7 @@ function VisasScreen() {
     if (dateRange.preset === 'custom' && dateRange.from) { const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date(); return { from: f, to: t } }
     return null
   }, [dateRange])
-  const filteredByDate = React.useMemo(() => {
+  const filteredByDate = useMemo(() => {
     const safe = (visas || []).filter(Boolean)
     if (!dateRangeBounds) return safe
     return safe.filter(v => { const d = new Date(v?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to })
@@ -2863,7 +2863,7 @@ function ServicesScreen() {
     } catch (e) { toast.error(e.message) }
   }
   useEffect(() => { load() }, [])
-  const dateRangeBounds = React.useMemo(() => {
+  const dateRangeBounds = useMemo(() => {
     const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
     if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
     if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
@@ -2871,7 +2871,7 @@ function ServicesScreen() {
     if (dateRange.preset === 'custom' && dateRange.from) { const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date(); return { from: f, to: t } }
     return null
   }, [dateRange])
-  const filteredByDate = React.useMemo(() => { if (!dateRangeBounds) return (services || []).filter(Boolean); return (services || []).filter(Boolean).filter(v => { const d = new Date(v?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to }) }, [services, dateRangeBounds])
+  const filteredByDate = useMemo(() => { if (!dateRangeBounds) return (services || []).filter(Boolean); return (services || []).filter(Boolean).filter(v => { const d = new Date(v?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to }) }, [services, dateRangeBounds])
   const filtered = applyFilter(filteredByDate, filter)
   const selected = filtered.find(v => v?.id === selectedId)
   const allSelected = filtered.length > 0 && filtered.every(v => selectedIds.has(v.id))
@@ -4939,7 +4939,7 @@ function PackagesScreen() {
     try { await api(`/packages/${p.id}`, { method: 'DELETE' }); toast.success('تم الحذف'); load() }
     catch (e) { toast.error(e.message) }
   }
-  const dateBounds = React.useMemo(() => {
+  const dateBounds = useMemo(() => {
     const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
     if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
     if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
@@ -4948,7 +4948,7 @@ function PackagesScreen() {
     return null
   }, [dateRange])
   const safePackages = (packages || []).filter(Boolean)
-  const filteredPackages = React.useMemo(() => {
+  const filteredPackages = useMemo(() => {
     if (!dateBounds) return safePackages
     return safePackages.filter(p => { const d = new Date(p?.start_date || p?.created_at); return !isNaN(d) && d >= dateBounds.from && d <= dateBounds.to })
   }, [safePackages, dateBounds])

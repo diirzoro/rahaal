@@ -1,5 +1,5 @@
 'use client'
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, Suspense } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -18,7 +18,16 @@ async function apiPost(path, body) {
   return j
 }
 
+// v3.9.12 — Wrap in Suspense for Next.js 15 requirement with useSearchParams
 export default function SignupPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-emerald-50"><Loader2 className="w-8 h-8 animate-spin text-blue-600" /></div>}>
+      <SignupPageInner />
+    </Suspense>
+  )
+}
+
+function SignupPageInner() {
   const params = useSearchParams()
   const router = useRouter()
   const [ref, setRef] = useState('')
