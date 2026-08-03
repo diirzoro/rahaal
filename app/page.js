@@ -2423,25 +2423,106 @@ function BulkImportDialog({ open, onOpenChange, kind, onDone }) {
           </div>
         )}
 
-        {/* Step 4: Result */}
-        {step === 4 && result && (
-          <div className="space-y-4 text-center py-6">
-            <div className="w-20 h-20 rounded-full grad-green mx-auto flex items-center justify-center shadow-xl">
-              <CheckCircle2 className="w-10 h-10 text-white" />
+        {/* Step 4: Result — v3.9.13 with detailed failed rows log + export */}
+        {step === 4 && result && (() => {
+          // Enrich errors with original row data by matching __row number
+          const rowsMap = new Map((preview?.rows || []).map(r => [r.__row, r]))
+          const failedDetails = (result.errors || []).map(e => {
+            const orig = rowsMap.get(e.row) || {}
+            return {
+              row: e.row,
+              passenger_name: orig.passenger_name || '—',
+              passport_no: orig.passport_no || '—',
+              pnr: orig.pnr || '—',
+              client_name: orig.client_name || '—',
+              supplier_name: orig.supplier_name || '—',
+              date: orig.date || orig.travel_date || orig.entry_date || '—',
+              currency: orig.currency || '—',
+              cost: orig.cost || 0,
+              sale_price: orig.sale_price || 0,
+              error_reason: Array.isArray(e.errors) ? e.errors.join(' • ') : String(e.errors || e.error || 'خطأ غير محدد'),
+              _orig: orig,
+            }
+          })
+          const exportFailedToExcel = () => {
+            if (failedDetails.length === 0) return
+            const wb = XLSX.utils.book_new()
+            const headers = ['رقم الصف في الشيت', 'اسم المسافر', 'رقم الجواز', 'PNR', 'حساب القبض', 'المورد', 'التاريخ', 'العملة', 'التكلفة', 'سعر البيع', '⚠️ سبب الفشل']
+            const rows = failedDetails.map(f => [f.row, f.passenger_name, f.passport_no, f.pnr, f.client_name, f.supplier_name, f.date, f.currency, f.cost, f.sale_price, f.error_reason])
+            const ws = XLSX.utils.aoa_to_sheet([headers, ...rows])
+            ws['!cols'] = [{ wch: 8 }, { wch: 22 }, { wch: 15 }, { wch: 12 }, { wch: 20 }, { wch: 20 }, { wch: 12 }, { wch: 8 }, { wch: 10 }, { wch: 10 }, { wch: 40 }]
+            XLSX.utils.book_append_sheet(wb, ws, 'الصفوف الفاشلة')
+            const filename = `الصفوف_الفاشلة_${kind === 'tickets' ? 'التذاكر' : 'التأشيرات'}_${new Date().toISOString().slice(0,10)}.xlsx`
+            XLSX.writeFile(wb, filename)
+            toast.success('✅ تم تنزيل ملف الصفوف الفاشلة — صحّح "سبب الفشل" وأعد رفع الملف')
+          }
+          return (
+            <div className="space-y-4">
+              <div className="text-center py-4">
+                <div className="w-16 h-16 rounded-full grad-green mx-auto flex items-center justify-center shadow-xl mb-3">
+                  <CheckCircle2 className="w-8 h-8 text-white" />
+                </div>
+                <div className="text-2xl font-extrabold text-slate-800">اكتمل الاستيراد!</div>
+                <div className="grid grid-cols-3 gap-3 max-w-md mx-auto mt-3">
+                  <StatMini label="تم إنشاؤها" value={result.created} color="bg-emerald-100 text-emerald-700" />
+                  <StatMini label="تخطي (مكرر)" value={result.skipped} color="bg-amber-100 text-amber-700" />
+                  <StatMini label="فشل" value={result.failed} color="bg-rose-100 text-rose-700" />
+                </div>
+              </div>
+
+              {/* Failed rows detailed table */}
+              {failedDetails.length > 0 && (
+                <div className="border-2 border-rose-200 rounded-xl overflow-hidden bg-rose-50/30">
+                  <div className="bg-gradient-to-l from-rose-500 to-orange-500 p-4 flex items-center justify-between text-white">
+                    <div>
+                      <div className="font-bold text-lg">⚠️ تقرير الصفوف الفاشلة ({failedDetails.length})</div>
+                      <div className="text-xs opacity-90">اطلع على السبب الدقيق لكل صف، ثم نزّل الملف لتصحيحه وإعادة الرفع</div>
+                    </div>
+                    <Button onClick={exportFailedToExcel} className="bg-white text-rose-700 hover:bg-rose-50 gap-2 font-bold">
+                      <FileSpreadsheet className="w-4 h-4" /> 📥 تنزيل الفاشلة كـ Excel
+                    </Button>
+                  </div>
+                  <div className="max-h-96 overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-100 sticky top-0">
+                        <tr>
+                          <th className="p-2 text-right text-xs font-bold text-slate-700">الصف</th>
+                          <th className="p-2 text-right text-xs font-bold text-slate-700">المسافر</th>
+                          <th className="p-2 text-right text-xs font-bold text-slate-700">الجواز</th>
+                          <th className="p-2 text-right text-xs font-bold text-slate-700">التاريخ</th>
+                          <th className="p-2 text-right text-xs font-bold text-slate-700">حساب القبض</th>
+                          <th className="p-2 text-right text-xs font-bold text-slate-700">المورد</th>
+                          <th className="p-2 text-right text-xs font-bold text-rose-800">🔴 سبب الفشل</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {failedDetails.map((f, i) => (
+                          <tr key={i} className="border-b hover:bg-rose-50/50">
+                            <td className="p-2 font-mono text-xs text-slate-600">#{f.row}</td>
+                            <td className="p-2 text-xs">{f.passenger_name}</td>
+                            <td className="p-2 font-mono text-xs">{f.passport_no}</td>
+                            <td className="p-2 text-xs">{f.date}</td>
+                            <td className="p-2 text-xs">{f.client_name}</td>
+                            <td className="p-2 text-xs">{f.supplier_name}</td>
+                            <td className="p-2 text-xs text-rose-700 font-semibold">{f.error_reason}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="p-3 bg-amber-50 border-t border-amber-200 text-xs text-amber-800">
+                    💡 <b>نصيحة:</b> نزّل الصفوف الفاشلة، صحّح "سبب الفشل" في العمود الأخير، احذف عمود السبب، ثم أعد رفع الملف. سيتم تجاهل الـ {result.created} صفاً الناجحة تلقائياً (اكتشاف تلقائي للمكرر).
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-center gap-2 pt-2">
+                <Button variant="outline" onClick={() => { reset(); }}>استيراد ملف آخر</Button>
+                <Button onClick={onDone} className="grad-brand text-white">إغلاق</Button>
+              </div>
             </div>
-            <div className="text-2xl font-extrabold text-slate-800">اكتمل الاستيراد!</div>
-            <div className="grid grid-cols-3 gap-3 max-w-md mx-auto">
-              <StatMini label="تم إنشاؤها" value={result.created} color="bg-emerald-100 text-emerald-700" />
-              <StatMini label="تخطي" value={result.skipped} color="bg-amber-100 text-amber-700" />
-              <StatMini label="فشل" value={result.failed} color="bg-rose-100 text-rose-700" />
-            </div>
-            <div className="text-sm text-slate-500">تم إنشاء القيود المحاسبية تلقائياً لجميع الصفوف الناجحة</div>
-            <div className="flex justify-center gap-2">
-              <Button variant="outline" onClick={() => { reset(); }}>استيراد ملف آخر</Button>
-              <Button onClick={onDone} className="grad-brand text-white">إغلاق</Button>
-            </div>
-          </div>
-        )}
+          )
+        })()}
       </DialogContent>
     </Dialog>
   )
@@ -3804,14 +3885,132 @@ function JournalScreen() {
 function ReportsScreen() {
   return (
     <div className="space-y-6">
-      <TopBar title="التقارير المالية" subtitle="الأرباح، كشوف الحسابات، ميزان المراجعة، قائمة الدخل" />
+      <TopBar title="التقارير المالية" subtitle="الأرباح، كشوف الحسابات، ميزان المراجعة، قائمة الدخل، الإقفال السنوي" />
       <Tabs defaultValue="profits">
-        <TabsList className="w-full justify-start bg-slate-100"><TabsTrigger value="profits">الأرباح</TabsTrigger><TabsTrigger value="statement">كشف حساب</TabsTrigger><TabsTrigger value="trial">ميزان المراجعة</TabsTrigger><TabsTrigger value="income">قائمة الدخل</TabsTrigger></TabsList>
+        <TabsList className="w-full justify-start bg-slate-100"><TabsTrigger value="profits">الأرباح</TabsTrigger><TabsTrigger value="statement">كشف حساب</TabsTrigger><TabsTrigger value="trial">ميزان المراجعة</TabsTrigger><TabsTrigger value="income">قائمة الدخل</TabsTrigger><TabsTrigger value="year-close" className="text-rose-700 font-bold">🔒 الإقفال السنوي</TabsTrigger></TabsList>
         <TabsContent value="profits" className="mt-4"><ProfitsReport /></TabsContent>
         <TabsContent value="statement" className="mt-4"><StatementReport /></TabsContent>
         <TabsContent value="trial" className="mt-4"><TrialBalanceReport /></TabsContent>
         <TabsContent value="income" className="mt-4"><IncomeStatement /></TabsContent>
+        <TabsContent value="year-close" className="mt-4"><YearCloseScreen /></TabsContent>
       </Tabs>
+    </div>
+  )
+}
+
+// v3.9.14 — Year-End Financial Closing Engine UI
+function YearCloseScreen() {
+  const { user, tenant } = useAuth()
+  const [years, setYears] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [closing, setClosing] = useState(null) // { year, revenue, expense, netProfit }
+  const [previewData, setPreviewData] = useState(null)
+  const load = async () => {
+    try {
+      setLoading(true)
+      const y = await api('/accounting/closable-years')
+      setYears(y || [])
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [])
+  const previewYear = async (year) => {
+    try {
+      const income = await api(`/reports/income-statement?year=${year}`)
+      setPreviewData({ year, ...income })
+      setClosing({ year })
+    } catch (e) { toast.error(e.message) }
+  }
+  const confirmClose = async () => {
+    if (!closing?.year) return
+    if (!confirm(`⚠️ تأكيد إقفال السنة ${closing.year}؟\n\nسيتم:\n• إنشاء قيد إقفال تلقائي بتاريخ 31/12/${closing.year}\n• تصفير أرصدة الإيرادات والمصروفات\n• ترحيل صافي الربح/الخسارة إلى حساب 3900 (الأرباح المُدوّرة)\n• قفل السنة — لن تُقبل أي إضافة أو تعديل بتاريخها\n\nمتابعة؟`)) return
+    try {
+      setLoading(true)
+      const r = await api('/accounting/close-year', { method: 'POST', body: { year: closing.year } })
+      toast.success(`✅ تم إقفال السنة ${r.year} — صافي ${r.net_profit >= 0 ? 'ربح' : 'خسارة'}: ${r.net_profit.toFixed(2)}`)
+      setClosing(null); setPreviewData(null)
+      await load()
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }
+  if (loading) return <Card><CardContent className="p-8 text-center"><Loader2 className="w-6 h-6 animate-spin mx-auto text-blue-600" /></CardContent></Card>
+  return (
+    <div className="space-y-4">
+      <Card className="border-2 border-rose-200 bg-gradient-to-l from-rose-50 to-orange-50">
+        <CardContent className="p-4">
+          <div className="flex items-start gap-3">
+            <div className="text-3xl">🔒</div>
+            <div>
+              <div className="font-extrabold text-lg text-rose-800">آلية الإقفال السنوي</div>
+              <div className="text-sm text-slate-700 mt-1">
+                يُنشئ قيد إقفال تلقائي في نهاية السنة (31/12) يُصفّر الإيرادات والمصروفات، ويُرحّل صافي الربح/الخسارة إلى حساب <b>3900 — الأرباح المُدوّرة</b>. بعد الإقفال يمنع النظام أي تعديل بتاريخ السنة المقفلة.
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Calendar className="w-5 h-5 text-blue-600" /> السنوات المالية</CardTitle></CardHeader>
+        <CardContent>
+          {years.length === 0 && <div className="text-center py-8 text-slate-400 text-sm">لا توجد قيود بعد — ابدأ بإضافة معاملات ثم عُد لإقفالها في نهاية السنة</div>}
+          <div className="space-y-2">
+            {years.map(y => (
+              <div key={y.year} className={`flex items-center justify-between p-3 rounded-lg border-2 ${y.is_closed ? 'bg-slate-100 border-slate-300' : 'bg-white border-emerald-200 hover:border-emerald-400'}`}>
+                <div className="flex items-center gap-3">
+                  <div className={`text-2xl font-black ${y.is_closed ? 'text-slate-500' : 'text-emerald-700'}`}>{y.year}</div>
+                  <div className="text-xs text-slate-600">
+                    <div>📊 {y.entries} قيد يومية</div>
+                    {y.is_closed ? <Badge className="bg-slate-600 text-white mt-1">🔒 مُقفلة</Badge> : <Badge className="bg-emerald-100 text-emerald-800 mt-1">🟢 مفتوحة</Badge>}
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  {!y.is_closed && user?.role === 'owner' && (
+                    <Button onClick={() => previewYear(y.year)} className="bg-rose-600 hover:bg-rose-700 text-white gap-2 font-bold">🔒 إقفال السنة {y.year}</Button>
+                  )}
+                  {y.is_closed && user?.role === 'super_admin' && (
+                    <Button variant="outline" onClick={async () => {
+                      if (!confirm(`فتح السنة ${y.year} المقفلة؟ سيتم حذف قيد الإقفال. (صلاحية سوبر أدمن)`)) return
+                      try { await api('/accounting/reopen-year', { method: 'POST', body: { year: y.year } }); toast.success('تم فتح السنة'); load() } catch (e) { toast.error(e.message) }
+                    }} className="text-xs">🔓 فتح</Button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Preview + confirmation dialog */}
+      <Dialog open={!!closing && !!previewData} onOpenChange={v => !v && (setClosing(null), setPreviewData(null))}>
+        <DialogContent dir="rtl" className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-xl flex items-center gap-2">🔒 معاينة إقفال السنة {closing?.year}</DialogTitle>
+            <DialogDescription>راجع الأرقام قبل تأكيد الإقفال. لا يمكن التراجع إلا بصلاحية السوبر أدمن.</DialogDescription>
+          </DialogHeader>
+          {previewData && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200">
+                  <div className="text-xs text-slate-600">إجمالي الإيرادات (بالعملة الأساسية)</div>
+                  <div className="text-lg font-extrabold text-emerald-700">{Number(previewData.total_revenue_base || previewData.total_revenue || 0).toFixed(2)}</div>
+                </div>
+                <div className="p-3 rounded-lg bg-rose-50 border border-rose-200">
+                  <div className="text-xs text-slate-600">إجمالي المصروفات</div>
+                  <div className="text-lg font-extrabold text-rose-700">{Number(previewData.total_expenses_base || previewData.total_expense || 0).toFixed(2)}</div>
+                </div>
+              </div>
+              <div className={`p-4 rounded-lg border-2 ${(previewData.net_profit_base || previewData.net_profit || 0) >= 0 ? 'bg-blue-50 border-blue-300' : 'bg-orange-50 border-orange-300'}`}>
+                <div className="text-xs text-slate-600 mb-1">صافي {(previewData.net_profit_base || previewData.net_profit || 0) >= 0 ? 'الربح' : 'الخسارة'} — يُرحّل إلى 3900 الأرباح المُدوّرة</div>
+                <div className={`text-2xl font-black ${(previewData.net_profit_base || previewData.net_profit || 0) >= 0 ? 'text-blue-700' : 'text-orange-700'}`}>{Number(previewData.net_profit_base || previewData.net_profit || 0).toFixed(2)}</div>
+              </div>
+              <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 p-2 rounded">⚠️ بعد الإقفال، لن يمكن إضافة أو تعديل قيود بتاريخ {closing?.year} إلا بصلاحية استثنائية.</div>
+              <div className="flex gap-2 pt-2">
+                <Button variant="outline" onClick={() => { setClosing(null); setPreviewData(null) }} className="flex-1">إلغاء</Button>
+                <Button onClick={confirmClose} disabled={loading} className="flex-1 bg-rose-600 hover:bg-rose-700 text-white gap-2">{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : '🔒'} تأكيد الإقفال</Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

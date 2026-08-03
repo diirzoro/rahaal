@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.13',
+          version: '3.9.14',
           db: 'connected',
         })
       } catch (e) {
@@ -1195,7 +1195,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.13',
+        version: '3.9.14',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
@@ -2249,6 +2249,87 @@ async function handleRoute(request, { params }) {
     if (route === '/reports/trial-balance' && method === 'GET') return ok(await reportTrialBalance(db, T))
     if (route === '/reports/income-statement' && method === 'GET') return ok(await reportIncome(db, T, q))
 
+    // v3.9.14 — Year-End Financial Closing Engine
+    if (route === '/accounting/closable-years' && method === 'GET') {
+      // Aggregate journal_entries to find distinct years and check status
+      const years = await db.collection('journal_entries').aggregate([
+        { $match: { tenant_id: T } },
+        { $group: { _id: { $year: '$date' }, count: { $sum: 1 }, min_date: { $min: '$date' }, max_date: { $max: '$date' } } },
+        { $sort: { _id: -1 } },
+      ]).toArray()
+      const closedYears = sess.tenant?.closed_years || []
+      return ok(years.map(y => ({ year: y._id, entries: y.count, min_date: y.min_date, max_date: y.max_date, is_closed: closedYears.includes(y._id) })))
+    }
+
+    if (route === '/accounting/close-year' && method === 'POST') {
+      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — يجب أن تكون مالكاً', 403)
+      const b = await request.json()
+      const year = parseInt(b.year)
+      if (!year || year < 2000 || year > 2100) return bad('السنة المالية غير صالحة')
+      const closedYears = sess.tenant?.closed_years || []
+      if (closedYears.includes(year)) return bad(`السنة ${year} مقفلة بالفعل`)
+      // Aggregate revenues and expenses for the year via journal_entries.lines
+      const start = new Date(year, 0, 1); const end = new Date(year + 1, 0, 1)
+      const jes = await db.collection('journal_entries').find({ tenant_id: T, date: { $gte: start, $lt: end } }).toArray()
+      let totalRevenue = 0, totalExpense = 0
+      const accountTotals = {} // account_code → { name, debit, credit }
+      for (const je of jes) {
+        for (const ln of (je.lines || [])) {
+          const code = ln.account_code || ''
+          if (!accountTotals[code]) accountTotals[code] = { name: ln.account_name, debit: 0, credit: 0 }
+          accountTotals[code].debit += Number(ln.debit || 0)
+          accountTotals[code].credit += Number(ln.credit || 0)
+          if (code.startsWith('4')) totalRevenue += Number(ln.credit || 0) - Number(ln.debit || 0)
+          if (code.startsWith('5')) totalExpense += Number(ln.debit || 0) - Number(ln.credit || 0)
+        }
+      }
+      const netProfit = +(totalRevenue - totalExpense).toFixed(2)
+      // Build closing JE lines: debit each revenue by its balance, credit each expense by its balance, plus RE 3900
+      const closingLines = []
+      for (const [code, t] of Object.entries(accountTotals)) {
+        const bal = +(t.credit - t.debit).toFixed(2)
+        if (code.startsWith('4') && bal !== 0) closingLines.push({ account_code: code, account_name: t.name, debit: bal, credit: 0 })
+        if (code.startsWith('5') && bal !== 0) closingLines.push({ account_code: code, account_name: t.name, debit: 0, credit: Math.abs(bal) })
+      }
+      // Retained Earnings balancing line
+      if (netProfit > 0) closingLines.push({ account_code: '3900', account_name: 'الأرباح المُدوّرة', debit: 0, credit: netProfit })
+      else if (netProfit < 0) closingLines.push({ account_code: '3900', account_name: 'الأرباح المُدوّرة', debit: Math.abs(netProfit), credit: 0 })
+      if (closingLines.length === 0) return bad(`لا توجد قيود إيرادات أو مصروفات في السنة ${year}`)
+      const closingJe = await createJournalEntry(db, T, {
+        date: new Date(year, 11, 31, 23, 59, 59),
+        description: `🔒 قيد إقفال السنة المالية ${year} — تصفير الإيرادات والمصروفات وترحيل صافي الربح (${netProfit >= 0 ? 'ربح' : 'خسارة'}) إلى الأرباح المُدوّرة`,
+        ref_type: 'year_close',
+        ref_id: `close-${year}`,
+        currency: 'USD',
+        lines: closingLines,
+      }, { skipQuota: true })
+      // Mark tenant year as closed
+      await db.collection('tenants').updateOne({ id: T }, {
+        $addToSet: { closed_years: year },
+        $set: { [`year_closes.${year}`]: { closed_at: new Date(), closed_by: sess.user.id, net_profit: netProfit, revenue: totalRevenue, expense: totalExpense } },
+      })
+      return ok({ ok: true, year, net_profit: netProfit, total_revenue: totalRevenue, total_expense: totalExpense, closing_je_id: closingJe.id, lines_count: closingLines.length })
+    }
+
+    if (route === '/accounting/reopen-year' && method === 'POST') {
+      if (sess.user.role !== 'super_admin' && sess.user.role !== 'owner') return bad('غير مصرح', 403)
+      const b = await request.json()
+      const year = parseInt(b.year)
+      if (!year) return bad('السنة مطلوبة')
+      // Only super_admin can reopen; owners can only close (safety)
+      if (sess.user.role !== 'super_admin') return bad('فتح السنة المقفلة يتطلب صلاحية السوبر أدمن', 403)
+      // Delete closing JE
+      await db.collection('journal_entries').deleteMany({ tenant_id: T, ref_type: 'year_close', ref_id: `close-${year}` })
+      await db.collection('tenants').updateOne({ id: T }, { $pull: { closed_years: year }, $unset: { [`year_closes.${year}`]: '' } })
+      return ok({ ok: true, year, reopened: true })
+    }
+
+    if (route === '/accounting/closed-years' && method === 'GET') {
+      const closedYears = sess.tenant?.closed_years || []
+      const details = sess.tenant?.year_closes || {}
+      return ok({ closed_years: closedYears, details })
+    }
+
     return bad(`Route ${route} not found`, 404)
   } catch (e) {
     if (e.code === 'QUOTA_EXCEEDED') {
@@ -2263,6 +2344,12 @@ async function handleRoute(request, { params }) {
 async function createTicket(db, T, b, opts = {}) {
   if (!b.supplier_id) return { error: 'المورد مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
+  // v3.9.14 — Period lock: prevent creating records in a closed year
+  if (b.date) {
+    const yr = new Date(b.date).getFullYear()
+    const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
+    if (tenant?.closed_years?.includes(yr)) return { error: `السنة المالية ${yr} مقفلة — لا يمكن إضافة أو تعديل قيود بتاريخها` }
+  }
   const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
   if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
   const cost = Number(b.cost) || 0, sale = Number(b.sale_price) || 0
@@ -2331,6 +2418,12 @@ async function createTicket(db, T, b, opts = {}) {
 async function createVisa(db, T, b, opts = {}) {
   if (!b.supplier_id) return { error: 'المورد مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
+  // v3.9.14 — Period lock
+  if (b.date) {
+    const yr = new Date(b.date).getFullYear()
+    const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
+    if (tenant?.closed_years?.includes(yr)) return { error: `السنة المالية ${yr} مقفلة — لا يمكن إضافة أو تعديل قيود بتاريخها` }
+  }
   const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
   if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
   const cost = Number(b.cost) || 0, sale = Number(b.sale_price) || 0
@@ -2857,8 +2950,15 @@ async function reportTrialBalance(db, T) {
   return { rows, totals }
 }
 async function reportIncome(db, T, q) {
-  const from = q.from ? new Date(q.from) : new Date(0)
-  const to = q.to ? new Date(q.to) : new Date(); to.setHours(23,59,59,999)
+  // v3.9.14 — accept year param
+  let from, to
+  if (q.year) {
+    const yr = parseInt(q.year)
+    from = new Date(yr, 0, 1); to = new Date(yr, 11, 31, 23, 59, 59)
+  } else {
+    from = q.from ? new Date(q.from) : new Date(0)
+    to = q.to ? new Date(q.to) : new Date(); to.setHours(23,59,59,999)
+  }
   const tf = { tenant_id: T, date: { $gte: from, $lte: to } }
   const rates = (await db.collection('tenant_settings').findOne({ tenant_id: T }))?.rates || DEFAULT_RATES
   const [tickets, visas, services, vouchers, jes] = await Promise.all([
