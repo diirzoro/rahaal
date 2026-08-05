@@ -1019,6 +1019,40 @@ backend:
       - working: true
         agent: "testing"
         comment: "✅ PASSED (Single Currency) - PUT /journal-entries/:id for manual single-currency JE works correctly. Created manual JE (200 SAR debit client, 200 SAR credit supplier), edited to 300 SAR both sides. ID preserved. Quota preserved (25→25). Client balance net +300 SAR, supplier +300 SAR. ✅ PASSED (Dual Currency) - PUT /journal-entries/:id for manual dual-currency JE works correctly. Created dual JE (100 USD debit box1, 375 SAR credit box2), edited to (120 USD, 456 SAR). ID preserved. Quota preserved (26→26). Box1 USD net +120, Box2 SAR net -456. ✅ PASSED (Non-Editable) - PUT /journal-entries/:id for non-manual JE (ticket ref) correctly returns 400 with Arabic message 'لا يمكن تعديل قيود المعاملات مباشرةً — عدّل السجل المرتبط'."
+  - task: "v3.9.17: POST /api/admin/tenants/{id}/topup - Add quota credits"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (9/9 tests) - POST /api/admin/tenants/{id}/topup works correctly. Valid topup (500 credits): Status 200, response has all required fields (success, tenant_id, added, new_limit, prev_limit, note). Topup persisted: journal_quota.limit increased by 500, wallet.topups array contains new entry with correct amount, note, and admin email. Edge cases: amount=0 → 400, amount=-100 → 400, amount=2000000 (exceeds 1M) → 400, no amount → 400, bogus tenant id → 404 'المكتب غير موجود'. Authorization: non-admin user → 403 'غير مصرح'. All validation and authorization working correctly."
+  - task: "v3.9.17: POST /api/admin/tenants/{id}/reset-password - Reset tenant owner password"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (8/8 tests) - POST /api/admin/tenants/{id}/reset-password works correctly. Auto-generate password: When body is empty {}, generates 10-char strong password. Response has all required fields (success, tenant_id, owner_email, new_password, note). Session invalidation: Old owner sessions correctly invalidated (GET /auth/me returns {user: null, tenant: null}). Password change verified: Old password returns 401, new password works for login. Can reset to specific password: Reset back to 'Demo@2025' works. Edge cases: password < 6 chars → 400 'كلمة السر يجب أن تكون 6 أحرف على الأقل'. Authorization: non-admin user → 403 'غير مصرح'. Password hashing uses bcrypt cost 8. All sessions for owner deleted on reset (force re-login)."
+  - task: "v3.9.17: Health endpoint version check"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - GET /api/health returns version: '3.9.17'. Status 200, all fields present (status, timestamp, uptime_sec, service, version, db)."
+
 
 test_plan:
   current_focus: []
@@ -1027,6 +1061,87 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+  - agent: "testing"
+    message: |
+      ✅ v3.9.17 BACKEND TESTING COMPLETED - ALL 20 TESTS PASSED
+      
+      Comprehensive test suite executed for v3.9.17 features (2 new admin endpoints for Target Media Holding dashboard):
+      
+      **Test Results: 20/20 PASSED**
+      
+      **1. POST /api/admin/tenants/{id}/topup - Add quota credits (9 tests)**
+      
+      ✅ Valid topup (500 credits):
+         - Status: 200
+         - Response fields: success=true, tenant_id, added=500, new_limit=prev_limit+500, prev_limit, note
+         - Arabic note preserved: "شحن تجريبي — دفعة تجريبية"
+      
+      ✅ Persistence verified:
+         - journal_quota.limit increased by 500 (887 → 1387)
+         - wallet.topups array contains new entry: {amount: 500, note: "شحن تجريبي — دفعة تجريبية", at: Date, by: "admin@targetmedia.com"}
+      
+      ✅ Edge cases (all return 400 with Arabic error "المبلغ يجب أن يكون بين 1 و 1,000,000 قيد"):
+         - amount=0
+         - amount=-100 (negative)
+         - amount=2000000 (exceeds 1M cap)
+         - no amount field
+      
+      ✅ Error handling:
+         - Bogus tenant id → 404 "المكتب غير موجود"
+         - Non-admin user (owner@demo.com) → 403 "غير مصرح"
+      
+      **2. POST /api/admin/tenants/{id}/reset-password - Reset tenant owner password (8 tests)**
+      
+      ✅ Auto-generate password:
+         - Empty body {} → generates 10-char strong password (chars: A-Z, a-z, 2-9, excluding confusing chars)
+         - Response fields: success=true, tenant_id, owner_email="owner@demo.com", new_password (10 chars), note (Arabic)
+      
+      ✅ Session invalidation (CRITICAL):
+         - Old owner session invalidated after password reset
+         - GET /auth/me with old cookie returns: {user: null, tenant: null}
+         - This is CORRECT behavior (not 401/403, but 200 with null user)
+      
+      ✅ Password change verified:
+         - Old password (Demo@2025) → 401 "بيانات الدخول غير صحيحة"
+         - New password (auto-generated) → 200 (login successful)
+      
+      ✅ Reset to specific password:
+         - POST with {new_password: "Demo@2025"} → 200
+         - Login with "Demo@2025" → 200 (credential restored)
+      
+      ✅ Edge cases:
+         - new_password="abc" (< 6 chars) → 400 "كلمة السر يجب أن تكون 6 أحرف على الأقل"
+         - Non-admin user → 403 "غير مصرح"
+      
+      ✅ Implementation details verified:
+         - Password hashing: bcrypt with cost 8
+         - All sessions deleted: db.collection('sessions').deleteMany({ user_id: owner.id })
+         - password_reset_at and password_reset_by fields added to user document
+      
+      **3. Regression tests (3 tests)**
+      
+      ✅ GET /api/health → version="3.9.17"
+      ✅ GET /api/admin/tenants → 200, returns 25 tenants with journal_quota field
+      ✅ POST /api/tickets → 200, ticket creation still works
+      
+      **CRITICAL VERIFICATIONS:**
+      ✅ Topup mechanism - Increments journal_quota.limit, appends to wallet.topups array
+      ✅ Session invalidation - All owner sessions deleted on password reset
+      ✅ Password hashing - bcrypt cost 8 used
+      ✅ Authorization - Only super_admin can access /admin/tenants/* endpoints
+      ✅ Validation - Amount range (1-1M), password length (≥6 chars)
+      ✅ Error messages - All in Arabic as per spec
+      ✅ Response structure - All required fields present
+      ✅ Persistence - Changes reflected in subsequent GET requests
+      
+      **IMPORTANT NOTE ON SESSION INVALIDATION:**
+      The /auth/me endpoint returns 200 with {user: null, tenant: null} when session is invalid (not 401/403). This is by design (line 532 in route.js). The session IS correctly deleted from the database, and subsequent requests with the old cookie will have no authenticated user.
+      
+      **DEMO CREDENTIAL RESTORED:**
+      owner@demo.com password has been reset back to Demo@2025 for future tests.
+      
+      Backend v3.9.17 is production-ready. Both new admin endpoints working flawlessly for Target Media Holding dashboard integration.
+
   - agent: "testing"
     message: |
       ✅ v2.5 EDIT MODE ENGINE BACKEND TESTING COMPLETED - 10/11 TESTS PASSED

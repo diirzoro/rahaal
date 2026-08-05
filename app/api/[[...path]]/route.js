@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.16',
+          version: '3.9.17',
           db: 'connected',
         })
       } catch (e) {
@@ -692,6 +692,49 @@ async function handleRoute(request, { params }) {
         const newStatus = t.status === 'suspended' ? 'active' : 'suspended'
         await db.collection('tenants').updateOne({ id: tid }, { $set: { status: newStatus, status_changed_at: new Date() } })
         return ok({ success: true, status: newStatus })
+      }
+
+      // v3.9.17 — Top-up: add journal-entries credits to tenant quota (Admin/Super Admin only)
+      const topupMatch = route.match(/^\/admin\/tenants\/([^/]+)\/topup$/)
+      if (topupMatch && method === 'POST') {
+        const tid = topupMatch[1]
+        const t = await db.collection('tenants').findOne({ id: tid })
+        if (!t) return bad('المكتب غير موجود', 404)
+        const b = await request.json()
+        const amount = parseInt(b.amount)
+        if (!amount || amount <= 0 || amount > 1000000) return bad('المبلغ يجب أن يكون بين 1 و 1,000,000 قيد')
+        const note = String(b.note || '').slice(0, 200)
+        const currentLimit = t.journal_quota?.limit || 500
+        const newLimit = currentLimit + amount
+        await db.collection('tenants').updateOne({ id: tid }, {
+          $set: { 'journal_quota.limit': newLimit, 'journal_quota.last_topup_at': new Date() },
+          $push: { 'wallet.topups': { amount, note, at: new Date(), by: sess.user.email } },
+        })
+        return ok({ success: true, tenant_id: tid, added: amount, new_limit: newLimit, prev_limit: currentLimit, note })
+      }
+
+      // v3.9.17 — Reset password for the tenant's owner (Admin/Super Admin only)
+      const resetPwdMatch = route.match(/^\/admin\/tenants\/([^/]+)\/reset-password$/)
+      if (resetPwdMatch && method === 'POST') {
+        const tid = resetPwdMatch[1]
+        const t = await db.collection('tenants').findOne({ id: tid })
+        if (!t) return bad('المكتب غير موجود', 404)
+        const owner = await db.collection('users').findOne({ tenant_id: tid, role: 'owner' })
+        if (!owner) return bad('لا يوجد مالك لهذا المكتب', 404)
+        const b = await request.json().catch(() => ({}))
+        // Accept a provided password OR auto-generate a strong 10-char password
+        let newPassword = String(b.new_password || '').trim()
+        if (!newPassword) {
+          const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'
+          newPassword = Array.from({ length: 10 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+        }
+        if (newPassword.length < 6) return bad('كلمة السر يجب أن تكون 6 أحرف على الأقل')
+        await db.collection('users').updateOne({ id: owner.id }, {
+          $set: { password_hash: bcrypt.hashSync(newPassword, 8), password_reset_at: new Date(), password_reset_by: sess.user.email },
+        })
+        // Invalidate all existing sessions for this owner (force re-login)
+        await db.collection('sessions').deleteMany({ user_id: owner.id })
+        return ok({ success: true, tenant_id: tid, owner_email: owner.email, new_password: newPassword, note: 'تم إبطال جميع الجلسات السابقة — على المالك تسجيل الدخول مجدداً' })
       }
 
       // v2.8 — Impersonate: super admin logs in as tenant (30-min session)
@@ -1195,7 +1238,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.16',
+        version: '3.9.17',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
