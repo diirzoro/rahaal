@@ -3416,6 +3416,7 @@ function VoucherScreen({ mode }) {
 }
 
 function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, onSaved, record }) {
+  const { user } = useAuth() // v3.9.16 — Fix "user is not defined" — used in box Select disabled state
   const isEdit = !!record
   const defaultParty = mode === 'receipt' ? 'client' : 'supplier'
   const emptyForm = { date: todayISO(), currency: 'USD', amount: '', party_type: defaultParty, party_id: '', party_name: '', box_id: '', method: '', description: '' }
@@ -4571,8 +4572,9 @@ function ReferralsTab() {
   }, [])
   if (loading) return <div className="text-center py-10 text-slate-400"><Loader2 className="w-6 h-6 animate-spin mx-auto" /> جاري التحميل...</div>
   if (!data) return null
-  const publicBase = typeof window !== 'undefined' ? window.location.origin : ''
-  const fullLink = `${publicBase}/signup?ref=${data.code}`
+  // v3.9.16 — Unified official domain for referral links (avoids ephemeral preview URLs)
+  const OFFICIAL_DOMAIN = 'https://rahaal.targetmediagrp.com'
+  const fullLink = `${OFFICIAL_DOMAIN}/signup?ref=${data.code}`
   const copy = (text) => { navigator.clipboard.writeText(text); toast.success('📋 تم النسخ') }
   const shareWhatsApp = () => {
     const msg = `🎁 انضم إلى منصة رحّال (Rahaal ERP) للمكاتب السياحية!\nسجّل الآن بحسابك التجريبي المجاني عبر رابط الإحالة الخاص بي:\n${fullLink}\n\n✅ 500 قيد يومي مجاناً في التسجيل\n✅ محاسبة متعددة العملات (YER / USD / SAR)\n✅ إدارة تذاكر / تأشيرات / صرافة`
