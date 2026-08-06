@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.20',
+          version: '3.9.21',
           db: 'connected',
         })
       } catch (e) {
@@ -1246,7 +1246,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.20',
+        version: '3.9.21',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
@@ -1500,6 +1500,124 @@ async function handleRoute(request, { params }) {
       await db.collection('package_bookings').deleteOne({ id: bookingId, tenant_id: T })
       return ok({ success: true, booking_id: bookingId })
     }
+
+    // v3.9.21 — PATCH a package booking (edit passenger data, recomputes balances + JE)
+    if (pkgBookDelMatch && method === 'PATCH') {
+      const [, pkgId2, bookingId2] = pkgBookDelMatch
+      const body = await request.json()
+      const oldBooking = await db.collection('package_bookings').findOne({ id: bookingId2, tenant_id: T, package_id: pkgId2 })
+      if (!oldBooking) return bad('التسجيل غير موجود', 404)
+      const pkgDoc = await db.collection('packages').findOne({ id: pkgId2, tenant_id: T })
+      if (!pkgDoc) return bad('الباكج غير موجود', 404)
+      if (pkgDoc.status === 'closed') return bad('الباكج مغلق — لا يمكن تعديل التسجيلات')
+      const cur = oldBooking.currency || pkgDoc.currency || 'USD'
+      const lightOnly = (
+        (body.pax_count === undefined || Number(body.pax_count) === Number(oldBooking.pax_count)) &&
+        (body.client_id === undefined || body.client_id === oldBooking.client_id) &&
+        (body.payment_method === undefined || body.payment_method === oldBooking.payment_method) &&
+        (body.box_id === undefined || body.box_id === (oldBooking.box_id || '')) &&
+        body.total_cost === undefined && body.total_sale === undefined
+      )
+      if (lightOnly) {
+        const updates = {}
+        if (body.pilgrim_name !== undefined) updates.pilgrim_name = String(body.pilgrim_name || '').trim() || oldBooking.pilgrim_name
+        if (body.passport_no !== undefined) updates.passport_no = String(body.passport_no || '').trim()
+        if (body.notes !== undefined) updates.notes = String(body.notes || '').trim()
+        if (Object.keys(updates).length > 0) {
+          await db.collection('package_bookings').updateOne({ id: bookingId2, tenant_id: T }, { $set: { ...updates, updated_at: new Date(), updated_by: sess.user.email } })
+          const newName = updates.pilgrim_name || oldBooking.pilgrim_name
+          await db.collection('journal_entries').updateOne(
+            { ref_type: 'package_booking', ref_id: bookingId2, tenant_id: T },
+            { $set: { description: `تسجيل ${newName} في ${pkgDoc.name} — ${oldBooking.pax_count} فرد (تعديل)` } }
+          )
+        }
+        const updatedLight = await db.collection('package_bookings').findOne({ id: bookingId2, tenant_id: T })
+        const { _id: _idL, ...restL } = updatedLight
+        return ok({ ...restL, _light_update: true })
+      }
+      // FULL RECALC — reverse old, then re-apply new
+      const oldPay = oldBooking.payment_method || 'credit'
+      if (oldPay === 'cash' && oldBooking.box_id) {
+        await updateBalance(db, 'boxes', { id: oldBooking.box_id, tenant_id: T }, cur, -(oldBooking.total_sale || 0))
+      } else if (oldBooking.client_id) {
+        await updateBalance(db, 'clients', { id: oldBooking.client_id, tenant_id: T }, cur, -(oldBooking.total_sale || 0))
+      }
+      if (Array.isArray(oldBooking.component_snapshots)) {
+        for (const comp of oldBooking.component_snapshots) {
+          if (comp.supplier_id && comp.cost_total) {
+            await updateBalance(db, 'suppliers', { id: comp.supplier_id, tenant_id: T }, cur, -(comp.cost_total || 0))
+          }
+        }
+      }
+      const oldJe = await db.collection('journal_entries').findOne({ ref_type: 'package_booking', ref_id: bookingId2, tenant_id: T })
+      const existingJeId = oldJe?.id || undefined
+      if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id })
+      const newPax = Math.max(1, Number(body.pax_count ?? oldBooking.pax_count) || 1)
+      const newPay = body.payment_method === 'cash' ? 'cash' : (body.payment_method === 'credit' ? 'credit' : (oldBooking.payment_method || 'credit'))
+      const newClientId = body.client_id || oldBooking.client_id
+      const cli = await db.collection('clients').findOne({ id: newClientId, tenant_id: T })
+      if (!cli) return bad('العميل غير موجود')
+      let box = null
+      if (newPay === 'cash') {
+        const newBoxId = body.box_id || oldBooking.box_id
+        if (!newBoxId) return bad('اختر الصندوق للدفع النقدي')
+        box = await db.collection('boxes').findOne({ id: newBoxId, tenant_id: T })
+        if (!box) return bad('الصندوق غير موجود')
+      }
+      const newSnapshots = (oldBooking.component_snapshots || []).map(c => ({
+        ...c,
+        cost_total: +((c.cost_per_pax || 0) * newPax).toFixed(2),
+        sale_total: +((c.sale_per_pax || 0) * newPax).toFixed(2),
+      }))
+      let total_cost = +newSnapshots.reduce((s, c) => s + (c.cost_total || 0), 0).toFixed(2)
+      let total_sale = +newSnapshots.reduce((s, c) => s + (c.sale_total || 0), 0).toFixed(2)
+      if (body.total_cost !== undefined && Number(body.total_cost) >= 0) total_cost = +Number(body.total_cost).toFixed(2)
+      if (body.total_sale !== undefined && Number(body.total_sale) >= 0) total_sale = +Number(body.total_sale).toFixed(2)
+      const commission = +(total_sale - total_cost).toFixed(2)
+      if (newPay === 'cash') {
+        await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
+      } else {
+        await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
+      }
+      for (const c of newSnapshots) {
+        if (c.supplier_id && c.cost_total) {
+          await updateBalance(db, 'suppliers', { id: c.supplier_id, tenant_id: T }, cur, c.cost_total)
+        }
+      }
+      const updatedBooking = {
+        ...oldBooking,
+        client_id: cli.id, client_name: cli.name,
+        pilgrim_name: (body.pilgrim_name !== undefined ? String(body.pilgrim_name || '').trim() : oldBooking.pilgrim_name) || cli.name,
+        passport_no: body.passport_no !== undefined ? String(body.passport_no || '').trim() : (oldBooking.passport_no || ''),
+        pax_count: newPax, currency: cur,
+        total_cost, total_sale, commission,
+        payment_method: newPay,
+        box_id: box?.id || null, box_name: box?.name_ar || null,
+        component_snapshots: newSnapshots,
+        notes: body.notes !== undefined ? String(body.notes || '').trim() : (oldBooking.notes || ''),
+        updated_at: new Date(), updated_by: sess.user.email,
+      }
+      delete updatedBooking._id
+      await db.collection('package_bookings').replaceOne({ id: bookingId2, tenant_id: T }, updatedBooking)
+      const lines = []
+      if (newPay === 'cash') lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
+      else lines.push({ account_code: '1301', account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
+      const supGrouped = {}
+      for (const c of newSnapshots) {
+        if (!c.supplier_id || !c.cost_total) continue
+        supGrouped[c.supplier_id] = supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }
+        supGrouped[c.supplier_id].amount += c.cost_total
+      }
+      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
+      if (commission > 0) lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkgDoc.name}`, debit: 0, credit: commission })
+      await createJournalEntry(db, T, {
+        date: oldJe?.date || updatedBooking.created_at || new Date(),
+        description: `تسجيل ${updatedBooking.pilgrim_name} في ${pkgDoc.name} — ${newPax} فرد (تعديل)`,
+        ref_type: 'package_booking', ref_id: bookingId2, currency: cur, lines,
+      }, { skipQuota: true, existingJeId, createdAt: oldJe?.created_at || new Date() })
+      return ok({ ...updatedBooking, _id: undefined, _full_recalc: true })
+    }
+
 
     // v3.9.20 — Data Backup: Export full tenant snapshot as JSON (Owner only)
     if (route === '/backup/export' && method === 'GET') {

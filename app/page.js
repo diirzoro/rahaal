@@ -759,11 +759,13 @@ function Dashboard({ setTab }) {
     <div className="space-y-6">
       <TopBar title="لوحة التحكم" subtitle="نظرة سريعة على أداء المكتب اليوم"
         right={<Button variant="outline" onClick={load} className="gap-2"><Activity className="w-4 h-4" /> تحديث</Button>} />
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <QuickAction icon={Plane} label="حجز تذكرة" grad="grad-brand" onClick={() => setTab('tickets')} />
-        <QuickAction icon={FileBadge2} label="تأشيرة" grad="grad-green" onClick={() => setTab('visas')} />
-        <QuickAction icon={Package} label="الباكج" grad="grad-teal" onClick={() => setTab('packages')} />
-        <QuickAction icon={Briefcase} label="خدمة" grad="grad-gold" onClick={() => setTab('services')} />
+      {/* v3.9.21 — 5 quick action cards in one horizontal row (البنود الخدمية الأساسية) */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+        <QuickAction icon={FileBadge2} label="التأشيرات" grad="grad-green" onClick={() => setTab('visas')} />
+        <QuickAction icon={Plane} label="التذاكر" grad="grad-brand" onClick={() => setTab('tickets')} />
+        <QuickAction icon={Package} label="الباقات" grad="grad-teal" onClick={() => setTab('packages')} />
+        <QuickAction icon={Search} label="تصفح الرحلات" grad="grad-purple" onClick={() => setTab('flights')} />
+        <QuickAction icon={Briefcase} label="الخدمات" grad="grad-gold" onClick={() => setTab('services')} />
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <KpiCard title="مبيعات اليوم" icon={DollarSign} grad="grad-brand"
@@ -5780,6 +5782,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   const [comps, setComps] = useState([])
   const [bookings, setBookings] = useState([])
   const [bookingSearch, setBookingSearch] = useState('') // v3.9.20 — Search field
+  const [editingBooking, setEditingBooking] = useState(null) // v3.9.21 — Booking edit state
   const [suppliers, setSuppliers] = useState([])
   const [clients, setClients] = useState([])
   const [boxes, setBoxes] = useState([])
@@ -5886,11 +5889,18 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     <TableCell className="text-left">{fmt(b?.total_sale, b?.currency)}</TableCell>
                     <TableCell className="text-left text-emerald-600 font-bold">{fmt(b?.commission, b?.currency)}</TableCell>
                     <TableCell className="text-center">
-                      <Button size="sm" variant="ghost" onClick={async () => {
-                        if (!confirm(`حذف تسجيل "${b?.pilgrim_name}"؟ سيتم عكس القيد المحاسبي وتحديث رصيد العميل تلقائياً.`)) return
-                        try { await api(`/packages/${pkg.id}/bookings/${b.id}`, { method: 'DELETE' }); toast.success('✅ تم الحذف'); load(); onChanged && onChanged() }
-                        catch (e) { toast.error(e.message) }
-                      }} className="h-7 w-7 p-0 text-rose-600 hover:bg-rose-50"><Trash2 className="w-3.5 h-3.5" /></Button>
+                      <div className="flex items-center justify-center gap-1">
+                        {pkg.status !== 'closed' && (
+                          <Button size="sm" variant="ghost" onClick={() => setEditingBooking(b)} className="h-7 w-7 p-0 text-blue-600 hover:bg-blue-50" title="تعديل بيانات المسافر">
+                            <Pencil className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
+                        <Button size="sm" variant="ghost" onClick={async () => {
+                          if (!confirm(`حذف تسجيل "${b?.pilgrim_name}"؟ سيتم عكس القيد المحاسبي وتحديث رصيد العميل تلقائياً.`)) return
+                          try { await api(`/packages/${pkg.id}/bookings/${b.id}`, { method: 'DELETE' }); toast.success('✅ تم الحذف'); load(); onChanged && onChanged() }
+                          catch (e) { toast.error(e.message) }
+                        }} className="h-7 w-7 p-0 text-rose-600 hover:bg-rose-50" title="حذف التسجيل"><Trash2 className="w-3.5 h-3.5" /></Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -5900,6 +5910,180 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
           </div>
         )}
         <DialogFooter><Button variant="outline" onClick={onClose}>إغلاق</Button></DialogFooter>
+      </DialogContent>
+      {editingBooking && (
+        <PackageBookingEditDialog
+          pkg={pkg}
+          booking={editingBooking}
+          clients={clients}
+          boxes={boxes}
+          onClose={() => setEditingBooking(null)}
+          onSaved={() => { setEditingBooking(null); load(); onChanged && onChanged() }}
+        />
+      )}
+    </Dialog>
+  )
+}
+
+// v3.9.21 — Edit an existing package booking (passenger data + optional financial recompute)
+function PackageBookingEditDialog({ pkg, booking, clients, boxes, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    pilgrim_name: booking?.pilgrim_name || '',
+    passport_no: booking?.passport_no || '',
+    pax_count: booking?.pax_count || 1,
+    payment_method: booking?.payment_method || 'credit',
+    client_id: booking?.client_id || '',
+    box_id: booking?.box_id || '',
+    notes: booking?.notes || '',
+    override_financials: false,
+    total_cost: booking?.total_cost || 0,
+    total_sale: booking?.total_sale || 0,
+  })
+  const [saving, setSaving] = useState(false)
+
+  const setF = (k, v) => setForm(f => ({ ...f, [k]: v }))
+
+  const previewProfit = (() => {
+    if (form.override_financials) {
+      return +((Number(form.total_sale) || 0) - (Number(form.total_cost) || 0)).toFixed(2)
+    }
+    // recompute from snapshots × pax
+    const snaps = booking?.component_snapshots || []
+    const pax = Math.max(1, Number(form.pax_count) || 1)
+    const cost = snaps.reduce((s, c) => s + ((c.cost_per_pax || 0) * pax), 0)
+    const sale = snaps.reduce((s, c) => s + ((c.sale_per_pax || 0) * pax), 0)
+    return { cost: +cost.toFixed(2), sale: +sale.toFixed(2), profit: +(sale - cost).toFixed(2) }
+  })()
+
+  const save = async () => {
+    if (!form.pilgrim_name.trim()) return toast.error('اسم المسافر مطلوب')
+    if (!form.client_id) return toast.error('اختر حساب القبض')
+    if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق للدفع النقدي')
+    const paxNum = Math.max(1, Number(form.pax_count) || 1)
+    const body = {
+      pilgrim_name: form.pilgrim_name.trim(),
+      passport_no: form.passport_no.trim(),
+      notes: form.notes.trim(),
+      pax_count: paxNum,
+      payment_method: form.payment_method,
+      client_id: form.client_id,
+      box_id: form.payment_method === 'cash' ? form.box_id : '',
+    }
+    if (form.override_financials) {
+      body.total_cost = +(Number(form.total_cost) || 0).toFixed(2)
+      body.total_sale = +(Number(form.total_sale) || 0).toFixed(2)
+    }
+    try {
+      setSaving(true)
+      const res = await api(`/packages/${pkg.id}/bookings/${booking.id}`, { method: 'PATCH', body })
+      if (res?._full_recalc) toast.success('✅ تم تعديل البيانات + إعادة احتساب القيد المحاسبي')
+      else toast.success('✅ تم تحديث بيانات المسافر')
+      onSaved && onSaved()
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+
+  return (
+    <Dialog open={true} onOpenChange={onClose}>
+      <DialogContent dir="rtl" className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Pencil className="w-4 h-4 text-blue-600" /> تعديل بيانات المسافر</DialogTitle>
+          <DialogDescription>
+            الباكج: <b>{pkg.name}</b> • العملة: <b>{pkg.currency}</b>
+            <div className="mt-1 text-xs text-slate-500">تعديل الاسم/الجواز/الملاحظات فقط لا يؤثر على القيد المحاسبي. أي تغيير في عدد الأفراد أو طريقة الدفع أو حساب القبض سيؤدي إلى إعادة احتساب تلقائية للقيد وأرصدة العملاء والموردين.</div>
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="اسم المعتمر/المسافر *">
+            <Input value={form.pilgrim_name} onChange={e => setF('pilgrim_name', e.target.value)} />
+          </Field>
+          <Field label="رقم الجواز">
+            <Input value={form.passport_no} onChange={e => setF('passport_no', e.target.value)} />
+          </Field>
+          <Field label="حساب القبض *">
+            <Select value={form.client_id} onValueChange={v => setF('client_id', v)}>
+              <SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger>
+              <SelectContent>{(clients || []).map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
+            </Select>
+          </Field>
+          <Field label="عدد الأفراد">
+            <Input type="number" min="1" value={form.pax_count} onChange={e => setF('pax_count', e.target.value)} />
+          </Field>
+          <Field label="طريقة الدفع">
+            <Select value={form.payment_method} onValueChange={v => setF('payment_method', v)}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="credit">🕓 آجل (على حساب العميل)</SelectItem>
+                <SelectItem value="cash">💵 نقد (صندوق)</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          {form.payment_method === 'cash' && (
+            <Field label="الصندوق *">
+              <Select value={form.box_id} onValueChange={v => setF('box_id', v)}>
+                <SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger>
+                <SelectContent>{(boxes || []).map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent>
+              </Select>
+            </Field>
+          )}
+          <div className="md:col-span-2">
+            <Field label="ملاحظات">
+              <Input value={form.notes} onChange={e => setF('notes', e.target.value)} placeholder="أي ملاحظات إضافية..." />
+            </Field>
+          </div>
+        </div>
+
+        {/* Financial preview */}
+        <div className="bg-slate-50 border rounded-lg p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold text-slate-700">💰 القيم المالية</div>
+            <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+              <input type="checkbox" checked={form.override_financials} onChange={e => setF('override_financials', e.target.checked)} />
+              تعديل يدوي (تجاوز الاحتساب التلقائي)
+            </label>
+          </div>
+          {!form.override_financials ? (
+            <div className="grid grid-cols-3 gap-2 text-sm">
+              <div className="bg-white rounded p-2 border">
+                <div className="text-[11px] text-slate-500">التكلفة (يُحسب)</div>
+                <div className="font-bold text-rose-600">{fmt(previewProfit.cost, pkg.currency)}</div>
+              </div>
+              <div className="bg-white rounded p-2 border">
+                <div className="text-[11px] text-slate-500">البيع (يُحسب)</div>
+                <div className="font-bold text-blue-600">{fmt(previewProfit.sale, pkg.currency)}</div>
+              </div>
+              <div className="bg-white rounded p-2 border">
+                <div className="text-[11px] text-slate-500">الربح</div>
+                <div className="font-bold text-emerald-600">{fmt(previewProfit.profit, pkg.currency)}</div>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <Field label={`إجمالي التكلفة (${pkg.currency})`}>
+                <Input type="number" step="0.01" value={form.total_cost} onChange={e => setF('total_cost', e.target.value)} />
+              </Field>
+              <Field label={`إجمالي البيع (${pkg.currency})`}>
+                <Input type="number" step="0.01" value={form.total_sale} onChange={e => setF('total_sale', e.target.value)} />
+              </Field>
+              <div className="flex items-end">
+                <div className="w-full bg-white rounded p-2 border">
+                  <div className="text-[11px] text-slate-500">الربح</div>
+                  <div className="font-bold text-emerald-600">{fmt(+(Number(form.total_sale || 0) - Number(form.total_cost || 0)).toFixed(2), pkg.currency)}</div>
+                </div>
+              </div>
+            </div>
+          )}
+          <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+            ⚠️ عند تغيير عدد الأفراد أو طريقة الدفع أو حساب القبض أو التعديل اليدوي للمالي، سيتم <b>عكس القيد المحاسبي القديم</b> وإعادة إنشائه بالبيانات الجديدة، مع تحديث أرصدة العميل والمورد. لا تُستهلك حصة إضافية من القيود.
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={saving}>إلغاء</Button>
+          <Button onClick={save} disabled={saving} className="grad-brand text-white gap-2">
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+            حفظ التعديلات
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
