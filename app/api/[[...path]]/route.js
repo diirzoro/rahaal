@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.19',
+          version: '3.9.20',
           db: 'connected',
         })
       } catch (e) {
@@ -1246,7 +1246,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.19',
+        version: '3.9.20',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
@@ -1465,6 +1465,62 @@ async function handleRoute(request, { params }) {
     if (pkgBookMatch && method === 'GET') {
       const list = await db.collection('package_bookings').find({ tenant_id: T, package_id: pkgBookMatch[1] }).sort({ created_at: -1 }).toArray()
       return ok(list.map(b => ({ ...b, _id: undefined })))
+    }
+
+    // v3.9.20 — Delete a specific package booking (reverses balances + JE)
+    const pkgBookDelMatch = route.match(/^\/packages\/([^/]+)\/bookings\/([^/]+)$/)
+    if (pkgBookDelMatch && method === 'DELETE') {
+      const [_, pkgId, bookingId] = pkgBookDelMatch
+      const booking = await db.collection('package_bookings').findOne({ id: bookingId, tenant_id: T, package_id: pkgId })
+      if (!booking) return bad('التسجيل غير موجود', 404)
+      // Reverse balances
+      const cur = booking.currency || 'USD'
+      const payMethod = booking.payment_method || 'credit'
+      if (payMethod === 'cash' && booking.box_id) {
+        await updateBalance(db, 'boxes', { id: booking.box_id, tenant_id: T }, cur, -(booking.total_sale || 0))
+      } else if (booking.client_id) {
+        await updateBalance(db, 'clients', { id: booking.client_id, tenant_id: T }, cur, -(booking.total_sale || 0))
+      }
+      // Reverse supplier balances from component snapshots
+      if (booking.component_snapshots && Array.isArray(booking.component_snapshots)) {
+        for (const comp of booking.component_snapshots) {
+          if (comp.supplier_id && comp.cost_total) {
+            await updateBalance(db, 'suppliers', { id: comp.supplier_id, tenant_id: T }, cur, -(comp.cost_total || 0))
+          }
+        }
+      }
+      // Delete associated JE
+      const je = await db.collection('journal_entries').findOne({ ref_type: 'package_booking', ref_id: bookingId, tenant_id: T })
+      if (je) {
+        await db.collection('journal_entries').deleteOne({ id: je.id })
+        await db.collection('tenants').updateOne({ id: T }, { $inc: { 'journal_quota.used': -1 } })
+      }
+      // Decrement package bookings count
+      await db.collection('packages').updateOne({ id: pkgId, tenant_id: T }, { $inc: { bookings_count: -1 } })
+      await db.collection('package_bookings').deleteOne({ id: bookingId, tenant_id: T })
+      return ok({ success: true, booking_id: bookingId })
+    }
+
+    // v3.9.20 — Data Backup: Export full tenant snapshot as JSON (Owner only)
+    if (route === '/backup/export' && method === 'GET') {
+      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — نسخ احتياطي متاح للمالك فقط', 403)
+      const collections = ['tickets', 'visas', 'services', 'clients', 'suppliers', 'boxes', 'journal_entries', 'packages', 'package_bookings', 'currency_exchanges', 'vouchers', 'accounts', 'service_types']
+      const backup = { tenant_id: T, tenant_name: sess.tenant?.name, exported_at: new Date().toISOString(), exported_by: sess.user.email, version: '3.9.20', data: {} }
+      for (const coll of collections) {
+        try {
+          const docs = await db.collection(coll).find({ tenant_id: T }).toArray()
+          backup.data[coll] = docs.map(d => { const { _id, ...rest } = d; return rest })
+        } catch (e) { backup.data[coll] = { error: e.message } }
+      }
+      // Return as JSON download
+      const filename = `rahaal-backup-${sess.tenant?.slug || T}-${new Date().toISOString().slice(0,10)}.json`
+      return new NextResponse(JSON.stringify(backup, null, 2), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+        },
+      })
     }
     if (pkgBookMatch && method === 'POST') {
       const b = await request.json()

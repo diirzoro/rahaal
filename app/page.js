@@ -8,7 +8,7 @@ import {
   ArrowDownLeft, ArrowUpRight, ArrowRight, BookOpenText, BarChart3, PieChart as PieIcon,
   Plus, Search, Calendar, TrendingUp, DollarSign, Sparkles, LogOut,
   Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
-  Building, Settings, Upload, FileSpreadsheet, CheckCircle2, XCircle,
+  Building, Settings, Upload, Download, FileSpreadsheet, CheckCircle2, XCircle,
   AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key, Pencil,
   ArrowLeftRight, Briefcase, CalendarClock, LogIn, Package,
 } from 'lucide-react'
@@ -5779,6 +5779,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   const [tab, setTab] = useState('components')
   const [comps, setComps] = useState([])
   const [bookings, setBookings] = useState([])
+  const [bookingSearch, setBookingSearch] = useState('') // v3.9.20 — Search field
   const [suppliers, setSuppliers] = useState([])
   const [clients, setClients] = useState([])
   const [boxes, setBoxes] = useState([])
@@ -5860,23 +5861,40 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                 {newBooking.payment_method === 'cash' && <div className="md:col-span-6"><Field label="الصندوق"><Select value={newBooking.box_id} onValueChange={v => setNewBooking({ ...newBooking, box_id: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></Field></div>}
               </div>
             )}
+            {/* v3.9.20 — Search field for bookings */}
+            <div className="flex items-center gap-2 p-2 bg-slate-50 border rounded-lg">
+              <Search className="w-4 h-4 text-slate-400" />
+              <Input value={bookingSearch} onChange={e => setBookingSearch(e.target.value)} placeholder="🔍 بحث بالاسم أو رقم الجواز أو حساب القبض..." className="border-0 bg-transparent flex-1" />
+              {bookingSearch && <Button size="sm" variant="ghost" onClick={() => setBookingSearch('')} className="text-rose-600 h-7">مسح</Button>}
+            </div>
             <Table>
-              <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>المعتمر/المسافر</TableHead><TableHead>حساب القبض</TableHead><TableHead>الجواز</TableHead><TableHead className="text-center">أفراد</TableHead><TableHead>الدفع</TableHead><TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead><TableHead className="text-left text-emerald-600">ربح</TableHead></TableRow></TableHeader>
+              <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>المعتمر/المسافر</TableHead><TableHead>حساب القبض</TableHead><TableHead>الجواز</TableHead><TableHead className="text-center">أفراد</TableHead><TableHead>الدفع</TableHead><TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead><TableHead className="text-left text-emerald-600">ربح</TableHead><TableHead className="text-center w-16">⚙️</TableHead></TableRow></TableHeader>
               <TableBody>
-                {bookings.map(b => (
-                  <TableRow key={b.id}>
-                    <TableCell className="text-xs">{fmtDate(b.created_at)}</TableCell>
-                    <TableCell className="font-semibold">{b.pilgrim_name}</TableCell>
-                    <TableCell className="text-xs">{b.client_name}</TableCell>
-                    <TableCell className="font-mono text-xs">{b.passport_no || '—'}</TableCell>
-                    <TableCell className="text-center">{b.pax_count}</TableCell>
-                    <TableCell>{b.payment_method === 'cash' ? '💵' : '🕓'}</TableCell>
-                    <TableCell className="text-left">{fmt(b.total_cost, b.currency)}</TableCell>
-                    <TableCell className="text-left">{fmt(b.total_sale, b.currency)}</TableCell>
-                    <TableCell className="text-left text-emerald-600 font-bold">{fmt(b.commission, b.currency)}</TableCell>
+                {(bookings || []).filter(b => {
+                  if (!bookingSearch) return true
+                  const q = bookingSearch.trim().toLowerCase()
+                  return (b?.pilgrim_name || '').toLowerCase().includes(q) || (b?.passport_no || '').toLowerCase().includes(q) || (b?.client_name || '').toLowerCase().includes(q)
+                }).map(b => (
+                  <TableRow key={b?.id}>
+                    <TableCell className="text-xs">{fmtDate(b?.created_at)}</TableCell>
+                    <TableCell className="font-semibold">{b?.pilgrim_name || '—'}</TableCell>
+                    <TableCell className="text-xs">{b?.client_name || '—'}</TableCell>
+                    <TableCell className="font-mono text-xs">{b?.passport_no || '—'}</TableCell>
+                    <TableCell className="text-center">{b?.pax_count || 1}</TableCell>
+                    <TableCell>{b?.payment_method === 'cash' ? '💵' : '🕓'}</TableCell>
+                    <TableCell className="text-left">{fmt(b?.total_cost, b?.currency)}</TableCell>
+                    <TableCell className="text-left">{fmt(b?.total_sale, b?.currency)}</TableCell>
+                    <TableCell className="text-left text-emerald-600 font-bold">{fmt(b?.commission, b?.currency)}</TableCell>
+                    <TableCell className="text-center">
+                      <Button size="sm" variant="ghost" onClick={async () => {
+                        if (!confirm(`حذف تسجيل "${b?.pilgrim_name}"؟ سيتم عكس القيد المحاسبي وتحديث رصيد العميل تلقائياً.`)) return
+                        try { await api(`/packages/${pkg.id}/bookings/${b.id}`, { method: 'DELETE' }); toast.success('✅ تم الحذف'); load(); onChanged && onChanged() }
+                        catch (e) { toast.error(e.message) }
+                      }} className="h-7 w-7 p-0 text-rose-600 hover:bg-rose-50"><Trash2 className="w-3.5 h-3.5" /></Button>
+                    </TableCell>
                   </TableRow>
                 ))}
-                {bookings.length === 0 && <TableRow><TableCell colSpan={9} className="text-center text-slate-400 py-6">لا يوجد مسجلون بعد</TableCell></TableRow>}
+                {(!bookings || bookings.length === 0) && <TableRow><TableCell colSpan={10} className="text-center text-slate-400 py-6">لا يوجد مسجلون بعد</TableCell></TableRow>}
               </TableBody>
             </Table>
           </div>
@@ -5917,6 +5935,92 @@ function PackageReportDialog({ pkg, onClose }) {
     </Dialog>
   )
 }
+
+
+// v3.9.20 — Data Backup Section (Manual JSON export)
+function BackupSection({ tenant }) {
+  const [downloading, setDownloading] = useState(false)
+  const [lastBackup, setLastBackup] = useState(null)
+
+  const downloadBackup = async () => {
+    try {
+      setDownloading(true)
+      const base = process.env.NEXT_PUBLIC_BASE_URL || ''
+      const res = await fetch(`${base}/api/backup/export`, { credentials: 'include' })
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}))
+        throw new Error(j.error || `HTTP ${res.status}`)
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      const cd = res.headers.get('Content-Disposition') || ''
+      const m = cd.match(/filename="([^"]+)"/)
+      a.href = url
+      a.download = m ? m[1] : `rahaal-backup-${new Date().toISOString().slice(0, 10)}.json`
+      document.body.appendChild(a); a.click(); a.remove()
+      URL.revokeObjectURL(url)
+      setLastBackup(new Date())
+      toast.success('✅ تم تنزيل النسخة الاحتياطية بنجاح')
+    } catch (e) { toast.error('فشل النسخ الاحتياطي: ' + e.message) } finally { setDownloading(false) }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card className="border-2 border-rose-200 bg-gradient-to-l from-rose-50 via-orange-50 to-amber-50">
+        <CardContent className="p-6">
+          <div className="flex items-start gap-4">
+            <div className="text-5xl">💾</div>
+            <div className="flex-1">
+              <div className="text-2xl font-black text-rose-800">النسخ الاحتياطي لبيانات المكتب</div>
+              <div className="text-sm text-slate-700 mt-2 leading-relaxed">
+                حماية أساسية لبياناتك: احفظ نسخة كاملة (تذاكر، تأشيرات، خدمات، عملاء، موردين، صناديق، قيود يومية، باكجات) على جهازك الشخصي بضغطة واحدة.
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2">📥 التحميل اليدوي</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <div className="text-sm text-slate-700">تنزيل نسخة احتياطية كاملة كملف JSON على جهازك الآن — يتضمن جميع بيانات مكتب <b>{tenant?.name}</b>.</div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+            <div className="bg-slate-50 p-3 rounded border">✔️ 12 مجموعة بيانات</div>
+            <div className="bg-slate-50 p-3 rounded border">✔️ صيغة JSON قابلة للاستعادة</div>
+            <div className="bg-slate-50 p-3 rounded border">✔️ آمن — تشفير أثناء النقل (HTTPS)</div>
+          </div>
+          <Button onClick={downloadBackup} disabled={downloading} className="w-full grad-brand text-white gap-2 py-6 text-base font-bold">
+            {downloading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
+            {downloading ? 'جاري إنشاء النسخة الاحتياطية...' : '💾 تنزيل نسخة احتياطية الآن'}
+          </Button>
+          {lastBackup && <div className="text-xs text-emerald-700 bg-emerald-50 p-2 rounded border border-emerald-200 text-center">✅ آخر نسخة تم تنزيلها: {lastBackup.toLocaleString('ar-EG')}</div>}
+        </CardContent>
+      </Card>
+
+      <Card className="border-2 border-amber-300 bg-amber-50">
+        <CardHeader><CardTitle className="text-amber-900 flex items-center gap-2">⚠️ إخلاء المسؤولية</CardTitle></CardHeader>
+        <CardContent className="text-sm text-amber-900 space-y-2 leading-relaxed">
+          <p>🔒 <b>حفظ النسخ الاحتياطية على أجهزتك مسؤوليتك الكاملة كمكتب.</b> يوصى بحفظ نسخة أسبوعية على الأقل في:</p>
+          <ul className="list-disc mr-5 space-y-1">
+            <li>💻 قرص صلب داخلي أو خارجي</li>
+            <li>☁️ حساب سحابي (Google Drive / OneDrive / Dropbox)</li>
+            <li>📧 بريد إلكتروني مؤرشف</li>
+          </ul>
+          <p className="pt-2 border-t border-amber-300">🛡️ <b>Target Media / رحّال</b> يوفر أيضاً نسخاً احتياطية دورية على السيرفر لأغراض الاستعادة الطارئة، لكن **إدارة النسخ المحلية والاستعادة الشخصية تظل مسؤوليتك**.</p>
+        </CardContent>
+      </Card>
+
+      <Card className="border-2 border-blue-200">
+        <CardHeader><CardTitle className="text-blue-900 flex items-center gap-2">🤖 النسخ التلقائي (قيد التطوير)</CardTitle></CardHeader>
+        <CardContent className="text-sm text-slate-700">
+          سيتم قريباً تفعيل **جدولة تلقائية** لأخذ نسخة احتياطية يومية/أسبوعية إلى بريدك الإلكتروني أو حسابك السحابي. حتى ذلك الحين، يرجى استخدام التنزيل اليدوي بانتظام.
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
 
 function OfficeSettings() {
   const { settings, refreshMe, user, tenant } = useAuth()
@@ -5985,6 +6089,7 @@ function OfficeSettings() {
           <TabsTrigger value="referrals">🎁 نظام الإحالة</TabsTrigger>
           <TabsTrigger value="extension" className="hidden lg:inline-flex">🕋 إضافة المتصفح</TabsTrigger>
           <TabsTrigger value="print"><Printer className="w-4 h-4 ml-1" /> معاينة الطباعة</TabsTrigger>
+          <TabsTrigger value="backup" className="text-rose-700 font-bold">💾 النسخ الاحتياطي</TabsTrigger>
         </TabsList>
 
         <TabsContent value="brand" className="mt-4">
@@ -6189,6 +6294,11 @@ function OfficeSettings() {
               <div className="text-center mt-4"><Button onClick={() => window.print()} variant="outline" className="gap-2"><Printer className="w-4 h-4" /> طباعة تجريبية</Button></div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* v3.9.20 — Data Backup Tab */}
+        <TabsContent value="backup" className="mt-4">
+          <BackupSection tenant={tenant} />
         </TabsContent>
       </Tabs>
     </div>
