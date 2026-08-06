@@ -6810,3 +6810,136 @@ agent_communication:
       
       **RECOMMENDATION:**
       The bug fix is correctly implemented and safe to deploy. The code change is minimal, well-commented, and follows the existing pattern used in other dialogs. Manual UI testing is recommended when the service stability issue is resolved, but the code review provides high confidence that the fix will work as intended.
+  - task: "v3.9.18: POST /api/public/signup - Mandatory phone field validation"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (7/7 tests) - Phone validation working correctly. Missing phone → 400 'رقم الهاتف / الواتساب مطلوب'. Invalid phone (letters 'abc123') → 400 'رقم الهاتف غير صالح'. Too short (< 7 digits) → 400. Too long (> 15 digits) → 400. Valid international with + (+967771234567) → 200, tenant created. Valid without + (967771234568) → 200, tenant created. Phone with spaces/dashes ('+967 77-123 4569') → 200, normalized to '+967771234569'. Database verification: All phones stored correctly in both users.phone and tenants.owner_phone fields with normalization (spaces/dashes removed). Regex accepts 7-15 digits with optional leading +."
+  - task: "v3.9.18: GET /api/affiliate - Referral link uses official domain"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED - GET /api/affiliate returns link starting with 'https://rahaal.targetmediagrp.com/signup?ref=' (NOT the Emergent preview URL). Tested with owner@demo.com, received link 'https://rahaal.targetmediagrp.com/signup?ref=UQ7Z98W8'. Official domain correctly hardcoded in line 956 of route.js."
+  - task: "v3.9.18: Regression checks"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (4/4 tests) - Health endpoint returns version '3.9.18'. Existing tenant (owner@demo.com) can login normally with Demo@2025. POST /api/admin/tenants/{id}/topup still works (added 10 credits). POST /api/admin/tenants/{id}/reset-password still works (reset to Demo@2025). All v3.9.17 features remain functional."
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      ✅ v3.9.18 BACKEND TESTING COMPLETED - ALL 12 TESTS PASSED
+      
+      Comprehensive test suite executed for v3.9.18 features (mandatory phone field + official affiliate domain):
+      
+      **Test Results: 12/12 PASSED**
+      
+      **1. POST /api/public/signup - Mandatory Phone Field (7 tests)**
+      
+      ✅ Missing phone field:
+         - POST without owner_phone → 400
+         - Error message: "رقم الهاتف / الواتساب مطلوب" (Arabic)
+      
+      ✅ Invalid phone (letters):
+         - owner_phone: "abc123" → 400
+         - Error message: "رقم الهاتف غير صالح — أدخل رمز الدولة والرقم (مثال: +967771234567)"
+      
+      ✅ Too short phone (< 7 digits):
+         - owner_phone: "12345" → 400
+         - Validation regex requires 7-15 digits
+      
+      ✅ Too long phone (> 15 digits):
+         - owner_phone: "1234567890123456" → 400
+         - Validation regex caps at 15 digits
+      
+      ✅ Valid international phone with +:
+         - owner_phone: "+967771234567" → 200
+         - Tenant created successfully
+         - Database verification: users.phone = "+967771234567", tenants.owner_phone = "+967771234567"
+      
+      ✅ Valid phone without +:
+         - owner_phone: "967771234568" → 200
+         - Tenant created successfully
+         - Database verification: users.phone = "967771234568", tenants.owner_phone = "967771234568"
+      
+      ✅ Phone normalization (spaces/dashes):
+         - owner_phone: "+967 77-123 4569" (with spaces and dashes) → 200
+         - Stored as: "+967771234569" (normalized, spaces/dashes removed)
+         - Database verification: Both users.phone and tenants.owner_phone contain normalized value
+         - Normalization logic: phone.replace(/[\s-]/g, '') on line 489 and 494
+      
+      **2. GET /api/affiliate - Official Domain (1 test)**
+      
+      ✅ Affiliate link uses official domain:
+         - Login as owner@demo.com
+         - GET /api/affiliate → 200
+         - Response link: "https://rahaal.targetmediagrp.com/signup?ref=UQ7Z98W8"
+         - ✅ VERIFIED: Link starts with "https://rahaal.targetmediagrp.com/signup?ref="
+         - ✅ NOT using Emergent preview URL (https://visa-booking-5.preview.emergentagent.com)
+         - Implementation: Line 956 hardcodes official domain
+      
+      **3. Regression Checks (4 tests)**
+      
+      ✅ Health endpoint version:
+         - GET /api/health → 200
+         - version: "3.9.18" ✅
+      
+      ✅ Existing tenant login:
+         - owner@demo.com / Demo@2025 → 200
+         - Login successful, no impact from phone requirement on existing accounts
+      
+      ✅ v3.9.17 topup endpoint:
+         - POST /api/admin/tenants/{id}/topup {amount: 10} → 200
+         - Still working correctly
+      
+      ✅ v3.9.17 reset-password endpoint:
+         - POST /api/admin/tenants/{id}/reset-password {new_password: "Demo@2025"} → 200
+         - Still working correctly
+         - Password reset back to Demo@2025 for future tests
+      
+      **CRITICAL VERIFICATIONS:**
+      ✅ Phone validation - All edge cases covered (missing, invalid, too short, too long)
+      ✅ Phone normalization - Spaces and dashes removed before storage
+      ✅ Database storage - Phone stored in both users.phone and tenants.owner_phone
+      ✅ Regex validation - Accepts 7-15 digits with optional leading +
+      ✅ Arabic error messages - All validation errors in Arabic
+      ✅ Affiliate link - Official domain hardcoded (not using env variable)
+      ✅ Backward compatibility - Existing tenants can login normally
+      ✅ Regression - All v3.9.17 features still working
+      
+      **DATABASE VERIFICATION:**
+      Directly queried MongoDB to verify phone storage:
+      - phonesignup1@gmail.com: phone = "+967771234567" (normalized) ✅
+      - phonesignup2@gmail.com: phone = "967771234568" (normalized) ✅
+      - phonesignup3@gmail.com: phone = "+967771234569" (normalized from "+967 77-123 4569") ✅
+      - All corresponding tenant documents have owner_phone field with same normalized values ✅
+      
+      **IMPLEMENTATION DETAILS:**
+      - Phone validation: Lines 443-446 (route.js)
+      - Regex: /^\+?[0-9]{7,15}$/ after removing spaces/dashes
+      - Normalization: phone.replace(/[\s-]/g, '') on lines 489 and 494
+      - User storage: Line 489 (users.phone)
+      - Tenant storage: Line 494 (tenants.owner_phone)
+      - Affiliate link: Line 956 (hardcoded official domain)
+      
+      Backend v3.9.18 is production-ready. All new features verified and working correctly.
+

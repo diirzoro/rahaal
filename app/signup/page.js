@@ -31,7 +31,7 @@ function SignupPageInner() {
   const params = useSearchParams()
   const router = useRouter()
   const [ref, setRef] = useState('')
-  const [form, setForm] = useState({ name: '', owner_name: '', owner_email: '', owner_password: '' })
+  const [form, setForm] = useState({ name: '', owner_name: '', owner_email: '', owner_phone: '', owner_password: '' })
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -41,16 +41,18 @@ function SignupPageInner() {
 
   const submit = async (e) => {
     e.preventDefault()
-    if (!form.name || !form.owner_email || !form.owner_password || !form.owner_name) {
-      return toast.error('الرجاء إكمال جميع الحقول')
+    if (!form.name || !form.owner_email || !form.owner_password || !form.owner_name || !form.owner_phone) {
+      return toast.error('الرجاء إكمال جميع الحقول (بما فيها رقم الهاتف)')
     }
+    // v3.9.18 — Phone must be international format with 7-15 digits
+    const cleanPhone = form.owner_phone.replace(/[\s-]/g, '')
+    if (!/^\+?[0-9]{7,15}$/.test(cleanPhone)) return toast.error('رقم الهاتف غير صالح — أدخل رمز الدولة والرقم (مثال: +967771234567)')
     if (form.owner_password.length < 6) return toast.error('كلمة المرور يجب أن تكون 6 أحرف على الأقل')
     try {
       setSaving(true)
-      const body = { ...form, referral_code: ref || undefined }
+      const body = { ...form, owner_phone: cleanPhone, referral_code: ref || undefined }
       const r = await apiPost('/public/signup', body)
       toast.success('🎉 تم إنشاء حسابك بنجاح!' + (r.referral_applied ? ' • تم منح المُحيل +15 قيد مجاني' : ''))
-      // Use hard navigation to ensure the auth cookie is applied on server-rendered request
       setTimeout(() => { window.location.href = '/' }, 1200)
     } catch (err) { toast.error(err.message) } finally { setSaving(false) }
   }
@@ -123,6 +125,11 @@ function SignupPageInner() {
               <div>
                 <label className="text-xs text-slate-600 mb-1 block">البريد الإلكتروني *</label>
                 <Input dir="ltr" type="email" value={form.owner_email} onChange={e => setForm({ ...form, owner_email: e.target.value })} placeholder="you@office.com" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-600 mb-1 block">📱 رقم الهاتف / الواتساب <span className="text-rose-600">*</span> <span className="text-slate-400">(مع رمز الدولة)</span></label>
+                <Input dir="ltr" type="tel" value={form.owner_phone} onChange={e => setForm({ ...form, owner_phone: e.target.value })} placeholder="+967771234567" required />
+                <div className="text-[10px] text-slate-500 mt-1">أدخل رمز الدولة والرقم (بدون مسافات). سيُستخدم للتواصل والدعم عبر الواتساب.</div>
               </div>
               <div>
                 <label className="text-xs text-slate-600 mb-1 block">كلمة المرور * (6 أحرف فأكثر)</label>

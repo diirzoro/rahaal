@@ -6176,8 +6176,8 @@ function OutOfQuotaModal({ open, onOpenChange, tenant }) {
     api('/plans').then(setPlans).catch(() => {})
     api('/referrals').then(r => setRefCode(r.code)).catch(() => {})
   }, [open])
-  const publicBase = typeof window !== 'undefined' ? window.location.origin : ''
-  const inviteLink = `${publicBase}/signup?ref=${refCode}`
+  // v3.9.18 — Official domain only for invite links (WhatsApp + copy)
+  const inviteLink = `https://rahaal.targetmediagrp.com/signup?ref=${refCode}`
   const shareWA = () => {
     const msg = `🎁 انضم إلى منصة رحّال (Rahaal ERP)!\nاحصل على 30 قيد تجريبي مجاناً + أكسب +50 قيد إضافي عبر رابط الإحالة:\n${inviteLink}`
     window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')

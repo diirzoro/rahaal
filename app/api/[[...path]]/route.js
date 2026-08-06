@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.17',
+          version: '3.9.18',
           db: 'connected',
         })
       } catch (e) {
@@ -439,6 +439,11 @@ async function handleRoute(request, { params }) {
     if (route === '/public/signup' && method === 'POST') {
       const b = await request.json()
       if (!b.name || !b.owner_email || !b.owner_password || !b.owner_name) return bad('الاسم الكامل، اسم المكتب، البريد وكلمة المرور مطلوبة')
+      // v3.9.18 — Mandatory phone/WhatsApp (with country code)
+      const phone = String(b.owner_phone || '').trim()
+      if (!phone) return bad('رقم الهاتف / الواتساب مطلوب')
+      // Accept international format with optional leading '+' and 7-15 digits
+      if (!/^\+?[0-9]{7,15}$/.test(phone.replace(/[\s-]/g, ''))) return bad('رقم الهاتف غير صالح — أدخل رمز الدولة والرقم (مثال: +967771234567)')
       const email = String(b.owner_email).toLowerCase().trim()
       // v3.9 — Restrict signup to real Gmail addresses to prevent fake/duplicate accounts.
       // (Full Google OAuth verification will be added later; this is the interim enforcement.)
@@ -481,9 +486,12 @@ async function handleRoute(request, { params }) {
       await db.collection('users').insertOne({
         id: userId, tenant_id: tenant.id, email, name: b.owner_name,
         role: 'owner', active: true,
+        phone: phone.replace(/[\s-]/g, ''), // v3.9.18 — Store normalized phone
         password_hash: bcrypt.hashSync(b.owner_password, 8),
         created_at: new Date(),
       })
+      // v3.9.18 — Also store owner phone in tenant profile for admin visibility
+      await db.collection('tenants').updateOne({ id: tenant.id }, { $set: { owner_phone: phone.replace(/[\s-]/g, '') } })
       await seedTenantDefaults(db, tenant.id)
       // Auto-login
       const sid = uuidv4()
@@ -944,8 +952,8 @@ async function handleRoute(request, { params }) {
       const code = await ensureReferralCode(db, T)
       const t = await db.collection('tenants').findOne({ id: T })
       const affiliate = t.affiliate || { balance_usd: 0, total_earned_usd: 0, total_withdrawn_usd: 0, commission_rate: AFFILIATE_COMMISSION_RATE, is_individual: false }
-      const publicBase = process.env.NEXT_PUBLIC_BASE_URL || ''
-      const link = `${publicBase}/signup?ref=${code}`
+      // v3.9.18 — Always use official domain for affiliate links (never expose Emergent preview URLs)
+      const link = `https://rahaal.targetmediagrp.com/signup?ref=${code}`
       const invitees = await db.collection('tenants').find({ referred_by: T }).sort({ created_at: -1 }).toArray()
       const activated = invitees.filter(x => x.activation_confirmed).length
       const withdrawals = await db.collection('cashout_requests').find({ tenant_id: T }).sort({ created_at: -1 }).limit(20).toArray()
@@ -1238,7 +1246,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.17',
+        version: '3.9.18',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
