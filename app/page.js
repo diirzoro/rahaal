@@ -658,6 +658,7 @@ const NAV = [
   { id: 'journal',   label: 'قيود اليومية', icon: ReceiptText, color: 'from-slate-700 to-slate-500' },
   { id: 'reports',   label: 'التقارير المالية', icon: BarChart3, color: 'from-cyan-600 to-blue-500' },
   { id: 'affiliate', label: 'التسويق بالعمولة', icon: User, color: 'from-emerald-600 to-teal-500' },
+  { id: 'help',      label: '📖 دليل الاستخدام', icon: BookOpenText, color: 'from-pink-600 to-rose-500' },
   { id: 'settings',  label: 'إعدادات المكتب', icon: Settings, color: 'from-slate-800 to-slate-600' },
 ]
 
@@ -4782,6 +4783,147 @@ function PermissionsDialog({ target, onClose, onSaved }) {
   )
 }
 
+
+// v3.9.19 — Interactive In-App Help Center (Product Tour + Field Guide per screen)
+const HELP_SCREENS = [
+  { id: 'tickets', icon: '🎫', title: 'حجز التذاكر', color: 'from-sky-500 to-blue-600', purpose: 'تسجيل مبيعات تذاكر الطيران مع إنشاء قيد محاسبي تلقائي', fields: [
+    { name: 'التاريخ', required: true, desc: 'تاريخ إصدار التذكرة' },
+    { name: 'المسافر', required: true, desc: 'اسم المسافر كما في جواز السفر' },
+    { name: 'PNR / رقم التذكرة', required: false, desc: 'يُستخدم لكشف التكرار عند الاستيراد' },
+    { name: 'المسار (route)', required: false, desc: 'مثل SAH-CAI' },
+    { name: 'الشركة الناقلة', required: false, desc: 'يمنية، سعودية، إلخ' },
+    { name: 'حساب القبض', required: true, desc: 'عميل (بيع آجل) أو صندوق/بنك (بيع نقدي)' },
+    { name: 'المورد', required: true, desc: 'من دليل الحسابات' },
+    { name: 'التكلفة / سعر البيع', required: true, desc: 'الفارق = العمولة تلقائياً' },
+    { name: 'طريقة الدفع', required: true, desc: 'آجل / نقدي (نقدي يتطلب صندوق)' },
+  ], workflow: ['اضغط "+ سند تذكرة" أو "استيراد Excel"', 'أدخل بيانات المسافر والتذكرة', 'اختر حساب القبض (عميل أو صندوق)', 'اضغط "حفظ" — سيتم إنشاء قيد محاسبي تلقائي'] },
+  { id: 'visas', icon: '🛂', title: 'التأشيرات', color: 'from-emerald-500 to-teal-600', purpose: 'تسجيل تأشيرات العمرة/الحج/السياحة/العمل مع القيد التلقائي', fields: [
+    { name: 'نوع الخدمة', required: true, desc: 'عمرة/حج/سياحة/عمل/زيارة' },
+    { name: 'اسم المعتمر/المسافر', required: true, desc: 'كما في الجواز' },
+    { name: 'رقم الجواز', required: true, desc: 'يُستخدم لكشف التكرار' },
+    { name: 'الجنسية', required: false, desc: 'يمني/سعودي/مصري إلخ' },
+    { name: 'تاريخ الدخول/الخروج', required: false, desc: 'لتتبع صلاحية التأشيرة' },
+    { name: 'التكلفة/سعر البيع/العملة', required: true, desc: '' },
+  ], workflow: ['اختر نوع التأشيرة', 'أدخل بيانات المسافر ورقم الجواز', 'حدد المورد والتكلفة وسعر البيع', 'حفظ — قيد تلقائي في 4102 إيرادات تأشيرات'] },
+  { id: 'services', icon: '🛠️', title: 'الخدمات الأخرى', color: 'from-orange-500 to-amber-600', purpose: 'تسجيل خدمات متنوعة (ترجمة، توثيق، حجوزات فنادق منفصلة)', fields: [
+    { name: 'نوع الخدمة', required: true, desc: 'قابل للتخصيص من دليل الأنواع' },
+    { name: 'المستفيد', required: false, desc: '' },
+    { name: 'الرقم المرجعي', required: false, desc: 'رقم عقد أو حجز' },
+    { name: 'حساب القبض + المورد + التكاليف', required: true, desc: '' },
+  ], workflow: ['أضف نوع خدمة جديد أو استخدم موجود', 'أدخل تكلفة وسعر بيع', 'حفظ — قيد يومية آلي'] },
+  { id: 'packages', icon: '📦', title: 'الباكجات والبرامج', color: 'from-teal-500 to-emerald-600', purpose: 'إدارة البرامج السياحية (عمرة/حج/سياحة) مع مكونات ديناميكية', fields: [
+    { name: 'اسم الباكج + النوع', required: true, desc: '' },
+    { name: 'تاريخ البداية والنهاية', required: true, desc: '' },
+    { name: 'العملة الأساسية', required: true, desc: '' },
+    { name: 'المكونات (Dynamic Builder)', required: true, desc: 'طيران + فندق + تأشيرة + نقل — كل مكون له مورد وتكلفة' },
+    { name: 'المسجلون', required: false, desc: 'قائمة الحجاج/المسافرين مع أسعارهم' },
+  ], workflow: ['أنشئ باكج جديد', 'أضف المكونات ديناميكياً مع الموردين', 'سجّل المسافرين', 'راجع تقرير الربحية', 'أغلق الباكج بعد انتهاء الرحلة'] },
+  { id: 'receipt', icon: '💵', title: 'سند قبض', color: 'from-green-500 to-emerald-600', purpose: 'تسجيل استلام دفعة من عميل', fields: [
+    { name: 'التاريخ', required: true, desc: 'تاريخ استلام المبلغ' },
+    { name: 'المستلم منه (العميل)', required: true, desc: 'من قائمة العملاء' },
+    { name: 'الصندوق / البنك', required: true, desc: 'الوجهة التي دخل إليها المبلغ' },
+    { name: 'المبلغ + العملة', required: true, desc: '' },
+    { name: 'طريقة الدفع', required: false, desc: 'نقدي / تحويل / شيك' },
+    { name: 'البيان', required: false, desc: 'وصف اختياري' },
+  ], workflow: ['اختر العميل', 'اختر الصندوق/البنك', 'أدخل المبلغ والعملة', 'حفظ — قيد: مدين صندوق / دائن عميل'] },
+  { id: 'payment', icon: '💸', title: 'سند صرف', color: 'from-rose-500 to-pink-600', purpose: 'دفع مبلغ لمورد أو مصروف', fields: [
+    { name: 'التاريخ + المبلغ + العملة', required: true, desc: '' },
+    { name: 'المدفوع إليه', required: true, desc: 'مورد أو حساب مصروف' },
+    { name: 'الصندوق المصدر', required: true, desc: 'الذي خرج منه المبلغ' },
+  ], workflow: ['اختر المستفيد (مورد/مصروف)', 'اختر الصندوق المصدر', 'أدخل المبلغ', 'حفظ — قيد: مدين المورد / دائن الصندوق'] },
+  { id: 'fx', icon: '💱', title: 'صرافة العملات', color: 'from-fuchsia-500 to-purple-600', purpose: 'شراء/بيع عملة مقابل أخرى', fields: [
+    { name: 'النوع', required: true, desc: 'شراء أو بيع' },
+    { name: 'العملة والمبلغ', required: true, desc: 'مثل 1000 USD' },
+    { name: 'العملة المقابلة والمبلغ', required: true, desc: 'مثل 3750 SAR' },
+    { name: 'صندوقان (مصدر + وجهة)', required: true, desc: '' },
+  ], workflow: ['حدد النوع (شراء/بيع)', 'أدخل مبلغ العملة الرئيسية', 'أدخل المبلغ المقابل بالعملة الثانية', 'اختر الصندوقين', 'حفظ — قيد مركب مع هامش ربح 4103'] },
+  { id: 'extension', icon: '🔌', title: 'إضافة المتصفح (Chrome Extension)', color: 'from-indigo-500 to-purple-600', purpose: 'استخراج بيانات التذاكر والتأشيرات تلقائياً من مواقع الحجز والـ PDF', fields: [
+    { name: 'PAT Token', required: true, desc: 'مفتاح شخصي تولّده من إعدادات المكتب — إضافة المتصفح' },
+    { name: 'رابط الخادم', required: true, desc: 'https://rahaal.targetmediagrp.com' },
+  ], workflow: ['نزّل rahal-extension.zip من الرابط الرسمي', 'فك الضغط وثبّت الإضافة في Chrome (Load Unpacked)', 'الصق PAT Token + رابط الخادم', 'افتح صفحة تذكرة/تأشيرة — اضغط أيقونة رحّال — قراءة الصفحة', 'راجع البيانات — اضغط "سحب إلى رحّال"', 'الحصة المجانية: 30 قراءة لكل مكتب Trial'] },
+]
+
+function HelpCenter({ setTab }) {
+  const [expanded, setExpanded] = useState(null)
+  return (
+    <div className="space-y-4">
+      <TopBar title="📖 دليل الاستخدام والمساعدة" subtitle="جولة تفاعلية لكل شاشة — تعرّف على الحقول وخطوات العمل بسهولة" />
+
+      <Card className="bg-gradient-to-l from-pink-50 via-rose-50 to-orange-50 border-2 border-pink-200">
+        <CardContent className="p-5">
+          <div className="flex items-center gap-3">
+            <div className="text-4xl">💡</div>
+            <div className="flex-1">
+              <div className="font-black text-lg text-slate-800">مرحباً بك في مركز المساعدة!</div>
+              <div className="text-sm text-slate-600 mt-1">اضغط على أي شاشة أدناه لعرض شرح مفصّل لكل حقل + خطوات العمل. جميع الشروحات مبنية على النظام الفعلي وتتحدث بشكل تلقائي مع كل إصدار.</div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {HELP_SCREENS.map(s => (
+          <Card key={s.id} className={`overflow-hidden hover:shadow-lg transition ${expanded === s.id ? 'ring-2 ring-blue-400' : ''}`}>
+            <div className={`h-1 bg-gradient-to-l ${s.color}`} />
+            <CardContent className="p-4 cursor-pointer" onClick={() => setExpanded(expanded === s.id ? null : s.id)}>
+              <div className="flex items-start justify-between">
+                <div className="flex items-center gap-3">
+                  <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${s.color} flex items-center justify-center text-2xl shadow`}>{s.icon}</div>
+                  <div>
+                    <div className="font-bold text-slate-800">{s.title}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">{s.purpose}</div>
+                  </div>
+                </div>
+                <Badge variant="outline" className="shrink-0 mt-1">{expanded === s.id ? '▲' : '▼'}</Badge>
+              </div>
+
+              {expanded === s.id && (
+                <div className="mt-4 space-y-3 pt-3 border-t">
+                  <div>
+                    <div className="text-xs font-bold text-blue-700 mb-2">📋 الحقول:</div>
+                    <div className="space-y-1.5">
+                      {s.fields.map((f, i) => (
+                        <div key={i} className="text-xs bg-slate-50 rounded p-2 flex items-start gap-2">
+                          <span className={`shrink-0 font-mono px-1.5 py-0.5 rounded ${f.required ? 'bg-rose-100 text-rose-700' : 'bg-slate-200 text-slate-600'}`}>{f.required ? '★' : '○'}</span>
+                          <div>
+                            <span className="font-bold text-slate-800">{f.name}</span>
+                            {f.desc && <span className="text-slate-600"> — {f.desc}</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-emerald-700 mb-2">🚀 خطوات العمل:</div>
+                    <ol className="text-xs text-slate-700 space-y-1 mr-4 list-decimal">
+                      {s.workflow.map((w, i) => <li key={i}>{w}</li>)}
+                    </ol>
+                  </div>
+                  {s.id !== 'extension' && (
+                    <Button size="sm" onClick={(e) => { e.stopPropagation(); setTab && setTab(s.id) }} className={`w-full bg-gradient-to-l ${s.color} text-white gap-2`}>
+                      🔗 انتقل إلى شاشة {s.title}
+                    </Button>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      <Card className="bg-slate-50 border-2 border-slate-200">
+        <CardContent className="p-5 text-center space-y-2">
+          <div className="text-2xl">📞</div>
+          <div className="font-bold text-slate-800">تحتاج مساعدة إضافية؟</div>
+          <div className="text-sm text-slate-600">تواصل مع فريق الدعم عبر واتساب لدى Target Media Group</div>
+          <div className="text-xs text-slate-500">دليل PDF مُفصّل متوفر في: <span className="font-mono">/app/memory/RAHAAL_USER_GUIDE.md</span></div>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+
 function AffiliateScreen() {
   const [data, setData] = useState(null)
   const [pmOpen, setPmOpen] = useState(false)
@@ -6121,6 +6263,7 @@ function TenantApp() {
         {tab === 'reports' && <ErrorBoundary tabName="التقارير المالية"><ReportsScreen /></ErrorBoundary>}
         {tab === 'settings' && user.role === 'owner' && <ErrorBoundary tabName="إعدادات المكتب"><OfficeSettings /></ErrorBoundary>}
         {tab === 'affiliate' && <ErrorBoundary tabName="التسويق بالعمولة"><AffiliateScreen /></ErrorBoundary>}
+        {tab === 'help' && <ErrorBoundary tabName="دليل الاستخدام"><HelpCenter setTab={setTab} /></ErrorBoundary>}
 
         {/* v2.8.1 — Global footer with contact + Target Media badge */}
         <div className="mt-8 pt-4 border-t border-slate-200 text-center text-xs text-slate-500 space-y-2">
