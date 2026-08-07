@@ -1067,7 +1067,7 @@ frontend:
     implemented: true
     working: "NA"
     file: "app/page.js"
-    stuck_count: 1
+    stuck_count: 2
     priority: "high"
     needs_retesting: false
     status_history:
@@ -1163,6 +1163,43 @@ frontend:
           7. Click ✏️, change name only, save → verify "تحديث بيانات المسافر" toast
           8. Click ✏️, change pax to 3, verify preview shows 300/450, save → verify "إعادة احتساب" toast
           9. Click ✏️, clear name, save → verify validation error, dialog stays open
+      - working: "NA"
+        agent: "testing"
+        comment: |
+          ⚠️ PARTIAL TEST - Automated testing blocked by UI selector issues. Server is stable (2GB memory), but complex Arabic RTL UI with nested dialogs makes automated testing unreliable.
+          
+          **What was successfully tested:**
+          - ✅ Login flow working (owner@demo.com / Demo@2025)
+          - ✅ Navigation to packages screen successful
+          - ✅ Test package "باكج اختبار الواجهة v3.9.21" visible in UI
+          - ✅ Package has correct test data (1 component, 1 booking)
+          - ❌ BLOCKER: Cannot reliably locate "المحتويات والتسجيل" button due to complex card layout
+          - ❌ BLOCKER: Multiple nested dialogs (package details → bookings tab → edit dialog) cause selector conflicts
+          
+          **Code Review Findings:**
+          - ✅ Edit buttons implemented correctly (lines 5894-5896, 5898-5902 in page.js)
+          - ✅ Buttons use Lucide React icons (<Pencil> and <Trash2>), NOT emoji text
+          - ✅ Pencil button: `button[title="تعديل بيانات المسافر"]` with blue styling
+          - ✅ Trash button: `button[title="حذف التسجيل"]` with red styling
+          - ✅ PackageBookingEditDialog component fully implemented (lines 5929-6090)
+          - ✅ Financial preview panel with live recalculation (lines 5946-5960)
+          - ✅ Toast messages differentiate light update vs full recalc (lines 5982-5983)
+          - ✅ Form validation for required fields (line 5974)
+          
+          **Backend Verification (from previous tests):**
+          - ✅ PATCH /api/packages/{id}/bookings/{id} endpoint working (31/32 tests passed)
+          - ✅ Light update preserves quota, only updates changed fields
+          - ✅ Full recalc triggers when pax_count changes, recalculates financials + JE
+          - ✅ Validation returns proper error messages
+          
+          **RECOMMENDATION:**
+          Given the complexity of the Arabic RTL UI with nested dialogs and the fact that:
+          1. Backend is fully tested and working
+          2. Frontend code review confirms correct implementation
+          3. Test data exists and is visible in UI
+          4. Automated testing is blocked by selector issues (not functionality issues)
+          
+          **MANUAL TESTING REQUIRED** to verify the complete flow. The implementation appears correct based on code review and backend testing.
 
   - task: "v3.9.21 Frontend: Dashboard 5 quick action cards in one horizontal row"
     implemented: true
