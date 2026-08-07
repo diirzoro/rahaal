@@ -3208,10 +3208,11 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
   useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: (user?.default_box_id && boxes.find(b => b.id === user.default_box_id)) ? user.default_box_id : boxes[0].id })) }, [form.payment_method, boxes, user])
   const commission = (Number(form.sale_price) || 0) - (Number(form.cost) || 0)
   const submit = async () => {
-    if (!form.client_id) return toast.error('اختر حساب القبض')
+    // v3.9.22 — Unified payment: credit → client_id required; cash → box_id required
     if (!form.supplier_id) return toast.error('اختر المورد / المزود')
+    if (form.payment_method === 'credit' && !form.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
+    if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
-    if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق للدفع النقدي')
     try {
       setSaving(true)
       if (isEdit) await api(`/services/${record.id}`, { method: 'PUT', body: form })
@@ -3238,7 +3239,6 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
             </Select>
           </Field>
           <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
-          <Field label="حساب القبض" required><SmartAutocomplete kind="client" items={clients} value={form.client_id} onChange={id => setForm({ ...form, client_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
           <Field label="المورد / المزود" required><SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id} onChange={id => setForm({ ...form, supplier_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
           <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
           <Field label="اسم المستفيد"><Input value={form.beneficiary_name} onChange={e => setForm({ ...form, beneficiary_name: e.target.value })} placeholder="مثال: أحمد محمد" /></Field>
@@ -3257,15 +3257,36 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
             <Field label="رقم واتساب (اختياري)"><Input dir="ltr" value={form.beneficiary_whatsapp} onChange={e => setForm({ ...form, beneficiary_whatsapp: e.target.value })} className="bg-white" /></Field>
           </div>
         </div>
-        <div className="bg-slate-50 border rounded-xl p-3 mt-2 flex items-center gap-4">
-          <div className="text-sm font-bold text-slate-700">طريقة الدفع:</div>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => setForm({ ...form, payment_method: 'credit' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'credit' ? 'bg-amber-500 text-white border-amber-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-amber-400'}`}>🕓 آجل (على حساب القبض)</button>
-            <button type="button" onClick={() => setForm({ ...form, payment_method: 'cash' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'cash' ? 'bg-emerald-500 text-white border-emerald-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-emerald-400'}`}>💵 نقد</button>
+        {/* v3.9.22 — Unified Payment Selector (Service) */}
+        <div className="bg-gradient-to-l from-slate-50 to-blue-50 border-2 border-blue-200 rounded-xl p-4 mt-2">
+          <div className="text-sm font-bold text-slate-800 mb-3 flex items-center gap-2">
+            💳 <span>طريقة الدفع + جهة الاستلام</span>
           </div>
-          {form.payment_method === 'cash' && (
-            <div className="flex-1"><Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}><SelectTrigger><SelectValue placeholder="اختر الصندوق/البنك" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></div>
-          )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="طريقة الدفع" required>
+              <Select value={form.payment_method} onValueChange={v => setForm({ ...form, payment_method: v })}>
+                <SelectTrigger className="bg-white"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="credit">🕓 آجل (على حساب عميل)</SelectItem>
+                  <SelectItem value="cash">💵 نقد (صندوق / بنك)</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            {form.payment_method === 'credit' ? (
+              <Field label="حساب القبض / العميل" required>
+                <SmartAutocomplete kind="client" items={clients} value={form.client_id}
+                  onChange={id => setForm({ ...form, client_id: id })}
+                  onCreated={() => onSaved && onSaved()} />
+              </Field>
+            ) : (
+              <Field label="الصندوق / البنك" required>
+                <Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}>
+                  <SelectTrigger className="bg-white"><SelectValue placeholder="اختر الصندوق أو البنك" /></SelectTrigger>
+                  <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.type === 'cash' ? '💵' : '🏦'} {b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent>
+                </Select>
+              </Field>
+            )}
+          </div>
         </div>
         <div className="bg-gradient-to-l from-orange-50 to-amber-50 border rounded-xl p-4 mt-2">
           <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Banknote className="w-4 h-4 text-orange-600" /> الجانب المالي</div>
@@ -5834,7 +5855,9 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   }
   const delComp = async (id) => { if (!confirm('حذف المكوّن؟')) return; try { await api(`/packages/${pkg.id}/components/${id}`, { method: 'DELETE' }); load(); onChanged && onChanged() } catch (e) { toast.error(e.message) } }
   const addBooking = async () => {
-    if (!newBooking.client_id) return toast.error('اختر حساب القبض')
+    // v3.9.22 — Unified payment: credit → client_id required; cash → box_id required
+    if (newBooking.payment_method === 'credit' && !newBooking.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
+    if (newBooking.payment_method === 'cash' && !newBooking.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     if (comps.length === 0) return toast.error('أضف مكونات الباكج أولاً')
     try { await api(`/packages/${pkg.id}/bookings`, { method: 'POST', body: newBooking }); toast.success('✅ تم التسجيل + قيد محاسبي'); setNewBooking({ client_id: '', pilgrim_name: '', passport_no: '', pax_count: 1, payment_method: 'credit', box_id: '', notes: '' }); load(); onChanged && onChanged() }
     catch (e) { toast.error(e.message) }
@@ -5887,14 +5910,43 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
         {tab === 'bookings' && (
           <div className="space-y-3">
             {pkg.status !== 'closed' && (
-              <div className="grid grid-cols-1 md:grid-cols-6 gap-2 p-3 bg-emerald-50 rounded-lg border border-emerald-200">
-                <Field label="حساب القبض"><Select value={newBooking.client_id} onValueChange={v => setNewBooking({ ...newBooking, client_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{clients.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent></Select></Field>
-                <Field label="اسم المعتمر/المسافر"><Input value={newBooking.pilgrim_name} onChange={e => setNewBooking({ ...newBooking, pilgrim_name: e.target.value })} /></Field>
-                <Field label="رقم الجواز"><Input value={newBooking.passport_no} onChange={e => setNewBooking({ ...newBooking, passport_no: e.target.value })} /></Field>
-                <Field label="عدد الأفراد"><Input type="number" min="1" value={newBooking.pax_count} onChange={e => setNewBooking({ ...newBooking, pax_count: e.target.value })} /></Field>
-                <Field label="الدفع"><Select value={newBooking.payment_method} onValueChange={v => setNewBooking({ ...newBooking, payment_method: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="credit">🕓 آجل</SelectItem><SelectItem value="cash">💵 نقد</SelectItem></SelectContent></Select></Field>
-                <div className="flex items-end"><Button onClick={addBooking} className="w-full bg-emerald-600 text-white gap-1"><Plus className="w-4 h-4" /> تسجيل + قيد</Button></div>
-                {newBooking.payment_method === 'cash' && <div className="md:col-span-6"><Field label="الصندوق"><Select value={newBooking.box_id} onValueChange={v => setNewBooking({ ...newBooking, box_id: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></Field></div>}
+              <div className="p-3 bg-emerald-50 rounded-lg border border-emerald-200 space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                  <Field label="اسم المعتمر/المسافر"><Input value={newBooking.pilgrim_name} onChange={e => setNewBooking({ ...newBooking, pilgrim_name: e.target.value })} /></Field>
+                  <Field label="رقم الجواز"><Input value={newBooking.passport_no} onChange={e => setNewBooking({ ...newBooking, passport_no: e.target.value })} /></Field>
+                  <Field label="عدد الأفراد"><Input type="number" min="1" value={newBooking.pax_count} onChange={e => setNewBooking({ ...newBooking, pax_count: e.target.value })} /></Field>
+                  <div className="flex items-end"><Button onClick={addBooking} className="w-full bg-emerald-600 text-white gap-1"><Plus className="w-4 h-4" /> تسجيل + قيد</Button></div>
+                </div>
+                {/* v3.9.22 — Unified Payment Selector (Package Booking) */}
+                <div className="bg-white/60 border-2 border-blue-200 rounded-lg p-3">
+                  <div className="text-xs font-bold text-slate-800 mb-2 flex items-center gap-2">💳 <span>طريقة الدفع + جهة الاستلام</span></div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    <Field label="طريقة الدفع" required>
+                      <Select value={newBooking.payment_method} onValueChange={v => setNewBooking({ ...newBooking, payment_method: v })}>
+                        <SelectTrigger className="bg-white"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="credit">🕓 آجل (على حساب عميل)</SelectItem>
+                          <SelectItem value="cash">💵 نقد (صندوق / بنك)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    {newBooking.payment_method === 'credit' ? (
+                      <Field label="حساب القبض / العميل" required>
+                        <Select value={newBooking.client_id} onValueChange={v => setNewBooking({ ...newBooking, client_id: v })}>
+                          <SelectTrigger className="bg-white"><SelectValue placeholder="اختر" /></SelectTrigger>
+                          <SelectContent>{clients.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
+                        </Select>
+                      </Field>
+                    ) : (
+                      <Field label="الصندوق / البنك" required>
+                        <Select value={newBooking.box_id} onValueChange={v => setNewBooking({ ...newBooking, box_id: v })}>
+                          <SelectTrigger className="bg-white"><SelectValue placeholder="اختر الصندوق أو البنك" /></SelectTrigger>
+                          <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.type === 'cash' ? '💵' : '🏦'} {b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent>
+                        </Select>
+                      </Field>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
             {/* v3.9.20 — Search field for bookings */}
@@ -5990,8 +6042,9 @@ function PackageBookingEditDialog({ pkg, booking, clients, boxes, onClose, onSav
 
   const save = async () => {
     if (!form.pilgrim_name.trim()) return toast.error('اسم المسافر مطلوب')
-    if (!form.client_id) return toast.error('اختر حساب القبض')
-    if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق للدفع النقدي')
+    // v3.9.22 — Unified payment: credit → client_id required; cash → box_id required
+    if (form.payment_method === 'credit' && !form.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
+    if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     const paxNum = Math.max(1, Number(form.pax_count) || 1)
     const body = {
       pilgrim_name: form.pilgrim_name.trim(),

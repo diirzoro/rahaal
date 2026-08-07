@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.22',
+          version: '3.9.23',
           db: 'connected',
         })
       } catch (e) {
@@ -1246,7 +1246,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.22',
+        version: '3.9.23',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
@@ -1269,10 +1269,13 @@ async function handleRoute(request, { params }) {
       const financial = b.financial || {}
       const docType = String(booking.doc_type || '').toLowerCase()
       if (!docType) return bad('doc_type مطلوب')
-      if (!b.client_id || !b.supplier_id) return bad('العميل والمورد مطلوبان (client_id + supplier_id)')
+      if (!b.supplier_id) return bad('المورد مطلوب (supplier_id)')
       const currency = CURRENCIES.includes(financial.currency) ? financial.currency : 'USD'
       const amount = Number(financial.amount) || 0
       const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+      // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id
+      if (paymentMethod === 'credit' && !b.client_id) return bad('العميل مطلوب للحجز الآجل')
+      if (paymentMethod === 'cash' && !b.box_id) return bad('اختر الصندوق / البنك للنقد')
       const passengerName = traveler.name_ar || traveler.name_en || ''
       // Route to ticket or visa creator
       if (docType === 'flight' || docType === 'bus') {
@@ -1554,13 +1557,18 @@ async function handleRoute(request, { params }) {
       if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id })
       const newPax = Math.max(1, Number(body.pax_count ?? oldBooking.pax_count) || 1)
       const newPay = body.payment_method === 'cash' ? 'cash' : (body.payment_method === 'credit' ? 'credit' : (oldBooking.payment_method || 'credit'))
-      const newClientId = body.client_id || oldBooking.client_id
-      const cli = await db.collection('clients').findOne({ id: newClientId, tenant_id: T })
-      if (!cli) return bad('العميل غير موجود')
+      // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id
+      const newClientId = body.client_id !== undefined ? body.client_id : oldBooking.client_id
+      let cli = null
+      if (newClientId) {
+        cli = await db.collection('clients').findOne({ id: newClientId, tenant_id: T })
+        if (!cli && newPay === 'credit') return bad('العميل غير موجود')
+      }
+      if (newPay === 'credit' && !cli) return bad('اختر حساب القبض / العميل (للحجز الآجل)')
       let box = null
       if (newPay === 'cash') {
         const newBoxId = body.box_id || oldBooking.box_id
-        if (!newBoxId) return bad('اختر الصندوق للدفع النقدي')
+        if (!newBoxId) return bad('اختر الصندوق / البنك (للنقد)')
         box = await db.collection('boxes').findOne({ id: newBoxId, tenant_id: T })
         if (!box) return bad('الصندوق غير موجود')
       }
@@ -1586,8 +1594,9 @@ async function handleRoute(request, { params }) {
       }
       const updatedBooking = {
         ...oldBooking,
-        client_id: cli.id, client_name: cli.name,
-        pilgrim_name: (body.pilgrim_name !== undefined ? String(body.pilgrim_name || '').trim() : oldBooking.pilgrim_name) || cli.name,
+        client_id: cli?.id || null,
+        client_name: cli?.name || (newPay === 'cash' ? (oldBooking.client_name || 'عميل نقدي') : ''),
+        pilgrim_name: (body.pilgrim_name !== undefined ? String(body.pilgrim_name || '').trim() : oldBooking.pilgrim_name) || cli?.name || oldBooking.pilgrim_name || 'مسافر نقدي',
         passport_no: body.passport_no !== undefined ? String(body.passport_no || '').trim() : (oldBooking.passport_no || ''),
         pax_count: newPax, currency: cur,
         total_cost, total_sale, commission,
@@ -1646,9 +1655,12 @@ async function handleRoute(request, { params }) {
       const pkg = await db.collection('packages').findOne({ id: pkgId, tenant_id: T })
       if (!pkg) return bad('الباكج غير موجود', 404)
       if (pkg.status === 'closed') return bad('الباكج مغلق — لا يمكن إضافة تسجيلات جديدة')
-      if (!b.client_id) return bad('حساب القبض مطلوب')
-      const cli = await db.collection('clients').findOne({ id: b.client_id, tenant_id: T })
-      if (!cli) return bad('العميل غير موجود')
+      const payMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+      // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id
+      if (payMethod === 'credit' && !b.client_id) return bad('اختر حساب القبض / العميل (للحجز الآجل)')
+      if (payMethod === 'cash' && !b.box_id) return bad('اختر الصندوق / البنك (للنقد)')
+      const cli = b.client_id ? await db.collection('clients').findOne({ id: b.client_id, tenant_id: T }) : null
+      if (payMethod === 'credit' && !cli) return bad('العميل غير موجود')
       const comps = await db.collection('package_components').find({ tenant_id: T, package_id: pkgId }).toArray()
       if (comps.length === 0) return bad('لا توجد مكونات في الباكج — أضف المكونات قبل التسجيل')
       const pax = Math.max(1, Number(b.pax_count) || 1)
@@ -1656,17 +1668,16 @@ async function handleRoute(request, { params }) {
       const total_cost = +comps.reduce((s, c) => s + (c.cost_per_pax * pax), 0).toFixed(2)
       const total_sale = +comps.reduce((s, c) => s + (c.sale_per_pax * pax), 0).toFixed(2)
       const commission = +(total_sale - total_cost).toFixed(2)
-      const payMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
       let box = null
       if (payMethod === 'cash') {
-        if (!b.box_id) return bad('اختر الصندوق للدفع النقدي')
         box = await db.collection('boxes').findOne({ id: b.box_id, tenant_id: T })
         if (!box) return bad('الصندوق غير موجود')
       }
       const bookingDoc = {
         id: uuidv4(), tenant_id: T, package_id: pkgId,
-        client_id: cli.id, client_name: cli.name,
-        pilgrim_name: b.pilgrim_name || cli.name,
+        client_id: cli?.id || null,
+        client_name: cli?.name || (payMethod === 'cash' ? (b.client_name || 'عميل نقدي') : ''),
+        pilgrim_name: b.pilgrim_name || cli?.name || 'مسافر نقدي',
         passport_no: b.passport_no || '',
         pax_count: pax, currency: cur,
         total_cost, total_sale, commission,
@@ -2704,14 +2715,23 @@ async function createVisa(db, T, b, opts = {}) {
 // v3.0 — Services: Dedicated dynamic-catalog service transactions (Hotels, Attestations, Transfers, etc.)
 // Uses revenue account 4103 (إيرادات خدمات إضافية). Party label = "حساب القبض" but stored the same way.
 async function createService(db, T, b, opts = {}) {
-  if (!b.client_id || !b.supplier_id) return { error: 'حساب القبض والمورد/المزود مطلوبان' }
+  if (!b.supplier_id) return { error: 'المورد/المزود مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
+  // v3.9.14 — Period lock: prevent creating records in a closed year
+  if (b.date) {
+    const yr = new Date(b.date).getFullYear()
+    const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
+    if (tenant?.closed_years?.includes(yr)) return { error: `السنة المالية ${yr} مقفلة — لا يمكن إضافة أو تعديل قيود بتاريخها` }
+  }
+  const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+  // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id only
+  if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
   const cost = Number(b.cost) || 0, sale = Number(b.sale_price) || 0
   const commission = +(sale - cost).toFixed(2)
-  const cli = await db.collection('clients').findOne({ id: b.client_id, tenant_id: T })
+  const cli = b.client_id ? await db.collection('clients').findOne({ id: b.client_id, tenant_id: T }) : null
   const sup = await db.collection('suppliers').findOne({ id: b.supplier_id, tenant_id: T })
-  if (!cli || !sup) return { error: 'حساب القبض أو المورد غير موجود' }
-  const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
+  if (!sup) return { error: 'المورد غير موجود' }
+  if (paymentMethod === 'credit' && !cli) return { error: 'العميل غير موجود' }
   let box = null
   if (paymentMethod === 'cash') {
     if (!b.box_id) return { error: 'اختر الصندوق/البنك للدفع النقدي' }
@@ -2723,7 +2743,9 @@ async function createService(db, T, b, opts = {}) {
     service_type: b.service_type || 'خدمات متنوعة',
     description: b.description || '',
     currency: b.currency, exchange_rate: Number(b.exchange_rate) || 1,
-    client_id: cli.id, client_name: cli.name, supplier_id: sup.id, supplier_name: sup.name,
+    client_id: cli?.id || null,
+    client_name: cli?.name || (paymentMethod === 'cash' ? (b.client_name || 'عميل نقدي') : ''),
+    supplier_id: sup.id, supplier_name: sup.name,
     beneficiary_name: b.beneficiary_name || '', reference_no: b.reference_no || '',
     // v3.2 — Phone / WhatsApp
     beneficiary_phone: b.beneficiary_phone || '',
@@ -2747,7 +2769,7 @@ async function createService(db, T, b, opts = {}) {
   lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
   lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيرادات ${doc.service_type}`, debit: 0, credit: commission })
   await createJournalEntry(db, T, {
-    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.beneficiary_name || cli.name}`,
+    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.beneficiary_name || cli?.name || doc.client_name || sup.name}`,
     ref_type: 'service', ref_id: doc.id, currency: b.currency, lines,
   }, { skipQuota: !!opts.skipQuota })
   const { _id, ...rest } = doc; return { doc: rest }

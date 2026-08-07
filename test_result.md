@@ -1056,12 +1056,67 @@ backend:
 
 test_plan:
   current_focus:
-    - "v3.9.22 Frontend: Unified Payment Selector — Tickets + Visas (Phase A)"
+    - "v3.9.23 Frontend: Unified Payment Selector — Services + Packages + Scraper (Phase B)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 frontend:
+  - task: "v3.9.23 Frontend: Unified Payment Selector — Services + Packages + Scraper (Phase B)"
+    implemented: true
+    working: true
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Phase B of the payment selector refactor. Extends the unified "طريقة الدفع +
+          جهة الاستلام" block introduced in Phase A (Tickets/Visas) to the remaining forms:
+          
+          Frontend refactored components:
+            • ServiceDialog (add + edit)  — removed standalone client field, added unified
+              payment block, updated validation.
+            • PackageDetailsDialog inline booking form (POST new booking) — replaced the
+              flat 6-column grid with two grouped rows: passenger info + unified payment
+              block.
+            • PackageBookingEditDialog (v3.9.21) — updated the save() validator to match
+              the credit→client / cash→box rule.
+          
+          Backend endpoints tightened to reflect unified semantics:
+            • createService — no longer requires client_id unconditionally; instead
+              credit requires client_id and cash requires box_id (mirrors createTicket
+              and createVisa). client_name defaults to "عميل نقدي" for cash sales.
+            • POST /api/packages/:id/bookings — same logic.
+            • PATCH /api/packages/:id/bookings/:bookingId — cli can now be null when the
+              new payment_method is 'cash'; client_id/client_name fields are cleared
+              accordingly; JE lines still balance.
+            • POST /api/scraper/ingest (Chrome Extension) — no longer requires client_id
+              unconditionally; extension can now push cash records too.
+          
+          Excel Imports:
+            • /api/import/tickets and /api/import/visas already used the correct pattern
+              (client_name column resolves to either a client OR a box) so no changes
+              needed. A /api/import/services endpoint does not exist yet — Excel import
+              for services is out of scope of this MVP.
+          
+          Smoke tests (curl): 10/10 passed
+            T1  SERVICE credit + client_id                         → OK
+            T2  SERVICE cash + cash box (no client_id)             → client_name="عميل نقدي"
+            T3  SERVICE cash via BANK-type box                     → box_name="حساب بنكي / محفظة"
+            T4  Validation: SERVICE credit without client_id       → 400 "العميل مطلوب للحجز الآجل"
+            T5  PACKAGE BOOKING credit + client_id                 → OK
+            T6  PACKAGE BOOKING cash + cash box (no client_id)     → client_name="عميل نقدي"
+            T7  Validation: PACKAGE credit without client_id       → 400
+            T8  Validation: PACKAGE cash without box_id            → 400
+            T9  PATCH package booking: cash → credit               → JE rebuilt, balances rebalanced
+            T10 PATCH package booking: credit → cash               → JE rebuilt, balances rebalanced
+          
+          Version bumped to 3.9.23. Backward compatibility maintained — legacy records with
+          both client_id and box_id set are still readable and editable.
+
   - task: "v3.9.22 Frontend: Unified Payment Selector — Tickets + Visas (Phase A)"
     implemented: true
     working: true
