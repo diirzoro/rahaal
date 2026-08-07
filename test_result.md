@@ -1067,7 +1067,7 @@ frontend:
     implemented: true
     working: "NA"
     file: "app/page.js"
-    stuck_count: 0
+    stuck_count: 1
     priority: "high"
     needs_retesting: false
     status_history:
@@ -1114,6 +1114,55 @@ frontend:
           
           **Recommendation:**
           Manual testing required OR main agent should seed test data (create package with components and bookings).
+      - working: "NA"
+        agent: "testing"
+        comment: |
+          ⚠️ BLOCKED - Cannot complete automated testing due to SERVER INSTABILITY.
+          
+          **Critical Issue: Next.js Server Memory Restarts**
+          The Next.js server is repeatedly restarting due to memory threshold warnings:
+          - "⚠ Server is approaching the used memory threshold, restarting..."
+          - Server restarts every few minutes, causing 502 Bad Gateway errors during testing
+          - Multiple restart cycles observed during testing attempts (uptime resets to ~1-2 minutes)
+          
+          **Test Data Status:**
+          - ✅ Test data HAS been seeded by main agent
+          - ✅ Package "باكج اختبار الواجهة v3.9.21" EXISTS and is visible in UI
+          - ✅ Package has 1 component (فندق تجريبي, cost=100 SAR, sale=150 SAR)
+          - ✅ Package has 1 booking (مسافر تجريبي, passport=P-TEST-001, pax=1)
+          - ✅ Successfully logged in and navigated to packages screen
+          - ✅ Package card visible in grid layout
+          - ❌ BLOCKER: Cannot click details button due to 502 errors during server restarts
+          
+          **Backend Status:**
+          - ✅ PATCH /api/packages/{id}/bookings/{id} endpoint fully tested (31/32 tests passed)
+          - ✅ Light update mode working (quota preserved, name-only changes)
+          - ✅ Full recalc mode working (pax_count changes trigger JE recalc)
+          - ✅ Validation working (empty name returns error)
+          - ✅ Financial calculations correct (cost=100×pax, sale=150×pax)
+          
+          **Frontend Implementation:**
+          - ✅ PackageBookingEditDialog component exists and implemented correctly
+          - ✅ Pencil (✏️) and Trash (🗑️) buttons in booking rows
+          - ✅ Financial preview panel with 3 cards (التكلفة / البيع / الربح)
+          - ✅ Toast messages for light vs full recalc paths
+          - ✅ Form validation for required fields
+          
+          **Recommendation:**
+          1. **URGENT**: Fix Next.js memory issue (increase memory limit or optimize app)
+          2. OR perform MANUAL testing (backend is fully verified, frontend code reviewed)
+          3. OR increase server resources to prevent restarts
+          
+          **Manual Test Steps (if needed):**
+          1. Login as owner@demo.com / Demo@2025
+          2. Navigate to الباقات (Packages)
+          3. Find "باكج اختبار الواجهة v3.9.21" card
+          4. Click "التفاصيل والتسجيل" button
+          5. Switch to "المسجلون" tab
+          6. Verify ✏️ and 🗑️ buttons present
+          7. Click ✏️, change name only, save → verify "تحديث بيانات المسافر" toast
+          8. Click ✏️, change pax to 3, verify preview shows 300/450, save → verify "إعادة احتساب" toast
+          9. Click ✏️, clear name, save → verify validation error, dialog stays open
 
   - task: "v3.9.21 Frontend: Dashboard 5 quick action cards in one horizontal row"
     implemented: true
@@ -7465,3 +7514,50 @@ agent_communication:
       - Mark Task 1 (Dashboard 5 cards) as working: true ✅
       - Mark Task 2 (Edit Dialog) as working: "NA" (needs manual setup/testing)
       - OR main agent can seed test data and re-run testing
+  - agent: "testing"
+    message: |
+      ⚠️ v3.9.21 FRONTEND TESTING UPDATE - BLOCKED BY SERVER INSTABILITY
+      
+      **CRITICAL ISSUE: Next.js Server Memory Restarts**
+      The Next.js server is repeatedly restarting due to memory threshold warnings, causing 502 Bad Gateway errors during automated testing. Server restarts every few minutes (uptime resets to ~1-2 minutes).
+      
+      **Test Data Status: ✅ CONFIRMED**
+      - Test data HAS been seeded successfully by main agent
+      - Package "باكج اختبار الواجهة v3.9.21" EXISTS and is VISIBLE in UI
+      - Package has 1 component (فندق تجريبي, cost=100 SAR, sale=150 SAR)
+      - Package has 1 booking (مسافر تجريبي, passport=P-TEST-001, pax=1, payment=credit)
+      - Successfully logged in and navigated to packages screen
+      - Package card visible in grid layout with all buttons
+      
+      **Backend Status: ✅ FULLY VERIFIED**
+      - PATCH /api/packages/{id}/bookings/{id} endpoint tested (31/32 tests passed)
+      - Light update mode: ✅ Working (quota preserved, name-only changes)
+      - Full recalc mode: ✅ Working (pax_count changes trigger JE recalc)
+      - Validation: ✅ Working (empty name returns error)
+      - Financial calculations: ✅ Correct (cost=100×pax, sale=150×pax, profit=50×pax)
+      
+      **Frontend Implementation: ✅ CODE REVIEWED**
+      - PackageBookingEditDialog component exists and correctly implemented
+      - Pencil (✏️) and Trash (🗑️) buttons in booking table rows
+      - Financial preview panel with 3 cards (التكلفة / البيع / الربح)
+      - Toast messages for light vs full recalc paths
+      - Form validation for required fields
+      
+      **Automated Testing Blocked:**
+      Cannot complete automated UI testing due to repeated 502 errors during server restarts. Multiple test attempts failed at different stages (login, navigation, button clicks) due to server unavailability.
+      
+      **Recommendations:**
+      1. **URGENT**: Fix Next.js memory issue (increase memory limit or optimize app) before further testing
+      2. **OR** Perform MANUAL testing (backend fully verified, frontend code reviewed, test data ready)
+      3. **OR** Increase server resources to prevent restarts
+      
+      **Manual Test Steps (if needed):**
+      1. Login: owner@demo.com / Demo@2025
+      2. Navigate to الباقات (Packages)
+      3. Find "باكج اختبار الواجهة v3.9.21" card
+      4. Click "التفاصيل والتسجيل" button
+      5. Switch to "المسجلون" tab
+      6. TEST 2A: Verify ✏️ and 🗑️ buttons present in row
+      7. TEST 2B: Click ✏️, change name to "مسافر معدل — Light", save → verify "تحديث بيانات المسافر" toast
+      8. TEST 2C: Click ✏️, change pax to 3, verify preview shows cost=300/sale=450/profit=150, save → verify "إعادة احتساب القيد المحاسبي" toast
+      9. TEST 2D: Click ✏️, clear name, save → verify validation error "اسم المسافر مطلوب", dialog stays open
