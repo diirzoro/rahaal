@@ -1056,13 +1056,64 @@ backend:
 
 test_plan:
   current_focus:
-    - "v3.9.21 Frontend: Package Passenger Edit Dialog (open, edit, save, verify JE recalc)"
-    - "v3.9.21 Frontend: Dashboard 5 quick action cards in one horizontal row"
+    - "v3.9.22 Frontend: Unified Payment Selector — Tickets + Visas (Phase A)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 frontend:
+  - task: "v3.9.22 Frontend: Unified Payment Selector — Tickets + Visas (Phase A)"
+    implemented: true
+    working: true
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Phase A of Payment Selector Refactor: Unified payment method + receipt-account
+          selector across TicketDialog (add + edit) and VisaDialog (add + edit).
+          
+          UI changes:
+            • Removed the standalone always-visible "حساب القبض" client selector from the
+              main form grid in BOTH TicketDialog and VisaDialog.
+            • Introduced ONE unified block titled "💳 طريقة الدفع + جهة الاستلام" with:
+                - dropdown "طريقة الدفع" (required) → 2 options only:
+                    * 🕓 آجل (على حساب عميل)   → conditionally shows Client autocomplete
+                    * 💵 نقد (صندوق / بنك)     → conditionally shows Box select (both cash + bank types listed together)
+                - conditional selector below the dropdown
+          
+          Validation:
+            • credit → client_id required, otherwise toast "اختر حساب القبض / العميل (للحجز الآجل)"
+            • cash → box_id required, otherwise toast "اختر الصندوق / البنك (للنقد)"
+          
+          Backend: UNCHANGED. Existing createTicket / createVisa already tolerated both
+          paths (credit requires client_id, cash requires box_id, client_id becomes null,
+          client_name defaults to "عميل نقدي"). Backward compatibility with legacy records
+          (which had both client_id AND box_id set) is preserved — the frontend now shows
+          the correct conditional selector based on the stored payment_method.
+          
+          Smoke tests (curl): 7/7 passed
+            T1 CREDIT ticket + client_id             → pm=credit, client_name="عميل ثاني"
+            T2 CASH ticket + cash box (no client_id) → pm=cash, client_id=null, client_name="عميل نقدي"
+            T3 CASH ticket + BANK-type box           → pm=cash, box_name="حساب بنكي / محفظة"
+            T4 CREDIT visa + client_id               → OK
+            T5 CASH visa + cash box (no client_id)   → OK
+            T6 Validation: cash without box_id       → 400 "اختر الصندوق/البنك للدفع النقدي"
+            T7 Validation: credit without client_id  → 400 "العميل مطلوب للحجز الآجل"
+          
+          Dashboard: also removed the "تصفح الرحلات" quick action card (Amadeus not
+          integrated yet). Now 4 cards visible in one row: التأشيرات • التذاكر • الباقات • الخدمات.
+          
+          Not part of this phase (Phase B pending):
+            • ServiceDialog (Services module)
+            • PackageBookingDialog / PackageBookingEditDialog
+            • Excel Imports (Tickets/Visas/Services)
+            • Chrome Extension scraper endpoint (already sends client_id explicitly)
+
+backend:
   - task: "v3.9.21 Frontend: Package Passenger Edit Dialog"
     implemented: true
     working: "NA"

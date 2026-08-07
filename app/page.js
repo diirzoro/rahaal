@@ -1250,9 +1250,11 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
   useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: (user?.default_box_id && boxes.find(b => b.id === user.default_box_id)) ? user.default_box_id : boxes[0].id })) }, [form.payment_method, boxes, user])
   const commission = useMemo(() => (Number(form.sale_price) || 0) - (Number(form.cost) || 0), [form.sale_price, form.cost])
   const submit = async () => {
-    if (!form.client_id || !form.supplier_id) return toast.error('اختر حساب القبض والمورد')
+    // v3.9.22 — Unified payment: credit → client_id required; cash → box_id required
+    if (!form.supplier_id) return toast.error('اختر المورد')
+    if (form.payment_method === 'credit' && !form.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
+    if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
-    if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق للدفع النقدي')
     try {
       setSaving(true)
       if (isEdit) {
@@ -1272,11 +1274,6 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
             <Field label="تاريخ الحركة"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
             <Field label="نوع العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
-            <Field label="حساب القبض" required>
-              <SmartAutocomplete kind="client" items={clients} value={form.client_id}
-                onChange={(id) => setForm({ ...form, client_id: id })}
-                onCreated={() => onSaved && onSaved()} />
-            </Field>
             <Field label="اسم المورد" required>
               <SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id}
                 onChange={(id) => setForm({ ...form, supplier_id: id })}
@@ -1375,21 +1372,36 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
             </div>
           </div>
 
-          {/* Payment method selector */}
-          <div className="bg-slate-50 border rounded-xl p-3 mt-2 flex items-center gap-4">
-            <div className="text-sm font-bold text-slate-700">طريقة الدفع:</div>
-            <div className="flex gap-2">
-              <button type="button" onClick={() => setForm({ ...form, payment_method: 'credit' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'credit' ? 'bg-amber-500 text-white border-amber-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-amber-400'}`}>🕓 آجل (على حساب العميل)</button>
-              <button type="button" onClick={() => setForm({ ...form, payment_method: 'cash' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'cash' ? 'bg-emerald-500 text-white border-emerald-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-emerald-400'}`}>💵 نقد (صندوق/بنك)</button>
+          {/* v3.9.22 — Unified Payment Selector: one dropdown, conditional client/box selector */}
+          <div className="bg-gradient-to-l from-slate-50 to-blue-50 border-2 border-blue-200 rounded-xl p-4 mt-2">
+            <div className="text-sm font-bold text-slate-800 mb-3 flex items-center gap-2">
+              💳 <span>طريقة الدفع + جهة الاستلام</span>
             </div>
-            {form.payment_method === 'cash' && (
-              <div className="flex-1">
-                <Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}>
-                  <SelectTrigger><SelectValue placeholder="اختر الصندوق/البنك" /></SelectTrigger>
-                  <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Field label="طريقة الدفع" required>
+                <Select value={form.payment_method} onValueChange={v => setForm({ ...form, payment_method: v })}>
+                  <SelectTrigger className="bg-white"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="credit">🕓 آجل (على حساب عميل)</SelectItem>
+                    <SelectItem value="cash">💵 نقد (صندوق / بنك)</SelectItem>
+                  </SelectContent>
                 </Select>
-              </div>
-            )}
+              </Field>
+              {form.payment_method === 'credit' ? (
+                <Field label="حساب القبض / العميل" required>
+                  <SmartAutocomplete kind="client" items={clients} value={form.client_id}
+                    onChange={(id) => setForm({ ...form, client_id: id })}
+                    onCreated={() => onSaved && onSaved()} />
+                </Field>
+              ) : (
+                <Field label="الصندوق / البنك" required>
+                  <Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}>
+                    <SelectTrigger className="bg-white"><SelectValue placeholder="اختر الصندوق أو البنك" /></SelectTrigger>
+                    <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.type === 'cash' ? '💵' : '🏦'} {b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent>
+                  </Select>
+                </Field>
+              )}
+            </div>
           </div>
 
           <div className="bg-gradient-to-l from-blue-50 to-emerald-50 border rounded-xl p-4 mt-2">
@@ -2878,9 +2890,11 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
   useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: (user?.default_box_id && boxes.find(b => b.id === user.default_box_id)) ? user.default_box_id : boxes[0].id })) }, [form.payment_method, boxes, user])
   const commission = (Number(form.sale_price) || 0) - (Number(form.cost) || 0)
   const submit = async () => {
-    if (!form.client_id || !form.supplier_id) return toast.error('اختر حساب القبض والمورد')
+    // v3.9.22 — Unified payment: credit → client_id required; cash → box_id required
+    if (!form.supplier_id) return toast.error('اختر المورد')
+    if (form.payment_method === 'credit' && !form.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
+    if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
-    if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق للدفع النقدي')
     try {
       setSaving(true)
       if (isEdit) await api(`/visas/${record.id}`, { method: 'PUT', body: form })
@@ -2897,7 +2911,6 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
             <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
             <Field label="نوع الخدمة"><Select value={form.service_type} onValueChange={v => setForm({ ...form, service_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{VISA_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
-            <Field label="حساب القبض" required><SmartAutocomplete kind="client" items={clients} value={form.client_id} onChange={id => setForm({ ...form, client_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
             <Field label="المورد" required><SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id} onChange={id => setForm({ ...form, supplier_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
             <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
             <Field label="اسم صاحب التأشيرة"><Input value={form.passenger_name} onChange={e => setForm({ ...form, passenger_name: e.target.value })} /></Field>
@@ -2927,15 +2940,36 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
               <Field label="رقم واتساب (إن اختلف)"><Input dir="ltr" value={form.passenger_whatsapp} onChange={e => setForm({ ...form, passenger_whatsapp: e.target.value })} placeholder="اختياري" className="bg-white" /></Field>
             </div>
           </div>
-          <div className="bg-slate-50 border rounded-xl p-3 mt-2 flex items-center gap-4">
-            <div className="text-sm font-bold text-slate-700">طريقة الدفع:</div>
-            <div className="flex gap-2">
-              <button type="button" onClick={() => setForm({ ...form, payment_method: 'credit' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'credit' ? 'bg-amber-500 text-white border-amber-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-amber-400'}`}>🕓 آجل</button>
-              <button type="button" onClick={() => setForm({ ...form, payment_method: 'cash' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition-all ${form.payment_method === 'cash' ? 'bg-emerald-500 text-white border-emerald-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-emerald-400'}`}>💵 نقد</button>
+          {/* v3.9.22 — Unified Payment Selector (Visa) */}
+          <div className="bg-gradient-to-l from-slate-50 to-blue-50 border-2 border-blue-200 rounded-xl p-4 mt-2">
+            <div className="text-sm font-bold text-slate-800 mb-3 flex items-center gap-2">
+              💳 <span>طريقة الدفع + جهة الاستلام</span>
             </div>
-            {form.payment_method === 'cash' && (
-              <div className="flex-1"><Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}><SelectTrigger><SelectValue placeholder="اختر الصندوق/البنك" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></div>
-            )}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Field label="طريقة الدفع" required>
+                <Select value={form.payment_method} onValueChange={v => setForm({ ...form, payment_method: v })}>
+                  <SelectTrigger className="bg-white"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="credit">🕓 آجل (على حساب عميل)</SelectItem>
+                    <SelectItem value="cash">💵 نقد (صندوق / بنك)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              {form.payment_method === 'credit' ? (
+                <Field label="حساب القبض / العميل" required>
+                  <SmartAutocomplete kind="client" items={clients} value={form.client_id}
+                    onChange={id => setForm({ ...form, client_id: id })}
+                    onCreated={() => onSaved && onSaved()} />
+                </Field>
+              ) : (
+                <Field label="الصندوق / البنك" required>
+                  <Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}>
+                    <SelectTrigger className="bg-white"><SelectValue placeholder="اختر الصندوق أو البنك" /></SelectTrigger>
+                    <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.type === 'cash' ? '💵' : '🏦'} {b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent>
+                  </Select>
+                </Field>
+              )}
+            </div>
           </div>
           <div className="bg-gradient-to-l from-emerald-50 to-blue-50 border rounded-xl p-4 mt-2">
             <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Banknote className="w-4 h-4 text-emerald-600" /> الجانب المالي</div>
