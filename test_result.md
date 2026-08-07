@@ -1055,13 +1055,101 @@ backend:
 
 
 test_plan:
-  current_focus: []
+  current_focus:
+    - "v3.9.21 Frontend: Package Passenger Edit Dialog (open, edit, save, verify JE recalc)"
+    - "v3.9.21 Frontend: Dashboard 5 quick action cards in one horizontal row"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
+frontend:
+  - task: "v3.9.21 Frontend: Package Passenger Edit Dialog"
+    implemented: true
+    working: "NA"
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Added a new Pencil (✏️) button next to the Trash (🗑️) button in each row of
+          the PackageDetailsDialog bookings table. Clicking it opens PackageBookingEditDialog.
+          Fields: pilgrim_name*, passport_no, client_id*, pax_count, payment_method (credit/cash),
+          box_id (only when cash), notes. Optional manual override for total_cost/total_sale.
+          Save calls PATCH /api/packages/{pkgId}/bookings/{bookingId} and shows one of two
+          success toasts depending on response._light_update vs _full_recalc.
+          Credentials: owner@demo.com / Demo@2025.
+      - working: "NA"
+        agent: "testing"
+        comment: |
+          ⚠️ BLOCKED - Cannot complete automated testing due to missing test data.
+          
+          **What was tested:**
+          - ✅ Successfully navigated to packages screen
+          - ✅ Found 14 existing packages in the system
+          - ✅ Opened package details dialog successfully
+          - ✅ Navigated to المسجلون (bookings) tab
+          - ❌ BLOCKER: All existing packages have 0 bookings (no test data available)
+          
+          **What needs manual setup:**
+          To test the Package Passenger Edit Dialog, the system needs:
+          1. At least ONE package with components (e.g., hotel, transport)
+          2. At least ONE booking/registration in that package
+          3. The booking should have: pilgrim_name, passport_no, client_id, pax_count
+          
+          **Backend verification:**
+          The backend PATCH endpoint has been fully tested (31/32 tests passed) and is working correctly:
+          - Light edit mode (pilgrim_name only) - VERIFIED
+          - Full recalc mode (pax_count change) - VERIFIED
+          - Validation (empty fields) - VERIFIED
+          - Quota preservation across edits - VERIFIED
+          
+          **Frontend implementation verified:**
+          - Code review confirms PackageBookingEditDialog component exists (lines 5929-6090)
+          - Pencil button implementation confirmed (line 5894-5896)
+          - Financial preview panel with 3 cards (cost/sale/profit) - CONFIRMED
+          - Save button with toast messages for light vs full recalc - CONFIRMED
+          
+          **Recommendation:**
+          Manual testing required OR main agent should seed test data (create package with components and bookings).
+
+  - task: "v3.9.21 Frontend: Dashboard 5 quick action cards in one horizontal row"
+    implemented: true
+    working: true
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Dashboard quick action row uses grid-cols-2 md:grid-cols-3 lg:grid-cols-5.
+          Five cards on desktop: التأشيرات، التذاكر، الباقات، تصفح الرحلات، الخدمات.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ PASSED - Dashboard 5 quick action cards verified successfully.
+          
+          **Test Results:**
+          1. ✅ Dashboard title 'لوحة التحكم' visible
+          2. ✅ Found cards container with correct grid classes (grid-cols-2 md:grid-cols-3 lg:grid-cols-5)
+          3. ✅ All 5 card labels present and visible in correct order (RTL):
+             - التأشيرات (Visas) - green gradient
+             - التذاكر (Tickets) - brand gradient
+             - الباقات (Packages) - teal gradient
+             - تصفح الرحلات (Browse Flights) - purple gradient
+             - الخدمات (Services) - gold gradient
+          4. ✅ Grid responsive classes verified: grid-cols-2 (mobile), md:grid-cols-3 (tablet), lg:grid-cols-5 (desktop)
+          5. ✅ All cards clickable and functional (tested navigation to packages screen)
+          
+          **Screenshot:** v3921_dashboard_5cards.png
+          
+          **Viewport:** 1920x1080 (desktop) - all 5 cards displayed in ONE horizontal row as expected.
+
 backend:
-  - task: "v3.9.21: PATCH /api/packages/:pkgId/bookings/:bookingId — Edit package booking (light + full recalc)"
     implemented: true
     working: true
     file: "app/api/[[...path]]/route.js"
@@ -7339,3 +7427,41 @@ agent_communication:
       
       Backend v3.9.20 is production-ready. Both new endpoints working correctly with proper authorization, balance reversal, and error handling.
 
+
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      ✅ v3.9.21 FRONTEND TESTING COMPLETED - 1/2 TASKS PASSED, 1 BLOCKED
+      
+      **Test Results Summary:**
+      
+      **TASK 1: Dashboard 5 Quick Action Cards ✅ PASSED**
+      - All 5 cards visible in ONE horizontal row on desktop (1920x1080)
+      - Correct order (RTL): التأشيرات • التذاكر • الباقات • تصفح الرحلات • الخدمات
+      - Grid classes verified: grid-cols-2 md:grid-cols-3 lg:grid-cols-5
+      - All cards functional and clickable
+      - Screenshot: v3921_dashboard_5cards.png
+      
+      **TASK 2: Package Passenger Edit Dialog ⚠️ BLOCKED**
+      - Cannot complete automated testing due to missing test data
+      - All 14 existing packages have ZERO bookings
+      - Backend PATCH endpoint fully tested and working (31/32 tests passed)
+      - Frontend implementation verified via code review:
+        * PackageBookingEditDialog component exists (lines 5929-6090)
+        * Pencil button present (line 5894-5896)
+        * Financial preview panel with 3 cards implemented
+        * Save logic with light vs full recalc toast messages implemented
+      
+      **What's Needed to Complete Testing:**
+      1. Create at least ONE package with components (hotel/transport)
+      2. Add at least ONE booking to that package
+      3. Then the edit dialog can be tested with all 3 sub-tests:
+         - Light edit (pilgrim_name only)
+         - Full recalc (pax_count change)
+         - Validation (empty fields)
+      
+      **Recommendation:**
+      - Mark Task 1 (Dashboard 5 cards) as working: true ✅
+      - Mark Task 2 (Edit Dialog) as working: "NA" (needs manual setup/testing)
+      - OR main agent can seed test data and re-run testing
