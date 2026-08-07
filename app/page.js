@@ -5912,7 +5912,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   const [clients, setClients] = useState([])
   const [boxes, setBoxes] = useState([])
   const [newComp, setNewComp] = useState({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '' })
-  const [newBooking, setNewBooking] = useState({ client_id: '', pilgrim_name: '', passport_no: '', pax_count: 1, payment_method: 'credit', box_id: '', transport_id: '', notes: '' })
+  const [newBooking, setNewBooking] = useState({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '' })
   const load = () => Promise.all([
     api(`/packages/${pkg.id}/components`).then(setComps),
     api(`/packages/${pkg.id}/bookings`).then(setBookings),
@@ -5939,7 +5939,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
     if (newBooking.payment_method === 'credit' && !newBooking.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
     if (newBooking.payment_method === 'cash' && !newBooking.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     if (comps.length === 0) return toast.error('أضف مكونات الباكج أولاً')
-    try { await api(`/packages/${pkg.id}/bookings`, { method: 'POST', body: newBooking }); toast.success('✅ تم التسجيل + قيد محاسبي'); setNewBooking({ client_id: '', pilgrim_name: '', passport_no: '', pax_count: 1, payment_method: 'credit', box_id: '', transport_id: '', notes: '' }); load(); onChanged && onChanged() }
+    try { await api(`/packages/${pkg.id}/bookings`, { method: 'POST', body: newBooking }); toast.success('✅ تم التسجيل + قيد محاسبي'); setNewBooking({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '' }); load(); onChanged && onChanged() }
     catch (e) { toast.error(e.message) }
   }
   const totalCost = comps.reduce((s, c) => s + (c.cost_per_pax || 0), 0)
@@ -6068,8 +6068,30 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
                   <Field label="اسم المعتمر/المسافر"><Input value={newBooking.pilgrim_name} onChange={e => setNewBooking({ ...newBooking, pilgrim_name: e.target.value })} /></Field>
                   <Field label="رقم الجواز"><Input value={newBooking.passport_no} onChange={e => setNewBooking({ ...newBooking, passport_no: e.target.value })} /></Field>
-                  <Field label="عدد الأفراد"><Input type="number" min="1" value={newBooking.pax_count} onChange={e => setNewBooking({ ...newBooking, pax_count: e.target.value })} /></Field>
+                  <Field label="📅 تاريخ الميلاد (اختياري)"><Input type="date" value={newBooking.birth_date} onChange={e => {
+                    const bd = e.target.value
+                    let auto = { birth_date: bd }
+                    if (bd) {
+                      const age = (Date.now() - new Date(bd).getTime()) / (365.25 * 24 * 3600 * 1000)
+                      if (age < 2) auto = { ...auto, pax_adults: 0, pax_children: 0, pax_infants: 1 }
+                      else if (age < 12) auto = { ...auto, pax_adults: 0, pax_children: 1, pax_infants: 0 }
+                      else auto = { ...auto, pax_adults: 1, pax_children: 0, pax_infants: 0 }
+                    }
+                    setNewBooking({ ...newBooking, ...auto })
+                  }} /></Field>
                   <div className="flex items-end"><Button onClick={addBooking} className="w-full bg-emerald-600 text-white gap-1"><Plus className="w-4 h-4" /> تسجيل + قيد</Button></div>
+                </div>
+                {/* v3.9.28 — Age category breakdown (Adult/Child/Infant per IATA) */}
+                <div className="bg-white/60 border-2 border-amber-200 rounded-lg p-3">
+                  <div className="text-xs font-bold text-slate-800 mb-2 flex items-center gap-2">👥 <span>عدد المسافرين حسب الفئة العمرية (IATA)</span></div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <Field label="🧑 بالغ (12+)"><Input type="number" min="0" value={newBooking.pax_adults} onChange={e => setNewBooking({ ...newBooking, pax_adults: Number(e.target.value) || 0 })} className="bg-white" /></Field>
+                    <Field label="👦 طفل (2-11)"><Input type="number" min="0" value={newBooking.pax_children} onChange={e => setNewBooking({ ...newBooking, pax_children: Number(e.target.value) || 0 })} className="bg-white" /></Field>
+                    <Field label="👶 رضيع (0-2) — بلا مقعد"><Input type="number" min="0" value={newBooking.pax_infants} onChange={e => setNewBooking({ ...newBooking, pax_infants: Number(e.target.value) || 0 })} className="bg-white" /></Field>
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-2">
+                    💡 التكلفة تُحسب على <b>البالغين + الأطفال فقط</b> ({(newBooking.pax_adults || 0) + (newBooking.pax_children || 0)} مسافر). الرضيع مجاناً محاسبياً <b>ولا يشغل مقعداً في وسيلة النقل</b>.
+                  </div>
                 </div>
                 {/* v3.9.22 — Unified Payment Selector (Package Booking) */}
                 <div className="bg-white/60 border-2 border-blue-200 rounded-lg p-3">
@@ -6111,10 +6133,11 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                         <SelectItem value="__none__">— بدون تسكين —</SelectItem>
                         {transports.filter(t => t.status !== 'closed').map(t => {
                           const remaining = Math.max(0, t.capacity - t.seats_booked)
+                          const seatsNeeded = (Number(newBooking.pax_adults) || 0) + (Number(newBooking.pax_children) || 0)
                           const emoji = t.type === 'flight' ? '✈️' : t.type === 'train' ? '🚂' : t.type === 'car' ? '🚗' : '🚌'
                           return (
-                            <SelectItem key={t.id} value={t.id} disabled={t.status === 'full' || remaining < (Number(newBooking.pax_count) || 1)}>
-                              {emoji} {t.name} — {t.seats_booked}/{t.capacity} {t.status === 'full' ? '⛔' : remaining < (Number(newBooking.pax_count) || 1) ? `(متبقٍ ${remaining} فقط)` : `(متبقٍ ${remaining})`}
+                            <SelectItem key={t.id} value={t.id} disabled={t.status === 'full' || remaining < seatsNeeded}>
+                              {emoji} {t.name} — {t.seats_booked}/{t.capacity} {t.status === 'full' ? '⛔' : remaining < seatsNeeded ? `(متبقٍ ${remaining} فقط)` : `(متبقٍ ${remaining})`}
                             </SelectItem>
                           )
                         })}

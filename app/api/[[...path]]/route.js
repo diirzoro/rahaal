@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.27',
+          version: '3.9.28',
           db: 'connected',
         })
       } catch (e) {
@@ -1246,7 +1246,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.27',
+        version: '3.9.28',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
@@ -1768,14 +1768,22 @@ async function handleRoute(request, { params }) {
       // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id
       if (payMethod === 'credit' && !b.client_id) return bad('اختر حساب القبض / العميل (للحجز الآجل)')
       if (payMethod === 'cash' && !b.box_id) return bad('اختر الصندوق / البنك (للنقد)')
-      // v3.9.26 — Transport capacity check
+      // v3.9.26 — Transport capacity check (uses pax_seats: adults + children, excludes infants)
+      // v3.9.28 — Age category breakdown (adults, children, infants)
+      const paxAdults = Math.max(0, Number(b.pax_adults) || 0)
+      const paxChildren = Math.max(0, Number(b.pax_children) || 0)
+      const paxInfants = Math.max(0, Number(b.pax_infants) || 0)
+      // Backward compat: if none provided, treat pax_count as all adults
+      const legacyPax = Math.max(1, Number(b.pax_count) || 1)
+      const totalPax = paxAdults + paxChildren + paxInfants > 0 ? (paxAdults + paxChildren + paxInfants) : legacyPax
+      const paxBilled = paxAdults + paxChildren + paxInfants > 0 ? (paxAdults + paxChildren) : legacyPax
+      const paxSeats = paxAdults + paxChildren + paxInfants > 0 ? (paxAdults + paxChildren) : legacyPax
       let transport = null
       if (b.transport_id) {
         transport = await db.collection('package_transports').findOne({ id: b.transport_id, tenant_id: T, package_id: pkgId })
         if (!transport) return bad('وسيلة النقل غير موجودة')
         if (transport.status === 'closed') return bad(`وسيلة النقل "${transport.name}" مغلقة — اختر وسيلة أخرى`)
-        const paxInc = Math.max(1, Number(b.pax_count) || 1)
-        if ((transport.seats_booked + paxInc) > transport.capacity) {
+        if ((transport.seats_booked + paxSeats) > transport.capacity) {
           return bad(`السعة مكتملة على "${transport.name}" (${transport.seats_booked}/${transport.capacity}). أضف وسيلة نقل جديدة أو اختر أخرى تحتوي على مقاعد متاحة.`)
         }
       }
@@ -1783,10 +1791,10 @@ async function handleRoute(request, { params }) {
       if (payMethod === 'credit' && !cli) return bad('العميل غير موجود')
       const comps = await db.collection('package_components').find({ tenant_id: T, package_id: pkgId }).toArray()
       if (comps.length === 0) return bad('لا توجد مكونات في الباكج — أضف المكونات قبل التسجيل')
-      const pax = Math.max(1, Number(b.pax_count) || 1)
+      const pax = totalPax
       const cur = pkg.currency
-      const total_cost = +comps.reduce((s, c) => s + (c.cost_per_pax * pax), 0).toFixed(2)
-      const total_sale = +comps.reduce((s, c) => s + (c.sale_per_pax * pax), 0).toFixed(2)
+      const total_cost = +comps.reduce((s, c) => s + (c.cost_per_pax * paxBilled), 0).toFixed(2)
+      const total_sale = +comps.reduce((s, c) => s + (c.sale_per_pax * paxBilled), 0).toFixed(2)
       const commission = +(total_sale - total_cost).toFixed(2)
       let box = null
       if (payMethod === 'cash') {
@@ -1800,25 +1808,34 @@ async function handleRoute(request, { params }) {
         pilgrim_name: b.pilgrim_name || cli?.name || 'مسافر نقدي',
         passport_no: b.passport_no || '',
         pax_count: pax, currency: cur,
+        // v3.9.28 — Age category breakdown
+        pax_adults: paxAdults || (paxAdults + paxChildren + paxInfants === 0 ? legacyPax : 0),
+        pax_children: paxChildren,
+        pax_infants: paxInfants,
+        pax_billed: paxBilled,
+        pax_seats: paxSeats,
+        birth_date: b.birth_date || null,
+        age_category: b.age_category || null,
         total_cost, total_sale, commission,
         payment_method: payMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
         transport_id: transport?.id || null,
         transport_name: transport?.name || null,
         transport_type: transport?.type || null,
-        component_snapshots: comps.map(c => ({ id: c.id, name: c.name, supplier_id: c.supplier_id, supplier_name: c.supplier_name, cost_per_pax: c.cost_per_pax, sale_per_pax: c.sale_per_pax, cost_total: c.cost_per_pax * pax, sale_total: c.sale_per_pax * pax })),
+        component_snapshots: comps.map(c => ({ id: c.id, name: c.name, supplier_id: c.supplier_id, supplier_name: c.supplier_name, cost_per_pax: c.cost_per_pax, sale_per_pax: c.sale_per_pax, cost_total: c.cost_per_pax * paxBilled, sale_total: c.sale_per_pax * paxBilled })),
         notes: b.notes || '', created_at: new Date(), created_by: sess.user.email,
       }
       await db.collection('package_bookings').insertOne(bookingDoc)
       // v3.9.26 — Increment transport seats_booked and auto-close on full
+      // v3.9.28 — Only adults + children take seats (infants free)
       if (transport) {
-        const newBooked = transport.seats_booked + pax
+        const newBooked = transport.seats_booked + paxSeats
         const newStatus = newBooked >= transport.capacity ? 'full' : transport.status
         await db.collection('package_transports').updateOne({ id: transport.id, tenant_id: T }, { $set: { seats_booked: newBooked, status: newStatus } })
       }
       // Balances
       if (payMethod === 'cash') await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
       else await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
-      for (const c of comps) await updateBalance(db, 'suppliers', { id: c.supplier_id, tenant_id: T }, cur, c.cost_per_pax * pax)
+      for (const c of comps) await updateBalance(db, 'suppliers', { id: c.supplier_id, tenant_id: T }, cur, c.cost_per_pax * paxBilled)
       // Single combined JE
       const lines = []
       if (payMethod === 'cash') lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
