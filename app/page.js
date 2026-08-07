@@ -5835,16 +5835,19 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   const [tab, setTab] = useState('components')
   const [comps, setComps] = useState([])
   const [bookings, setBookings] = useState([])
+  const [transports, setTransports] = useState([]) // v3.9.26 — Package transports
+  const [newTransport, setNewTransport] = useState({ name: '', type: 'bus', capacity: 44, driver_name: '', driver_phone: '', vehicle_plate: '', flight_no: '' })
   const [bookingSearch, setBookingSearch] = useState('') // v3.9.20 — Search field
   const [editingBooking, setEditingBooking] = useState(null) // v3.9.21 — Booking edit state
   const [suppliers, setSuppliers] = useState([])
   const [clients, setClients] = useState([])
   const [boxes, setBoxes] = useState([])
   const [newComp, setNewComp] = useState({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '' })
-  const [newBooking, setNewBooking] = useState({ client_id: '', pilgrim_name: '', passport_no: '', pax_count: 1, payment_method: 'credit', box_id: '', notes: '' })
+  const [newBooking, setNewBooking] = useState({ client_id: '', pilgrim_name: '', passport_no: '', pax_count: 1, payment_method: 'credit', box_id: '', transport_id: '', notes: '' })
   const load = () => Promise.all([
     api(`/packages/${pkg.id}/components`).then(setComps),
     api(`/packages/${pkg.id}/bookings`).then(setBookings),
+    api(`/packages/${pkg.id}/transports`).then(setTransports).catch(() => setTransports([])),
     api('/suppliers').then(setSuppliers), api('/clients').then(setClients), api('/boxes').then(setBoxes),
   ]).catch(e => toast.error(e.message))
   useEffect(() => { load() }, [pkg.id])
@@ -5854,12 +5857,20 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
     catch (e) { toast.error(e.message) }
   }
   const delComp = async (id) => { if (!confirm('حذف المكوّن؟')) return; try { await api(`/packages/${pkg.id}/components/${id}`, { method: 'DELETE' }); load(); onChanged && onChanged() } catch (e) { toast.error(e.message) } }
+  // v3.9.26 — Transport CRUD
+  const addTransport = async () => {
+    if (!newTransport.name.trim()) return toast.error('اسم وسيلة النقل مطلوب')
+    try { await api(`/packages/${pkg.id}/transports`, { method: 'POST', body: newTransport }); toast.success('✅ تمت الإضافة'); setNewTransport({ name: '', type: 'bus', capacity: 44, driver_name: '', driver_phone: '', vehicle_plate: '', flight_no: '' }); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const delTransport = async (t) => { if (!confirm(`حذف وسيلة النقل "${t.name}"؟`)) return; try { await api(`/packages/${pkg.id}/transports/${t.id}`, { method: 'DELETE' }); toast.success('تم الحذف'); load() } catch (e) { toast.error(e.message) } }
+  const toggleTransportStatus = async (t) => { try { await api(`/packages/${pkg.id}/transports/${t.id}`, { method: 'PATCH', body: { status: t.status === 'open' ? 'closed' : 'open' } }); load() } catch (e) { toast.error(e.message) } }
   const addBooking = async () => {
     // v3.9.22 — Unified payment: credit → client_id required; cash → box_id required
     if (newBooking.payment_method === 'credit' && !newBooking.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
     if (newBooking.payment_method === 'cash' && !newBooking.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     if (comps.length === 0) return toast.error('أضف مكونات الباكج أولاً')
-    try { await api(`/packages/${pkg.id}/bookings`, { method: 'POST', body: newBooking }); toast.success('✅ تم التسجيل + قيد محاسبي'); setNewBooking({ client_id: '', pilgrim_name: '', passport_no: '', pax_count: 1, payment_method: 'credit', box_id: '', notes: '' }); load(); onChanged && onChanged() }
+    try { await api(`/packages/${pkg.id}/bookings`, { method: 'POST', body: newBooking }); toast.success('✅ تم التسجيل + قيد محاسبي'); setNewBooking({ client_id: '', pilgrim_name: '', passport_no: '', pax_count: 1, payment_method: 'credit', box_id: '', transport_id: '', notes: '' }); load(); onChanged && onChanged() }
     catch (e) { toast.error(e.message) }
   }
   const totalCost = comps.reduce((s, c) => s + (c.cost_per_pax || 0), 0)
@@ -5872,8 +5883,9 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
           <DialogTitle>{pkg.name} — {PACKAGE_TYPES.find(t => t.v === pkg.package_type)?.l}</DialogTitle>
           <DialogDescription>سعر الفرد الواحد: تكلفة <b>{fmt(totalCost, pkg.currency)}</b> • بيع <b>{fmt(totalSale, pkg.currency)}</b> • ربح <b className="text-emerald-600">{fmt(profit, pkg.currency)}</b></DialogDescription>
         </DialogHeader>
-        <div className="flex gap-2 mb-3 border-b">
+        <div className="flex gap-2 mb-3 border-b flex-wrap">
           <button onClick={() => setTab('components')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'components' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500'}`}>🧩 المكونات ({comps.length})</button>
+          <button onClick={() => setTab('transports')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'transports' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500'}`}>🚌 وسائل النقل ({transports.length})</button>
           <button onClick={() => setTab('bookings')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'bookings' ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-slate-500'}`}>👥 المسجلون ({bookings.length})</button>
         </div>
         {tab === 'components' && (
@@ -5907,6 +5919,79 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
             </Table>
           </div>
         )}
+        {tab === 'transports' && (
+          <div className="space-y-3">
+            {pkg.status !== 'closed' && (
+              <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
+                <div className="text-sm font-bold text-slate-800 mb-2">➕ إضافة وسيلة نقل جديدة (باص / طائرة / قطار)</div>
+                <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
+                  <Field label="الاسم *"><Input value={newTransport.name} onChange={e => setNewTransport({ ...newTransport, name: e.target.value })} placeholder="باص 1 / رحلة 1" /></Field>
+                  <Field label="النوع">
+                    <Select value={newTransport.type} onValueChange={v => setNewTransport({ ...newTransport, type: v })}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="bus">🚌 باص</SelectItem>
+                        <SelectItem value="flight">✈️ طائرة</SelectItem>
+                        <SelectItem value="train">🚂 قطار</SelectItem>
+                        <SelectItem value="car">🚗 سيارة</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                  <Field label="السعة *"><Input type="number" min="1" value={newTransport.capacity} onChange={e => setNewTransport({ ...newTransport, capacity: e.target.value })} /></Field>
+                  <Field label="السائق / الطيران #"><Input value={newTransport.type === 'flight' ? newTransport.flight_no : newTransport.driver_name} onChange={e => setNewTransport({ ...newTransport, [newTransport.type === 'flight' ? 'flight_no' : 'driver_name']: e.target.value })} placeholder={newTransport.type === 'flight' ? 'IY123' : 'اسم السائق'} /></Field>
+                  <Field label={newTransport.type === 'flight' ? 'شركة الطيران' : 'رقم اللوحة'}><Input value={newTransport.type === 'flight' ? newTransport.driver_name : newTransport.vehicle_plate} onChange={e => setNewTransport({ ...newTransport, [newTransport.type === 'flight' ? 'driver_name' : 'vehicle_plate']: e.target.value })} placeholder={newTransport.type === 'flight' ? 'Yemenia' : 'أ ب ج 1234'} /></Field>
+                  <div className="flex items-end"><Button onClick={addTransport} className="w-full bg-indigo-600 text-white gap-1"><Plus className="w-4 h-4" /> إضافة</Button></div>
+                </div>
+              </div>
+            )}
+            {transports.length === 0 ? (
+              <div className="text-center py-8 text-slate-400 border-2 border-dashed rounded-lg">
+                <div className="text-3xl mb-2">🚌</div>
+                <div>لا توجد وسائل نقل مضافة بعد. أضِف باصاً أو رحلة أعلاه لتبدأ التسكين.</div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {transports.map(t => {
+                  const pct = t.capacity > 0 ? Math.round((t.seats_booked / t.capacity) * 100) : 0
+                  const isFull = t.status === 'full'
+                  const isClosed = t.status === 'closed'
+                  return (
+                    <div key={t.id} className={`p-3 rounded-lg border-2 ${isClosed ? 'bg-slate-50 border-slate-300' : isFull ? 'bg-rose-50 border-rose-300' : 'bg-white border-indigo-200'}`}>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-2xl">{t.type === 'flight' ? '✈️' : t.type === 'train' ? '🚂' : t.type === 'car' ? '🚗' : '🚌'}</span>
+                          <div>
+                            <div className="font-bold text-slate-800">{t.name}</div>
+                            <div className="text-[11px] text-slate-500">{t.driver_name || t.flight_no || '—'} • {t.vehicle_plate || (t.type === 'flight' ? 'رحلة' : 'مركبة')}</div>
+                          </div>
+                        </div>
+                        <div className="flex gap-1">
+                          <Button size="sm" variant="ghost" onClick={() => toggleTransportStatus(t)} className="h-7 px-2 text-xs" title={t.status === 'open' ? 'إغلاق يدوي' : 'إعادة فتح'}>
+                            {t.status === 'open' ? '🔒' : '🔓'}
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={() => delTransport(t)} className="h-7 w-7 p-0 text-rose-600 hover:bg-rose-50" title="حذف"><Trash2 className="w-3.5 h-3.5" /></Button>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <div className="flex-1 bg-slate-200 rounded-full h-3 overflow-hidden">
+                          <div className={`h-full transition-all ${isFull ? 'bg-rose-500' : pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(100, pct)}%` }}></div>
+                        </div>
+                        <div className="text-xs font-bold text-slate-700 tabular-nums">{t.seats_booked} / {t.capacity}</div>
+                      </div>
+                      <div className="flex items-center justify-between text-[11px]">
+                        <div className="text-slate-500">{pct}% ممتلئ</div>
+                        <Badge className={isClosed ? 'bg-slate-500' : isFull ? 'bg-rose-500' : 'bg-emerald-500'}>
+                          {isClosed ? '🔒 مغلق' : isFull ? '⛔ مكتمل' : '✅ متاح'}
+                        </Badge>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         {tab === 'bookings' && (
           <div className="space-y-3">
             {pkg.status !== 'closed' && (
@@ -5947,6 +6032,27 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     )}
                   </div>
                 </div>
+                {/* v3.9.26 — Transport / bus selector with live capacity */}
+                {transports.length > 0 && (
+                  <div className="bg-white/60 border-2 border-indigo-200 rounded-lg p-3">
+                    <div className="text-xs font-bold text-slate-800 mb-2 flex items-center gap-2">🚌 <span>وسيلة النقل (اختياري)</span></div>
+                    <Select value={newBooking.transport_id || '__none__'} onValueChange={v => setNewBooking({ ...newBooking, transport_id: v === '__none__' ? '' : v })}>
+                      <SelectTrigger className="bg-white"><SelectValue placeholder="اختر الباص / الرحلة" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none__">— بدون تسكين —</SelectItem>
+                        {transports.filter(t => t.status !== 'closed').map(t => {
+                          const remaining = Math.max(0, t.capacity - t.seats_booked)
+                          const emoji = t.type === 'flight' ? '✈️' : t.type === 'train' ? '🚂' : t.type === 'car' ? '🚗' : '🚌'
+                          return (
+                            <SelectItem key={t.id} value={t.id} disabled={t.status === 'full' || remaining < (Number(newBooking.pax_count) || 1)}>
+                              {emoji} {t.name} — {t.seats_booked}/{t.capacity} {t.status === 'full' ? '⛔' : remaining < (Number(newBooking.pax_count) || 1) ? `(متبقٍ ${remaining} فقط)` : `(متبقٍ ${remaining})`}
+                            </SelectItem>
+                          )
+                        })}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
               </div>
             )}
             {/* v3.9.20 — Search field for bookings */}
@@ -5956,12 +6062,12 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
               {bookingSearch && <Button size="sm" variant="ghost" onClick={() => setBookingSearch('')} className="text-rose-600 h-7">مسح</Button>}
             </div>
             <Table>
-              <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>المعتمر/المسافر</TableHead><TableHead>حساب القبض</TableHead><TableHead>الجواز</TableHead><TableHead className="text-center">أفراد</TableHead><TableHead>الدفع</TableHead><TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead><TableHead className="text-left text-emerald-600">ربح</TableHead><TableHead className="text-center w-16">⚙️</TableHead></TableRow></TableHeader>
+              <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>المعتمر/المسافر</TableHead><TableHead>حساب القبض</TableHead><TableHead>الجواز</TableHead><TableHead className="text-center">أفراد</TableHead><TableHead>🚌 النقل</TableHead><TableHead>الدفع</TableHead><TableHead className="text-left">تكلفة</TableHead><TableHead className="text-left">بيع</TableHead><TableHead className="text-left text-emerald-600">ربح</TableHead><TableHead className="text-center w-16">⚙️</TableHead></TableRow></TableHeader>
               <TableBody>
                 {(bookings || []).filter(b => {
                   if (!bookingSearch) return true
                   const q = bookingSearch.trim().toLowerCase()
-                  return (b?.pilgrim_name || '').toLowerCase().includes(q) || (b?.passport_no || '').toLowerCase().includes(q) || (b?.client_name || '').toLowerCase().includes(q)
+                  return (b?.pilgrim_name || '').toLowerCase().includes(q) || (b?.passport_no || '').toLowerCase().includes(q) || (b?.client_name || '').toLowerCase().includes(q) || (b?.transport_name || '').toLowerCase().includes(q)
                 }).map(b => (
                   <TableRow key={b?.id}>
                     <TableCell className="text-xs">{fmtDate(b?.created_at)}</TableCell>
@@ -5969,6 +6075,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     <TableCell className="text-xs">{b?.client_name || '—'}</TableCell>
                     <TableCell className="font-mono text-xs">{b?.passport_no || '—'}</TableCell>
                     <TableCell className="text-center">{b?.pax_count || 1}</TableCell>
+                    <TableCell className="text-xs">{b?.transport_name ? <span className="inline-flex items-center gap-1"><span>{b.transport_type === 'flight' ? '✈️' : '🚌'}</span>{b.transport_name}</span> : <span className="text-slate-400">—</span>}</TableCell>
                     <TableCell>{b?.payment_method === 'cash' ? '💵' : '🕓'}</TableCell>
                     <TableCell className="text-left">{fmt(b?.total_cost, b?.currency)}</TableCell>
                     <TableCell className="text-left">{fmt(b?.total_sale, b?.currency)}</TableCell>
@@ -5989,7 +6096,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     </TableCell>
                   </TableRow>
                 ))}
-                {(!bookings || bookings.length === 0) && <TableRow><TableCell colSpan={10} className="text-center text-slate-400 py-6">لا يوجد مسجلون بعد</TableCell></TableRow>}
+                {(!bookings || bookings.length === 0) && <TableRow><TableCell colSpan={11} className="text-center text-slate-400 py-6">لا يوجد مسجلون بعد</TableCell></TableRow>}
               </TableBody>
             </Table>
           </div>
@@ -6002,6 +6109,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
           booking={editingBooking}
           clients={clients}
           boxes={boxes}
+          transports={transports}
           onClose={() => setEditingBooking(null)}
           onSaved={() => { setEditingBooking(null); load(); onChanged && onChanged() }}
         />
@@ -6011,7 +6119,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
 }
 
 // v3.9.21 — Edit an existing package booking (passenger data + optional financial recompute)
-function PackageBookingEditDialog({ pkg, booking, clients, boxes, onClose, onSaved }) {
+function PackageBookingEditDialog({ pkg, booking, clients, boxes, transports = [], onClose, onSaved }) {
   const [form, setForm] = useState({
     pilgrim_name: booking?.pilgrim_name || '',
     passport_no: booking?.passport_no || '',
@@ -6019,6 +6127,7 @@ function PackageBookingEditDialog({ pkg, booking, clients, boxes, onClose, onSav
     payment_method: booking?.payment_method || 'credit',
     client_id: booking?.client_id || '',
     box_id: booking?.box_id || '',
+    transport_id: booking?.transport_id || '',
     notes: booking?.notes || '',
     override_financials: false,
     total_cost: booking?.total_cost || 0,
@@ -6054,6 +6163,7 @@ function PackageBookingEditDialog({ pkg, booking, clients, boxes, onClose, onSav
       payment_method: form.payment_method,
       client_id: form.client_id,
       box_id: form.payment_method === 'cash' ? form.box_id : '',
+      transport_id: form.transport_id || null,
     }
     if (form.override_financials) {
       body.total_cost = +(Number(form.total_cost) || 0).toFixed(2)
@@ -6110,6 +6220,30 @@ function PackageBookingEditDialog({ pkg, booking, clients, boxes, onClose, onSav
                 <SelectContent>{(boxes || []).map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
+          )}
+          {/* v3.9.26 — Transport selector (edit) */}
+          {transports.length > 0 && (
+            <div className="md:col-span-2">
+              <Field label="🚌 وسيلة النقل">
+                <Select value={form.transport_id || '__none__'} onValueChange={v => setF('transport_id', v === '__none__' ? '' : v)}>
+                  <SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">— بدون تسكين —</SelectItem>
+                    {transports.map(t => {
+                      const emoji = t.type === 'flight' ? '✈️' : t.type === 'train' ? '🚂' : t.type === 'car' ? '🚗' : '🚌'
+                      const isCurrent = t.id === booking?.transport_id
+                      const remaining = t.capacity - t.seats_booked + (isCurrent ? (booking?.pax_count || 0) : 0)
+                      const disabled = !isCurrent && (t.status === 'closed' || t.status === 'full' || remaining < (Number(form.pax_count) || 1))
+                      return (
+                        <SelectItem key={t.id} value={t.id} disabled={disabled}>
+                          {emoji} {t.name} — {t.seats_booked}/{t.capacity} {t.status === 'full' ? '⛔' : `(متبقٍ ${remaining})`}{isCurrent ? ' • الحالي' : ''}
+                        </SelectItem>
+                      )
+                    })}
+                  </SelectContent>
+                </Select>
+              </Field>
+            </div>
           )}
           <div className="md:col-span-2">
             <Field label="ملاحظات">

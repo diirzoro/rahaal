@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.23',
+          version: '3.9.26',
           db: 'connected',
         })
       } catch (e) {
@@ -1246,7 +1246,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.23',
+        version: '3.9.26',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
@@ -1463,6 +1463,71 @@ async function handleRoute(request, { params }) {
       return ok({ success: true })
     }
 
+    // v3.9.26 — Package Transports (buses/flights) with capacity tracking
+    const pkgTransMatch = route.match(/^\/packages\/([^/]+)\/transports$/)
+    if (pkgTransMatch && method === 'GET') {
+      const list = await db.collection('package_transports').find({ tenant_id: T, package_id: pkgTransMatch[1] }).sort({ created_at: 1 }).toArray()
+      return ok(list.map(t => ({ ...t, _id: undefined })))
+    }
+    if (pkgTransMatch && method === 'POST') {
+      const b = await request.json()
+      const pkgId = pkgTransMatch[1]
+      const pkg = await db.collection('packages').findOne({ id: pkgId, tenant_id: T })
+      if (!pkg) return bad('الباكج غير موجود', 404)
+      if (!b.name || !String(b.name).trim()) return bad('اسم وسيلة النقل مطلوب')
+      const capacity = Math.max(1, Number(b.capacity) || 44)
+      const type = ['bus', 'flight', 'train', 'car'].includes(b.type) ? b.type : 'bus'
+      const doc = {
+        id: uuidv4(), tenant_id: T, package_id: pkgId,
+        name: String(b.name).trim(),
+        type, capacity, seats_booked: 0,
+        driver_name: b.driver_name || '',
+        driver_phone: b.driver_phone || '',
+        vehicle_plate: b.vehicle_plate || '',
+        flight_no: b.flight_no || '',
+        notes: b.notes || '',
+        status: 'open',
+        created_at: new Date(), created_by: sess.user.email,
+      }
+      await db.collection('package_transports').insertOne(doc)
+      const { _id, ...rest } = doc; return ok(rest)
+    }
+    const pkgTransItemMatch = route.match(/^\/packages\/([^/]+)\/transports\/([^/]+)$/)
+    if (pkgTransItemMatch && method === 'PATCH') {
+      const [, pkgIdT, tid] = pkgTransItemMatch
+      const b = await request.json()
+      const existing = await db.collection('package_transports').findOne({ id: tid, tenant_id: T, package_id: pkgIdT })
+      if (!existing) return bad('وسيلة النقل غير موجودة', 404)
+      const updates = {}
+      if (b.name !== undefined) updates.name = String(b.name).trim() || existing.name
+      if (b.type !== undefined && ['bus', 'flight', 'train', 'car'].includes(b.type)) updates.type = b.type
+      if (b.capacity !== undefined) {
+        const cap = Math.max(1, Number(b.capacity) || existing.capacity)
+        if (cap < existing.seats_booked) return bad(`السعة الجديدة (${cap}) أقل من المقاعد المحجوزة (${existing.seats_booked})`)
+        updates.capacity = cap
+      }
+      if (b.driver_name !== undefined) updates.driver_name = String(b.driver_name || '')
+      if (b.driver_phone !== undefined) updates.driver_phone = String(b.driver_phone || '')
+      if (b.vehicle_plate !== undefined) updates.vehicle_plate = String(b.vehicle_plate || '')
+      if (b.flight_no !== undefined) updates.flight_no = String(b.flight_no || '')
+      if (b.notes !== undefined) updates.notes = String(b.notes || '')
+      if (b.status !== undefined && ['open', 'closed'].includes(b.status)) updates.status = b.status
+      updates.updated_at = new Date()
+      await db.collection('package_transports').updateOne({ id: tid, tenant_id: T }, { $set: updates })
+      const updated = await db.collection('package_transports').findOne({ id: tid, tenant_id: T })
+      const { _id, ...rest } = updated; return ok(rest)
+    }
+    if (pkgTransItemMatch && method === 'DELETE') {
+      const [, pkgIdT2, tid] = pkgTransItemMatch
+      const existing = await db.collection('package_transports').findOne({ id: tid, tenant_id: T, package_id: pkgIdT2 })
+      if (!existing) return bad('وسيلة النقل غير موجودة', 404)
+      const usedCount = await db.collection('package_bookings').countDocuments({ tenant_id: T, package_id: pkgIdT2, transport_id: tid })
+      if (usedCount > 0) return bad(`لا يمكن الحذف — يوجد ${usedCount} مسافر مسجّل على هذه الوسيلة. انقلهم إلى وسيلة أخرى أولاً.`)
+      await db.collection('package_transports').deleteOne({ id: tid, tenant_id: T })
+      return ok({ success: true, transport_id: tid })
+    }
+
+
     // Package bookings — register a client with auto-JE
     const pkgBookMatch = route.match(/^\/packages\/([^/]+)\/bookings$/)
     if (pkgBookMatch && method === 'GET') {
@@ -1500,6 +1565,15 @@ async function handleRoute(request, { params }) {
       }
       // Decrement package bookings count
       await db.collection('packages').updateOne({ id: pkgId, tenant_id: T }, { $inc: { bookings_count: -1 } })
+      // v3.9.26 — Free up transport seats
+      if (booking.transport_id) {
+        const t = await db.collection('package_transports').findOne({ id: booking.transport_id, tenant_id: T })
+        if (t) {
+          const newBooked = Math.max(0, (t.seats_booked || 0) - (booking.pax_count || 1))
+          const newStatus = t.status === 'full' && newBooked < t.capacity ? 'open' : t.status
+          await db.collection('package_transports').updateOne({ id: t.id, tenant_id: T }, { $set: { seats_booked: newBooked, status: newStatus } })
+        }
+      }
       await db.collection('package_bookings').deleteOne({ id: bookingId, tenant_id: T })
       return ok({ success: true, booking_id: bookingId })
     }
@@ -1572,6 +1646,24 @@ async function handleRoute(request, { params }) {
         box = await db.collection('boxes').findOne({ id: newBoxId, tenant_id: T })
         if (!box) return bad('الصندوق غير موجود')
       }
+      // v3.9.26 — Transport switch validation
+      let newTransport = null
+      let oldTransport = null
+      const newTransportId = body.transport_id !== undefined ? body.transport_id : oldBooking.transport_id
+      if (newTransportId) {
+        newTransport = await db.collection('package_transports').findOne({ id: newTransportId, tenant_id: T, package_id: pkgId2 })
+        if (!newTransport) return bad('وسيلة النقل غير موجودة')
+        // If switching transport OR changing pax_count, check new transport capacity
+        if (newTransportId !== oldBooking.transport_id || newPax !== oldBooking.pax_count) {
+          const currentUse = newTransportId === oldBooking.transport_id ? newTransport.seats_booked - oldBooking.pax_count : newTransport.seats_booked
+          if ((currentUse + newPax) > newTransport.capacity) {
+            return bad(`السعة غير كافية على "${newTransport.name}" (${currentUse}/${newTransport.capacity} — تحتاج ${newPax} مقعداً).`)
+          }
+        }
+      }
+      if (oldBooking.transport_id) {
+        oldTransport = await db.collection('package_transports').findOne({ id: oldBooking.transport_id, tenant_id: T })
+      }
       const newSnapshots = (oldBooking.component_snapshots || []).map(c => ({
         ...c,
         cost_total: +((c.cost_per_pax || 0) * newPax).toFixed(2),
@@ -1602,12 +1694,29 @@ async function handleRoute(request, { params }) {
         total_cost, total_sale, commission,
         payment_method: newPay,
         box_id: box?.id || null, box_name: box?.name_ar || null,
+        transport_id: newTransport?.id || null,
+        transport_name: newTransport?.name || null,
+        transport_type: newTransport?.type || null,
         component_snapshots: newSnapshots,
         notes: body.notes !== undefined ? String(body.notes || '').trim() : (oldBooking.notes || ''),
         updated_at: new Date(), updated_by: sess.user.email,
       }
       delete updatedBooking._id
       await db.collection('package_bookings').replaceOne({ id: bookingId2, tenant_id: T }, updatedBooking)
+      // v3.9.26 — Adjust transport seat counts
+      if (oldTransport && (!newTransport || oldTransport.id !== newTransport.id)) {
+        // Old transport loses old pax
+        const oldNewBooked = Math.max(0, oldTransport.seats_booked - oldBooking.pax_count)
+        const oldNewStatus = oldTransport.status === 'full' && oldNewBooked < oldTransport.capacity ? 'open' : oldTransport.status
+        await db.collection('package_transports').updateOne({ id: oldTransport.id, tenant_id: T }, { $set: { seats_booked: oldNewBooked, status: oldNewStatus } })
+      }
+      if (newTransport) {
+        const delta = newTransport.id === oldBooking.transport_id ? (newPax - oldBooking.pax_count) : newPax
+        const target = await db.collection('package_transports').findOne({ id: newTransport.id, tenant_id: T })
+        const newBooked = Math.max(0, (target.seats_booked || 0) + delta)
+        const newStatus = newBooked >= target.capacity ? 'full' : (target.status === 'full' && newBooked < target.capacity ? 'open' : target.status)
+        await db.collection('package_transports').updateOne({ id: newTransport.id, tenant_id: T }, { $set: { seats_booked: newBooked, status: newStatus } })
+      }
       const lines = []
       if (newPay === 'cash') lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
       else lines.push({ account_code: '1301', account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
@@ -1659,6 +1768,17 @@ async function handleRoute(request, { params }) {
       // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id
       if (payMethod === 'credit' && !b.client_id) return bad('اختر حساب القبض / العميل (للحجز الآجل)')
       if (payMethod === 'cash' && !b.box_id) return bad('اختر الصندوق / البنك (للنقد)')
+      // v3.9.26 — Transport capacity check
+      let transport = null
+      if (b.transport_id) {
+        transport = await db.collection('package_transports').findOne({ id: b.transport_id, tenant_id: T, package_id: pkgId })
+        if (!transport) return bad('وسيلة النقل غير موجودة')
+        if (transport.status === 'closed') return bad(`وسيلة النقل "${transport.name}" مغلقة — اختر وسيلة أخرى`)
+        const paxInc = Math.max(1, Number(b.pax_count) || 1)
+        if ((transport.seats_booked + paxInc) > transport.capacity) {
+          return bad(`السعة مكتملة على "${transport.name}" (${transport.seats_booked}/${transport.capacity}). أضف وسيلة نقل جديدة أو اختر أخرى تحتوي على مقاعد متاحة.`)
+        }
+      }
       const cli = b.client_id ? await db.collection('clients').findOne({ id: b.client_id, tenant_id: T }) : null
       if (payMethod === 'credit' && !cli) return bad('العميل غير موجود')
       const comps = await db.collection('package_components').find({ tenant_id: T, package_id: pkgId }).toArray()
@@ -1682,10 +1802,19 @@ async function handleRoute(request, { params }) {
         pax_count: pax, currency: cur,
         total_cost, total_sale, commission,
         payment_method: payMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
+        transport_id: transport?.id || null,
+        transport_name: transport?.name || null,
+        transport_type: transport?.type || null,
         component_snapshots: comps.map(c => ({ id: c.id, name: c.name, supplier_id: c.supplier_id, supplier_name: c.supplier_name, cost_per_pax: c.cost_per_pax, sale_per_pax: c.sale_per_pax, cost_total: c.cost_per_pax * pax, sale_total: c.sale_per_pax * pax })),
         notes: b.notes || '', created_at: new Date(), created_by: sess.user.email,
       }
       await db.collection('package_bookings').insertOne(bookingDoc)
+      // v3.9.26 — Increment transport seats_booked and auto-close on full
+      if (transport) {
+        const newBooked = transport.seats_booked + pax
+        const newStatus = newBooked >= transport.capacity ? 'full' : transport.status
+        await db.collection('package_transports').updateOne({ id: transport.id, tenant_id: T }, { $set: { seats_booked: newBooked, status: newStatus } })
+      }
       // Balances
       if (payMethod === 'cash') await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
       else await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
