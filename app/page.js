@@ -759,12 +759,11 @@ function Dashboard({ setTab }) {
     <div className="space-y-6">
       <TopBar title="لوحة التحكم" subtitle="نظرة سريعة على أداء المكتب اليوم"
         right={<Button variant="outline" onClick={load} className="gap-2"><Activity className="w-4 h-4" /> تحديث</Button>} />
-      {/* v3.9.21 — 5 quick action cards in one horizontal row (البنود الخدمية الأساسية) */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+      {/* v3.9.22 — 4 quick action cards (Amadeus flight browser hidden until API keys available) */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <QuickAction icon={FileBadge2} label="التأشيرات" grad="grad-green" onClick={() => setTab('visas')} />
         <QuickAction icon={Plane} label="التذاكر" grad="grad-brand" onClick={() => setTab('tickets')} />
         <QuickAction icon={Package} label="الباقات" grad="grad-teal" onClick={() => setTab('packages')} />
-        <QuickAction icon={Search} label="تصفح الرحلات" grad="grad-purple" onClick={() => setTab('flights')} />
         <QuickAction icon={Briefcase} label="الخدمات" grad="grad-gold" onClick={() => setTab('services')} />
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
