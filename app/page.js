@@ -1209,6 +1209,9 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
     ticket_type: 'عادي', arrival_time: '', departure_time: '', boarding_point: '', sale_point: '',
     // v3.2 — Travel mode + WhatsApp
     travel_mode: 'air', passenger_whatsapp: '',
+    // v3.9.27 — Commission Sharing
+    commission_partner_type: '', commission_partner_id: '', commission_partner_name: '',
+    commission_share_mode: 'amount', commission_share_value: '',
   }
   const [form, setForm] = useState(emptyForm)
   const [boxes, setBoxes] = useState([])
@@ -1240,6 +1243,11 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
         sale_point: record.sale_point || '',
         travel_mode: record.travel_mode === 'land' ? 'land' : 'air',
         passenger_whatsapp: record.passenger_whatsapp || record.passenger_phone || '',
+        commission_partner_type: record.commission_partner_type || '',
+        commission_partner_id: record.commission_partner_id || '',
+        commission_partner_name: record.commission_partner_name || '',
+        commission_share_mode: record.commission_share_mode || 'amount',
+        commission_share_value: record.commission_share_value ?? '',
       })
     } else {
       setForm(emptyForm)
@@ -1414,6 +1422,67 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
               </Field>
             </div>
           </div>
+
+          {/* v3.9.27 — Commission Sharing block */}
+          {commission > 0 && (
+            <div className="bg-gradient-to-l from-amber-50 to-yellow-50 border-2 border-amber-200 rounded-xl p-4 mt-2">
+              <div className="flex items-center justify-between mb-3">
+                <div className="text-sm font-bold text-slate-800 flex items-center gap-2">🤝 <span>مشاركة العمولة (اختياري)</span></div>
+                {form.commission_partner_id && (
+                  <Button size="sm" variant="ghost" onClick={() => setForm({ ...form, commission_partner_type: '', commission_partner_id: '', commission_partner_name: '', commission_share_value: '' })} className="text-rose-600 h-7 text-xs">إلغاء المشاركة</Button>
+                )}
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                <Field label="الشريك (المستفيد)">
+                  <Select value={form.commission_partner_id ? `${form.commission_partner_type}:${form.commission_partner_id}` : ''} onValueChange={v => {
+                    if (!v) return
+                    const [type, id] = v.split(':')
+                    const items = type === 'supplier' ? suppliers : clients
+                    const found = items.find(x => x.id === id)
+                    setForm({ ...form, commission_partner_type: type, commission_partner_id: id, commission_partner_name: found?.name || '' })
+                  }}>
+                    <SelectTrigger><SelectValue placeholder="اختر عميل / مورد" /></SelectTrigger>
+                    <SelectContent>
+                      {clients.length > 0 && <SelectItem value="__hdr_c__" disabled>— العملاء —</SelectItem>}
+                      {clients.map(c => <SelectItem key={`c-${c.id}`} value={`client:${c.id}`}>👤 {c.name}</SelectItem>)}
+                      {suppliers.length > 0 && <SelectItem value="__hdr_s__" disabled>— الموردون / الوكلاء —</SelectItem>}
+                      {suppliers.map(s => <SelectItem key={`s-${s.id}`} value={`supplier:${s.id}`}>🏢 {s.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="الصيغة">
+                  <Select value={form.commission_share_mode} onValueChange={v => setForm({ ...form, commission_share_mode: v })} disabled={!form.commission_partner_id}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="amount">💰 مبلغ ثابت</SelectItem>
+                      <SelectItem value="percent">📊 نسبة من العمولة</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label={form.commission_share_mode === 'percent' ? 'النسبة %' : `المبلغ (${form.currency})`}>
+                  <Input type="number" step="0.01" value={form.commission_share_value} onChange={e => setForm({ ...form, commission_share_value: e.target.value })} disabled={!form.commission_partner_id} placeholder={form.commission_share_mode === 'percent' ? '50' : '5'} />
+                </Field>
+                <Field label="حصة المكتب">
+                  {(() => {
+                    const share = form.commission_share_mode === 'percent'
+                      ? +(commission * (Number(form.commission_share_value) || 0) / 100).toFixed(2)
+                      : +(Number(form.commission_share_value) || 0).toFixed(2)
+                    const cappedShare = Math.min(Math.max(0, share), commission)
+                    const netOffice = +(commission - cappedShare).toFixed(2)
+                    return (
+                      <div className="text-sm space-y-0.5">
+                        <div className="flex justify-between"><span className="text-slate-500">حصة الشريك:</span><b className="text-amber-700">{fmt(cappedShare, form.currency)}</b></div>
+                        <div className="flex justify-between border-t pt-0.5"><span className="text-slate-500">حصة المكتب:</span><b className="text-emerald-700">{fmt(netOffice, form.currency)}</b></div>
+                      </div>
+                    )
+                  })()}
+                </Field>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-2 leading-relaxed">
+                💡 عند حفظ التذكرة، سيُنشأ سطر إضافي في قيد اليومية يخصم حصة الشريك من إيرادات المكتب ويقيدها لحسابه — مما يُسهّل المقاصة المالية لاحقاً بدون كشوفات يدوية.
+              </div>
+            </div>
+          )}
           <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} disabled={saving} className="grad-brand text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (isEdit ? '💾 حفظ التعديل + عكس القيد' : 'حفظ + إنشاء قيد')}</Button></DialogFooter>
         </DialogContent>
       </Dialog>

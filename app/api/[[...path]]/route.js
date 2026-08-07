@@ -427,7 +427,7 @@ async function handleRoute(request, { params }) {
           timestamp: new Date().toISOString(),
           uptime_sec: Math.floor(process.uptime()),
           service: 'rahaal-erp',
-          version: '3.9.26',
+          version: '3.9.27',
           db: 'connected',
         })
       } catch (e) {
@@ -1246,7 +1246,7 @@ async function handleRoute(request, { params }) {
       return ok({
         ok: true, tenant: { id: T, name: sess.tenant?.name || null, plan: isPaid ? 'paid' : 'trial' },
         user: { id: sess.user.id, email: sess.user.email, role: sess.user.role },
-        version: '3.9.26',
+        version: '3.9.27',
         extension_min_version: '1.4.0',
         usage: { plan: isPaid ? 'paid' : 'trial', used, limit: isPaid ? -1 : limit, remaining: isPaid ? -1 : Math.max(0, limit - used), unlimited: isPaid },
       })
@@ -2756,13 +2756,39 @@ async function createTicket(db, T, b, opts = {}) {
     boarding_point: b.boarding_point || '',
     sale_point: b.sale_point || '',
     cost, sale_price: sale, commission,
+    // v3.9.27 — Commission Sharing (partner split)
+    commission_partner_type: b.commission_partner_type || null,   // 'client' | 'supplier' | null
+    commission_partner_id: b.commission_partner_id || null,
+    commission_partner_name: b.commission_partner_name || '',
+    commission_share_mode: b.commission_share_mode === 'percent' ? 'percent' : 'amount',
+    commission_share_value: Number(b.commission_share_value) || 0,
+    commission_share_amount: 0,   // computed below
     payment_method: paymentMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
     created_at: opts.createdAt || new Date(),
     ...(opts.existingId ? { updated_at: new Date() } : {}),
   }
+  // v3.9.27 — Compute partner commission share amount
+  let partnerShare = 0
+  if (doc.commission_partner_id && doc.commission_share_value > 0 && commission > 0) {
+    if (doc.commission_share_mode === 'percent') {
+      partnerShare = +(commission * (doc.commission_share_value / 100)).toFixed(2)
+    } else {
+      partnerShare = +Number(doc.commission_share_value).toFixed(2)
+    }
+    partnerShare = Math.min(partnerShare, commission) // cap at total commission
+  }
+  doc.commission_share_amount = partnerShare
+  const officeNetCommission = +(commission - partnerShare).toFixed(2)
   await db.collection('tickets').insertOne(doc)
   // Balance updates + journal
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
+  // v3.9.27 — Update partner balance if commission-share configured
+  if (partnerShare > 0 && doc.commission_partner_id) {
+    const col = doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
+    // Partner is CREDITED (they are owed by us). For clients that means their debt to us decreases.
+    // We credit them by -partnerShare (i.e., they owe us less / we owe them if supplier)
+    await updateBalance(db, col, { id: doc.commission_partner_id, tenant_id: T }, b.currency, -partnerShare)
+  }
   const lines = []
   if (paymentMethod === 'cash') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
@@ -2772,9 +2798,14 @@ async function createTicket(db, T, b, opts = {}) {
     lines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
   }
   lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
-  lines.push({ account_code: '4101', account_name: 'إيرادات عمولات التذاكر', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التذاكر', debit: 0, credit: commission })
+  if (officeNetCommission !== 0) {
+    lines.push({ account_code: '4101', account_name: 'إيرادات عمولات التذاكر', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التذاكر', debit: 0, credit: officeNetCommission })
+  }
+  if (partnerShare > 0) {
+    lines.push({ account_code: doc.commission_partner_type === 'supplier' ? '2101' : '1301', account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+  }
   await createJournalEntry(db, T, {
-    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}حجز تذكرة ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} PNR ${doc.pnr || '-'} — ${cli?.name || doc.client_name || sup.name}`,
+    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}حجز تذكرة ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} PNR ${doc.pnr || '-'} — ${cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
     ref_type: 'ticket', ref_id: doc.id, currency: b.currency, lines,
   }, { skipQuota: !!opts.skipQuota })
   const { _id, ...rest } = doc; return { doc: rest }
