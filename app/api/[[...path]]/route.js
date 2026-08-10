@@ -270,22 +270,33 @@ function generatePat() {
   return `rhl_pat_${raw}`
 }
 async function getPatSession(request, db) {
-  // Support Authorization: Bearer <pat> for Chrome Extension / API clients
-  const auth = request.headers.get('authorization') || ''
-  const m = auth.match(/^Bearer\s+(rhl_pat_[A-Za-z0-9]+)$/i)
-  if (!m) return null
-  const token = m[1]
-  const hash = hashPat(token)
-  const pat = await db.collection('pats').findOne({ token_hash: hash, revoked_at: null })
-  if (!pat) return null
-  const user = await db.collection('users').findOne({ id: pat.user_id })
-  if (!user || !user.active) return null
-  let tenant = null
-  if (user.tenant_id) tenant = await db.collection('tenants').findOne({ id: user.tenant_id })
-  if (tenant && tenant.status !== 'active') return { pat, user, tenant, blocked: true }
-  // Update last-used timestamp (fire-and-forget)
-  db.collection('pats').updateOne({ id: pat.id }, { $set: { last_used_at: new Date() } }).catch(() => {})
-  return { pat, user, tenant, isPat: true }
+  try {
+    if (!request || !request.headers) return null
+
+    // قراءة آمنة للهيدر تمنع حدوث أي خطأ undefined أو استدعاء خاطئ
+    const auth = (typeof request.headers.get === 'function'
+      ? request.headers.get('authorization')
+      : request.headers.authorization) || ''
+
+    if (!auth || typeof auth !== 'string') return null
+    const m = auth.match(/^Bearer\s+(rhl_pat_[A-Za-z0-9]+)$/i)
+    if (!m) return null
+    const token = m[1]
+    const hash = hashPat(token)
+    const pat = await db.collection('pats').findOne({ token_hash: hash, revoked_at: null })
+    if (!pat) return null
+    const user = await db.collection('users').findOne({ id: pat.user_id })
+    if (!user || !user.active) return null
+    let tenant = null
+    if (user.tenant_id) tenant = await db.collection('tenants').findOne({ id: user.tenant_id })
+    if (tenant && tenant.status !== 'active') return { pat, user, tenant, blocked: true }
+
+    // تحديث وقت آخر استخدام
+    db.collection('pats').updateOne({ id: pat.id }, { $set: { last_used_at: new Date() } }).catch(() => {})
+    return { pat, user, tenant, isPat: true }
+  } catch (err) {
+    return null
+  }
 }
 function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
 function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price } : null }
