@@ -7704,3 +7704,53 @@ agent_communication:
       7. TEST 2B: Click ✏️, change name to "مسافر معدل — Light", save → verify "تحديث بيانات المسافر" toast
       8. TEST 2C: Click ✏️, change pax to 3, verify preview shows cost=300/sale=450/profit=150, save → verify "إعادة احتساب القيد المحاسبي" toast
       9. TEST 2D: Click ✏️, clear name, save → verify validation error "اسم المسافر مطلوب", dialog stays open
+
+  - agent: "main"
+    message: |
+      🌳 v3.10.0 — Chart of Accounts Migration + Autocomplete + Tree View (Session A + B1 + B2)
+      
+      **PHASE 1: Data Migration (Session A + B1)**
+      - Wrote /app/scripts/dry_run_migration.js — read-only report generator
+      - Wrote /app/scripts/live_migration.js — actual migration
+      - Backups: /app/backups/pre_chart_migration_20260810_064940 + pre_live_migration_20260810_074349
+      - EXECUTED on owner@demo.com tenant (d89bc41d-e19b-430f-be93-e3f8ca6d404a):
+        * 38 clients → codes 13010001..13010038
+        * 35 suppliers → codes 21010001..21010035
+        * 7 boxes → 4 cash (11010001..11010004) + 3 bank (12010001..12010003)
+        * 111 JEs / 223 lines updated with new account_codes
+        * 8 zero-activity entities flagged inactive:true
+      - Balances preserved 100% (verified by pre/post sum comparison)
+      - UUIDs preserved 100%
+      
+      **PHASE 2: Backend Changes (Session B2)** — app/api/[[...path]]/route.js
+      - Added generateSubAccountCode(db, T, parent_code) — atomic sequential code generator (findOneAndUpdate with $inc)
+      - Added validateJournalLines(db, T, lines) — reject negative + verify account exists
+      - Updated POST /clients, /suppliers, /boxes to auto-generate account_code
+      - New endpoint GET /accounts/search?q=&type=client|supplier|box|all&limit=&include_inactive=
+      - New endpoint GET /accounts/tree — hierarchical parents + sub_entities
+      - Enhanced createManualJournal with negative-check + account-existence check
+      
+      **PHASE 3: Frontend Changes (Session B2)** — app/page.js
+      - New reusable component: AccountAutocomplete (props: type, value, onChange, placeholder)
+      - Enhanced ChartScreen with viewMode toggle: 'tree' | 'classic'
+      - Tree view features:
+        * Full hierarchical display (parents + sub-entities)
+        * Search box (debounced)
+        * Show/hide inactive toggle
+        * Expand/collapse per node + expand-all / collapse-all buttons
+        * Color-coded by type (asset/liability/revenue/expense)
+        * Sub-entities show code + name + balance snapshot + inactive badge
+      
+      **Manual Testing Done (via cURL):**
+      - ✅ POST /clients → returns account_code=13010039 (next in sequence)
+      - ✅ POST JE with debit=-100 → rejects "لا يُسمح بقيم سالبة في القيد"
+      - ✅ POST JE with account_code=99999999 → rejects "الحساب غير موجود في دليل الحسابات"
+      - ✅ GET /accounts/search?q=demo&type=client → returns DemoClientA with code 13010001
+      - ✅ GET /accounts/tree → returns 4 root types with sub_entities under 1101/1201/1301/2101
+      
+      **Pending User Testing:**
+      1. Visual check of the tree view in the "الدليل المحاسبي" screen
+      2. Test the search / expand-collapse UX
+      3. Verify inactive filter behavior
+      
+      **Note:** AccountAutocomplete component is created and ready, but NOT YET integrated into existing JE / cash receipt / cash payment / transfer dialogs. That's a follow-up mini-session (Session B3) requiring user's priority list.

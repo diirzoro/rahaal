@@ -615,6 +615,100 @@ function Field({ label, required, children }) {
   )
 }
 
+// v3.10.0 — AccountAutocomplete: smart searcher across clients/suppliers/boxes
+// Props:
+//   type: 'client' | 'supplier' | 'box' | 'all'  (default 'all')
+//   value: currently selected id (or null)
+//   onChange: fn(entity) — entity = { id, name, type, account_code, parent_code, balances, ... } or null
+//   placeholder: string
+//   disabled: bool
+//   allowClear: bool
+function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder = 'بحث بالاسم أو الكود...', disabled = false, allowClear = true }) {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState([])
+  const [open, setOpen] = useState(false)
+  const [selected, setSelected] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const wrapRef = useRef(null)
+  // Debounced search
+  useEffect(() => {
+    if (!open) return
+    const timer = setTimeout(async () => {
+      setLoading(true)
+      try {
+        const rs = await api(`/accounts/search?q=${encodeURIComponent(query)}&type=${type}&limit=25`)
+        setResults(Array.isArray(rs) ? rs : [])
+      } catch (_) { setResults([]) }
+      setLoading(false)
+    }, 200)
+    return () => clearTimeout(timer)
+  }, [query, type, open])
+  // Load selected by value once
+  useEffect(() => {
+    if (!value) { setSelected(null); return }
+    if (selected?.id === value) return
+    // Try fetching by empty search + filter (fast path); if not found, keep placeholder
+    api(`/accounts/search?q=&type=${type}&limit=200`).then(list => {
+      const found = (list || []).find(x => x.id === value)
+      if (found) setSelected(found)
+    }).catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, type])
+  // Click outside
+  useEffect(() => {
+    const handler = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+  const typeIcon = { client: '👤', supplier: '🏭', box: '💰' }
+  const typeLabel = { client: 'عميل', supplier: 'مورد', box: 'صندوق' }
+  const typeBadge = { client: 'bg-emerald-50 text-emerald-700 border-emerald-200', supplier: 'bg-rose-50 text-rose-700 border-rose-200', box: 'bg-blue-50 text-blue-700 border-blue-200' }
+  const pick = (r) => { setSelected(r); onChange?.(r); setOpen(false); setQuery('') }
+  const clear = (e) => { e.stopPropagation(); setSelected(null); onChange?.(null); setQuery('') }
+  return (
+    <div ref={wrapRef} className="relative">
+      <div className={`flex items-center gap-1 border rounded-md bg-white px-2 py-1.5 text-sm cursor-text ${disabled ? 'opacity-60 pointer-events-none' : 'hover:border-blue-400'}`} onClick={() => !disabled && setOpen(true)}>
+        {selected ? (
+          <div className="flex items-center gap-2 flex-1 min-w-0">
+            <span className="text-base shrink-0">{typeIcon[selected.type] || '•'}</span>
+            <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${typeBadge[selected.type] || 'bg-slate-50 border-slate-200'}`}>{selected.account_code}</span>
+            <span className="truncate">{selected.name}</span>
+            {allowClear && <button onClick={clear} className="ms-auto text-slate-400 hover:text-rose-500 shrink-0" title="مسح">✕</button>}
+          </div>
+        ) : open ? (
+          <input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder={placeholder} className="flex-1 outline-none bg-transparent" />
+        ) : (
+          <div className="flex-1 text-slate-400">{placeholder}</div>
+        )}
+        <span className="text-slate-400 text-xs shrink-0">▾</span>
+      </div>
+      {open && (
+        <div className="absolute z-50 mt-1 w-full max-h-72 overflow-y-auto bg-white border-2 rounded-lg shadow-lg">
+          {!selected && (
+            <div className="p-2 border-b bg-slate-50">
+              <input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder={placeholder} className="w-full px-2 py-1 text-sm border rounded" />
+            </div>
+          )}
+          {loading && <div className="p-3 text-center text-xs text-slate-400">جاري البحث...</div>}
+          {!loading && results.length === 0 && <div className="p-3 text-center text-xs text-slate-400">لا نتائج — جرّب كلمة أخرى</div>}
+          {!loading && results.map(r => (
+            <button key={r.id} onClick={() => pick(r)} className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-blue-50 border-b last:border-b-0 text-right">
+              <span className="text-base shrink-0">{typeIcon[r.type] || '•'}</span>
+              <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${typeBadge[r.type] || 'bg-slate-50 border-slate-200'}`}>{r.account_code}</span>
+              <span className="flex-1 truncate">{r.name}</span>
+              <span className="text-[10px] text-slate-400 shrink-0">{typeLabel[r.type] || ''}</span>
+              <span className="text-[10px] font-mono text-slate-500 shrink-0">
+                {Object.entries(r.balances || {}).filter(([, v]) => Number(v) !== 0).slice(0, 1).map(([c, v]) => `${c}:${Number(v).toLocaleString()}`).join('')}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 // ================================================================
 // TENANT SIDEBAR & TOP BAR
 // ================================================================
@@ -3774,8 +3868,16 @@ function ChartScreen() {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState({ code: '', name_ar: '', type: 'asset', parent: '', is_group: false, notes: '' })
+  // v3.10.0 — Full tree view (parents + sub-entities: clients/suppliers/boxes)
+  const [viewMode, setViewMode] = useState('tree') // 'tree' | 'classic'
+  const [treeData, setTreeData] = useState([])
+  const [treeSearch, setTreeSearch] = useState('')
+  const [showInactive, setShowInactive] = useState(false)
+  const [expanded, setExpanded] = useState({})
   const load = () => api('/accounts').then(setRows).catch(e => toast.error(e.message))
+  const loadTree = () => api(`/accounts/tree${showInactive ? '?include_inactive=1' : ''}`).then(setTreeData).catch(() => {})
   useEffect(() => { load() }, [])
+  useEffect(() => { if (viewMode === 'tree') loadTree() }, [viewMode, showInactive])
   useEffect(() => {
     if (!open) return
     if (editing) setForm({ code: editing.code || '', name_ar: editing.name_ar || '', type: editing.type || 'asset', parent: editing.parent || '', is_group: !!editing.is_group, notes: editing.notes || '' })
@@ -3825,21 +3927,129 @@ function ChartScreen() {
       {node.children?.map(c => renderNode(c, depth + 1))}
     </div>
   )
+
+  // v3.10.0 — Full-tree renderer with sub_entities (clients/suppliers/boxes)
+  const typeColor = { asset: 'text-emerald-700 bg-emerald-50 border-emerald-200', liability: 'text-rose-700 bg-rose-50 border-rose-200', revenue: 'text-blue-700 bg-blue-50 border-blue-200', expense: 'text-amber-700 bg-amber-50 border-amber-200' }
+  const subEntityIcon = { client: '👤', supplier: '🏭', box: '💰' }
+  const matchesSearch = (text) => !treeSearch || String(text || '').toLowerCase().includes(treeSearch.toLowerCase())
+  const nodeMatches = (node) => {
+    if (matchesSearch(node.name) || matchesSearch(node.code)) return true
+    if ((node.children || []).some(c => nodeMatches(c))) return true
+    if ((node.sub_entities || []).some(s => matchesSearch(s.name) || matchesSearch(s.code))) return true
+    return false
+  }
+  const toggleExp = (code) => setExpanded(e => ({ ...e, [code]: !e[code] }))
+  const renderTreeNode = (node, depth = 0) => {
+    if (!nodeMatches(node)) return null
+    const hasChildren = (node.children || []).length > 0
+    const hasSubs = (node.sub_entities || []).length > 0
+    const canExpand = hasChildren || hasSubs
+    const isOpen = expanded[node.code] !== false // default open
+    const clr = typeColor[node.type] || 'text-slate-700 bg-slate-50'
+    return (
+      <div key={node.code} className="mb-1">
+        <div className={`flex items-center justify-between gap-2 p-2 rounded-lg border ${clr}`} style={{ marginRight: `${depth * 16}px` }}>
+          <div className="flex items-center gap-2 flex-1 min-w-0">
+            {canExpand ? (
+              <button onClick={() => toggleExp(node.code)} className="w-5 h-5 flex items-center justify-center rounded hover:bg-white/60 text-xs font-bold">
+                {isOpen ? '▾' : '▸'}
+              </button>
+            ) : <span className="w-5 h-5 inline-block" />}
+            <span className="font-mono text-[11px] font-bold px-1.5 py-0.5 rounded bg-white/70 border">{node.code}</span>
+            <span className="text-sm font-semibold truncate">{node.name}</span>
+            {node.is_group && <Badge variant="outline" className="text-[10px] shrink-0">📁 مجموعة</Badge>}
+            {node.is_parent && <Badge variant="outline" className="text-[10px] shrink-0 bg-white">🌳 شجري · {node.next_child_seq} فرع</Badge>}
+          </div>
+          <div className="flex items-center gap-1 opacity-70 hover:opacity-100 shrink-0">
+            <Button size="sm" variant="ghost" onClick={() => { setEditing({ id: node.id, code: node.code, name_ar: node.name, type: node.type, parent: node.parent, is_group: node.is_group }); setOpen(true) }} className="h-6 w-6 p-0"><Pencil className="w-3 h-3" /></Button>
+          </div>
+        </div>
+        {isOpen && hasChildren && (
+          <div className="mt-1 space-y-1 border-r-2 border-dashed border-slate-200 pr-2 mr-4">
+            {(node.children || []).map(c => renderTreeNode(c, depth + 1))}
+          </div>
+        )}
+        {isOpen && hasSubs && (
+          <div className="mt-1 space-y-1 border-r-2 border-dotted border-purple-200 pr-2 mr-8">
+            {(node.sub_entities || []).filter(s => matchesSearch(s.name) || matchesSearch(s.code)).map(se => (
+              <div key={se.id} className={`flex items-center justify-between gap-2 p-1.5 rounded-md text-xs bg-white border ${se.inactive ? 'border-slate-200 opacity-60' : 'border-slate-200 hover:border-purple-300'}`}>
+                <div className="flex items-center gap-2 flex-1 min-w-0">
+                  <span>{subEntityIcon[se.type] || '•'}</span>
+                  <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-purple-50 border border-purple-200 text-purple-700">{se.code}</span>
+                  <span className="text-slate-800 truncate">{se.name}</span>
+                  {se.inactive && <Badge variant="outline" className="text-[9px] shrink-0 bg-slate-100 text-slate-500">🌙 غير نشط</Badge>}
+                </div>
+                <div className="text-[10px] text-slate-500 shrink-0 font-mono">
+                  {Object.entries(se.balances || {}).filter(([, v]) => Number(v) !== 0).slice(0, 2).map(([c, v]) => `${c}:${Number(v).toLocaleString()}`).join(' · ') || '—'}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
   return (
     <div className="space-y-6">
       <TopBar title="الدليل المحاسبي" subtitle="شجرة الحسابات الرئيسية والفرعية — يدعم الحسابات المجمعة (parent/child)"
         right={<Button onClick={() => { setEditing(null); setOpen(true) }} className="gap-2 grad-brand text-white"><Plus className="w-4 h-4" /> حساب جديد</Button>} />
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {Object.entries(byType).map(([t, list]) => (
-          <Card key={t}>
-            <CardHeader><CardTitle className="flex items-center gap-2"><div className={`w-8 h-8 rounded-md ${typeGrad[t]}`} /> {typeLabel[t]} <Badge variant="outline">{list.length}</Badge></CardTitle></CardHeader>
-            <CardContent><div className="space-y-1">
-              {list.length === 0 && <div className="text-xs text-slate-400 text-center py-4">لا توجد حسابات — أضف حساباً جديداً</div>}
-              {buildTree(list).map(n => renderNode(n))}
-            </div></CardContent>
-          </Card>
-        ))}
-      </div>
+
+      {/* v3.10.0 — View mode toggle bar */}
+      <Card>
+        <CardContent className="p-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100 border">
+              <button onClick={() => setViewMode('tree')} className={`px-3 py-1.5 rounded-md text-xs font-bold transition ${viewMode === 'tree' ? 'bg-white shadow border' : 'text-slate-500'}`}>🌳 عرض الشجرة الشاملة</button>
+              <button onClick={() => setViewMode('classic')} className={`px-3 py-1.5 rounded-md text-xs font-bold transition ${viewMode === 'classic' ? 'bg-white shadow border' : 'text-slate-500'}`}>📚 العرض التقليدي</button>
+            </div>
+            {viewMode === 'tree' && (
+              <>
+                <div className="flex-1 min-w-[200px]">
+                  <Input placeholder="🔍 بحث في الشجرة (اسم أو كود)..." value={treeSearch} onChange={e => setTreeSearch(e.target.value)} className="h-8 text-sm" />
+                </div>
+                <label className="flex items-center gap-2 text-xs cursor-pointer">
+                  <input type="checkbox" checked={showInactive} onChange={e => setShowInactive(e.target.checked)} />
+                  <span>إظهار الحسابات الخاملة (🌙)</span>
+                </label>
+                <Button size="sm" variant="outline" onClick={() => setExpanded({})} className="h-8 text-xs">📂 توسيع الكل</Button>
+                <Button size="sm" variant="outline" onClick={() => {
+                  const all = {}; const collect = (n) => { all[n.code] = false; (n.children || []).forEach(collect) }; treeData.forEach(collect); setExpanded(all)
+                }} className="h-8 text-xs">📁 طي الكل</Button>
+              </>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {viewMode === 'tree' ? (
+        <Card>
+          <CardContent className="p-4">
+            {treeData.length === 0 && <div className="text-center py-8 text-slate-400 text-sm">جاري تحميل شجرة الحسابات...</div>}
+            <div className="space-y-2">
+              {treeData.map(root => renderTreeNode(root, 0))}
+            </div>
+            <div className="mt-4 pt-3 border-t text-[11px] text-slate-500 flex flex-wrap gap-3">
+              <span>🎨 <span className="px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold">الأصول</span></span>
+              <span><span className="px-1.5 py-0.5 rounded bg-rose-50 border border-rose-200 text-rose-700 font-semibold">الخصوم</span></span>
+              <span><span className="px-1.5 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700 font-semibold">الإيرادات</span></span>
+              <span><span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-700 font-semibold">المصروفات</span></span>
+              <span className="ms-auto">👤 عميل · 🏭 مورد · 💰 صندوق/بنك</span>
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {Object.entries(byType).map(([t, list]) => (
+            <Card key={t}>
+              <CardHeader><CardTitle className="flex items-center gap-2"><div className={`w-8 h-8 rounded-md ${typeGrad[t]}`} /> {typeLabel[t]} <Badge variant="outline">{list.length}</Badge></CardTitle></CardHeader>
+              <CardContent><div className="space-y-1">
+                {list.length === 0 && <div className="text-xs text-slate-400 text-center py-4">لا توجد حسابات — أضف حساباً جديداً</div>}
+                {buildTree(list).map(n => renderNode(n))}
+              </div></CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
       <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }}>
         <DialogContent dir="rtl" className="max-w-lg">
           <DialogHeader>

@@ -310,6 +310,45 @@ async function ensureReferralCode(db, tenantId) {
 async function updateBalance(db, col, filter, currency, delta) {
   await db.collection(col).updateOne(filter, { $inc: { [`balances.${currency}`]: delta } })
 }
+
+// v3.10.0 — Chart of Accounts tree: atomic sequential code generator
+// Returns new account_code in form: <parent_code><4-digit-sequence>
+async function generateSubAccountCode(db, tenantId, parentCode) {
+  const parent = await db.collection('accounts').findOneAndUpdate(
+    { tenant_id: tenantId, code: String(parentCode) },
+    { $inc: { next_child_seq: 1 }, $set: { is_parent: true } },
+    { returnDocument: 'after' }
+  )
+  const parentDoc = parent?.value || parent
+  if (!parentDoc) throw new Error(`الحساب الأب ${parentCode} غير موجود في الدليل`)
+  const seq = parentDoc.next_child_seq || 1
+  return {
+    account_code: String(parentCode) + String(seq).padStart(4, '0'),
+    account_parent_code: String(parentCode),
+    account_seq: seq,
+  }
+}
+
+// v3.10.0 — Validate JE lines: no negatives + account exists
+async function validateJournalLines(db, tenantId, lines) {
+  if (!Array.isArray(lines) || lines.length === 0) return { ok: true }
+  // Cache parent + sub-account codes to avoid many queries
+  const acctCodes = new Set((await db.collection('accounts').find({ tenant_id: tenantId }).project({ code: 1 }).toArray()).map(a => a.code))
+  const clientCodes = new Set((await db.collection('clients').find({ tenant_id: tenantId }).project({ account_code: 1 }).toArray()).map(x => x.account_code).filter(Boolean))
+  const supplierCodes = new Set((await db.collection('suppliers').find({ tenant_id: tenantId }).project({ account_code: 1 }).toArray()).map(x => x.account_code).filter(Boolean))
+  const boxCodes = new Set((await db.collection('boxes').find({ tenant_id: tenantId }).project({ account_code: 1 }).toArray()).map(x => x.account_code).filter(Boolean))
+  for (const l of lines) {
+    const d = Number(l.debit) || 0
+    const c = Number(l.credit) || 0
+    if (d < 0 || c < 0) return { ok: false, error: `لا يُسمح بقيم سالبة في القيد (المدين=${d}، الدائن=${c})` }
+    const code = l.account_code
+    if (!code || code === 'MANUAL') continue // MANUAL is a placeholder allowed for legacy
+    const exists = acctCodes.has(code) || clientCodes.has(code) || supplierCodes.has(code) || boxCodes.has(code)
+    if (!exists) return { ok: false, error: `الحساب "${code}" غير موجود في دليل الحسابات` }
+  }
+  return { ok: true }
+}
+
 async function createJournalEntry(db, tenantId, { date, description, ref_type, ref_id, currency, lines }, opts = {}) {
   // Enforce quota (skipped in edit mode)
   if (!opts.skipQuota) {
@@ -1991,7 +2030,9 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       if (!b.name) return bad('اسم العميل مطلوب')
       const parent_code = String(b.parent_code || '1301') // v3.9.3 — default to العملاء (مدينون)
-      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', parent_code, balances: emptyBalances(), created_at: new Date() }
+      let accountInfo = {}
+      try { accountInfo = await generateSubAccountCode(db, T, parent_code) } catch (e) { return bad(e.message) }
+      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', parent_code, ...accountInfo, balances: emptyBalances(), created_at: new Date() }
       await db.collection('clients').insertOne(doc)
       const { _id, ...rest } = doc; return ok(rest)
     }
@@ -2021,7 +2062,9 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       if (!b.name) return bad('اسم المورد مطلوب')
       const parent_code = String(b.parent_code || '2101') // v3.9.3 — default to الموردون والوكلاء (دائنون)
-      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', parent_code, balances: emptyBalances(), created_at: new Date() }
+      let accountInfo = {}
+      try { accountInfo = await generateSubAccountCode(db, T, parent_code) } catch (e) { return bad(e.message) }
+      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', parent_code, ...accountInfo, balances: emptyBalances(), created_at: new Date() }
       await db.collection('suppliers').insertOne(doc)
       const { _id, ...rest } = doc; return ok(rest)
     }
@@ -2052,13 +2095,108 @@ async function handleRoute(request, { params }) {
       const type = b.type || 'cash'
       const defaultParent = type === 'cash' ? '1101' : '1201' // 1101=صندوق, 1201=حسابات بنكية
       const parent_code = String(b.parent_code || defaultParent)
-      const doc = { id: uuidv4(), tenant_id: T, name_ar: b.name_ar, type, parent_code, balances: emptyBalances(), created_at: new Date() }
+      let accountInfo = {}
+      try { accountInfo = await generateSubAccountCode(db, T, parent_code) } catch (e) { return bad(e.message) }
+      const doc = { id: uuidv4(), tenant_id: T, name_ar: b.name_ar, type, parent_code, ...accountInfo, balances: emptyBalances(), created_at: new Date() }
       await db.collection('boxes').insertOne(doc)
       const { _id, ...rest } = doc; return ok(rest)
     }
 
     // Accounts (Chart of Accounts)
     if (route === '/accounts' && method === 'GET') return ok(clean(await db.collection('accounts').find(tf).sort({ code: 1 }).toArray()))
+
+    // v3.10.0 — GET /accounts/search — smart autocomplete across sub-accounts
+    // Query: ?q=<text>&type=client|supplier|box|all&limit=20&include_inactive=0
+    if (route === '/accounts/search' && method === 'GET') {
+      const qText = String(q.q || '').trim().toLowerCase()
+      const wantType = String(q.type || 'all').toLowerCase()
+      const includeInactive = String(q.include_inactive || '0') === '1'
+      const lim = Math.min(Number(q.limit) || 30, 100)
+      const filterInactive = includeInactive ? {} : { $or: [{ inactive: { $exists: false } }, { inactive: { $ne: true } }] }
+      const baseQ = { tenant_id: T, ...filterInactive }
+      const results = []
+      const wantAll = wantType === 'all'
+      if (wantAll || wantType === 'client') {
+        const rows = await db.collection('clients').find(baseQ).toArray()
+        rows.forEach(r => {
+          const label = (r.name || '').toLowerCase()
+          const code = (r.account_code || '').toLowerCase()
+          if (!qText || label.includes(qText) || code.includes(qText)) {
+            results.push({ id: r.id, name: r.name, type: 'client', account_code: r.account_code, parent_code: r.account_parent_code || r.parent_code, balances: r.balances || {}, phone: r.phone || '' })
+          }
+        })
+      }
+      if (wantAll || wantType === 'supplier') {
+        const rows = await db.collection('suppliers').find(baseQ).toArray()
+        rows.forEach(r => {
+          const label = (r.name || '').toLowerCase()
+          const code = (r.account_code || '').toLowerCase()
+          if (!qText || label.includes(qText) || code.includes(qText)) {
+            results.push({ id: r.id, name: r.name, type: 'supplier', account_code: r.account_code, parent_code: r.account_parent_code || r.parent_code, balances: r.balances || {}, phone: r.phone || '' })
+          }
+        })
+      }
+      if (wantAll || wantType === 'box') {
+        const rows = await db.collection('boxes').find(baseQ).toArray()
+        rows.forEach(r => {
+          const label = (r.name_ar || '').toLowerCase()
+          const code = (r.account_code || '').toLowerCase()
+          if (!qText || label.includes(qText) || code.includes(qText)) {
+            results.push({ id: r.id, name: r.name_ar, type: 'box', box_type: r.type, account_code: r.account_code, parent_code: r.account_parent_code || r.parent_code, balances: r.balances || {} })
+          }
+        })
+      }
+      // Sort: by account_code ascending (natural tree order)
+      results.sort((a, b) => (a.account_code || '').localeCompare(b.account_code || ''))
+      return ok(results.slice(0, lim))
+    }
+
+    // v3.10.0 — GET /accounts/tree — hierarchical accounts + sub-accounts for tree view
+    if (route === '/accounts/tree' && method === 'GET') {
+      const includeInactive = String(q.include_inactive || '0') === '1'
+      const filterInactive = includeInactive ? {} : { $or: [{ inactive: { $exists: false } }, { inactive: { $ne: true } }] }
+      const [accs, clients, suppliers, boxes] = await Promise.all([
+        db.collection('accounts').find({ tenant_id: T }).sort({ code: 1 }).toArray(),
+        db.collection('clients').find({ tenant_id: T, ...filterInactive }).toArray(),
+        db.collection('suppliers').find({ tenant_id: T, ...filterInactive }).toArray(),
+        db.collection('boxes').find({ tenant_id: T, ...filterInactive }).toArray(),
+      ])
+      // Build accounts tree by parent
+      const byCode = new Map()
+      accs.forEach(a => byCode.set(a.code, {
+        id: a.id, code: a.code, name: a.name_ar, type: a.type, parent: a.parent,
+        is_group: !!a.is_group, is_parent: !!a.is_parent, next_child_seq: a.next_child_seq || 0,
+        children: [], sub_entities: [],
+      }))
+      const roots = []
+      accs.forEach(a => {
+        const node = byCode.get(a.code)
+        if (a.parent && byCode.has(a.parent)) byCode.get(a.parent).children.push(node)
+        else roots.push(node)
+      })
+      // Attach sub-entities under their parent codes
+      const attach = (entity, type) => {
+        const pcode = entity.account_parent_code || entity.parent_code
+        if (pcode && byCode.has(pcode)) {
+          byCode.get(pcode).sub_entities.push({
+            id: entity.id,
+            code: entity.account_code || pcode,
+            name: entity.name || entity.name_ar,
+            type,
+            box_type: entity.type,
+            balances: entity.balances || {},
+            inactive: !!entity.inactive,
+          })
+        }
+      }
+      clients.forEach(c => attach(c, 'client'))
+      suppliers.forEach(s => attach(s, 'supplier'))
+      boxes.forEach(b => attach(b, 'box'))
+      // Sort sub-entities by code
+      byCode.forEach(n => n.sub_entities.sort((a, b) => (a.code || '').localeCompare(b.code || '')))
+      return ok(roots)
+    }
+
     if (route === '/accounts' && method === 'POST') {
       const b = await request.json()
       if (!b.code || !b.name_ar || !b.type) return bad('الرمز والاسم والنوع مطلوبة')
@@ -3113,8 +3251,16 @@ async function createManualJournal(db, T, b, opts = {}) {
   if (b.dual) {
     const da = Number(b.debit_amount) || 0
     const ca = Number(b.credit_amount) || 0
+    if (da < 0 || ca < 0) return { error: 'لا يُسمح بقيم سالبة في المبالغ' }
     if (da <= 0 || ca <= 0) return { error: 'المبالغ يجب أن تكون أكبر من صفر' }
     if (!CURRENCIES.includes(b.debit_currency) || !CURRENCIES.includes(b.credit_currency)) return { error: 'العملات غير صالحة' }
+    // v3.10.0 — validate account codes exist
+    const preLines = [
+      { account_code: b.debit_account_code, debit: da, credit: 0 },
+      { account_code: b.credit_account_code, debit: 0, credit: ca },
+    ]
+    const v = await validateJournalLines(db, T, preLines)
+    if (!v.ok) return { error: v.error }
     const rates = (await db.collection('tenant_settings').findOne({ tenant_id: T }))?.rates || DEFAULT_RATES
     const debitInBase = toBase(da, b.debit_currency, rates)
     const creditInBase = toBase(ca, b.credit_currency, rates)
@@ -3144,6 +3290,9 @@ async function createManualJournal(db, T, b, opts = {}) {
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   const lines = Array.isArray(b.lines) ? b.lines : []
   if (lines.length < 2) return { error: 'يجب إدخال طرفين على الأقل' }
+  // v3.10.0 — reject negative + verify accounts exist
+  const v = await validateJournalLines(db, T, lines)
+  if (!v.ok) return { error: v.error }
   const totalD = lines.reduce((s, l) => s + (Number(l.debit) || 0), 0)
   const totalC = lines.reduce((s, l) => s + (Number(l.credit) || 0), 0)
   if (Math.abs(totalD - totalC) > 0.01) return { error: `القيد غير متوازن: مدين ${totalD.toFixed(2)} ≠ دائن ${totalC.toFixed(2)}` }
