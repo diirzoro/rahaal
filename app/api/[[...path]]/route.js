@@ -337,14 +337,21 @@ async function validateJournalLines(db, tenantId, lines) {
   const clientCodes = new Set((await db.collection('clients').find({ tenant_id: tenantId }).project({ account_code: 1 }).toArray()).map(x => x.account_code).filter(Boolean))
   const supplierCodes = new Set((await db.collection('suppliers').find({ tenant_id: tenantId }).project({ account_code: 1 }).toArray()).map(x => x.account_code).filter(Boolean))
   const boxCodes = new Set((await db.collection('boxes').find({ tenant_id: tenantId }).project({ account_code: 1 }).toArray()).map(x => x.account_code).filter(Boolean))
-  for (const l of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]
     const d = Number(l.debit) || 0
     const c = Number(l.credit) || 0
-    if (d < 0 || c < 0) return { ok: false, error: `لا يُسمح بقيم سالبة في القيد (المدين=${d}، الدائن=${c})` }
+    if (d < 0 || c < 0) return { ok: false, error: `لا يُسمح بقيم سالبة في القيد (المدين=${d}، الدائن=${c}) — السطر ${i + 1}` }
+    const hasAmount = d > 0 || c > 0
     const code = l.account_code
-    if (!code || code === 'MANUAL') continue // MANUAL is a placeholder allowed for legacy
-    const exists = acctCodes.has(code) || clientCodes.has(code) || supplierCodes.has(code) || boxCodes.has(code)
-    if (!exists) return { ok: false, error: `الحساب "${code}" غير موجود في دليل الحسابات` }
+    // v3.10.0 strict — any line with amount MUST have a valid registered account_code
+    if (hasAmount && (!code || code === 'MANUAL')) {
+      return { ok: false, error: `عذراً، يجب اختيار حساب معتمد من دليل الحسابات (السطر ${i + 1})` }
+    }
+    if (code && code !== 'MANUAL') {
+      const exists = acctCodes.has(code) || clientCodes.has(code) || supplierCodes.has(code) || boxCodes.has(code)
+      if (!exists) return { ok: false, error: `الحساب "${code}" غير موجود في دليل الحسابات — السطر ${i + 1}` }
+    }
   }
   return { ok: true }
 }
@@ -3269,6 +3276,8 @@ async function createManualJournal(db, T, b, opts = {}) {
     if (da < 0 || ca < 0) return { error: 'لا يُسمح بقيم سالبة في المبالغ' }
     if (da <= 0 || ca <= 0) return { error: 'المبالغ يجب أن تكون أكبر من صفر' }
     if (!CURRENCIES.includes(b.debit_currency) || !CURRENCIES.includes(b.credit_currency)) return { error: 'العملات غير صالحة' }
+    // v3.10.0 strict — both sides MUST have registered account_code
+    if (!b.debit_account_code || !b.credit_account_code) return { error: 'عذراً، يجب اختيار حساب معتمد من دليل الحسابات لكلا الطرفين' }
     // v3.10.0 — validate account codes exist
     const preLines = [
       { account_code: b.debit_account_code, debit: da, credit: 0 },

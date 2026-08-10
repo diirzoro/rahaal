@@ -615,28 +615,30 @@ function Field({ label, required, children }) {
   )
 }
 
-// v3.10.0 — AccountAutocomplete: smart searcher across clients/suppliers/boxes
+// v3.10.0 — AccountAutocomplete: smart searcher across clients/suppliers/boxes/accounts
 // Props:
-//   type: 'client' | 'supplier' | 'box' | 'all'  (default 'all')
+//   type: 'client' | 'supplier' | 'box' | 'account' | 'all'  (default 'all')
 //   value: currently selected id (or null)
 //   onChange: fn(entity) — entity = { id, name, type, account_code, parent_code, balances, ... } or null
 //   placeholder: string
 //   disabled: bool
 //   allowClear: bool
-function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder = 'بحث بالاسم أو الكود...', disabled = false, allowClear = true }) {
+//   dropdownWidth: css string for popover min-width (default '400px')
+function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder = 'بحث بالاسم أو الكود...', disabled = false, allowClear = true, dropdownWidth = '420px' }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState([])
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState(null)
   const [loading, setLoading] = useState(false)
   const wrapRef = useRef(null)
+  const inputRef = useRef(null)
   // Debounced search
   useEffect(() => {
     if (!open) return
     const timer = setTimeout(async () => {
       setLoading(true)
       try {
-        const rs = await api(`/accounts/search?q=${encodeURIComponent(query)}&type=${type}&limit=25`)
+        const rs = await api(`/accounts/search?q=${encodeURIComponent(query)}&type=${type}&limit=30`)
         setResults(Array.isArray(rs) ? rs : [])
       } catch (_) { setResults([]) }
       setLoading(false)
@@ -647,61 +649,88 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
   useEffect(() => {
     if (!value) { setSelected(null); return }
     if (selected?.id === value) return
-    // Try fetching by empty search + filter (fast path); if not found, keep placeholder
-    api(`/accounts/search?q=&type=${type}&limit=200`).then(list => {
+    api(`/accounts/search?q=&type=${type}&limit=300`).then(list => {
       const found = (list || []).find(x => x.id === value)
       if (found) setSelected(found)
     }).catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value, type])
-  // Click outside
+  // Click outside — close popover
   useEffect(() => {
     const handler = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false) }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [])
+  // Auto-focus search input when opened
+  useEffect(() => {
+    if (open && inputRef.current) {
+      setTimeout(() => inputRef.current?.focus(), 50)
+    }
+  }, [open])
   const typeIcon = { client: '👤', supplier: '🏭', box: '💰', account: '📒' }
   const typeLabel = { client: 'عميل', supplier: 'مورد', box: 'صندوق', account: 'حساب' }
   const typeBadge = { client: 'bg-emerald-50 text-emerald-700 border-emerald-200', supplier: 'bg-rose-50 text-rose-700 border-rose-200', box: 'bg-blue-50 text-blue-700 border-blue-200', account: 'bg-purple-50 text-purple-700 border-purple-200' }
   const pick = (r) => { setSelected(r); onChange?.(r); setOpen(false); setQuery('') }
   const clear = (e) => { e.stopPropagation(); setSelected(null); onChange?.(null); setQuery('') }
+  const openPopover = () => { if (!disabled) { setOpen(true); setQuery('') } }
   return (
-    <div ref={wrapRef} className="relative">
-      <div className={`flex items-center gap-1 border rounded-md bg-white px-2 py-1.5 text-sm cursor-text ${disabled ? 'opacity-60 pointer-events-none' : 'hover:border-blue-400'}`} onClick={() => !disabled && setOpen(true)}>
+    <div ref={wrapRef} className="relative w-full">
+      {/* Field trigger */}
+      <div
+        className={`flex items-center gap-1 border-2 rounded-md bg-white px-2 py-1.5 text-sm min-h-[38px] ${disabled ? 'opacity-60 pointer-events-none' : 'cursor-pointer hover:border-blue-400'} ${open ? 'border-blue-500 ring-1 ring-blue-200' : 'border-slate-200'}`}
+        onClick={openPopover}
+      >
         {selected ? (
           <div className="flex items-center gap-2 flex-1 min-w-0">
             <span className="text-base shrink-0">{typeIcon[selected.type] || '•'}</span>
-            <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${typeBadge[selected.type] || 'bg-slate-50 border-slate-200'}`}>{selected.account_code}</span>
+            <span className={`font-mono text-[11px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${typeBadge[selected.type] || 'bg-slate-50 border-slate-200'}`}>{selected.account_code}</span>
             <span className="truncate">{selected.name}</span>
-            {allowClear && <button onClick={clear} className="ms-auto text-slate-400 hover:text-rose-500 shrink-0" title="مسح">✕</button>}
+            {allowClear && !disabled && <button type="button" onClick={clear} className="ms-auto text-slate-400 hover:text-rose-500 shrink-0 text-lg leading-none" title="مسح">✕</button>}
           </div>
-        ) : open ? (
-          <input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder={placeholder} className="flex-1 outline-none bg-transparent" />
         ) : (
-          <div className="flex-1 text-slate-400">{placeholder}</div>
+          <div className="flex-1 text-slate-400 truncate">{placeholder}</div>
         )}
         <span className="text-slate-400 text-xs shrink-0">▾</span>
       </div>
+      {/* Popover dropdown */}
       {open && (
-        <div className="absolute z-50 mt-1 w-full max-h-72 overflow-y-auto bg-white border-2 rounded-lg shadow-lg">
-          {!selected && (
-            <div className="p-2 border-b bg-slate-50">
-              <input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder={placeholder} className="w-full px-2 py-1 text-sm border rounded" />
-            </div>
-          )}
-          {loading && <div className="p-3 text-center text-xs text-slate-400">جاري البحث...</div>}
-          {!loading && results.length === 0 && <div className="p-3 text-center text-xs text-slate-400">لا نتائج — جرّب كلمة أخرى</div>}
-          {!loading && results.map(r => (
-            <button key={r.id} onClick={() => pick(r)} className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-blue-50 border-b last:border-b-0 text-right">
-              <span className="text-base shrink-0">{typeIcon[r.type] || '•'}</span>
-              <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${typeBadge[r.type] || 'bg-slate-50 border-slate-200'}`}>{r.account_code}</span>
-              <span className="flex-1 truncate">{r.name}</span>
-              <span className="text-[10px] text-slate-400 shrink-0">{typeLabel[r.type] || ''}</span>
-              <span className="text-[10px] font-mono text-slate-500 shrink-0">
-                {Object.entries(r.balances || {}).filter(([, v]) => Number(v) !== 0).slice(0, 1).map(([c, v]) => `${c}:${Number(v).toLocaleString()}`).join('')}
-              </span>
-            </button>
-          ))}
+        <div
+          className="absolute mt-1 bg-white border-2 border-blue-300 rounded-lg shadow-2xl"
+          style={{ minWidth: dropdownWidth, maxWidth: '90vw', zIndex: 9999, insetInlineStart: 0 }}
+        >
+          <div className="p-2 border-b bg-slate-50 rounded-t-lg">
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="🔍 اكتب للبحث بالاسم أو الكود..."
+              className="w-full px-3 py-2 text-sm border rounded outline-none focus:border-blue-500"
+              autoFocus
+            />
+          </div>
+          <div className="max-h-72 overflow-y-auto">
+            {loading && <div className="p-4 text-center text-xs text-slate-400">جاري البحث...</div>}
+            {!loading && results.length === 0 && <div className="p-4 text-center text-xs text-slate-400">لا نتائج — جرّب كلمة أخرى</div>}
+            {!loading && results.map(r => (
+              <button
+                key={`${r.type}-${r.id}`}
+                type="button"
+                onClick={() => pick(r)}
+                className={`w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-blue-50 border-b last:border-b-0 text-right ${selected?.id === r.id ? 'bg-blue-100' : ''}`}
+              >
+                <span className="text-base shrink-0">{typeIcon[r.type] || '•'}</span>
+                <span className={`font-mono text-[11px] font-bold px-1.5 py-0.5 rounded border shrink-0 whitespace-nowrap ${typeBadge[r.type] || 'bg-slate-50 border-slate-200'}`}>{r.account_code}</span>
+                <span className="flex-1 truncate text-slate-800">{r.name}</span>
+                <span className="text-[10px] text-slate-400 shrink-0 whitespace-nowrap">{typeLabel[r.type] || ''}</span>
+                <span className="text-[10px] font-mono text-slate-500 shrink-0 whitespace-nowrap">
+                  {Object.entries(r.balances || {}).filter(([, v]) => Number(v) !== 0).slice(0, 1).map(([c, v]) => `${c}:${Number(v).toLocaleString()}`).join('')}
+                </span>
+              </button>
+            ))}
+          </div>
+          <div className="p-1.5 border-t bg-slate-50 rounded-b-lg text-[10px] text-slate-500 text-center">
+            {results.length > 0 ? `${results.length} نتيجة — اضغط للاختيار` : 'استخدم البحث الذكي'}
+          </div>
         </div>
       )}
     </div>
@@ -7570,10 +7599,19 @@ function ManualJournalDialog({ open, onOpenChange, onSaved, record }) {
       setSaving(true)
       if (mode === 'single') {
         if (!balanced) return toast.error('القيد غير متوازن — يجب أن يتساوى مجموع المدين والدائن')
+        // v3.10.0 — strict validation: every line with amount MUST have a selected account
+        const badLine = singleForm.lines.findIndex(l => (Number(l.debit) > 0 || Number(l.credit) > 0) && !l.account_code)
+        if (badLine >= 0) return toast.error(`عذراً، يجب اختيار حساب معتمد من دليل الحسابات (السطر ${badLine + 1})`)
+        const negLine = singleForm.lines.findIndex(l => Number(l.debit) < 0 || Number(l.credit) < 0)
+        if (negLine >= 0) return toast.error(`لا يُسمح بقيم سالبة (السطر ${negLine + 1})`)
         if (isEdit) await api(`/journal-entries/${record.id}`, { method: 'PUT', body: singleForm })
         else await api('/journal-entries', { method: 'POST', body: singleForm })
       } else {
         if (!dualForm.debit_amount || !dualForm.credit_amount) return toast.error('أدخل المبالغ')
+        // v3.10.0 — strict: both sides must have selected account
+        if (!dualForm.debit_account_code) return toast.error('عذراً، يجب اختيار حساب معتمد للطرف المدين')
+        if (!dualForm.credit_account_code) return toast.error('عذراً، يجب اختيار حساب معتمد للطرف الدائن')
+        if (Number(dualForm.debit_amount) < 0 || Number(dualForm.credit_amount) < 0) return toast.error('لا يُسمح بقيم سالبة في المبالغ')
         if (isEdit) await api(`/journal-entries/${record.id}`, { method: 'PUT', body: { dual: true, ...dualForm } })
         else await api('/journal-entries', { method: 'POST', body: { dual: true, ...dualForm } })
       }
@@ -7584,7 +7622,7 @@ function ManualJournalDialog({ open, onOpenChange, onSaved, record }) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto" dir="rtl">
+      <DialogContent className="w-[95vw] sm:max-w-5xl lg:max-w-6xl max-h-[95vh] overflow-y-auto overflow-x-visible" dir="rtl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-xl">
             <div className="w-9 h-9 rounded-lg grad-slate flex items-center justify-center"><ReceiptText className="w-4 h-4 text-white" /></div>
