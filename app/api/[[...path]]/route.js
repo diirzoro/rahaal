@@ -8,10 +8,13 @@ import crypto from 'crypto'
 let client, db
 async function connectToMongo() {
   if (!client) {
+    // v3.10.1 — Fail-fast with clear error when env vars are missing (prevents obscure "startsWith of undefined" from mongodb driver)
+    if (!process.env.MONGO_URL || typeof process.env.MONGO_URL !== 'string') {
+      throw new Error('MONGO_URL environment variable is required (missing in this deployment environment)')
+    }
+    if (!process.env.DB_NAME) throw new Error('DB_NAME environment variable is required')
     client = new MongoClient(process.env.MONGO_URL)
     await client.connect()
-    // v3.4 deployment fix — remove hardcoded DB_NAME fallback so we fail-fast if env is missing
-    if (!process.env.DB_NAME) throw new Error('DB_NAME environment variable is required')
     db = client.db(process.env.DB_NAME)
     await seedInitial(db)
   }
