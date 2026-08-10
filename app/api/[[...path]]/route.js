@@ -2105,8 +2105,8 @@ async function handleRoute(request, { params }) {
     // Accounts (Chart of Accounts)
     if (route === '/accounts' && method === 'GET') return ok(clean(await db.collection('accounts').find(tf).sort({ code: 1 }).toArray()))
 
-    // v3.10.0 — GET /accounts/search — smart autocomplete across sub-accounts
-    // Query: ?q=<text>&type=client|supplier|box|all&limit=20&include_inactive=0
+    // v3.10.0 — GET /accounts/search — smart autocomplete across sub-accounts + parent accounts
+    // Query: ?q=<text>&type=client|supplier|box|account|all&limit=20&include_inactive=0
     if (route === '/accounts/search' && method === 'GET') {
       const qText = String(q.q || '').trim().toLowerCase()
       const wantType = String(q.type || 'all').toLowerCase()
@@ -2143,6 +2143,19 @@ async function handleRoute(request, { params }) {
           const code = (r.account_code || '').toLowerCase()
           if (!qText || label.includes(qText) || code.includes(qText)) {
             results.push({ id: r.id, name: r.name_ar, type: 'box', box_type: r.type, account_code: r.account_code, parent_code: r.account_parent_code || r.parent_code, balances: r.balances || {} })
+          }
+        })
+      }
+      // v3.10.0 — include parent/chart accounts (revenue/expense/generic) when type='account' or 'all'
+      if (wantAll || wantType === 'account') {
+        const accs = await db.collection('accounts').find({ tenant_id: T }).toArray()
+        accs.forEach(a => {
+          // Skip group-parents already served via sub-entities (client/supplier/box parents)
+          if (['1101', '1201', '1301', '2101'].includes(a.code)) return
+          const label = (a.name_ar || '').toLowerCase()
+          const code = (a.code || '').toLowerCase()
+          if (!qText || label.includes(qText) || code.includes(qText)) {
+            results.push({ id: a.id, name: a.name_ar, type: 'account', account_code: a.code, parent_code: a.parent || null, acct_type: a.type, is_group: !!a.is_group })
           }
         })
       }
@@ -3094,6 +3107,7 @@ async function createVoucher(db, T, b, opts = {}) {
   if (!['receipt', 'payment'].includes(b.type)) return { error: 'نوع السند غير صالح' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   const amount = Number(b.amount) || 0
+  if (Number(b.amount) < 0) return { error: 'لا يُسمح بمبلغ سالب في السند' }
   if (amount <= 0) return { error: 'المبلغ يجب أن يكون أكبر من صفر' }
   let partyName = ''
   if (b.party_type === 'client') {
@@ -3173,6 +3187,7 @@ async function createFx(db, T, b, opts = {}) {
   if (b.currency === b.counter_currency) return { error: 'يجب اختيار عملتين مختلفتين' }
   const amount = Number(b.amount) || 0
   const rate = Number(b.exchange_rate) || 0
+  if (Number(b.amount) < 0 || Number(b.exchange_rate) < 0) return { error: 'لا يُسمح بقيم سالبة في المبلغ أو سعر الصرف' }
   if (amount <= 0 || rate <= 0) return { error: 'المبلغ وسعر الصرف مطلوبان' }
   const counter_amount = +(amount * rate).toFixed(2)
   const payment_method = b.payment_method === 'account' ? 'account' : 'cash'

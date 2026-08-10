@@ -660,9 +660,9 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [])
-  const typeIcon = { client: '👤', supplier: '🏭', box: '💰' }
-  const typeLabel = { client: 'عميل', supplier: 'مورد', box: 'صندوق' }
-  const typeBadge = { client: 'bg-emerald-50 text-emerald-700 border-emerald-200', supplier: 'bg-rose-50 text-rose-700 border-rose-200', box: 'bg-blue-50 text-blue-700 border-blue-200' }
+  const typeIcon = { client: '👤', supplier: '🏭', box: '💰', account: '📒' }
+  const typeLabel = { client: 'عميل', supplier: 'مورد', box: 'صندوق', account: 'حساب' }
+  const typeBadge = { client: 'bg-emerald-50 text-emerald-700 border-emerald-200', supplier: 'bg-rose-50 text-rose-700 border-rose-200', box: 'bg-blue-50 text-blue-700 border-blue-200', account: 'bg-purple-50 text-purple-700 border-purple-200' }
   const pick = (r) => { setSelected(r); onChange?.(r); setOpen(false); setQuery('') }
   const clear = (e) => { e.stopPropagation(); setSelected(null); onChange?.(null); setQuery('') }
   return (
@@ -3681,11 +3681,30 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
           {form.party_type === 'expense' ? (
             <Field label="بيان المصروف" required><Input value={form.party_name} onChange={e => setForm({ ...form, party_name: e.target.value })} placeholder="إيجار / كهرباء" /></Field>
           ) : (
-            <Field label={mode === 'receipt' ? 'المستلم من' : 'المدفوع إلى'} required><Select value={form.party_id} onValueChange={v => setForm({ ...form, party_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{list.map(x => <SelectItem key={x.id} value={x.id}>{x.name}</SelectItem>)}</SelectContent></Select></Field>
+            <div className="md:col-span-1">
+              <Field label={`${mode === 'receipt' ? 'المستلم من' : 'المدفوع إلى'} 🔍 (بحث ذكي)`} required>
+                <AccountAutocomplete
+                  type={form.party_type}
+                  value={form.party_id || null}
+                  onChange={(sel) => setForm({ ...form, party_id: sel?.id || '', party_name: sel?.name || '' })}
+                  placeholder={`ابحث عن ${form.party_type === 'client' ? 'عميل' : 'مورد'} بالاسم أو الكود...`}
+                />
+              </Field>
+            </div>
           )}
-          <Field label="الصندوق/البنك" required><Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent></Select></Field>
+          <div className="md:col-span-1">
+            <Field label="الصندوق/البنك 🔍" required>
+              <AccountAutocomplete
+                type="box"
+                value={form.box_id || null}
+                onChange={(sel) => setForm({ ...form, box_id: sel?.id || '' })}
+                placeholder="اختر صندوق أو بنك..."
+                disabled={!!user?.lock_box && user?.role !== 'owner'}
+              />
+            </Field>
+          </div>
           <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
-          <Field label="المبلغ" required><Input type="number" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
+          <Field label="المبلغ" required><Input type="number" step="0.01" min="0" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
           <Field label="طريقة الدفع"><Input value={form.method} onChange={e => setForm({ ...form, method: e.target.value })} placeholder="نقدي / حوالة" /></Field>
           <div className="md:col-span-2"><Field label="البيان"><Textarea rows={2} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></Field></div>
         </div>
@@ -7434,34 +7453,30 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
           </Field>
           {isCash ? (
             <>
-              <Field label={`صندوق ${form.currency}`} required><Select value={form.box_currency_id} onValueChange={v => setForm({ ...form, box_currency_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{cashOptions.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></Field>
-              <Field label={`صندوق ${form.counter_currency}`} required><Select value={form.box_counter_id} onValueChange={v => setForm({ ...form, box_counter_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{cashOptions.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar}</SelectItem>)}</SelectContent></Select></Field>
+              <Field label={`صندوق ${form.currency} 🔍`} required>
+                <AccountAutocomplete type="box" value={form.box_currency_id || null} onChange={(sel) => setForm({ ...form, box_currency_id: sel?.id || '' })} placeholder={`اختر صندوق ${form.currency}...`} />
+              </Field>
+              <Field label={`صندوق ${form.counter_currency} 🔍`} required>
+                <AccountAutocomplete type="box" value={form.box_counter_id || null} onChange={(sel) => setForm({ ...form, box_counter_id: sel?.id || '' })} placeholder={`اختر صندوق ${form.counter_currency}...`} />
+              </Field>
             </>
           ) : (
             <>
-              <Field label={`حساب ${form.currency}`} required>
-                <Select value={form.account_currency_id} onValueChange={v => setForm({ ...form, account_currency_id: v })}>
-                  <SelectTrigger><SelectValue placeholder={`اختر من ${accountOptions.length}`} /></SelectTrigger>
-                  <SelectContent className="max-h-64">
-                    {accountOptions.map(a => (
-                      <SelectItem key={`${a.kind}:${a.id}`} value={`${a.kind}:${a.id}`}>
-                        <span className="inline-flex items-center gap-2"><Badge variant="outline" className="text-[10px] px-1 py-0">{a.group}</Badge><span>{a.name}</span></span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              <Field label={`حساب ${form.currency} 🔍`} required>
+                <AccountAutocomplete
+                  type="all"
+                  value={form.account_currency_id ? form.account_currency_id.split(':')[1] : null}
+                  onChange={(sel) => setForm({ ...form, account_currency_id: sel ? `${sel.type === 'account' ? 'account' : sel.type}:${sel.type === 'account' ? sel.account_code : sel.id}` : '' })}
+                  placeholder={`اختر حساب ${form.currency}...`}
+                />
               </Field>
-              <Field label={`حساب ${form.counter_currency}`} required>
-                <Select value={form.account_counter_id} onValueChange={v => setForm({ ...form, account_counter_id: v })}>
-                  <SelectTrigger><SelectValue placeholder={`اختر من ${accountOptions.length}`} /></SelectTrigger>
-                  <SelectContent className="max-h-64">
-                    {accountOptions.map(a => (
-                      <SelectItem key={`${a.kind}:${a.id}`} value={`${a.kind}:${a.id}`}>
-                        <span className="inline-flex items-center gap-2"><Badge variant="outline" className="text-[10px] px-1 py-0">{a.group}</Badge><span>{a.name}</span></span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              <Field label={`حساب ${form.counter_currency} 🔍`} required>
+                <AccountAutocomplete
+                  type="all"
+                  value={form.account_counter_id ? form.account_counter_id.split(':')[1] : null}
+                  onChange={(sel) => setForm({ ...form, account_counter_id: sel ? `${sel.type === 'account' ? 'account' : sel.type}:${sel.type === 'account' ? sel.account_code : sel.id}` : '' })}
+                  placeholder={`اختر حساب ${form.counter_currency}...`}
+                />
               </Field>
             </>
           )}
@@ -7591,14 +7606,25 @@ function ManualJournalDialog({ open, onOpenChange, onSaved, record }) {
               <Field label="البيان"><Input value={singleForm.description} onChange={e => setSingleForm({ ...singleForm, description: e.target.value })} placeholder="سبب القيد" /></Field>
             </div>
             <Table>
-              <TableHeader><TableRow><TableHead>الحساب</TableHead><TableHead>الوصف / الطرف</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead></TableHead></TableRow></TableHeader>
+              <TableHeader><TableRow><TableHead>الحساب (بحث ذكي 🔍)</TableHead><TableHead>الوصف / الطرف</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead></TableHead></TableRow></TableHeader>
               <TableBody>
                 {singleForm.lines.map((l, i) => (
                   <TableRow key={i}>
-                    <TableCell><Input value={l.account_code} onChange={e => updateLine(i, 'account_code', e.target.value)} placeholder="1301" className="text-xs w-24" /></TableCell>
-                    <TableCell><Input value={l.account_name} onChange={e => updateLine(i, 'account_name', e.target.value)} placeholder="اسم الحساب" /></TableCell>
-                    <TableCell><Input type="number" step="0.01" value={l.debit} onChange={e => updateLine(i, 'debit', e.target.value)} className="text-left w-32" /></TableCell>
-                    <TableCell><Input type="number" step="0.01" value={l.credit} onChange={e => updateLine(i, 'credit', e.target.value)} className="text-left w-32" /></TableCell>
+                    <TableCell className="min-w-[260px]">
+                      <AccountAutocomplete
+                        type="all"
+                        value={l.party_id || null}
+                        onChange={(sel) => {
+                          if (!sel) { updateLine(i, 'account_code', ''); updateLine(i, 'account_name', ''); updateLine(i, 'party_type', undefined); updateLine(i, 'party_id', undefined); updateLine(i, 'party_name', undefined); return }
+                          setSingleForm(f => ({ ...f, lines: f.lines.map((ll, idx) => idx === i ? { ...ll, account_code: sel.account_code, account_name: sel.name, party_type: sel.type === 'account' ? 'manual' : sel.type, party_id: sel.type === 'account' ? null : sel.id, party_name: sel.name } : ll) }))
+                        }}
+                        placeholder="اختر حساب/عميل/مورد/صندوق..."
+                      />
+                      {l.account_code && !l.party_id && <div className="mt-1 text-[10px] font-mono text-purple-600">📒 {l.account_code}</div>}
+                    </TableCell>
+                    <TableCell><Input value={l.account_name || ''} onChange={e => updateLine(i, 'account_name', e.target.value)} placeholder="بيان السطر (اختياري)" className="text-xs" /></TableCell>
+                    <TableCell><Input type="number" step="0.01" min="0" value={l.debit} onChange={e => updateLine(i, 'debit', e.target.value)} className="text-left w-32" /></TableCell>
+                    <TableCell><Input type="number" step="0.01" min="0" value={l.credit} onChange={e => updateLine(i, 'credit', e.target.value)} className="text-left w-32" /></TableCell>
                     <TableCell>{singleForm.lines.length > 2 && <Button size="icon" variant="ghost" onClick={() => removeLine(i)}><Trash2 className="w-3 h-3 text-rose-500" /></Button>}</TableCell>
                   </TableRow>
                 ))}
@@ -7617,19 +7643,47 @@ function ManualJournalDialog({ open, onOpenChange, onSaved, record }) {
               <div className="border-2 border-blue-200 rounded-lg p-4 bg-blue-50/40">
                 <div className="text-sm font-bold text-blue-700 mb-3">الطرف المدين (Debit)</div>
                 <div className="space-y-3">
-                  <Field label="كود الحساب"><Input value={dualForm.debit_account_code} onChange={e => setDualForm({ ...dualForm, debit_account_code: e.target.value })} placeholder="1101" /></Field>
-                  <Field label="اسم الحساب"><Input value={dualForm.debit_account_name} onChange={e => setDualForm({ ...dualForm, debit_account_name: e.target.value })} placeholder="صندوق دولار" /></Field>
+                  <Field label="الحساب (بحث ذكي 🔍)">
+                    <AccountAutocomplete
+                      type="all"
+                      value={null}
+                      onChange={(sel) => {
+                        if (!sel) return setDualForm({ ...dualForm, debit_account_code: '', debit_account_name: '', debit_party_type: undefined, debit_party_id: undefined, debit_party_name: undefined })
+                        setDualForm({ ...dualForm, debit_account_code: sel.account_code, debit_account_name: sel.name, debit_party_type: sel.type === 'account' ? 'manual' : sel.type, debit_party_id: sel.type === 'account' ? null : sel.id, debit_party_name: sel.name })
+                      }}
+                      placeholder="اختر الحساب المدين..."
+                    />
+                  </Field>
+                  {dualForm.debit_account_code && (
+                    <div className="text-[11px] font-mono px-2 py-1 rounded bg-white border border-blue-200">
+                      📒 {dualForm.debit_account_code} — {dualForm.debit_account_name}
+                    </div>
+                  )}
                   <Field label="العملة"><Select value={dualForm.debit_currency} onValueChange={v => setDualForm({ ...dualForm, debit_currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
-                  <Field label="المبلغ" required><Input type="number" step="0.01" value={dualForm.debit_amount} onChange={e => setDualForm({ ...dualForm, debit_amount: e.target.value })} className="text-lg font-bold text-blue-700" /></Field>
+                  <Field label="المبلغ" required><Input type="number" step="0.01" min="0" value={dualForm.debit_amount} onChange={e => setDualForm({ ...dualForm, debit_amount: e.target.value })} className="text-lg font-bold text-blue-700" /></Field>
                 </div>
               </div>
               <div className="border-2 border-rose-200 rounded-lg p-4 bg-rose-50/40">
                 <div className="text-sm font-bold text-rose-700 mb-3">الطرف الدائن (Credit)</div>
                 <div className="space-y-3">
-                  <Field label="كود الحساب"><Input value={dualForm.credit_account_code} onChange={e => setDualForm({ ...dualForm, credit_account_code: e.target.value })} placeholder="1102" /></Field>
-                  <Field label="اسم الحساب"><Input value={dualForm.credit_account_name} onChange={e => setDualForm({ ...dualForm, credit_account_name: e.target.value })} placeholder="صندوق سعودي" /></Field>
+                  <Field label="الحساب (بحث ذكي 🔍)">
+                    <AccountAutocomplete
+                      type="all"
+                      value={null}
+                      onChange={(sel) => {
+                        if (!sel) return setDualForm({ ...dualForm, credit_account_code: '', credit_account_name: '', credit_party_type: undefined, credit_party_id: undefined, credit_party_name: undefined })
+                        setDualForm({ ...dualForm, credit_account_code: sel.account_code, credit_account_name: sel.name, credit_party_type: sel.type === 'account' ? 'manual' : sel.type, credit_party_id: sel.type === 'account' ? null : sel.id, credit_party_name: sel.name })
+                      }}
+                      placeholder="اختر الحساب الدائن..."
+                    />
+                  </Field>
+                  {dualForm.credit_account_code && (
+                    <div className="text-[11px] font-mono px-2 py-1 rounded bg-white border border-rose-200">
+                      📒 {dualForm.credit_account_code} — {dualForm.credit_account_name}
+                    </div>
+                  )}
                   <Field label="العملة"><Select value={dualForm.credit_currency} onValueChange={v => setDualForm({ ...dualForm, credit_currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
-                  <Field label="المبلغ" required><Input type="number" step="0.01" value={dualForm.credit_amount} onChange={e => setDualForm({ ...dualForm, credit_amount: e.target.value })} className="text-lg font-bold text-rose-700" /></Field>
+                  <Field label="المبلغ" required><Input type="number" step="0.01" min="0" value={dualForm.credit_amount} onChange={e => setDualForm({ ...dualForm, credit_amount: e.target.value })} className="text-lg font-bold text-rose-700" /></Field>
                 </div>
               </div>
             </div>
