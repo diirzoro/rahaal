@@ -594,8 +594,8 @@ function EditTenantDialog({ tenant, onOpenChange, onSaved }) {
               <SelectContent><SelectItem value="active">نشط</SelectItem><SelectItem value="suspended">موقوف</SelectItem></SelectContent>
             </Select>
           </Field>
-          <Field label="حد المستخدمين"><Input type="number" value={f.max_users || 1} onChange={e = min="0"> setF({ ...f, max_users: Number(e.target.value) })} /></Field>
-          <Field label="عدد الفروع"><Input type="number" value={f.max_branches || 1} onChange={e = min="0"> setF({ ...f, max_branches: Number(e.target.value) })} /></Field>
+          <Field label="حد المستخدمين"><Input type="number" min="0" value={f.max_users || 1} onChange={e => setF({ ...f, max_users: Number(e.target.value) })} /></Field>
+          <Field label="عدد الفروع"><Input type="number" min="0" value={f.max_branches || 1} onChange={e => setF({ ...f, max_branches: Number(e.target.value) })} /></Field>
         </div>
         <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} className="grad-brand text-white">حفظ</Button></DialogFooter>
       </DialogContent>
@@ -1519,7 +1519,7 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-2">
             <Field label="تاريخ الحركة"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
             <Field label="نوع العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
-            <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e = min="0"> setForm({ ...form, exchange_rate: e.target.value })} /></Field>
+            <Field label="سعر الصرف"><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
             <Field label="اسم المورد" required>
               <SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id}
                 onChange={(id) => setForm({ ...form, supplier_id: id })}
@@ -1653,8 +1653,8 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
           <div className="bg-gradient-to-l from-blue-50 to-emerald-50 border rounded-xl p-4 mt-2">
             <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Banknote className="w-4 h-4 text-blue-600" /> الجانب المالي</div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Field label={`سعر التكلفة (${form.currency})`} required><Input type="number" step="0.01" value={form.cost} onChange={e = min="0"> setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
-              <Field label={`سعر البيع (${form.currency})`} required><Input type="number" step="0.01" value={form.sale_price} onChange={e = min="0"> setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
+              <Field label={`سعر التكلفة (${form.currency})`} required><Input type="number" min="0" step="0.01" value={form.cost} onChange={e => setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
+              <Field label={`سعر البيع (${form.currency})`} required><Input type="number" min="0" step="0.01" value={form.sale_price} onChange={e => setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
               <Field label={`العمولة (${form.currency})`}>
                 <div className={`px-3 py-2 rounded-md border text-lg font-extrabold ${commission >= 0 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>{fmt(commission, form.currency)}</div>
               </Field>
@@ -1698,7 +1698,7 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
                   </Select>
                 </Field>
                 <Field label={form.commission_share_mode === 'percent' ? 'النسبة %' : `المبلغ (${form.currency})`}>
-                  <Input type="number" step="0.01" value={form.commission_share_value} onChange={e = min="0"> setForm({ ...form, commission_share_value: e.target.value })} disabled={!form.commission_partner_id} placeholder={form.commission_share_mode === 'percent' ? '50' : '5'} />
+                  <Input type="number" min="0" step="0.01" value={form.commission_share_value} onChange={e => setForm({ ...form, commission_share_value: e.target.value })} disabled={!form.commission_partner_id} placeholder={form.commission_share_mode === 'percent' ? '50' : '5'} />
                 </Field>
                 <Field label="حصة المكتب">
                   {(() => {
@@ -2196,8 +2196,8 @@ function RefundDialog({ open, onOpenChange, record, refType, onSaved }) {
           <div className="flex justify-between"><span className="text-slate-500">طريقة الدفع الأصلية:</span><span>{record.payment_method === 'cash' ? '💵 نقد' : '🕓 آجل'}</span></div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <Field label="غرامة المورد/الشركة"><Input type="number" step="0.01" value={f.supplier_penalty} onChange={e = min="0"> setF({ ...f, supplier_penalty: e.target.value })} placeholder="0" /></Field>
-          <Field label="رسوم خدمة المكتب"><Input type="number" step="0.01" value={f.office_fee} onChange={e = min="0"> setF({ ...f, office_fee: e.target.value })} placeholder="0" /></Field>
+          <Field label="غرامة المورد/الشركة"><Input type="number" min="0" step="0.01" value={f.supplier_penalty} onChange={e => setF({ ...f, supplier_penalty: e.target.value })} placeholder="0" /></Field>
+          <Field label="رسوم خدمة المكتب"><Input type="number" min="0" step="0.01" value={f.office_fee} onChange={e => setF({ ...f, office_fee: e.target.value })} placeholder="0" /></Field>
           <div className="md:col-span-2"><Field label="سبب الإلغاء"><Input value={f.reason} onChange={e => setF({ ...f, reason: e.target.value })} placeholder="طلب العميل / تعذر السفر / تأجيل ..." /></Field></div>
           <div className="md:col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field></div>
         </div>
@@ -3279,7 +3279,7 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
             <Field label="نوع الخدمة"><Select value={form.service_type} onValueChange={v => setForm({ ...form, service_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{VISA_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="المورد" required><SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id} onChange={id => setForm({ ...form, supplier_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
-            <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e = min="0"> setForm({ ...form, exchange_rate: e.target.value })} /></Field>
+            <Field label="سعر الصرف"><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
             <Field label="اسم صاحب التأشيرة"><Input value={form.passenger_name} onChange={e => setForm({ ...form, passenger_name: e.target.value })} /></Field>
             <Field label="رقم الجواز"><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value })} /></Field>
             <Field label="الجنسية"><Input value={form.nationality} onChange={e => setForm({ ...form, nationality: e.target.value })} /></Field>
@@ -3341,8 +3341,8 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
           <div className="bg-gradient-to-l from-emerald-50 to-blue-50 border rounded-xl p-4 mt-2">
             <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Banknote className="w-4 h-4 text-emerald-600" /> الجانب المالي</div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Field label={`التكلفة (${form.currency})`} required><Input type="number" step="0.01" value={form.cost} onChange={e = min="0"> setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
-              <Field label={`سعر البيع (${form.currency})`} required><Input type="number" step="0.01" value={form.sale_price} onChange={e = min="0"> setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
+              <Field label={`التكلفة (${form.currency})`} required><Input type="number" min="0" step="0.01" value={form.cost} onChange={e => setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
+              <Field label={`سعر البيع (${form.currency})`} required><Input type="number" min="0" step="0.01" value={form.sale_price} onChange={e => setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
               <Field label={`العمولة (${form.currency})`}><div className={`px-3 py-2 rounded-md border text-lg font-extrabold ${commission >= 0 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>{fmt(commission, form.currency)}</div></Field>
             </div>
           </div>
@@ -3607,7 +3607,7 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
           </Field>
           <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="المورد / المزود" required><SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id} onChange={id => setForm({ ...form, supplier_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
-          <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e = min="0"> setForm({ ...form, exchange_rate: e.target.value })} /></Field>
+          <Field label="سعر الصرف"><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
           <Field label="اسم المستفيد"><Input value={form.beneficiary_name} onChange={e => setForm({ ...form, beneficiary_name: e.target.value })} placeholder="مثال: أحمد محمد" /></Field>
           <Field label="الرقم المرجعي"><Input value={form.reference_no} onChange={e => setForm({ ...form, reference_no: e.target.value })} placeholder="مثال: HTL-2025-001" /></Field>
           <Field label="وصف مختصر"><Input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="مثال: 3 ليالٍ فندق البلد" /></Field>
@@ -3658,8 +3658,8 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
         <div className="bg-gradient-to-l from-orange-50 to-amber-50 border rounded-xl p-4 mt-2">
           <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Banknote className="w-4 h-4 text-orange-600" /> الجانب المالي</div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Field label={`التكلفة (${form.currency})`} required><Input type="number" step="0.01" value={form.cost} onChange={e = min="0"> setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
-            <Field label={`سعر البيع (${form.currency})`} required><Input type="number" step="0.01" value={form.sale_price} onChange={e = min="0"> setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
+            <Field label={`التكلفة (${form.currency})`} required><Input type="number" min="0" step="0.01" value={form.cost} onChange={e => setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
+            <Field label={`سعر البيع (${form.currency})`} required><Input type="number" min="0" step="0.01" value={form.sale_price} onChange={e => setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
             <Field label={`العمولة (${form.currency})`}><div className={`px-3 py-2 rounded-md border text-lg font-extrabold ${commission >= 0 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>{fmt(commission, form.currency)}</div></Field>
           </div>
         </div>
@@ -6376,7 +6376,7 @@ function CashoutDialog({ open, onOpenChange, data, onSaved }) {
         </DialogHeader>
         <div className="space-y-3">
           <Field label="المبلغ المطلوب (USD)" required>
-            <Input type="number" step="0.01" value={amount} onChange={e = min="0"> setAmount(e.target.value)} className="text-xl font-bold" />
+            <Input type="number" min="0" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} className="text-xl font-bold" />
           </Field>
           <Field label="طريقة السحب" required>
             <Select value={pmId} onValueChange={setPmId}>
@@ -6428,7 +6428,7 @@ function ApplyToSubscriptionDialog({ open, onOpenChange, data, onSaved }) {
             💰 رصيد الأفلييت الحالي: <b className="text-emerald-700">${data.balance_usd.toFixed(2)}</b>
           </div>
           <Field label="المبلغ (USD)" required>
-            <Input type="number" step="0.01" value={amount} onChange={e = min="0"> setAmount(e.target.value)} className="text-xl font-bold" />
+            <Input type="number" min="0" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} className="text-xl font-bold" />
           </Field>
         </div>
         <DialogFooter>
@@ -6893,8 +6893,8 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
                         <SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
                       </Select>
                     </div>
-                    <div className="col-span-1"><div className="text-[10px] text-slate-500 mb-1">تكلفة</div><Input type="number" value={it.cost} onChange={e = min="0"> updItem(i, 'cost', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
-                    <div className="col-span-1"><div className="text-[10px] text-slate-500 mb-1">بيع</div><Input type="number" value={it.sale} onChange={e = min="0"> updItem(i, 'sale', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
+                    <div className="col-span-1"><div className="text-[10px] text-slate-500 mb-1">تكلفة</div><Input type="number" min="0" value={it.cost} onChange={e => updItem(i, 'cost', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
+                    <div className="col-span-1"><div className="text-[10px] text-slate-500 mb-1">بيع</div><Input type="number" min="0" value={it.sale} onChange={e => updItem(i, 'sale', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
                     <div className="col-span-1 text-center">
                       <div className="text-[10px] text-slate-500 mb-1">ربح</div>
                       <div className={`text-xs font-bold ${(Number(it.sale) - Number(it.cost)) >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{((Number(it.sale) || 0) - (Number(it.cost) || 0)).toFixed(2)}</div>
@@ -7003,8 +7003,8 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                 <Field label="نوع"><Select value={newComp.component_type} onValueChange={v => setNewComp({ ...newComp, component_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{COMPONENT_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
                 <Field label="الاسم"><Input value={newComp.name} onChange={e => setNewComp({ ...newComp, name: e.target.value })} placeholder="فندق البلد" /></Field>
                 <Field label="المورد"><Select value={newComp.supplier_id} onValueChange={v => setNewComp({ ...newComp, supplier_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent></Select></Field>
-                <Field label={`تكلفة/فرد (${pkg.currency})`}><Input type="number" value={newComp.cost_per_pax} onChange={e = min="0"> setNewComp({ ...newComp, cost_per_pax: e.target.value })} /></Field>
-                <Field label={`بيع/فرد (${pkg.currency})`}><Input type="number" value={newComp.sale_per_pax} onChange={e = min="0"> setNewComp({ ...newComp, sale_per_pax: e.target.value })} /></Field>
+                <Field label={`تكلفة/فرد (${pkg.currency})`}><Input type="number" min="0" value={newComp.cost_per_pax} onChange={e => setNewComp({ ...newComp, cost_per_pax: e.target.value })} /></Field>
+                <Field label={`بيع/فرد (${pkg.currency})`}><Input type="number" min="0" value={newComp.sale_per_pax} onChange={e => setNewComp({ ...newComp, sale_per_pax: e.target.value })} /></Field>
                 <div className="flex items-end"><Button onClick={addComp} className="w-full grad-brand text-white gap-1"><Plus className="w-4 h-4" /> إضافة</Button></div>
               </div>
             )}
@@ -7410,10 +7410,10 @@ function PackageBookingEditDialog({ pkg, booking, clients, boxes, transports = [
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
               <Field label={`إجمالي التكلفة (${pkg.currency})`}>
-                <Input type="number" step="0.01" value={form.total_cost} onChange={e = min="0"> setF('total_cost', e.target.value)} />
+                <Input type="number" min="0" step="0.01" value={form.total_cost} onChange={e => setF('total_cost', e.target.value)} />
               </Field>
               <Field label={`إجمالي البيع (${pkg.currency})`}>
-                <Input type="number" step="0.01" value={form.total_sale} onChange={e = min="0"> setF('total_sale', e.target.value)} />
+                <Input type="number" min="0" step="0.01" value={form.total_sale} onChange={e => setF('total_sale', e.target.value)} />
               </Field>
               <div className="flex items-end">
                 <div className="w-full bg-white rounded p-2 border">
@@ -7741,11 +7741,11 @@ function OfficeSettings() {
                       <TableRow key={c}>
                         <TableCell><Badge className="text-sm font-bold" variant="outline">{c}</Badge> <span className="text-xs text-slate-500">{CUR_NAME[c]}</span></TableCell>
                         <TableCell><Badge variant="secondary">YER</Badge></TableCell>
-                        <TableCell><Input type="number" step="0.0001" value={rObj.transfer || ''} onChange={e = min="0"> upd('transfer', e.target.value)} className="w-28 text-left font-bold" disabled={c === 'YER'} /></TableCell>
-                        <TableCell><Input type="number" step="0.0001" value={rObj.buy || ''} onChange={e = min="0"> upd('buy', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
-                        <TableCell><Input type="number" step="0.0001" value={rObj.sell || ''} onChange={e = min="0"> upd('sell', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
-                        <TableCell><Input type="number" step="0.0001" value={rObj.min || ''} onChange={e = min="0"> upd('min', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
-                        <TableCell><Input type="number" step="0.0001" value={rObj.max || ''} onChange={e = min="0"> upd('max', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" min="0" step="0.0001" value={rObj.transfer || ''} onChange={e => upd('transfer', e.target.value)} className="w-28 text-left font-bold" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" min="0" step="0.0001" value={rObj.buy || ''} onChange={e => upd('buy', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" min="0" step="0.0001" value={rObj.sell || ''} onChange={e => upd('sell', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" min="0" step="0.0001" value={rObj.min || ''} onChange={e => upd('min', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" min="0" step="0.0001" value={rObj.max || ''} onChange={e => upd('max', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
                         <TableCell><Input value={rObj.remarks || ''} onChange={e => setF({ ...f, rates: { ...f.rates, [c]: { ...rObj, remarks: e.target.value } } })} className="w-40" placeholder="ملاحظة" disabled={c === 'YER'} /></TableCell>
                       </TableRow>
                     )
@@ -7759,16 +7759,16 @@ function OfficeSettings() {
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                   <Field label="سعر التحويل المباشر">
-                    <Input type="number" step="0.0001" value={f.pair_usd_sar?.transfer ?? 3.75}
-                      onChange={e = min="0"> setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), transfer: Number(e.target.value) } })} className="text-lg font-bold" />
+                    <Input type="number" min="0" step="0.0001" value={f.pair_usd_sar?.transfer ?? 3.75}
+                      onChange={e => setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), transfer: Number(e.target.value) } })} className="text-lg font-bold" />
                   </Field>
                   <Field label="سعر شراء الدولار (SAR)">
-                    <Input type="number" step="0.0001" value={f.pair_usd_sar?.buy ?? 3.74}
-                      onChange={e = min="0"> setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), buy: Number(e.target.value) } })} />
+                    <Input type="number" min="0" step="0.0001" value={f.pair_usd_sar?.buy ?? 3.74}
+                      onChange={e => setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), buy: Number(e.target.value) } })} />
                   </Field>
                   <Field label="سعر بيع الدولار (SAR)">
-                    <Input type="number" step="0.0001" value={f.pair_usd_sar?.sell ?? 3.76}
-                      onChange={e = min="0"> setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), sell: Number(e.target.value) } })} />
+                    <Input type="number" min="0" step="0.0001" value={f.pair_usd_sar?.sell ?? 3.76}
+                      onChange={e => setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), sell: Number(e.target.value) } })} />
                   </Field>
                   <Field label="ملاحظات">
                     <Input value={f.pair_usd_sar?.remarks || ''}
@@ -8254,8 +8254,8 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-2">
           <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
           <Field label="العملة" required><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
-          <Field label="المبلغ" required><Input type="number" step="0.01" value={form.amount} onChange={e = min="0"> setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
-          <Field label="سعر الصرف" required><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e = min="0"> setForm({ ...form, exchange_rate: e.target.value })} className="text-lg font-bold" /></Field>
+          <Field label="المبلغ" required><Input type="number" min="0" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
+          <Field label="سعر الصرف" required><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} className="text-lg font-bold" /></Field>
 
           <Field label="المقابل بعملة" required><Select value={form.counter_currency} onValueChange={v => setForm({ ...form, counter_currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="القيمة الإجمالية">

@@ -8375,3 +8375,84 @@ agent_communication:
       - Development complete on local
       - Blocked by missing MONGO_URL env var on rahaal.targetmediagrp.com
       - User needs to contact Emergent support to inject env vars
+
+  - agent: "main"
+    message: |
+      🚨 URGENT BUG FIX — "e is not defined" error on 5 screens
+      
+      **ROOT CAUSE IDENTIFIED:**
+      - My earlier Python regex to add `min="0"` to number inputs corrupted 32 arrow functions
+      - Broken pattern: `onChange={e = min="0"> upd(...)` (invalid JSX)
+      - Correct pattern: `onChange={e => upd(...)}` with `min="0"` as a separate `<Input>` attribute
+      
+      **FIX APPLIED:**
+      - Restored all 32 broken arrow functions to correct syntax: `onChange={e => ...}`
+      - Added `min="0"` properly as an attribute right after `type="number"`
+      
+      **AFFECTED SCREENS:**
+      1. حجز التذاكر (Tickets — /tab=tickets)
+      2. التأشيرات (Visas — /tab=visas)
+      3. الخدمات (Services — /tab=services)
+      4. صرافة العملات (Currency Exchange — /tab=fx)
+      5. إعدادات المكتب (Office Settings — /tab=settings)
+      
+      **TESTING REQUIRED:**
+      Please verify EACH of the 5 screens loads without any JS errors:
+      - Navigate to each screen
+      - Verify no ErrorBoundary error banner appears
+      - Verify dialogs open without errors
+      - Check console for "e is not defined" errors
+      
+      Login: owner@demo.com / Demo@2025 at https://visa-booking-5.preview.emergentagent.com
+
+  - agent: "testing"
+    message: |
+      ✅ BUG VERIFICATION COMPLETED — "e is not defined" error is FIXED
+      
+      **COMPREHENSIVE UI TESTING EXECUTED:**
+      Tested all 5 reported broken screens with automated Playwright script:
+      
+      **Test Results: 5/5 SCREENS PASSED ✅**
+      
+      1. ✅ حجز التذاكر (Tickets)
+         - Screen renders without ErrorBoundary
+         - "إضافة تذكرة" dialog opens successfully
+         - No console errors
+      
+      2. ✅ التأشيرات (Visas)
+         - Screen renders without ErrorBoundary
+         - "إضافة تأشيرة" dialog opens successfully
+         - No console errors
+      
+      3. ✅ الخدمات (Services)
+         - Screen renders without ErrorBoundary
+         - No console errors
+      
+      4. ✅ صرافة العملات (Currency Exchange / FX)
+         - Screen renders without ErrorBoundary
+         - "شراء عملة" dialog opens successfully
+         - "بيع عملة" dialog opens successfully
+         - Number inputs (المبلغ, سعر الصرف) have `min="0"` attribute working correctly (found 2 inputs)
+         - No console errors
+      
+      5. ✅ إعدادات المكتب (Office Settings)
+         - Screen renders without ErrorBoundary
+         - Settings form renders correctly
+         - No console errors
+      
+      **CRITICAL VERIFICATIONS:**
+      ✅ NO "e is not defined" errors in browser console
+      ✅ NO ErrorBoundary fallback UI appeared on ANY screen
+      ✅ All dialogs open without errors
+      ✅ Number inputs with min="0" attribute working correctly
+      ✅ All 32 arrow functions restored to correct syntax: `onChange={e => ...}`
+      
+      **CONSOLE LOG ANALYSIS:**
+      - Only warnings detected (Next.js metadata viewport, accessibility warnings)
+      - NO JavaScript errors
+      - NO "e is not defined" errors
+      - NO runtime exceptions
+      
+      **CONCLUSION:**
+      The bug fix is VERIFIED and WORKING. All 5 screens that were previously broken with "e is not defined" error are now functioning correctly. The corrupted arrow functions have been successfully restored.
+
