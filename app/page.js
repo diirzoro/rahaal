@@ -594,8 +594,8 @@ function EditTenantDialog({ tenant, onOpenChange, onSaved }) {
               <SelectContent><SelectItem value="active">نشط</SelectItem><SelectItem value="suspended">موقوف</SelectItem></SelectContent>
             </Select>
           </Field>
-          <Field label="حد المستخدمين"><Input type="number" value={f.max_users || 1} onChange={e => setF({ ...f, max_users: Number(e.target.value) })} /></Field>
-          <Field label="عدد الفروع"><Input type="number" value={f.max_branches || 1} onChange={e => setF({ ...f, max_branches: Number(e.target.value) })} /></Field>
+          <Field label="حد المستخدمين"><Input type="number" value={f.max_users || 1} onChange={e = min="0"> setF({ ...f, max_users: Number(e.target.value) })} /></Field>
+          <Field label="عدد الفروع"><Input type="number" value={f.max_branches || 1} onChange={e = min="0"> setF({ ...f, max_branches: Number(e.target.value) })} /></Field>
         </div>
         <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} className="grad-brand text-white">حفظ</Button></DialogFooter>
       </DialogContent>
@@ -616,22 +616,28 @@ function Field({ label, required, children }) {
 }
 
 // v3.10.0 — AccountAutocomplete: smart searcher across clients/suppliers/boxes/accounts
+// v3.10.3 — Now supports quick-add: shows "+ Add new" when no results
 // Props:
 //   type: 'client' | 'supplier' | 'box' | 'account' | 'all'  (default 'all')
 //   value: currently selected id (or null)
-//   onChange: fn(entity) — entity = { id, name, type, account_code, parent_code, balances, ... } or null
+//   onChange: fn(entity)
 //   placeholder: string
 //   disabled: bool
 //   allowClear: bool
-//   dropdownWidth: css string for popover min-width (default '400px')
-function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder = 'بحث بالاسم أو الكود...', disabled = false, allowClear = true, dropdownWidth = '420px' }) {
+//   dropdownWidth: css string
+//   allowQuickAdd: bool (default true for client/supplier — false otherwise)
+function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder = 'بحث بالاسم أو الكود...', disabled = false, allowClear = true, dropdownWidth = '420px', allowQuickAdd }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState([])
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [quickAddOpen, setQuickAddOpen] = useState(false)
+  const [quickAddType, setQuickAddType] = useState(null) // 'client' | 'supplier'
   const wrapRef = useRef(null)
   const inputRef = useRef(null)
+  // Default: quick-add enabled for client/supplier/all, disabled for box/account
+  const enableQA = allowQuickAdd !== undefined ? allowQuickAdd : ['client', 'supplier', 'all'].includes(type)
   // Debounced search
   useEffect(() => {
     if (!open) return
@@ -673,6 +679,11 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
   const pick = (r) => { setSelected(r); onChange?.(r); setOpen(false); setQuery('') }
   const clear = (e) => { e.stopPropagation(); setSelected(null); onChange?.(null); setQuery('') }
   const openPopover = () => { if (!disabled) { setOpen(true); setQuery('') } }
+  const openQuickAdd = (t) => { setQuickAddType(t); setQuickAddOpen(true) }
+  const onQuickAddDone = (entity) => {
+    // Auto-select the newly created entity
+    setQuickAddOpen(false); setSelected(entity); onChange?.(entity); setOpen(false); setQuery('')
+  }
   return (
     <div ref={wrapRef} className="relative w-full">
       {/* Field trigger */}
@@ -710,7 +721,25 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
           </div>
           <div className="max-h-72 overflow-y-auto">
             {loading && <div className="p-4 text-center text-xs text-slate-400">جاري البحث...</div>}
-            {!loading && results.length === 0 && <div className="p-4 text-center text-xs text-slate-400">لا نتائج — جرّب كلمة أخرى</div>}
+            {!loading && results.length === 0 && (
+              <div className="p-4 text-center text-xs text-slate-400">
+                لا نتائج مطابقة
+                {enableQA && query.trim().length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    {(type === 'client' || type === 'all') && (
+                      <button type="button" onClick={() => openQuickAdd('client')} className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-emerald-50 border-2 border-dashed border-emerald-300 text-emerald-700 font-bold text-sm hover:bg-emerald-100">
+                        👤 ➕ إضافة عميل جديد باسم "{query.trim().slice(0, 30)}"
+                      </button>
+                    )}
+                    {(type === 'supplier' || type === 'all') && (
+                      <button type="button" onClick={() => openQuickAdd('supplier')} className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-rose-50 border-2 border-dashed border-rose-300 text-rose-700 font-bold text-sm hover:bg-rose-100">
+                        🏭 ➕ إضافة مورد جديد باسم "{query.trim().slice(0, 30)}"
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             {!loading && results.map(r => (
               <button
                 key={`${r.type}-${r.id}`}
@@ -729,11 +758,95 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
             ))}
           </div>
           <div className="p-1.5 border-t bg-slate-50 rounded-b-lg text-[10px] text-slate-500 text-center">
-            {results.length > 0 ? `${results.length} نتيجة — اضغط للاختيار` : 'استخدم البحث الذكي'}
+            {results.length > 0 ? `${results.length} نتيجة — اضغط للاختيار` : (enableQA ? 'ابحث أولاً أو اضغط لإضافة جديد' : 'استخدم البحث الذكي')}
           </div>
         </div>
       )}
+      {/* Quick-Add Dialog */}
+      {quickAddOpen && (
+        <QuickAddEntityDialog
+          open={quickAddOpen}
+          type={quickAddType}
+          initialName={query.trim()}
+          onOpenChange={setQuickAddOpen}
+          onCreated={onQuickAddDone}
+        />
+      )}
     </div>
+  )
+}
+
+// v3.10.3 — Quick-Add Client/Supplier Dialog
+function QuickAddEntityDialog({ open, onOpenChange, type, initialName = '', onCreated }) {
+  const [form, setForm] = useState({ name: initialName, phone: '', parent_code: type === 'client' ? '1301' : '2101' })
+  const [saving, setSaving] = useState(false)
+  const [parents, setParents] = useState([])
+  useEffect(() => { setForm(f => ({ ...f, name: initialName })) }, [initialName])
+  useEffect(() => {
+    if (!open) return
+    // Load possible parent accounts (assets for clients, liabilities for suppliers)
+    const filterType = type === 'client' ? 'asset' : 'liability'
+    api('/accounts').then(rows => {
+      const list = (rows || []).filter(a => a.type === filterType && a.is_group)
+      setParents(list.length ? list : (rows || []).filter(a => a.type === filterType))
+    }).catch(() => setParents([]))
+  }, [open, type])
+  const submit = async () => {
+    if (!form.name || !form.name.trim()) return toast.error('الاسم مطلوب')
+    if (!form.phone || !form.phone.trim()) return toast.error('رقم الجوال مطلوب')
+    try {
+      setSaving(true)
+      const endpoint = type === 'client' ? '/clients' : '/suppliers'
+      const created = await api(endpoint, { method: 'POST', body: { name: form.name.trim(), phone: form.phone.trim(), parent_code: form.parent_code } })
+      const entity = { id: created.id, name: created.name, type, account_code: created.account_code, parent_code: created.account_parent_code, balances: created.balances || {} }
+      toast.success(`✅ تم إنشاء ${type === 'client' ? 'العميل' : 'المورد'} بكود: ${created.account_code}`)
+      onCreated?.(entity)
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  const isClient = type === 'client'
+  const clr = isClient ? 'emerald' : 'rose'
+  const label = isClient ? 'عميل' : 'مورد'
+  const icon = isClient ? '👤' : '🏭'
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md" dir="rtl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-lg">
+            <span className="text-2xl">{icon}</span>
+            <span>إضافة {label} جديد سريعاً</span>
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <Field label="الاسم" required>
+            <Input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder={`اسم ال${label}`} className="font-semibold" />
+          </Field>
+          <Field label="رقم الجوال" required>
+            <Input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="7XXXXXXXX" />
+          </Field>
+          <Field label="الحساب الأب (شجرة الحسابات)">
+            <Select value={form.parent_code} onValueChange={v => setForm({ ...form, parent_code: v })}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {parents.map(p => (
+                  <SelectItem key={p.code} value={p.code}>
+                    <span className="font-mono text-xs">{p.code}</span> — {p.name_ar}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <div className={`text-[11px] p-2 rounded bg-${clr}-50 border border-${clr}-200 text-${clr}-700`}>
+            💡 سيتم توليد كود الحساب تلقائياً بشكل تسلسلي تحت الحساب الأب المختار (مثال: {form.parent_code}0001)
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>إلغاء</Button>
+          <Button onClick={submit} disabled={saving} className={`bg-${clr}-600 hover:bg-${clr}-700 text-white`}>
+            {saving ? 'جاري الحفظ...' : `✅ حفظ ${label}`}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -771,6 +884,8 @@ const NAV = [
   { id: 'visas',     label: 'التأشيرات', icon: FileBadge2, color: 'from-emerald-600 to-teal-500' },
   { id: 'services',  label: 'الخدمات', icon: Briefcase, color: 'from-orange-600 to-amber-500' },
   { id: 'packages',  label: 'الباكجات والبرامج', icon: FileBadge2, color: 'from-teal-600 to-emerald-500' },
+  { id: 'visa-monitor', label: 'مراقبة التأشيرات', icon: CalendarClock, color: 'from-red-600 to-orange-500' },
+  { id: 'query',     label: 'مركز الاستعلامات', icon: BarChart3, color: 'from-violet-600 to-indigo-500' },
   { id: 'fx',        label: 'صرافة العملات', icon: ArrowLeftRight, color: 'from-fuchsia-600 to-purple-500' },
   { id: 'receipt',   label: 'سند قبض', icon: ArrowDownLeft, color: 'from-green-600 to-emerald-500' },
   { id: 'payment',   label: 'سند صرف', icon: ArrowUpRight, color: 'from-rose-600 to-pink-500' },
@@ -1404,7 +1519,7 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-2">
             <Field label="تاريخ الحركة"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
             <Field label="نوع العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
-            <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
+            <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e = min="0"> setForm({ ...form, exchange_rate: e.target.value })} /></Field>
             <Field label="اسم المورد" required>
               <SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id}
                 onChange={(id) => setForm({ ...form, supplier_id: id })}
@@ -1538,8 +1653,8 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
           <div className="bg-gradient-to-l from-blue-50 to-emerald-50 border rounded-xl p-4 mt-2">
             <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Banknote className="w-4 h-4 text-blue-600" /> الجانب المالي</div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Field label={`سعر التكلفة (${form.currency})`} required><Input type="number" step="0.01" value={form.cost} onChange={e => setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
-              <Field label={`سعر البيع (${form.currency})`} required><Input type="number" step="0.01" value={form.sale_price} onChange={e => setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
+              <Field label={`سعر التكلفة (${form.currency})`} required><Input type="number" step="0.01" value={form.cost} onChange={e = min="0"> setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
+              <Field label={`سعر البيع (${form.currency})`} required><Input type="number" step="0.01" value={form.sale_price} onChange={e = min="0"> setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
               <Field label={`العمولة (${form.currency})`}>
                 <div className={`px-3 py-2 rounded-md border text-lg font-extrabold ${commission >= 0 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>{fmt(commission, form.currency)}</div>
               </Field>
@@ -1583,7 +1698,7 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
                   </Select>
                 </Field>
                 <Field label={form.commission_share_mode === 'percent' ? 'النسبة %' : `المبلغ (${form.currency})`}>
-                  <Input type="number" step="0.01" value={form.commission_share_value} onChange={e => setForm({ ...form, commission_share_value: e.target.value })} disabled={!form.commission_partner_id} placeholder={form.commission_share_mode === 'percent' ? '50' : '5'} />
+                  <Input type="number" step="0.01" value={form.commission_share_value} onChange={e = min="0"> setForm({ ...form, commission_share_value: e.target.value })} disabled={!form.commission_partner_id} placeholder={form.commission_share_mode === 'percent' ? '50' : '5'} />
                 </Field>
                 <Field label="حصة المكتب">
                   {(() => {
@@ -1617,27 +1732,68 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
 
 function QuickAddDialog({ open, onOpenChange, kind, onSaved, initialName }) {
   const [name, setName] = useState(''); const [phone, setPhone] = useState(''); const [address, setAddress] = useState(''); const [serviceType, setServiceType] = useState('')
+  // v3.10.3 — parent account selection (COA integration)
+  const [parentCode, setParentCode] = useState(kind === 'client' ? '1301' : '2101')
+  const [parents, setParents] = useState([])
   useEffect(() => { if (open && initialName) setName(initialName) }, [open, initialName])
+  useEffect(() => {
+    if (!open) return
+    setParentCode(kind === 'client' ? '1301' : '2101')
+    // Load possible parent accounts (assets for clients, liabilities for suppliers)
+    const filterType = kind === 'client' ? 'asset' : 'liability'
+    api('/accounts').then(rows => {
+      const list = (rows || []).filter(a => a.type === filterType)
+      // Prefer group accounts + relevant defaults
+      setParents(list.length ? list : [])
+    }).catch(() => setParents([]))
+  }, [open, kind])
   const save = async () => {
-    if (!name) return toast.error('الاسم مطلوب')
+    if (!name || !name.trim()) return toast.error('الاسم مطلوب')
+    if (!phone || !phone.trim()) return toast.error('رقم الجوال مطلوب')
     try {
-      const body = { name, phone, notes: [address, serviceType].filter(Boolean).join(' • ') }
+      const body = { name: name.trim(), phone: phone.trim(), notes: [address, serviceType].filter(Boolean).join(' • '), parent_code: parentCode }
       const created = await api(`/${kind === 'client' ? 'clients' : 'suppliers'}`, { method: 'POST', body })
-      toast.success('تمت الإضافة'); onOpenChange(false); setName(''); setPhone(''); setAddress(''); setServiceType('')
+      toast.success(`✅ تمت الإضافة بكود: ${created.account_code}`); onOpenChange(false); setName(''); setPhone(''); setAddress(''); setServiceType('')
       onSaved && onSaved(created)
     } catch (e) { toast.error(e.message) }
   }
+  const isClient = kind === 'client'
+  const clr = isClient ? 'emerald' : 'rose'
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md" dir="rtl">
-        <DialogHeader><DialogTitle>إضافة {kind === 'client' ? 'عميل' : 'مورد'} سريع</DialogTitle><DialogDescription>سيُضاف مباشرةً للدليل المحاسبي وتُختار في الحقل الحالي</DialogDescription></DialogHeader>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <span className="text-2xl">{isClient ? '👤' : '🏭'}</span>
+            <span>إضافة {isClient ? 'عميل' : 'مورد'} سريع</span>
+          </DialogTitle>
+          <DialogDescription>سيُضاف مباشرةً للدليل المحاسبي وتُختار في الحقل الحالي</DialogDescription>
+        </DialogHeader>
         <div className="space-y-3">
-          <Field label="الاسم" required><Input value={name} onChange={e => setName(e.target.value)} /></Field>
-          <Field label="الجوال"><Input value={phone} onChange={e => setPhone(e.target.value)} /></Field>
+          <Field label="الاسم" required><Input value={name} onChange={e => setName(e.target.value)} className="font-semibold" /></Field>
+          <Field label="رقم الجوال" required><Input value={phone} onChange={e => setPhone(e.target.value)} placeholder="7XXXXXXXX" /></Field>
           <Field label="العنوان"><Input value={address} onChange={e => setAddress(e.target.value)} /></Field>
           {kind === 'supplier' && <Field label="نوع الخدمة"><Input value={serviceType} onChange={e => setServiceType(e.target.value)} placeholder="تذاكر / تأشيرات / فنادق" /></Field>}
+          <Field label="الحساب الأب (شجرة الحسابات)">
+            <Select value={parentCode} onValueChange={setParentCode}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {parents.map(p => (
+                  <SelectItem key={p.code} value={p.code}>
+                    <span className="font-mono text-xs">{p.code}</span> — {p.name_ar}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <div className={`text-[11px] p-2 rounded bg-${clr}-50 border border-${clr}-200 text-${clr}-700`}>
+            💡 سيتم توليد كود الحساب تلقائياً تحت الحساب الأب المختار (مثال: <b>{parentCode}0001</b>)
+          </div>
         </div>
-        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={save} className="grad-brand text-white">حفظ</Button></DialogFooter>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
+          <Button onClick={save} className={`bg-${clr}-600 hover:bg-${clr}-700 text-white`}>✅ حفظ</Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -2040,8 +2196,8 @@ function RefundDialog({ open, onOpenChange, record, refType, onSaved }) {
           <div className="flex justify-between"><span className="text-slate-500">طريقة الدفع الأصلية:</span><span>{record.payment_method === 'cash' ? '💵 نقد' : '🕓 آجل'}</span></div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <Field label="غرامة المورد/الشركة"><Input type="number" step="0.01" value={f.supplier_penalty} onChange={e => setF({ ...f, supplier_penalty: e.target.value })} placeholder="0" /></Field>
-          <Field label="رسوم خدمة المكتب"><Input type="number" step="0.01" value={f.office_fee} onChange={e => setF({ ...f, office_fee: e.target.value })} placeholder="0" /></Field>
+          <Field label="غرامة المورد/الشركة"><Input type="number" step="0.01" value={f.supplier_penalty} onChange={e = min="0"> setF({ ...f, supplier_penalty: e.target.value })} placeholder="0" /></Field>
+          <Field label="رسوم خدمة المكتب"><Input type="number" step="0.01" value={f.office_fee} onChange={e = min="0"> setF({ ...f, office_fee: e.target.value })} placeholder="0" /></Field>
           <div className="md:col-span-2"><Field label="سبب الإلغاء"><Input value={f.reason} onChange={e => setF({ ...f, reason: e.target.value })} placeholder="طلب العميل / تعذر السفر / تأجيل ..." /></Field></div>
           <div className="md:col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field></div>
         </div>
@@ -2232,25 +2388,44 @@ const TICKET_FIELDS = [
   { key: 'currency', label: 'العملة', aliases: ['currency', 'العملة'] },
   { key: 'pnr', label: 'رقم التذكرة / PNR', aliases: ['pnr', 'ticket', 'ticket no', 'رقم التذكرة', 'رقم الحجز'] },
   { key: 'route', label: 'خط السير', aliases: ['route', 'itinerary', 'خط السير', 'المسار'] },
+  { key: 'travel_mode', label: 'وسيلة السفر', aliases: ['mode', 'travel mode', 'وسيلة السفر', 'الطائرة'] },
   { key: 'passenger_name', label: 'اسم المسافر', aliases: ['passenger', 'name', 'اسم المسافر', 'الاسم'] },
   { key: 'passport_no', label: 'رقم الجواز', aliases: ['passport', 'passport no', 'رقم الجواز'] },
-  { key: 'travel_date', label: 'تاريخ السفر', aliases: ['travel date', 'departure', 'تاريخ السفر'] },
+  { key: 'phone', label: 'رقم الجوال', aliases: ['phone', 'mobile', 'الجوال', 'رقم الجوال', 'رقم الاتصال'] },
+  { key: 'travel_date', label: 'تاريخ السفر', aliases: ['travel date', 'departure date', 'تاريخ السفر'] },
+  { key: 'departure_time', label: 'وقت الإقلاع', aliases: ['departure time', 'وقت الإقلاع', 'وقت المغادرة'] },
+  { key: 'return_date', label: 'تاريخ العودة', aliases: ['return date', 'تاريخ العودة'] },
+  { key: 'ticket_type', label: 'نوع التذكرة', aliases: ['ticket type', 'نوع التذكرة'] },
   { key: 'client_name', label: 'حساب القبض', aliases: ['client', 'customer', 'العميل', 'اسم العميل', 'حساب القبض'] },
   { key: 'supplier_name', label: 'اسم المورد', aliases: ['supplier', 'vendor', 'agent', 'المورد', 'الوكيل', 'اسم المورد'] },
   { key: 'cost', label: 'التكلفة', aliases: ['cost', 'buy', 'purchase', 'التكلفة', 'الشراء'] },
   { key: 'sale_price', label: 'سعر البيع', aliases: ['sale', 'sell', 'price', 'sale price', 'البيع', 'سعر البيع'] },
+  { key: 'discount', label: 'الخصم', aliases: ['discount', 'الخصم'] },
+  { key: 'commission', label: 'العمولة', aliases: ['commission', 'العمولة'] },
+  { key: 'partner_commission_share', label: 'عمولة الشريك', aliases: ['partner commission', 'partner', 'عمولة الشريك'] },
+  { key: 'payment_method', label: 'طريقة الدفع', aliases: ['payment', 'payment method', 'طريقة الدفع', 'نقد أو آجل'] },
+  { key: 'notes', label: 'ملاحظات', aliases: ['notes', 'note', 'ملاحظات'] },
 ]
 const VISA_FIELDS = [
   { key: 'date', label: 'التاريخ', aliases: ['date', 'التاريخ'] },
-  { key: 'service_type', label: 'نوع الخدمة', aliases: ['service', 'type', 'نوع الخدمة', 'النوع'] },
+  { key: 'service_type', label: 'نوع التأشيرة', aliases: ['service', 'type', 'visa_type', 'نوع الخدمة', 'النوع', 'نوع التأشيرة'] },
   { key: 'currency', label: 'العملة', aliases: ['currency', 'العملة'] },
-  { key: 'passenger_name', label: 'اسم المسافر/المعتمر', aliases: ['name', 'pilgrim', 'الاسم', 'اسم المعتمر'] },
+  { key: 'beneficiary_name', label: 'اسم صاحب التأشيرة', aliases: ['beneficiary', 'اسم صاحب التأشيرة', 'اسم المعتمر', 'اسم المستفيد'] },
+  { key: 'passenger_name', label: 'اسم المسافر/المعتمر', aliases: ['name', 'pilgrim', 'passenger', 'الاسم', 'اسم المعتمر'] },
   { key: 'passport_no', label: 'رقم الجواز', aliases: ['passport', 'رقم الجواز'] },
+  { key: 'phone', label: 'رقم الجوال', aliases: ['phone', 'mobile', 'الجوال', 'رقم الجوال'] },
   { key: 'nationality', label: 'الجنسية', aliases: ['nationality', 'الجنسية'] },
+  { key: 'destination_country', label: 'الدولة الوجهة', aliases: ['country', 'destination', 'وجهة السفر', 'الدولة'] },
+  { key: 'entry_date', label: 'تاريخ الدخول', aliases: ['entry', 'entry_date', 'تاريخ الدخول'] },
+  { key: 'max_exit_date', label: 'أقصى تاريخ للخروج', aliases: ['exit', 'max_exit', 'أقصى تاريخ للخروج', 'خروج أقصى'] },
   { key: 'client_name', label: 'حساب القبض', aliases: ['client', 'customer', 'العميل', 'اسم العميل', 'حساب القبض'] },
   { key: 'supplier_name', label: 'اسم المورد', aliases: ['supplier', 'agent', 'المورد', 'الوكيل'] },
   { key: 'cost', label: 'التكلفة', aliases: ['cost', 'التكلفة'] },
   { key: 'sale_price', label: 'سعر البيع', aliases: ['sale', 'price', 'البيع', 'سعر البيع'] },
+  { key: 'discount', label: 'الخصم', aliases: ['discount', 'الخصم'] },
+  { key: 'commission', label: 'العمولة', aliases: ['commission', 'العمولة'] },
+  { key: 'payment_method', label: 'طريقة الدفع', aliases: ['payment', 'payment method', 'طريقة الدفع'] },
+  { key: 'notes', label: 'ملاحظات', aliases: ['notes', 'note', 'ملاحظات'] },
 ]
 
 function autoMap(headers, fields) {
@@ -2864,7 +3039,7 @@ function BulkEditDialog({ open, onOpenChange, kind, ids, suppliers, boxes, onDon
 // ================================================================
 // VISAS SCREEN with Manual + Bulk import
 // ================================================================
-const VISA_TYPES = ['تأشيرة عمرة', 'موافقة أمنية', 'فيزا سياحية', 'فيزا عمل', 'حجز فندق', 'خدمات أخرى']
+const VISA_TYPES = ['تأشيرة عمرة', 'تأشيرة زيارة', 'موافقة أمنية', 'فيزا سياحية', 'فيزا عمل', 'حجز فندق', 'خدمات أخرى']
 
 function VisasScreen() {
   const { settings, tenant } = useAuth()
@@ -3104,7 +3279,7 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
             <Field label="نوع الخدمة"><Select value={form.service_type} onValueChange={v => setForm({ ...form, service_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{VISA_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="المورد" required><SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id} onChange={id => setForm({ ...form, supplier_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
-            <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
+            <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e = min="0"> setForm({ ...form, exchange_rate: e.target.value })} /></Field>
             <Field label="اسم صاحب التأشيرة"><Input value={form.passenger_name} onChange={e => setForm({ ...form, passenger_name: e.target.value })} /></Field>
             <Field label="رقم الجواز"><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value })} /></Field>
             <Field label="الجنسية"><Input value={form.nationality} onChange={e => setForm({ ...form, nationality: e.target.value })} /></Field>
@@ -3166,8 +3341,8 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
           <div className="bg-gradient-to-l from-emerald-50 to-blue-50 border rounded-xl p-4 mt-2">
             <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Banknote className="w-4 h-4 text-emerald-600" /> الجانب المالي</div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Field label={`التكلفة (${form.currency})`} required><Input type="number" step="0.01" value={form.cost} onChange={e => setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
-              <Field label={`سعر البيع (${form.currency})`} required><Input type="number" step="0.01" value={form.sale_price} onChange={e => setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
+              <Field label={`التكلفة (${form.currency})`} required><Input type="number" step="0.01" value={form.cost} onChange={e = min="0"> setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
+              <Field label={`سعر البيع (${form.currency})`} required><Input type="number" step="0.01" value={form.sale_price} onChange={e = min="0"> setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
               <Field label={`العمولة (${form.currency})`}><div className={`px-3 py-2 rounded-md border text-lg font-extrabold ${commission >= 0 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>{fmt(commission, form.currency)}</div></Field>
             </div>
           </div>
@@ -3432,7 +3607,7 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
           </Field>
           <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="المورد / المزود" required><SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id} onChange={id => setForm({ ...form, supplier_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
-          <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
+          <Field label="سعر الصرف"><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e = min="0"> setForm({ ...form, exchange_rate: e.target.value })} /></Field>
           <Field label="اسم المستفيد"><Input value={form.beneficiary_name} onChange={e => setForm({ ...form, beneficiary_name: e.target.value })} placeholder="مثال: أحمد محمد" /></Field>
           <Field label="الرقم المرجعي"><Input value={form.reference_no} onChange={e => setForm({ ...form, reference_no: e.target.value })} placeholder="مثال: HTL-2025-001" /></Field>
           <Field label="وصف مختصر"><Input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="مثال: 3 ليالٍ فندق البلد" /></Field>
@@ -3483,8 +3658,8 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
         <div className="bg-gradient-to-l from-orange-50 to-amber-50 border rounded-xl p-4 mt-2">
           <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Banknote className="w-4 h-4 text-orange-600" /> الجانب المالي</div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Field label={`التكلفة (${form.currency})`} required><Input type="number" step="0.01" value={form.cost} onChange={e => setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
-            <Field label={`سعر البيع (${form.currency})`} required><Input type="number" step="0.01" value={form.sale_price} onChange={e => setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
+            <Field label={`التكلفة (${form.currency})`} required><Input type="number" step="0.01" value={form.cost} onChange={e = min="0"> setForm({ ...form, cost: e.target.value })} className="text-lg font-bold" /></Field>
+            <Field label={`سعر البيع (${form.currency})`} required><Input type="number" step="0.01" value={form.sale_price} onChange={e = min="0"> setForm({ ...form, sale_price: e.target.value })} className="text-lg font-bold" /></Field>
             <Field label={`العمولة (${form.currency})`}><div className={`px-3 py-2 rounded-md border text-lg font-extrabold ${commission >= 0 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>{fmt(commission, form.currency)}</div></Field>
           </div>
         </div>
@@ -3752,14 +3927,14 @@ function PartiesScreen({ kind }) {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [q, setQ] = useState('')
-  const [form, setForm] = useState({ name: '', phone: '', whatsapp: '', address: '', email: '', notes: '', parent_code: defaultParent })
+  const [form, setForm] = useState({ name: '', phone: '', whatsapp: '', address: '', email: '', notes: '', parent_code: defaultParent, credit_limit: 0, credit_currency: 'USD', is_frozen: false })
   const load = async () => { try { setRows(await api(`/${kind}`)) } catch (e) { toast.error(e.message) } }
   const loadAccounts = async () => { try { setAccounts(await api('/accounts')) } catch (_) {} }
   useEffect(() => { load(); loadAccounts() }, [kind])
   useEffect(() => {
     if (!open) return
-    if (editing) setForm({ name: editing.name || '', phone: editing.phone || '', whatsapp: editing.whatsapp || editing.phone || '', address: editing.address || '', email: editing.email || '', notes: editing.notes || '', parent_code: editing.parent_code || defaultParent })
-    else setForm({ name: '', phone: '', whatsapp: '', address: '', email: '', notes: '', parent_code: defaultParent })
+    if (editing) setForm({ name: editing.name || '', phone: editing.phone || '', whatsapp: editing.whatsapp || editing.phone || '', address: editing.address || '', email: editing.email || '', notes: editing.notes || '', parent_code: editing.parent_code || defaultParent, credit_limit: editing.credit_limit || 0, credit_currency: editing.credit_currency || 'USD', is_frozen: !!editing.is_frozen })
+    else setForm({ name: '', phone: '', whatsapp: '', address: '', email: '', notes: '', parent_code: defaultParent, credit_limit: 0, credit_currency: 'USD', is_frozen: false })
   }, [open, editing])
   const save = async () => {
     if (!form.name) return toast.error('الاسم مطلوب')
@@ -3833,6 +4008,28 @@ function PartiesScreen({ kind }) {
               </Field>
               <div className="text-xs text-slate-500 mt-1">سيندرج {kind === 'clients' ? 'العميل' : 'المورد'} كحساب فرعي تحت هذا الأب في شجرة الحسابات.</div>
             </div>
+            {kind === 'clients' && (
+              <>
+                <Field label="💳 سقف الائتمان">
+                  <Input type="number" min="0" value={form.credit_limit || 0} onChange={e => setForm({ ...form, credit_limit: e.target.value })} placeholder="0 = بدون سقف" />
+                </Field>
+                <Field label="💱 عملة السقف">
+                  <Select value={form.credit_currency || 'USD'} onValueChange={v => setForm({ ...form, credit_currency: v })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+                  </Select>
+                </Field>
+                <div className="md:col-span-2">
+                  <label className="flex items-center gap-3 p-2 rounded border cursor-pointer bg-slate-50">
+                    <input type="checkbox" checked={!!form.is_frozen} onChange={e => setForm({ ...form, is_frozen: e.target.checked })} className="w-5 h-5" />
+                    <div>
+                      <div className="font-bold text-red-700">❄️ تجميد الحساب</div>
+                      <div className="text-xs text-slate-500">يمنع إصدار أي حركات آجلة على هذا العميل</div>
+                    </div>
+                  </label>
+                </div>
+              </>
+            )}
             <div className="md:col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></Field></div>
           </div>
           <DialogFooter>
@@ -3889,6 +4086,7 @@ function BoxesScreen() {
                   <SelectItem value="bank">بنك</SelectItem>
                 </SelectContent>
               </Select>
+
             </Field>
             <Field label="🌲 الحساب الأب (شجرة الحسابات)">
               <Select value={parentCode} onValueChange={setParentCode}>
@@ -4282,6 +4480,589 @@ function ReportsScreen() {
     </div>
   )
 }
+
+
+// ================================================================
+// v3.10.4 — QUERY CENTER (Custom Query & Statistics)
+// Visas + Tickets filtered stats with export
+// ================================================================
+function QueryCenterScreen() {
+  const { settings, tenant } = useAuth()
+  const [filters, setFilters] = useState({ from: '', to: '', kind: 'all', service_type: '', ticket_type: '', client_id: '', supplier_id: '', payment_method: '', min_qty: '', search: '' })
+  const [data, setData] = useState({ stats: {}, visas: [], tickets: [] })
+  const [loading, setLoading] = useState(false)
+  const [activeTab, setActiveTab] = useState('visas')
+
+  const runQuery = async () => {
+    setLoading(true)
+    try {
+      const qs = Object.entries(filters).filter(([, v]) => v !== '' && v !== null).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&')
+      const res = await api(`/reports/query?${qs}`)
+      setData(res)
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }
+  useEffect(() => { runQuery() }, [])
+
+  const s = data.stats || {}
+  const baseCcy = s.base_currency || 'USD'
+
+  const exportExcel = () => {
+    const rows = activeTab === 'visas' ? data.visas : data.tickets
+    if (!rows || rows.length === 0) return toast.error('لا توجد بيانات للتصدير')
+    const cols = activeTab === 'visas'
+      ? ['date', 'service_type', 'beneficiary_name', 'phone', 'passport_no', 'nationality', 'client_name', 'supplier_name', 'currency', 'cost', 'sale_price', 'commission', 'payment_method']
+      : ['date', 'ticket_type', 'passenger_name', 'phone', 'pnr', 'travel_date', 'route', 'client_name', 'supplier_name', 'currency', 'cost', 'sale_price', 'commission', 'payment_method']
+    const csv = [cols.join(','), ...rows.map(r => cols.map(c => `"${String(r[c] ?? '').replace(/"/g, '""')}"`).join(','))].join('\n')
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = `query_${activeTab}_${new Date().toISOString().slice(0, 10)}.csv`; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const printReport = () => {
+    const rows = activeTab === 'visas' ? data.visas : data.tickets
+    const cols = activeTab === 'visas'
+      ? [{ key: 'date', label: 'التاريخ' }, { key: 'service_type', label: 'النوع' }, { key: 'beneficiary_name', label: 'المستفيد' }, { key: 'phone', label: 'الجوال' }, { key: 'client_name', label: 'العميل' }, { key: 'supplier_name', label: 'المورد' }, { key: 'sale_price', label: 'المبيع', align: 'left' }, { key: 'commission', label: 'العمولة', align: 'left' }]
+      : [{ key: 'date', label: 'التاريخ' }, { key: 'passenger_name', label: 'المسافر' }, { key: 'pnr', label: 'PNR' }, { key: 'travel_date', label: 'تاريخ السفر' }, { key: 'client_name', label: 'العميل' }, { key: 'supplier_name', label: 'المورد' }, { key: 'sale_price', label: 'المبيع', align: 'left' }, { key: 'commission', label: 'العمولة', align: 'left' }]
+    printTable({ title: `مركز الاستعلامات — ${activeTab === 'visas' ? 'التأشيرات' : 'التذاكر'}`, columns: cols, rows: rows || [], settings, tenant })
+  }
+
+  return (
+    <div className="space-y-6">
+      <TopBar title="📊 مركز الاستعلامات والإحصائيات" subtitle="بحث وفلترة متقدمة على التأشيرات والتذاكر مع تصدير النتائج"
+        right={<div className="flex gap-2">
+          <Button onClick={exportExcel} className="gap-2 bg-emerald-600 hover:bg-emerald-700 text-white" size="sm"><Download className="w-4 h-4" /> Excel</Button>
+          <Button onClick={printReport} className="gap-2 bg-blue-600 hover:bg-blue-700 text-white" size="sm"><Printer className="w-4 h-4" /> طباعة</Button>
+        </div>} />
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <Card className="border-l-4 border-l-emerald-500">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-lg bg-emerald-100 flex items-center justify-center text-2xl">📄</div>
+              <div>
+                <div className="text-xs text-slate-500">إجمالي التأشيرات</div>
+                <div className="text-3xl font-black text-emerald-700">{s.visas_count || 0}</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="border-l-4 border-l-sky-500">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-lg bg-sky-100 flex items-center justify-center text-2xl">✈️</div>
+              <div>
+                <div className="text-xs text-slate-500">إجمالي التذاكر</div>
+                <div className="text-3xl font-black text-sky-700">{s.tickets_count || 0}</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="border-l-4 border-l-indigo-500">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-lg bg-indigo-100 flex items-center justify-center text-2xl">💰</div>
+              <div>
+                <div className="text-xs text-slate-500">إجمالي المبيعات ({baseCcy})</div>
+                <div className="text-2xl font-black text-indigo-700">{Number(s.total_sales || 0).toLocaleString()}</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="border-l-4 border-l-amber-500">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-lg bg-amber-100 flex items-center justify-center text-2xl">💎</div>
+              <div>
+                <div className="text-xs text-slate-500">صافي العمولات ({baseCcy})</div>
+                <div className="text-2xl font-black text-amber-700">{Number(s.total_commission || 0).toLocaleString()}</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Filters */}
+      <Card>
+        <CardHeader><CardTitle className="text-base flex items-center gap-2"><Filter className="w-4 h-4" /> الفلاتر المتقدمة</CardTitle></CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Field label="من تاريخ"><Input type="date" value={filters.from} onChange={e => setFilters({ ...filters, from: e.target.value })} /></Field>
+            <Field label="إلى تاريخ"><Input type="date" value={filters.to} onChange={e => setFilters({ ...filters, to: e.target.value })} /></Field>
+            <Field label="النوع الرئيسي">
+              <Select value={filters.kind} onValueChange={v => setFilters({ ...filters, kind: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">📊 الكل</SelectItem>
+                  <SelectItem value="visa">📄 التأشيرات فقط</SelectItem>
+                  <SelectItem value="ticket">✈️ التذاكر فقط</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="طريقة الدفع">
+              <Select value={filters.payment_method || 'all'} onValueChange={v => setFilters({ ...filters, payment_method: v === 'all' ? '' : v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">الكل</SelectItem>
+                  <SelectItem value="cash">💵 نقدي</SelectItem>
+                  <SelectItem value="credit">📅 آجل</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="نوع التأشيرة (إن وُجد)">
+              <Select value={filters.service_type || 'all'} onValueChange={v => setFilters({ ...filters, service_type: v === 'all' ? '' : v })}>
+                <SelectTrigger><SelectValue placeholder="الكل" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">الكل</SelectItem>
+                  {VISA_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="نوع التذكرة (إن وُجد)">
+              <Select value={filters.ticket_type || 'all'} onValueChange={v => setFilters({ ...filters, ticket_type: v === 'all' ? '' : v })}>
+                <SelectTrigger><SelectValue placeholder="الكل" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">الكل</SelectItem>
+                  <SelectItem value="ذهاب فقط">ذهاب فقط</SelectItem>
+                  <SelectItem value="ذهاب وعودة">ذهاب وعودة</SelectItem>
+                  <SelectItem value="متعدد الوجهات">متعدد الوجهات</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="الحد الأدنى للكمية"><Input type="number" min="0" value={filters.min_qty} onChange={e => setFilters({ ...filters, min_qty: e.target.value })} placeholder="0" /></Field>
+            <Field label="بحث عام (اسم/جواز/PNR)"><Input value={filters.search} onChange={e => setFilters({ ...filters, search: e.target.value })} placeholder="اكتب للبحث..." /></Field>
+          </div>
+          <div className="mt-3 flex justify-between items-center">
+            <div className="text-xs text-slate-500">
+              {loading ? 'جاري البحث...' : `${(data.visas?.length || 0) + (data.tickets?.length || 0)} سجل`}
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setFilters({ from: '', to: '', kind: 'all', service_type: '', ticket_type: '', client_id: '', supplier_id: '', payment_method: '', min_qty: '', search: '' })} size="sm">🧹 مسح</Button>
+              <Button onClick={runQuery} className="bg-violet-600 hover:bg-violet-700 text-white" size="sm"><Search className="w-4 h-4 me-1" /> بحث</Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Tabs Results */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100 border w-fit mb-4">
+            <button onClick={() => setActiveTab('visas')} className={`px-4 py-1.5 rounded-md text-xs font-bold transition ${activeTab === 'visas' ? 'bg-white shadow border' : 'text-slate-500'}`}>📄 التأشيرات ({data.visas?.length || 0})</button>
+            <button onClick={() => setActiveTab('tickets')} className={`px-4 py-1.5 rounded-md text-xs font-bold transition ${activeTab === 'tickets' ? 'bg-white shadow border' : 'text-slate-500'}`}>✈️ التذاكر ({data.tickets?.length || 0})</button>
+          </div>
+
+          {activeTab === 'visas' ? (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader><TableRow><TableHead>#</TableHead><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>المستفيد</TableHead><TableHead>الجواز</TableHead><TableHead>العميل</TableHead><TableHead>المورد</TableHead><TableHead className="text-left">التكلفة</TableHead><TableHead className="text-left">المبيع</TableHead><TableHead className="text-left">العمولة</TableHead><TableHead>الدفع</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {(data.visas || []).map((v, i) => (
+                    <TableRow key={v.id}>
+                      <TableCell className="text-xs text-slate-400">{i + 1}</TableCell>
+                      <TableCell className="text-xs">{v.date}</TableCell>
+                      <TableCell><Badge variant="outline" className="text-[10px]">{v.service_type}</Badge></TableCell>
+                      <TableCell className="font-semibold">{v.beneficiary_name || v.passenger_name}</TableCell>
+                      <TableCell className="text-xs font-mono">{v.passport_no || '—'}</TableCell>
+                      <TableCell className="text-xs">{v.client_name || '—'}</TableCell>
+                      <TableCell className="text-xs">{v.supplier_name}</TableCell>
+                      <TableCell className="text-left text-xs">{fmt(v.cost, v.currency)}</TableCell>
+                      <TableCell className="text-left text-xs font-bold text-emerald-700">{fmt(v.sale_price, v.currency)}</TableCell>
+                      <TableCell className="text-left text-xs font-bold text-amber-700">{fmt(v.commission, v.currency)}</TableCell>
+                      <TableCell><Badge className={v.payment_method === 'cash' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}>{v.payment_method === 'cash' ? 'نقد' : 'آجل'}</Badge></TableCell>
+                    </TableRow>
+                  ))}
+                  {(data.visas || []).length === 0 && <TableRow><TableCell colSpan={11} className="text-center text-slate-400 py-6">لا توجد نتائج مطابقة</TableCell></TableRow>}
+                </TableBody>
+              </Table>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader><TableRow><TableHead>#</TableHead><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>المسافر</TableHead><TableHead>PNR</TableHead><TableHead>تاريخ السفر</TableHead><TableHead>العميل</TableHead><TableHead>المورد</TableHead><TableHead className="text-left">التكلفة</TableHead><TableHead className="text-left">المبيع</TableHead><TableHead className="text-left">العمولة</TableHead><TableHead>الدفع</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {(data.tickets || []).map((t, i) => (
+                    <TableRow key={t.id}>
+                      <TableCell className="text-xs text-slate-400">{i + 1}</TableCell>
+                      <TableCell className="text-xs">{t.date}</TableCell>
+                      <TableCell><Badge variant="outline" className="text-[10px]">{t.ticket_type || '—'}</Badge></TableCell>
+                      <TableCell className="font-semibold">{t.passenger_name}</TableCell>
+                      <TableCell className="text-xs font-mono">{t.pnr || '—'}</TableCell>
+                      <TableCell className="text-xs">{t.travel_date}</TableCell>
+                      <TableCell className="text-xs">{t.client_name || '—'}</TableCell>
+                      <TableCell className="text-xs">{t.supplier_name}</TableCell>
+                      <TableCell className="text-left text-xs">{fmt(t.cost, t.currency)}</TableCell>
+                      <TableCell className="text-left text-xs font-bold text-emerald-700">{fmt(t.sale_price, t.currency)}</TableCell>
+                      <TableCell className="text-left text-xs font-bold text-amber-700">{fmt(t.commission, t.currency)}</TableCell>
+                      <TableCell><Badge className={t.payment_method === 'cash' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}>{t.payment_method === 'cash' ? 'نقد' : 'آجل'}</Badge></TableCell>
+                    </TableRow>
+                  ))}
+                  {(data.tickets || []).length === 0 && <TableRow><TableCell colSpan={12} className="text-center text-slate-400 py-6">لا توجد نتائج مطابقة</TableCell></TableRow>}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+// v3.10.5 — VISA MONITORING CENTER — Full implementation
+function VisaMonitorScreen() {
+  const [rows, setRows] = useState([])
+  const [stats, setStats] = useState({})
+  const [countries, setCountries] = useState([])
+  const [filters, setFilters] = useState({ status: 'active', has_fines: '0', country: '', search: '' })
+  const [loading, setLoading] = useState(false)
+  const [dlgOpen, setDlgOpen] = useState(false)
+  const [editing, setEditing] = useState(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const [countryDlgOpen, setCountryDlgOpen] = useState(false)
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const qs = Object.entries(filters).filter(([, v]) => v !== '' && v !== null).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&')
+      const [list, s, c] = await Promise.all([
+        api(`/visa-monitor?${qs}`),
+        api('/visa-monitor/stats'),
+        api('/countries'),
+      ])
+      setRows(list || []); setStats(s || {}); setCountries(c || [])
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [])
+
+  const doAction = async (row, action) => {
+    if (!confirm(action === 'exited' ? 'تأكيد تم الخروج؟' : action === 'acknowledge' ? 'إخفاء من القائمة النشطة (يبقى في الأرشيف)؟' : 'إعادة تفعيل السجل؟')) return
+    try {
+      await api(`/visa-monitor/${row.id}`, { method: 'PATCH', body: { action } })
+      toast.success('✅ تم التحديث'); load()
+    } catch (e) { toast.error(e.message) }
+  }
+
+  const del = async (row) => {
+    if (!confirm(`حذف سجل ${row.traveler_name} نهائياً؟`)) return
+    try { await api(`/visa-monitor/${row.id}`, { method: 'DELETE' }); toast.success('حُذف'); load() } catch (e) { toast.error(e.message) }
+  }
+
+  const alertColor = { red: 'bg-red-100 border-r-4 border-red-500', yellow: 'bg-yellow-100 border-r-4 border-yellow-500', orange: 'bg-orange-100 border-r-4 border-orange-400', none: '' }
+  const countryLabel = (code) => { const c = countries.find(x => x.code === code); return c ? `${c.flag} ${c.name_ar}` : code }
+
+  return (
+    <div className="space-y-6">
+      <TopBar title="🛃 مركز مراقبة التأشيرات" subtitle="تتبع الإقامات وتنبيهات الغرامات — مستقل عن المبيعات والمالية"
+        right={<div className="flex gap-2">
+          <Button onClick={() => setCountryDlgOpen(true)} variant="outline" size="sm">🌍 إعدادات الدول</Button>
+          <Button onClick={() => setImportOpen(true)} variant="outline" size="sm">📥 استيراد نسك</Button>
+          <Button onClick={() => { setEditing(null); setDlgOpen(true) }} className="grad-brand text-white" size="sm"><Plus className="w-4 h-4 me-1" /> إضافة سجل</Button>
+        </div>} />
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+        <Card className="border-l-4 border-l-red-500 bg-red-50/40">
+          <CardContent className="p-3">
+            <div className="text-xs text-slate-500">🚨 تنبيهات حمراء</div>
+            <div className="text-3xl font-black text-red-700">{stats.red_alerts || 0}</div>
+            <div className="text-[10px] text-slate-500">تجاوز + غرامات</div>
+          </CardContent>
+        </Card>
+        <Card className="border-l-4 border-l-yellow-500 bg-yellow-50/40">
+          <CardContent className="p-3">
+            <div className="text-xs text-slate-500">⚠️ تنبيهات صفراء</div>
+            <div className="text-3xl font-black text-yellow-700">{stats.yellow_alerts || 0}</div>
+            <div className="text-[10px] text-slate-500">تجاوز بدون غرامات</div>
+          </CardContent>
+        </Card>
+        <Card className="border-l-4 border-l-orange-400 bg-orange-50/40">
+          <CardContent className="p-3">
+            <div className="text-xs text-slate-500">⏰ تحذيرات</div>
+            <div className="text-3xl font-black text-orange-600">{stats.orange_alerts || 0}</div>
+            <div className="text-[10px] text-slate-500">3 أيام أو أقل</div>
+          </CardContent>
+        </Card>
+        <Card className="border-l-4 border-l-blue-500 bg-blue-50/40">
+          <CardContent className="p-3">
+            <div className="text-xs text-slate-500">👁️ نشطة</div>
+            <div className="text-3xl font-black text-blue-700">{stats.active || 0}</div>
+            <div className="text-[10px] text-slate-500">قيد المتابعة</div>
+          </CardContent>
+        </Card>
+        <Card className="border-l-4 border-l-emerald-500 bg-emerald-50/40">
+          <CardContent className="p-3">
+            <div className="text-xs text-slate-500">🛫 مؤرشفة</div>
+            <div className="text-3xl font-black text-emerald-700">{(stats.exited || 0) + (stats.acknowledged || 0)}</div>
+            <div className="text-[10px] text-slate-500">{stats.exited || 0} خروج · {stats.acknowledged || 0} مطّلع</div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Filters */}
+      <Card>
+        <CardContent className="p-3">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <Field label="الحالة">
+              <Select value={filters.status} onValueChange={v => setFilters({ ...filters, status: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="active">👁️ النشطة</SelectItem>
+                  <SelectItem value="exited">🛫 تم الخروج</SelectItem>
+                  <SelectItem value="acknowledged">👁️ تم الاطلاع</SelectItem>
+                  <SelectItem value="all">📋 الكل</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="الدولة">
+              <Select value={filters.country || 'all'} onValueChange={v => setFilters({ ...filters, country: v === 'all' ? '' : v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">🌍 كل الدول</SelectItem>
+                  {countries.map(c => <SelectItem key={c.code} value={c.code}>{c.flag} {c.name_ar}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+            <div className="col-span-2"><Field label="بحث (اسم/جواز/جوال)"><Input value={filters.search} onChange={e => setFilters({ ...filters, search: e.target.value })} placeholder="اكتب للبحث..." /></Field></div>
+            <Field label=" ">
+              <label className="flex items-center gap-2 cursor-pointer p-2 rounded border bg-red-50">
+                <input type="checkbox" checked={filters.has_fines === '1'} onChange={e => setFilters({ ...filters, has_fines: e.target.checked ? '1' : '0' })} />
+                <span className="text-xs font-bold text-red-700">🚨 المسؤولية المالية فقط</span>
+              </label>
+            </Field>
+          </div>
+          <div className="mt-3 flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setFilters({ status: 'active', has_fines: '0', country: '', search: '' })} size="sm">🧹 مسح</Button>
+            <Button onClick={load} className="grad-brand text-white" size="sm"><Search className="w-4 h-4 me-1" /> تطبيق</Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Table */}
+      <Card>
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader><TableRow>
+                <TableHead>#</TableHead><TableHead>المسافر</TableHead><TableHead>الجواز</TableHead>
+                <TableHead>الدولة</TableHead><TableHead>النوع</TableHead>
+                <TableHead>دخول</TableHead><TableHead>خروج أقصى</TableHead><TableHead className="text-center">الأيام المتبقية</TableHead>
+                <TableHead className="text-center">حالة</TableHead><TableHead>الإجراءات</TableHead>
+              </TableRow></TableHeader>
+              <TableBody>
+                {loading && <TableRow><TableCell colSpan={10} className="text-center py-6"><Loader2 className="w-6 h-6 animate-spin inline" /></TableCell></TableRow>}
+                {!loading && rows.length === 0 && <TableRow><TableCell colSpan={10} className="text-center text-slate-400 py-6">لا توجد سجلات مطابقة</TableCell></TableRow>}
+                {!loading && rows.map((r, i) => (
+                  <TableRow key={r.id} className={alertColor[r.alert_level] || ''}>
+                    <TableCell className="text-xs text-slate-400">{i + 1}</TableCell>
+                    <TableCell className="font-semibold">{r.traveler_name}<div className="text-[10px] text-slate-500">{r.phone}</div></TableCell>
+                    <TableCell className="text-xs font-mono font-bold">{r.passport_no}</TableCell>
+                    <TableCell>{countryLabel(r.destination_country)}{r.has_fines && <div className="text-[9px] mt-0.5"><Badge className="bg-red-600 text-white text-[9px]">غرامات</Badge></div>}</TableCell>
+                    <TableCell><Badge variant="outline" className="text-[10px]">{r.visa_type || '-'}</Badge></TableCell>
+                    <TableCell className="text-xs">{r.entry_date}</TableCell>
+                    <TableCell className="text-xs">{r.max_exit_date || '—'}</TableCell>
+                    <TableCell className="text-center">
+                      {r.remaining_days === null ? <span className="text-slate-400">—</span> :
+                        r.remaining_days < 0 ? <span className="font-bold text-red-700">-{Math.abs(r.remaining_days)} يوم متأخر</span> :
+                          <span className={`font-bold ${r.remaining_days <= 3 ? 'text-orange-600' : 'text-slate-700'}`}>{r.remaining_days} يوم</span>}
+                    </TableCell>
+                    <TableCell className="text-center">
+                      {r.status === 'active' && <Badge className="bg-blue-100 text-blue-700">نشط</Badge>}
+                      {r.status === 'exited' && <Badge className="bg-emerald-100 text-emerald-700">🛫 خرج</Badge>}
+                      {r.status === 'acknowledged' && <Badge className="bg-slate-200 text-slate-700">👁️ مطّلع</Badge>}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1">
+                        {r.status === 'active' && <>
+                          <Button size="sm" variant="outline" onClick={() => doAction(r, 'exited')} className="h-7 px-2 text-[10px] bg-emerald-50 hover:bg-emerald-100 border-emerald-300" title="تم الخروج">🛫 خرج</Button>
+                          {!r.has_fines && <Button size="sm" variant="outline" onClick={() => doAction(r, 'acknowledge')} className="h-7 px-2 text-[10px]" title="تم الاطلاع">👁️</Button>}
+                        </>}
+                        {r.status !== 'active' && <Button size="sm" variant="outline" onClick={() => doAction(r, 'reactivate')} className="h-7 px-2 text-[10px]" title="إعادة تفعيل">🔄</Button>}
+                        <Button size="sm" variant="ghost" onClick={() => { setEditing(r); setDlgOpen(true) }} className="h-7 w-7 p-0"><Pencil className="w-3 h-3" /></Button>
+                        <Button size="sm" variant="ghost" onClick={() => del(r)} className="h-7 w-7 p-0 text-rose-600"><Trash2 className="w-3 h-3" /></Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
+
+      <VisaMonitorDialog open={dlgOpen} onOpenChange={setDlgOpen} record={editing} countries={countries} onSaved={load} />
+      <VisaMonitorImportDialog open={importOpen} onOpenChange={setImportOpen} countries={countries} onDone={load} />
+      <CountriesSettingsDialog open={countryDlgOpen} onOpenChange={setCountryDlgOpen} onChanged={load} />
+    </div>
+  )
+}
+
+// v3.10.5 — Add/Edit Monitor Record Dialog
+function VisaMonitorDialog({ open, onOpenChange, record, countries, onSaved }) {
+  const [form, setForm] = useState({ traveler_name: '', phone: '', passport_no: '', destination_country: 'SA', visa_type: 'تأشيرة عمرة', entry_date: new Date().toISOString().slice(0, 10), max_exit_date: '', notes: '' })
+  useEffect(() => {
+    if (record) setForm({ ...form, ...record })
+    else setForm({ traveler_name: '', phone: '', passport_no: '', destination_country: 'SA', visa_type: 'تأشيرة عمرة', entry_date: new Date().toISOString().slice(0, 10), max_exit_date: '', notes: '' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [record, open])
+  const submit = async () => {
+    if (!form.traveler_name?.trim()) return toast.error('اسم المسافر مطلوب')
+    if (!form.passport_no?.trim()) return toast.error('رقم الجواز مطلوب')
+    if (!form.destination_country) return toast.error('الدولة مطلوبة')
+    if (!form.entry_date) return toast.error('تاريخ الدخول مطلوب')
+    try {
+      if (record?.id) await api(`/visa-monitor/${record.id}`, { method: 'PATCH', body: form })
+      else await api('/visa-monitor', { method: 'POST', body: form })
+      toast.success('✅ تم الحفظ'); onOpenChange(false); onSaved()
+    } catch (e) { toast.error(e.message) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl" dir="rtl">
+        <DialogHeader><DialogTitle className="flex items-center gap-2"><span className="text-2xl">🛃</span>{record ? 'تعديل سجل مراقبة' : 'إضافة سجل مراقبة جديد'}</DialogTitle></DialogHeader>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="اسم المسافر" required><Input value={form.traveler_name} onChange={e => setForm({ ...form, traveler_name: e.target.value })} /></Field>
+          <Field label="رقم الجوال"><Input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="7XXXXXXXX" /></Field>
+          <Field label="رقم الجواز" required><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value.toUpperCase() })} placeholder="A1234567" className="font-mono" /></Field>
+          <Field label="الدولة" required>
+            <Select value={form.destination_country} onValueChange={v => setForm({ ...form, destination_country: v })}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>{countries.map(c => <SelectItem key={c.code} value={c.code}>{c.flag} {c.name_ar}</SelectItem>)}</SelectContent>
+            </Select>
+          </Field>
+          <Field label="نوع التأشيرة">
+            <Select value={form.visa_type} onValueChange={v => setForm({ ...form, visa_type: v })}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>{VISA_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
+            </Select>
+          </Field>
+          <Field label="تاريخ الدخول" required><Input type="date" value={form.entry_date} onChange={e => setForm({ ...form, entry_date: e.target.value })} /></Field>
+          <Field label="أقصى تاريخ للخروج"><Input type="date" value={form.max_exit_date || ''} onChange={e => setForm({ ...form, max_exit_date: e.target.value })} /></Field>
+          <div className="col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></Field></div>
+        </div>
+        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} className="grad-brand text-white">✅ حفظ</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// v3.10.5 — Excel Import Dialog (Nusuk)
+function VisaMonitorImportDialog({ open, onOpenChange, countries, onDone }) {
+  const [file, setFile] = useState(null)
+  const [rows, setRows] = useState([])
+  const [uploading, setUploading] = useState(false)
+  const parseExcel = async (f) => {
+    try {
+      const buf = await f.arrayBuffer()
+      const wb = XLSX.read(buf, { type: 'array', cellDates: true })
+      const ws = wb.Sheets[wb.SheetNames[0]]
+      const parsed = XLSX.utils.sheet_to_json(ws, { defval: '' })
+      // Map common Nusuk column names → our schema
+      const mapped = parsed.map(row => {
+        const findVal = (keys) => { for (const k of keys) { for (const key in row) if (String(key).toLowerCase().includes(k.toLowerCase())) return row[key] } return '' }
+        const fmtDate = (v) => { if (!v) return ''; if (v instanceof Date) return v.toISOString().slice(0, 10); return String(v).slice(0, 10) }
+        return {
+          traveler_name: findVal(['name', 'اسم', 'traveler', 'passenger', 'معتمر']),
+          phone: findVal(['phone', 'جوال', 'mobile']),
+          passport_no: String(findVal(['passport', 'جواز', 'passport_no'])).toUpperCase(),
+          destination_country: findVal(['country', 'دولة', 'destination']) || 'SA',
+          visa_type: findVal(['visa_type', 'نوع', 'type']) || 'تأشيرة عمرة',
+          entry_date: fmtDate(findVal(['entry', 'دخول', 'entry_date'])),
+          max_exit_date: fmtDate(findVal(['exit', 'خروج', 'max_exit'])),
+          actual_exit_date: fmtDate(findVal(['actual_exit', 'خرج فعلياً']))
+        }
+      }).filter(r => r.passport_no && r.traveler_name)
+      setRows(mapped)
+      toast.success(`تم قراءة ${mapped.length} سجل`)
+    } catch (e) { toast.error('فشل قراءة الملف: ' + e.message) }
+  }
+  const submit = async () => {
+    if (rows.length === 0) return toast.error('لا توجد بيانات صالحة')
+    setUploading(true)
+    try {
+      const res = await api('/visa-monitor/import', { method: 'POST', body: { rows } })
+      toast.success(`✅ تم: ${res.inserted} إضافة، ${res.updated} تحديث، ${res.skipped} متجاهل`)
+      onOpenChange(false); setFile(null); setRows([]); onDone()
+    } catch (e) { toast.error(e.message) } finally { setUploading(false) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl" dir="rtl">
+        <DialogHeader><DialogTitle className="flex items-center gap-2"><span className="text-2xl">📥</span>استيراد سجلات المراقبة من ملف نُسك</DialogTitle>
+          <DialogDescription>يقوم النظام بتحديث السجلات الموجودة (Upsert بواسطة رقم الجواز) دون إنشاء حركات مالية</DialogDescription></DialogHeader>
+        <div className="space-y-3">
+          <Field label="اختر ملف Excel">
+            <Input type="file" accept=".xlsx,.xls,.csv" onChange={e => { const f = e.target.files?.[0]; if (f) { setFile(f); parseExcel(f) } }} />
+          </Field>
+          {rows.length > 0 && (
+            <div className="text-xs bg-slate-50 p-3 rounded border">
+              <div className="font-bold mb-2">معاينة ({rows.length} سجل):</div>
+              <div className="max-h-40 overflow-y-auto space-y-1">
+                {rows.slice(0, 5).map((r, i) => <div key={i} className="font-mono text-[10px]">{r.passport_no} · {r.traveler_name} · {r.destination_country} · {r.entry_date} → {r.max_exit_date}</div>)}
+                {rows.length > 5 && <div className="text-slate-500">... و {rows.length - 5} آخرين</div>}
+              </div>
+            </div>
+          )}
+          <div className="text-[11px] text-blue-700 bg-blue-50 p-2 rounded border border-blue-200">
+            💡 الأعمدة المتوقّعة: <b>name / اسم</b>, <b>passport / جواز</b>, <b>country / دولة</b>, <b>entry / دخول</b>, <b>max_exit / خروج</b>
+          </div>
+        </div>
+        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} disabled={rows.length === 0 || uploading} className="grad-brand text-white">{uploading ? 'جاري الاستيراد...' : '📤 استيراد'}</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// v3.10.5 — Countries Settings Dialog
+function CountriesSettingsDialog({ open, onOpenChange, onChanged }) {
+  const [rows, setRows] = useState([])
+  const [editing, setEditing] = useState(null)
+  useEffect(() => { if (open) api('/countries').then(setRows).catch(() => {}) }, [open])
+  const updateRule = async (country, visaType, hasFines) => {
+    const cfg = { ...(country.fines_config || {}) }
+    cfg[visaType] = { has_fines: hasFines }
+    await api(`/countries/${country.id}`, { method: 'PATCH', body: { fines_config: cfg } })
+    toast.success('تم التحديث')
+    api('/countries').then(setRows); onChanged && onChanged()
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl" dir="rtl">
+        <DialogHeader><DialogTitle>🌍 إعدادات الدول والغرامات</DialogTitle>
+          <DialogDescription>عدّل تصنيف الغرامات لكل دولة + نوع تأشيرة (has_fines)</DialogDescription></DialogHeader>
+        <div className="space-y-3 max-h-[60vh] overflow-y-auto">
+          {rows.map(c => (
+            <Card key={c.id} className="border">
+              <CardContent className="p-3">
+                <div className="flex items-center gap-3 mb-2">
+                  <span className="text-3xl">{c.flag}</span>
+                  <div className="flex-1">
+                    <div className="font-bold text-lg">{c.name_ar}</div>
+                    <div className="text-xs text-slate-500 font-mono">{c.code}</div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {['default', ...VISA_TYPES].map(vt => {
+                    const rule = (c.fines_config || {})[vt]
+                    const hasFines = rule?.has_fines ?? false
+                    return (
+                      <label key={vt} className={`flex items-center justify-between px-2 py-1.5 rounded border text-xs cursor-pointer ${hasFines ? 'bg-red-50 border-red-300' : 'bg-emerald-50 border-emerald-300'}`}>
+                        <span>{vt === 'default' ? '⚙️ الافتراضي' : vt}</span>
+                        <input type="checkbox" checked={hasFines} onChange={e => updateRule(c, vt, e.target.checked)} className="w-4 h-4" />
+                      </label>
+                    )
+                  })}
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+        <DialogFooter><Button onClick={() => onOpenChange(false)} className="grad-brand text-white">إغلاق</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 
 // v3.9.14 — Year-End Financial Closing Engine UI
 function YearCloseScreen() {
@@ -5595,7 +6376,7 @@ function CashoutDialog({ open, onOpenChange, data, onSaved }) {
         </DialogHeader>
         <div className="space-y-3">
           <Field label="المبلغ المطلوب (USD)" required>
-            <Input type="number" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} className="text-xl font-bold" />
+            <Input type="number" step="0.01" value={amount} onChange={e = min="0"> setAmount(e.target.value)} className="text-xl font-bold" />
           </Field>
           <Field label="طريقة السحب" required>
             <Select value={pmId} onValueChange={setPmId}>
@@ -5647,7 +6428,7 @@ function ApplyToSubscriptionDialog({ open, onOpenChange, data, onSaved }) {
             💰 رصيد الأفلييت الحالي: <b className="text-emerald-700">${data.balance_usd.toFixed(2)}</b>
           </div>
           <Field label="المبلغ (USD)" required>
-            <Input type="number" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} className="text-xl font-bold" />
+            <Input type="number" step="0.01" value={amount} onChange={e = min="0"> setAmount(e.target.value)} className="text-xl font-bold" />
           </Field>
         </div>
         <DialogFooter>
@@ -6112,8 +6893,8 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
                         <SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
                       </Select>
                     </div>
-                    <div className="col-span-1"><div className="text-[10px] text-slate-500 mb-1">تكلفة</div><Input type="number" value={it.cost} onChange={e => updItem(i, 'cost', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
-                    <div className="col-span-1"><div className="text-[10px] text-slate-500 mb-1">بيع</div><Input type="number" value={it.sale} onChange={e => updItem(i, 'sale', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
+                    <div className="col-span-1"><div className="text-[10px] text-slate-500 mb-1">تكلفة</div><Input type="number" value={it.cost} onChange={e = min="0"> updItem(i, 'cost', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
+                    <div className="col-span-1"><div className="text-[10px] text-slate-500 mb-1">بيع</div><Input type="number" value={it.sale} onChange={e = min="0"> updItem(i, 'sale', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
                     <div className="col-span-1 text-center">
                       <div className="text-[10px] text-slate-500 mb-1">ربح</div>
                       <div className={`text-xs font-bold ${(Number(it.sale) - Number(it.cost)) >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{((Number(it.sale) || 0) - (Number(it.cost) || 0)).toFixed(2)}</div>
@@ -6222,8 +7003,8 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                 <Field label="نوع"><Select value={newComp.component_type} onValueChange={v => setNewComp({ ...newComp, component_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{COMPONENT_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
                 <Field label="الاسم"><Input value={newComp.name} onChange={e => setNewComp({ ...newComp, name: e.target.value })} placeholder="فندق البلد" /></Field>
                 <Field label="المورد"><Select value={newComp.supplier_id} onValueChange={v => setNewComp({ ...newComp, supplier_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent></Select></Field>
-                <Field label={`تكلفة/فرد (${pkg.currency})`}><Input type="number" value={newComp.cost_per_pax} onChange={e => setNewComp({ ...newComp, cost_per_pax: e.target.value })} /></Field>
-                <Field label={`بيع/فرد (${pkg.currency})`}><Input type="number" value={newComp.sale_per_pax} onChange={e => setNewComp({ ...newComp, sale_per_pax: e.target.value })} /></Field>
+                <Field label={`تكلفة/فرد (${pkg.currency})`}><Input type="number" value={newComp.cost_per_pax} onChange={e = min="0"> setNewComp({ ...newComp, cost_per_pax: e.target.value })} /></Field>
+                <Field label={`بيع/فرد (${pkg.currency})`}><Input type="number" value={newComp.sale_per_pax} onChange={e = min="0"> setNewComp({ ...newComp, sale_per_pax: e.target.value })} /></Field>
                 <div className="flex items-end"><Button onClick={addComp} className="w-full grad-brand text-white gap-1"><Plus className="w-4 h-4" /> إضافة</Button></div>
               </div>
             )}
@@ -6629,10 +7410,10 @@ function PackageBookingEditDialog({ pkg, booking, clients, boxes, transports = [
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
               <Field label={`إجمالي التكلفة (${pkg.currency})`}>
-                <Input type="number" step="0.01" value={form.total_cost} onChange={e => setF('total_cost', e.target.value)} />
+                <Input type="number" step="0.01" value={form.total_cost} onChange={e = min="0"> setF('total_cost', e.target.value)} />
               </Field>
               <Field label={`إجمالي البيع (${pkg.currency})`}>
-                <Input type="number" step="0.01" value={form.total_sale} onChange={e => setF('total_sale', e.target.value)} />
+                <Input type="number" step="0.01" value={form.total_sale} onChange={e = min="0"> setF('total_sale', e.target.value)} />
               </Field>
               <div className="flex items-end">
                 <div className="w-full bg-white rounded p-2 border">
@@ -6960,11 +7741,11 @@ function OfficeSettings() {
                       <TableRow key={c}>
                         <TableCell><Badge className="text-sm font-bold" variant="outline">{c}</Badge> <span className="text-xs text-slate-500">{CUR_NAME[c]}</span></TableCell>
                         <TableCell><Badge variant="secondary">YER</Badge></TableCell>
-                        <TableCell><Input type="number" step="0.0001" value={rObj.transfer || ''} onChange={e => upd('transfer', e.target.value)} className="w-28 text-left font-bold" disabled={c === 'YER'} /></TableCell>
-                        <TableCell><Input type="number" step="0.0001" value={rObj.buy || ''} onChange={e => upd('buy', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
-                        <TableCell><Input type="number" step="0.0001" value={rObj.sell || ''} onChange={e => upd('sell', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
-                        <TableCell><Input type="number" step="0.0001" value={rObj.min || ''} onChange={e => upd('min', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
-                        <TableCell><Input type="number" step="0.0001" value={rObj.max || ''} onChange={e => upd('max', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" step="0.0001" value={rObj.transfer || ''} onChange={e = min="0"> upd('transfer', e.target.value)} className="w-28 text-left font-bold" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" step="0.0001" value={rObj.buy || ''} onChange={e = min="0"> upd('buy', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" step="0.0001" value={rObj.sell || ''} onChange={e = min="0"> upd('sell', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" step="0.0001" value={rObj.min || ''} onChange={e = min="0"> upd('min', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
+                        <TableCell><Input type="number" step="0.0001" value={rObj.max || ''} onChange={e = min="0"> upd('max', e.target.value)} className="w-28 text-left" disabled={c === 'YER'} /></TableCell>
                         <TableCell><Input value={rObj.remarks || ''} onChange={e => setF({ ...f, rates: { ...f.rates, [c]: { ...rObj, remarks: e.target.value } } })} className="w-40" placeholder="ملاحظة" disabled={c === 'YER'} /></TableCell>
                       </TableRow>
                     )
@@ -6979,15 +7760,15 @@ function OfficeSettings() {
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                   <Field label="سعر التحويل المباشر">
                     <Input type="number" step="0.0001" value={f.pair_usd_sar?.transfer ?? 3.75}
-                      onChange={e => setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), transfer: Number(e.target.value) } })} className="text-lg font-bold" />
+                      onChange={e = min="0"> setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), transfer: Number(e.target.value) } })} className="text-lg font-bold" />
                   </Field>
                   <Field label="سعر شراء الدولار (SAR)">
                     <Input type="number" step="0.0001" value={f.pair_usd_sar?.buy ?? 3.74}
-                      onChange={e => setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), buy: Number(e.target.value) } })} />
+                      onChange={e = min="0"> setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), buy: Number(e.target.value) } })} />
                   </Field>
                   <Field label="سعر بيع الدولار (SAR)">
                     <Input type="number" step="0.0001" value={f.pair_usd_sar?.sell ?? 3.76}
-                      onChange={e => setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), sell: Number(e.target.value) } })} />
+                      onChange={e = min="0"> setF({ ...f, pair_usd_sar: { ...(f.pair_usd_sar || {}), sell: Number(e.target.value) } })} />
                   </Field>
                   <Field label="ملاحظات">
                     <Input value={f.pair_usd_sar?.remarks || ''}
@@ -7125,6 +7906,8 @@ function TenantApp() {
         {tab === 'chart' && <ErrorBoundary tabName="الدليل المحاسبي"><ChartScreen /></ErrorBoundary>}
         {tab === 'journal' && <ErrorBoundary tabName="قيود اليومية"><JournalScreen /></ErrorBoundary>}
         {tab === 'reports' && <ErrorBoundary tabName="التقارير المالية"><ReportsScreen /></ErrorBoundary>}
+        {tab === 'query' && <ErrorBoundary tabName="مركز الاستعلامات"><QueryCenterScreen /></ErrorBoundary>}
+        {tab === 'visa-monitor' && <ErrorBoundary tabName="مراقبة التأشيرات"><VisaMonitorScreen /></ErrorBoundary>}
         {tab === 'settings' && user.role === 'owner' && <ErrorBoundary tabName="إعدادات المكتب"><OfficeSettings /></ErrorBoundary>}
         {tab === 'affiliate' && <ErrorBoundary tabName="التسويق بالعمولة"><AffiliateScreen /></ErrorBoundary>}
         {tab === 'help' && <ErrorBoundary tabName="دليل الاستخدام"><HelpCenter setTab={setTab} /></ErrorBoundary>}
@@ -7471,8 +8254,8 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-2">
           <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
           <Field label="العملة" required><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
-          <Field label="المبلغ" required><Input type="number" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
-          <Field label="سعر الصرف" required><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} className="text-lg font-bold" /></Field>
+          <Field label="المبلغ" required><Input type="number" step="0.01" value={form.amount} onChange={e = min="0"> setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
+          <Field label="سعر الصرف" required><Input type="number" step="0.0001" value={form.exchange_rate} onChange={e = min="0"> setForm({ ...form, exchange_rate: e.target.value })} className="text-lg font-bold" /></Field>
 
           <Field label="المقابل بعملة" required><Select value={form.counter_currency} onValueChange={v => setForm({ ...form, counter_currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="القيمة الإجمالية">

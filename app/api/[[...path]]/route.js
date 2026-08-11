@@ -101,6 +101,8 @@ const DEFAULT_STAFF_PERMISSIONS = {
   reports_view: false, show_profit: false,
   vouchers_manage: false, accounts_manage: false,
   edit_price: false, apply_discount: false,
+  can_close_periods: false,  // v3.10.6 — permission to lock/unlock financial periods
+  can_refund: false,          // v3.10.6 — permission to refund/cancel transactions
 }
 function ownerPermissions() {
   const p = {}
@@ -123,6 +125,14 @@ async function seedInitial(db) {
   for (const c of ['accounts', 'boxes', 'clients', 'suppliers', 'tickets', 'visas', 'vouchers', 'journal_entries', 'settings']) {
     await db.collection(c).deleteMany({ tenant_id: { $exists: false } }).catch(() => {})
   }
+
+  // v3.10.2 — Enforce unique account code per tenant (chart of accounts + sub-accounts)
+  try {
+    await db.collection('accounts').createIndex({ tenant_id: 1, code: 1 }, { unique: true, name: 'unique_tenant_account_code' })
+    await db.collection('clients').createIndex({ tenant_id: 1, account_code: 1 }, { unique: true, sparse: true, name: 'unique_tenant_client_code' })
+    await db.collection('suppliers').createIndex({ tenant_id: 1, account_code: 1 }, { unique: true, sparse: true, name: 'unique_tenant_supplier_code' })
+    await db.collection('boxes').createIndex({ tenant_id: 1, account_code: 1 }, { unique: true, sparse: true, name: 'unique_tenant_box_code' })
+  } catch (e) { /* Indexes may already exist */ }
 
   // Migrate rate schema: flat number → { transfer, buy, sell, min, max, remarks }
   const allSettings = await db.collection('tenant_settings').find({}).toArray()
@@ -366,6 +376,39 @@ async function validateJournalLines(db, tenantId, lines) {
       const exists = acctCodes.has(code) || clientCodes.has(code) || supplierCodes.has(code) || boxCodes.has(code)
       if (!exists) return { ok: false, error: `الحساب "${code}" غير موجود في دليل الحسابات — السطر ${i + 1}` }
     }
+  }
+  return { ok: true }
+}
+
+// v3.10.6 — Credit Limit + Freeze enforcement for credit sales
+async function checkClientCredit(db, tenantId, clientId, saleAmount, currency, settings) {
+  if (!clientId) return { ok: true }
+  const cli = await db.collection('clients').findOne({ id: clientId, tenant_id: tenantId })
+  if (!cli) return { ok: false, error: 'العميل غير موجود' }
+  if (cli.is_frozen) return { ok: false, error: `❄️ الحساب مجمّد — لا يمكن إصدار حركات آجلة للعميل "${cli.name}". يرجى مراجعة المالك.` }
+  const limit = Number(cli.credit_limit) || 0
+  if (limit <= 0) return { ok: true } // No limit set
+  // Convert existing balance + new sale to credit_currency for check
+  const limitCcy = cli.credit_currency || 'USD'
+  const balances = cli.balances || {}
+  const rates = (settings && settings.rates) || {}
+  const baseCcy = (settings && settings.base_currency) || 'USD'
+  const toBase = (amt, cur) => {
+    const r = (rates[cur] && rates[cur].to_base) ? Number(rates[cur].to_base) : 1
+    return Number(amt || 0) * r
+  }
+  const fromBase = (baseAmt, cur) => {
+    const r = (rates[cur] && rates[cur].to_base) ? Number(rates[cur].to_base) : 1
+    return baseAmt / r
+  }
+  // Total current debt in base then convert to limit_currency
+  let currentDebtBase = 0
+  Object.entries(balances).forEach(([cur, val]) => { currentDebtBase += toBase(Math.max(0, Number(val || 0)), cur) })
+  const newSaleBase = toBase(Number(saleAmount || 0), currency)
+  const totalAfterBase = currentDebtBase + newSaleBase
+  const totalAfterLimitCcy = fromBase(totalAfterBase, limitCcy)
+  if (totalAfterLimitCcy > limit) {
+    return { ok: false, error: `⛔ العميل "${cli.name}" تجاوز سقف الائتمان المسموح به (${limit.toLocaleString()} ${limitCcy}). الرصيد الحالي مع الحركة الجديدة سيصبح ${totalAfterLimitCcy.toFixed(2)} ${limitCcy}. يمكن للمالك رفع السقف من بطاقة العميل.` }
   }
   return { ok: true }
 }
@@ -2053,7 +2096,14 @@ async function handleRoute(request, { params }) {
       const parent_code = String(b.parent_code || '1301') // v3.9.3 — default to العملاء (مدينون)
       let accountInfo = {}
       try { accountInfo = await generateSubAccountCode(db, T, parent_code) } catch (e) { return bad(e.message) }
-      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', parent_code, ...accountInfo, balances: emptyBalances(), created_at: new Date() }
+      const doc = {
+        id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '',
+        address: b.address || '', email: b.email || '', notes: b.notes || '', parent_code, ...accountInfo,
+        credit_limit: Number(b.credit_limit) || 0,  // v3.10.6 — 0 = no limit
+        credit_currency: b.credit_currency || 'USD',
+        is_frozen: !!b.is_frozen,
+        balances: emptyBalances(), created_at: new Date()
+      }
       await db.collection('clients').insertOne(doc)
       const { _id, ...rest } = doc; return ok(rest)
     }
@@ -2062,7 +2112,7 @@ async function handleRoute(request, { params }) {
     if (clientIdMatch && method === 'PUT') {
       const b = await request.json()
       const upd = {}
-      for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes', 'parent_code']) if (b[k] !== undefined) upd[k] = b[k]
+      for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes', 'parent_code', 'credit_limit', 'credit_currency', 'is_frozen']) if (b[k] !== undefined) upd[k] = k === 'credit_limit' ? (Number(b[k]) || 0) : k === 'is_frozen' ? !!b[k] : b[k]
       await db.collection('clients').updateOne({ id: clientIdMatch[1], tenant_id: T }, { $set: upd })
       return ok({ success: true })
     }
@@ -2125,6 +2175,239 @@ async function handleRoute(request, { params }) {
 
     // Accounts (Chart of Accounts)
     if (route === '/accounts' && method === 'GET') return ok(clean(await db.collection('accounts').find(tf).sort({ code: 1 }).toArray()))
+
+    // ================================================================
+    // v3.10.5 — VISA MONITORING CENTER — Countries + Rules + Records
+    // ================================================================
+
+    // GET /countries — list all countries (seeded on first call)
+    if (route === '/countries' && method === 'GET') {
+      let list = await db.collection('countries').find({ $or: [{ tenant_id: T }, { tenant_id: null }] }).sort({ code: 1 }).toArray()
+      if (list.length === 0) {
+        // Seed defaults (global — tenant_id null so all tenants share, but editable overrides go per-tenant)
+        const defaults = [
+          { code: 'SA', name_ar: 'السعودية', flag: '🇸🇦', fines_config: { 'تأشيرة عمرة': { has_fines: true }, 'تأشيرة حج': { has_fines: true }, 'تأشيرة زيارة': { has_fines: false }, 'فيزا عمل': { has_fines: false } } },
+          { code: 'AE', name_ar: 'الإمارات', flag: '🇦🇪', fines_config: { 'default': { has_fines: true } } },
+          { code: 'OM', name_ar: 'عمان', flag: '🇴🇲', fines_config: { 'تأشيرة عبور': { has_fines: true }, 'ترانزيت': { has_fines: true }, 'فيزا سياحية': { has_fines: true }, 'default': { has_fines: false } } },
+          { code: 'EG', name_ar: 'مصر', flag: '🇪🇬', fines_config: { 'default': { has_fines: false } } },
+          { code: 'TR', name_ar: 'تركيا', flag: '🇹🇷', fines_config: { 'default': { has_fines: false } } },
+          { code: 'MY', name_ar: 'ماليزيا', flag: '🇲🇾', fines_config: { 'default': { has_fines: false } } },
+        ]
+        for (const d of defaults) {
+          await db.collection('countries').insertOne({ id: uuidv4(), tenant_id: T, ...d, created_at: new Date() })
+        }
+        list = await db.collection('countries').find({ tenant_id: T }).sort({ code: 1 }).toArray()
+      }
+      return ok(clean(list))
+    }
+    // ================================================================
+    // v3.10.6 — PERIOD LOCK (Financial Period Closing)
+    // ================================================================
+    // GET /period-lock — current lock status
+    if (route === '/period-lock' && method === 'GET') {
+      const s = await db.collection('tenant_settings').findOne({ tenant_id: T }) || {}
+      const lock = s.period_lock || { closed_until: null, locked_by: null, locked_at: null, reason: '' }
+      return ok(lock)
+    }
+    // POST /period-lock — set/update lock (owner or can_close_periods)
+    if (route === '/period-lock' && method === 'POST') {
+      const perms = effectivePermissions(sess.user)
+      if (sess.user.role !== 'owner' && !perms.can_close_periods) return bad('لا تملك صلاحية إقفال الفترات', 403)
+      const b = await request.json()
+      if (!b.closed_until) return bad('التاريخ مطلوب')
+      // Validate: closed_until must be past date
+      if (new Date(b.closed_until) >= new Date()) return bad('تاريخ الإقفال يجب أن يكون قبل اليوم')
+      const lock = {
+        closed_until: b.closed_until,
+        locked_by: sess.user.id,
+        locked_by_email: sess.user.email,
+        locked_at: new Date().toISOString(),
+        reason: b.reason || ''
+      }
+      await db.collection('tenant_settings').updateOne({ tenant_id: T }, { $set: { period_lock: lock } }, { upsert: true })
+      return ok(lock)
+    }
+    // DELETE /period-lock — unlock (owner only)
+    if (route === '/period-lock' && method === 'DELETE') {
+      if (sess.user.role !== 'owner') return bad('فقط المالك يمكنه إلغاء إقفال الفترة', 403)
+      await db.collection('tenant_settings').updateOne({ tenant_id: T }, { $unset: { period_lock: '' } })
+      return ok({ success: true })
+    }
+
+
+    if (route === '/countries' && method === 'POST') {
+      const b = await request.json()
+      if (!b.code || !b.name_ar) return bad('كود واسم الدولة مطلوبان')
+      const exists = await db.collection('countries').findOne({ tenant_id: T, code: String(b.code).toUpperCase() })
+      if (exists) return bad('كود الدولة موجود بالفعل')
+      const doc = { id: uuidv4(), tenant_id: T, code: String(b.code).toUpperCase(), name_ar: b.name_ar, flag: b.flag || '🏳️', fines_config: b.fines_config || { default: { has_fines: false } }, created_at: new Date() }
+      await db.collection('countries').insertOne(doc); const { _id, ...r } = doc; return ok(r)
+    }
+    // PATCH /countries/:id
+    {
+      const m = route.match(/^\/countries\/([^/]+)$/)
+      if (m && method === 'PATCH') {
+        const b = await request.json()
+        const upd = {}
+        if (b.name_ar !== undefined) upd.name_ar = b.name_ar
+        if (b.flag !== undefined) upd.flag = b.flag
+        if (b.fines_config !== undefined) upd.fines_config = b.fines_config
+        upd.updated_at = new Date()
+        await db.collection('countries').updateOne({ id: m[1], tenant_id: T }, { $set: upd })
+        return ok({ success: true })
+      }
+      if (m && method === 'DELETE') {
+        await db.collection('countries').deleteOne({ id: m[1], tenant_id: T })
+        return ok({ success: true })
+      }
+    }
+
+    // Helper: determine has_fines for a country + visa_type combo
+    const resolveHasFines = async (countryCode, visaType) => {
+      if (!countryCode) return false
+      const country = await db.collection('countries').findOne({ tenant_id: T, code: countryCode })
+      if (!country) return false
+      const cfg = country.fines_config || {}
+      if (visaType && cfg[visaType] && cfg[visaType].has_fines !== undefined) return !!cfg[visaType].has_fines
+      if (cfg.default && cfg.default.has_fines !== undefined) return !!cfg.default.has_fines
+      return false
+    }
+
+    // GET /visa-monitor — list with filters
+    // Query: ?status=active|exited|acknowledged&has_fines=0|1&country=SA&search=text
+    if (route === '/visa-monitor' && method === 'GET') {
+      const status = String(q.status || 'active').toLowerCase()
+      const finesOnly = String(q.has_fines || '0') === '1'
+      const country = q.country || null
+      const searchText = (q.search || '').toString().trim().toLowerCase()
+      const filter = { tenant_id: T }
+      if (status !== 'all') filter.status = status
+      if (country) filter.destination_country = country
+      const rows = await db.collection('visa_monitoring').find(filter).sort({ max_exit_date: 1 }).toArray()
+      // Enrich with computed fields
+      const today = new Date().toISOString().slice(0, 10)
+      const enriched = []
+      for (const r of rows) {
+        const hasFines = await resolveHasFines(r.destination_country, r.visa_type)
+        const maxExit = r.max_exit_date ? new Date(r.max_exit_date) : null
+        const todayDt = new Date(today)
+        const remainingDays = maxExit ? Math.floor((maxExit - todayDt) / (1000 * 60 * 60 * 24)) : null
+        const isOverdue = remainingDays !== null && remainingDays < 0
+        const alertLevel = r.status === 'active' && isOverdue ? (hasFines ? 'red' : 'yellow') : (r.status === 'active' && remainingDays !== null && remainingDays <= 3 ? 'orange' : 'none')
+        enriched.push({ ...r, has_fines: hasFines, remaining_days: remainingDays, is_overdue: isOverdue, alert_level: alertLevel })
+      }
+      const filtered = finesOnly ? enriched.filter(x => x.has_fines) : enriched
+      const searched = searchText ? filtered.filter(x =>
+        String(x.traveler_name || '').toLowerCase().includes(searchText) ||
+        String(x.passport_no || '').toLowerCase().includes(searchText) ||
+        String(x.phone || '').includes(searchText)
+      ) : filtered
+      return ok(clean(searched))
+    }
+
+    // POST /visa-monitor — add manual record
+    if (route === '/visa-monitor' && method === 'POST') {
+      const b = await request.json()
+      if (!b.traveler_name || !String(b.traveler_name).trim()) return bad('اسم المسافر مطلوب')
+      if (!b.passport_no || !String(b.passport_no).trim()) return bad('رقم الجواز مطلوب')
+      if (!b.destination_country) return bad('الدولة مطلوبة')
+      if (!b.entry_date) return bad('تاريخ الدخول مطلوب')
+      const doc = {
+        id: uuidv4(), tenant_id: T,
+        traveler_name: String(b.traveler_name).trim(),
+        phone: b.phone || '',
+        passport_no: String(b.passport_no).trim().toUpperCase(),
+        destination_country: b.destination_country,
+        visa_type: b.visa_type || '',
+        entry_date: b.entry_date,
+        max_exit_date: b.max_exit_date || null,
+        actual_exit_date: null,
+        status: 'active',
+        linked_visa_id: b.linked_visa_id || null,
+        source: b.source || 'manual',
+        notes: b.notes || '',
+        created_at: new Date(), updated_at: new Date()
+      }
+      await db.collection('visa_monitoring').insertOne(doc)
+      const { _id, ...r } = doc; return ok(r)
+    }
+
+    // PATCH /visa-monitor/:id — action buttons (exited / acknowledged / update)
+    {
+      const m = route.match(/^\/visa-monitor\/([^/]+)$/)
+      if (m && method === 'PATCH') {
+        const b = await request.json()
+        const upd = { updated_at: new Date() }
+        if (b.action === 'exited') { upd.status = 'exited'; upd.actual_exit_date = b.actual_exit_date || new Date().toISOString().slice(0, 10) }
+        else if (b.action === 'acknowledge') upd.status = 'acknowledged'
+        else if (b.action === 'reactivate') { upd.status = 'active'; upd.actual_exit_date = null }
+        else {
+          ['traveler_name', 'phone', 'passport_no', 'destination_country', 'visa_type', 'entry_date', 'max_exit_date', 'notes'].forEach(f => { if (b[f] !== undefined) upd[f] = b[f] })
+        }
+        await db.collection('visa_monitoring').updateOne({ id: m[1], tenant_id: T }, { $set: upd })
+        return ok({ success: true })
+      }
+      if (m && method === 'DELETE') {
+        await db.collection('visa_monitoring').deleteOne({ id: m[1], tenant_id: T })
+        return ok({ success: true })
+      }
+    }
+
+    // POST /visa-monitor/import — bulk upsert by passport_no
+    if (route === '/visa-monitor/import' && method === 'POST') {
+      const b = await request.json()
+      const rows = Array.isArray(b.rows) ? b.rows : []
+      let inserted = 0, updated = 0, skipped = 0
+      for (const r of rows) {
+        if (!r.passport_no) { skipped++; continue }
+        const passport = String(r.passport_no).trim().toUpperCase()
+        const existing = await db.collection('visa_monitoring').findOne({ tenant_id: T, passport_no: passport })
+        if (existing) {
+          // Upsert: only update entry/exit dates, keep original record
+          const upd = { updated_at: new Date() }
+          if (r.entry_date) upd.entry_date = r.entry_date
+          if (r.max_exit_date) upd.max_exit_date = r.max_exit_date
+          if (r.actual_exit_date) { upd.actual_exit_date = r.actual_exit_date; upd.status = 'exited' }
+          await db.collection('visa_monitoring').updateOne({ id: existing.id }, { $set: upd })
+          updated++
+        } else {
+          if (!r.traveler_name || !r.destination_country || !r.entry_date) { skipped++; continue }
+          await db.collection('visa_monitoring').insertOne({
+            id: uuidv4(), tenant_id: T,
+            traveler_name: r.traveler_name, phone: r.phone || '', passport_no: passport,
+            destination_country: r.destination_country, visa_type: r.visa_type || '',
+            entry_date: r.entry_date, max_exit_date: r.max_exit_date || null,
+            actual_exit_date: r.actual_exit_date || null,
+            status: r.actual_exit_date ? 'exited' : 'active',
+            source: 'nusuk_import', notes: r.notes || '',
+            created_at: new Date(), updated_at: new Date()
+          })
+          inserted++
+        }
+      }
+      return ok({ inserted, updated, skipped, total: rows.length })
+    }
+
+    // GET /visa-monitor/stats
+    if (route === '/visa-monitor/stats' && method === 'GET') {
+      const active = await db.collection('visa_monitoring').countDocuments({ tenant_id: T, status: 'active' })
+      const exited = await db.collection('visa_monitoring').countDocuments({ tenant_id: T, status: 'exited' })
+      const acknowledged = await db.collection('visa_monitoring').countDocuments({ tenant_id: T, status: 'acknowledged' })
+      const today = new Date().toISOString().slice(0, 10)
+      const activeRows = await db.collection('visa_monitoring').find({ tenant_id: T, status: 'active' }).toArray()
+      let redAlerts = 0, yellowAlerts = 0, orangeAlerts = 0
+      const todayDt = new Date(today)
+      for (const r of activeRows) {
+        if (!r.max_exit_date) continue
+        const rem = Math.floor((new Date(r.max_exit_date) - todayDt) / (1000 * 60 * 60 * 24))
+        const hasFines = await resolveHasFines(r.destination_country, r.visa_type)
+        if (rem < 0 && hasFines) redAlerts++
+        else if (rem < 0) yellowAlerts++
+        else if (rem <= 3) orangeAlerts++
+      }
+      return ok({ active, exited, acknowledged, red_alerts: redAlerts, yellow_alerts: yellowAlerts, orange_alerts: orangeAlerts })
+    }
+
 
     // v3.10.0 — GET /accounts/search — smart autocomplete across sub-accounts + parent accounts
     // Query: ?q=<text>&type=client|supplier|box|account|all&limit=20&include_inactive=0
@@ -2234,14 +2517,24 @@ async function handleRoute(request, { params }) {
     if (route === '/accounts' && method === 'POST') {
       const b = await request.json()
       if (!b.code || !b.name_ar || !b.type) return bad('الرمز والاسم والنوع مطلوبة')
-      const exists = await db.collection('accounts').findOne({ tenant_id: T, code: String(b.code) })
-      if (exists) return bad('رمز الحساب مستخدم بالفعل')
+      const code = String(b.code)
+      // v3.10.2 — check uniqueness across accounts + clients + suppliers + boxes account_codes
+      const [existsAcc, existsClient, existsSupp, existsBox] = await Promise.all([
+        db.collection('accounts').findOne({ tenant_id: T, code }),
+        db.collection('clients').findOne({ tenant_id: T, account_code: code }),
+        db.collection('suppliers').findOne({ tenant_id: T, account_code: code }),
+        db.collection('boxes').findOne({ tenant_id: T, account_code: code }),
+      ])
+      if (existsAcc) return bad(`رمز الحساب "${code}" مستخدم بالفعل في دليل الحسابات`)
+      if (existsClient) return bad(`رمز الحساب "${code}" مستخدم لعميل بالفعل`)
+      if (existsSupp) return bad(`رمز الحساب "${code}" مستخدم لمورد بالفعل`)
+      if (existsBox) return bad(`رمز الحساب "${code}" مستخدم لصندوق/بنك بالفعل`)
       if (b.parent) {
         const p = await db.collection('accounts').findOne({ tenant_id: T, code: String(b.parent) })
         if (!p) return bad('الحساب الأب غير موجود')
       }
       const doc = {
-        id: uuidv4(), tenant_id: T, code: String(b.code), name_ar: String(b.name_ar),
+        id: uuidv4(), tenant_id: T, code, name_ar: String(b.name_ar),
         type: b.type, parent: b.parent ? String(b.parent) : null,
         is_group: !!b.is_group, notes: b.notes || '',
         created_at: new Date(),
@@ -2802,6 +3095,74 @@ async function handleRoute(request, { params }) {
     if (route === '/reports/statement' && method === 'GET') return ok(await reportStatement(db, T, q))
     if (route === '/reports/trial-balance' && method === 'GET') return ok(await reportTrialBalance(db, T))
     if (route === '/reports/income-statement' && method === 'GET') return ok(await reportIncome(db, T, q))
+    // v3.10.4 — Unified Query & Filters for Visas + Tickets
+    if (route === '/reports/query' && method === 'GET') {
+      const from = q.from || null
+      const to = q.to || null
+      const kind = String(q.kind || 'all').toLowerCase() // 'all' | 'visa' | 'ticket'
+      const serviceType = q.service_type || null       // e.g. 'تأشيرة عمرة'
+      const ticketType = q.ticket_type || null         // e.g. 'ذهاب فقط'
+      const clientId = q.client_id || null
+      const supplierId = q.supplier_id || null
+      const paymentMethod = q.payment_method || null   // 'cash' | 'credit'
+      const minQty = Number(q.min_qty) || 0            // count filter
+      const searchText = (q.search || '').toString().trim().toLowerCase()
+      const baseFilter = { tenant_id: T }
+      if (from) baseFilter.date = { ...(baseFilter.date || {}), $gte: from }
+      if (to) baseFilter.date = { ...(baseFilter.date || {}), $lte: to }
+      if (clientId) baseFilter.client_id = clientId
+      if (supplierId) baseFilter.supplier_id = supplierId
+      if (paymentMethod) baseFilter.payment_method = paymentMethod
+      let visas = [], tickets = []
+      if (kind === 'all' || kind === 'visa') {
+        const vf = { ...baseFilter }
+        if (serviceType) vf.service_type = serviceType
+        visas = await db.collection('visas').find(vf).sort({ date: -1 }).toArray()
+        if (searchText) visas = visas.filter(v =>
+          String(v.beneficiary_name || v.passenger_name || '').toLowerCase().includes(searchText) ||
+          String(v.passport_no || '').toLowerCase().includes(searchText) ||
+          String(v.phone || '').includes(searchText) ||
+          String(v.client_name || '').toLowerCase().includes(searchText) ||
+          String(v.supplier_name || '').toLowerCase().includes(searchText)
+        )
+      }
+      if (kind === 'all' || kind === 'ticket') {
+        const tf = { ...baseFilter }
+        if (ticketType) tf.ticket_type = ticketType
+        tickets = await db.collection('tickets').find(tf).sort({ date: -1 }).toArray()
+        if (searchText) tickets = tickets.filter(t =>
+          String(t.passenger_name || '').toLowerCase().includes(searchText) ||
+          String(t.pnr || '').toLowerCase().includes(searchText) ||
+          String(t.phone || '').includes(searchText) ||
+          String(t.client_name || '').toLowerCase().includes(searchText) ||
+          String(t.supplier_name || '').toLowerCase().includes(searchText)
+        )
+      }
+      // Aggregate stats (in base currency of tenant if rates given, else keep per-currency)
+      const settings = await db.collection('tenant_settings').findOne({ tenant_id: T }) || {}
+      const baseCcy = settings.base_currency || 'USD'
+      const rates = settings.rates || {}
+      const toBaseAmt = (amt, cur) => {
+        const r = (rates[cur] && rates[cur].to_base) ? Number(rates[cur].to_base) : 1
+        return Number(amt || 0) * r
+      }
+      let totalSales = 0, totalCommission = 0
+      visas.forEach(v => { totalSales += toBaseAmt(v.sale_price, v.currency || baseCcy); totalCommission += toBaseAmt(v.commission, v.currency || baseCcy) })
+      tickets.forEach(t => { totalSales += toBaseAmt(t.sale_price, t.currency || baseCcy); totalCommission += toBaseAmt(t.commission, t.currency || baseCcy) })
+      const stats = {
+        visas_count: visas.length,
+        tickets_count: tickets.length,
+        total_sales: +totalSales.toFixed(2),
+        total_commission: +totalCommission.toFixed(2),
+        base_currency: baseCcy,
+      }
+      // minQty filter — return only if aggregates satisfy
+      if (minQty > 0) {
+        if (visas.length < minQty) visas = []
+        if (tickets.length < minQty) tickets = []
+      }
+      return ok({ stats, visas: clean(visas), tickets: clean(tickets), filters_applied: { from, to, kind, service_type: serviceType, ticket_type: ticketType, client_id: clientId, supplier_id: supplierId, payment_method: paymentMethod, min_qty: minQty, search: searchText } })
+    }
 
     // v3.9.14 — Year-End Financial Closing Engine
     if (route === '/accounting/closable-years' && method === 'GET') {
@@ -2898,11 +3259,23 @@ async function handleRoute(request, { params }) {
 async function createTicket(db, T, b, opts = {}) {
   if (!b.supplier_id) return { error: 'المورد مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
+  // v3.10.2 — Strict validation for mandatory ticket fields
+  if (!b.passenger_name || !String(b.passenger_name).trim()) return { error: 'اسم المسافر مطلوب' }
+  if (!b.travel_date) return { error: 'تاريخ السفر مطلوب' }
+  if (!b.phone || !String(b.phone).trim()) return { error: 'رقم الجوال مطلوب' }
+  // v3.10.2 — Reject negative amounts across all numeric fields
+  const numFields = ['cost', 'sale_price', 'discount', 'commission', 'partner_commission_share', 'partner_commission', 'commission_office_share']
+  for (const f of numFields) if (b[f] !== undefined && Number(b[f]) < 0) return { error: `القيمة السالبة غير مسموحة في الحقل: ${f}` }
   // v3.9.14 — Period lock: prevent creating records in a closed year
   if (b.date) {
     const yr = new Date(b.date).getFullYear()
     const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
     if (tenant?.closed_years?.includes(yr)) return { error: `السنة المالية ${yr} مقفلة — لا يمكن إضافة أو تعديل قيود بتاريخها` }
+    // v3.10.6 — Date-level period lock check
+    const settings = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { period_lock: 1 } })
+    if (settings?.period_lock?.closed_until && b.date <= settings.period_lock.closed_until) {
+      return { error: `🔒 الفترة حتى ${settings.period_lock.closed_until} مقفلة — استخدم قيد تسوية عكسي بالتاريخ الحالي بدلاً من التعديل الرجعي` }
+    }
   }
   const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
   if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
@@ -2912,6 +3285,18 @@ async function createTicket(db, T, b, opts = {}) {
   const sup = await db.collection('suppliers').findOne({ id: b.supplier_id, tenant_id: T })
   if (!sup) return { error: 'المورد غير موجود' }
   if (paymentMethod === 'credit' && !cli) return { error: 'العميل غير موجود' }
+  // v3.10.6 — Credit limit + freeze check
+  if (paymentMethod === 'credit' && !opts.existingId) {
+    const _settings_credit = await db.collection('tenant_settings').findOne({ tenant_id: T }) || {}
+    const _cc = await checkClientCredit(db, T, b.client_id, sale || Number(b.sale_price) || 0, b.currency, _settings_credit)
+    if (!_cc.ok) return { error: _cc.error }
+  }
+  // v3.10.7 — Below-cost sale prevention (Phase 6)
+  const _cost = Number(b.cost) || 0
+  const _sale = Number(b.sale_price) || 0
+  if (_cost > 0 && _sale > 0 && _sale < _cost && !b.allow_below_cost) {
+    return { error: `⚠️ سعر البيع (${_sale}) أقل من التكلفة (${_cost}) — لتجاوز هذا الحد أضف \"allow_below_cost: true\" في الطلب أو ارفع السعر أعلى من التكلفة.` }
+  }
   let box = null
   if (paymentMethod === 'cash') {
     if (!b.box_id) return { error: 'اختر الصندوق/البنك للدفع النقدي' }
@@ -3003,11 +3388,22 @@ async function createTicket(db, T, b, opts = {}) {
 async function createVisa(db, T, b, opts = {}) {
   if (!b.supplier_id) return { error: 'المورد مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
+  // v3.10.2 — Strict validation for mandatory visa fields
+  if (!b.beneficiary_name || !String(b.beneficiary_name).trim()) return { error: 'اسم صاحب التأشيرة / المعتمر مطلوب' }
+  if (!b.phone || !String(b.phone).trim()) return { error: 'رقم الجوال مطلوب' }
+  // v3.10.2 — Reject negative amounts
+  const numFields = ['cost', 'sale_price', 'discount', 'commission']
+  for (const f of numFields) if (b[f] !== undefined && Number(b[f]) < 0) return { error: `القيمة السالبة غير مسموحة في الحقل: ${f}` }
   // v3.9.14 — Period lock
   if (b.date) {
     const yr = new Date(b.date).getFullYear()
     const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
     if (tenant?.closed_years?.includes(yr)) return { error: `السنة المالية ${yr} مقفلة — لا يمكن إضافة أو تعديل قيود بتاريخها` }
+    // v3.10.6 — Date-level period lock check
+    const settings = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { period_lock: 1 } })
+    if (settings?.period_lock?.closed_until && b.date <= settings.period_lock.closed_until) {
+      return { error: `🔒 الفترة حتى ${settings.period_lock.closed_until} مقفلة — استخدم قيد تسوية عكسي بالتاريخ الحالي` }
+    }
   }
   const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
   if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
@@ -3017,6 +3413,18 @@ async function createVisa(db, T, b, opts = {}) {
   const sup = await db.collection('suppliers').findOne({ id: b.supplier_id, tenant_id: T })
   if (!sup) return { error: 'المورد غير موجود' }
   if (paymentMethod === 'credit' && !cli) return { error: 'العميل غير موجود' }
+  // v3.10.6 — Credit limit + freeze check
+  if (paymentMethod === 'credit' && !opts.existingId) {
+    const _settings_credit = await db.collection('tenant_settings').findOne({ tenant_id: T }) || {}
+    const _cc = await checkClientCredit(db, T, b.client_id, sale || Number(b.sale_price) || 0, b.currency, _settings_credit)
+    if (!_cc.ok) return { error: _cc.error }
+  }
+  // v3.10.7 — Below-cost sale prevention (Phase 6)
+  const _cost = Number(b.cost) || 0
+  const _sale = Number(b.sale_price) || 0
+  if (_cost > 0 && _sale > 0 && _sale < _cost && !b.allow_below_cost) {
+    return { error: `⚠️ سعر البيع (${_sale}) أقل من التكلفة (${_cost}) — لتجاوز هذا الحد أضف \"allow_below_cost: true\" في الطلب أو ارفع السعر أعلى من التكلفة.` }
+  }
   let box = null
   if (paymentMethod === 'cash') {
     if (!b.box_id) return { error: 'اختر الصندوق/البنك للدفع النقدي' }
@@ -3058,6 +3466,31 @@ async function createVisa(db, T, b, opts = {}) {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.passenger_name || cli?.name || doc.client_name || sup.name}`,
     ref_type: 'visa', ref_id: doc.id, currency: b.currency, lines,
   }, { skipQuota: !!opts.skipQuota })
+  // v3.10.5 — Auto-create Visa Monitor record if destination_country + passport are provided
+  if (!opts.existingId && b.destination_country && b.passport_no) {
+    try {
+      const passport = String(b.passport_no).trim().toUpperCase()
+      const existing = await db.collection('visa_monitoring').findOne({ tenant_id: T, passport_no: passport })
+      if (!existing) {
+        await db.collection('visa_monitoring').insertOne({
+          id: uuidv4(), tenant_id: T,
+          traveler_name: doc.passenger_name || doc.beneficiary_name || '',
+          phone: b.phone || '',
+          passport_no: passport,
+          destination_country: b.destination_country,
+          visa_type: doc.service_type,
+          entry_date: b.entry_date || doc.date,
+          max_exit_date: b.max_exit_date || null,
+          actual_exit_date: null,
+          status: 'active',
+          linked_visa_id: doc.id,
+          source: 'auto_from_visa',
+          notes: 'إنشاء تلقائي من شاشة التأشيرات',
+          created_at: new Date(), updated_at: new Date()
+        })
+      }
+    } catch (e) { /* silent — monitor creation is optional */ }
+  }
   const { _id, ...rest } = doc; return { doc: rest }
 }
 
@@ -3071,6 +3504,11 @@ async function createService(db, T, b, opts = {}) {
     const yr = new Date(b.date).getFullYear()
     const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
     if (tenant?.closed_years?.includes(yr)) return { error: `السنة المالية ${yr} مقفلة — لا يمكن إضافة أو تعديل قيود بتاريخها` }
+    // v3.10.6 — Date-level period lock check
+    const settings = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { period_lock: 1 } })
+    if (settings?.period_lock?.closed_until && b.date <= settings.period_lock.closed_until) {
+      return { error: `🔒 الفترة حتى ${settings.period_lock.closed_until} مقفلة — استخدم قيد تسوية عكسي بالتاريخ الحالي بدلاً من التعديل الرجعي` }
+    }
   }
   const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
   // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id only
@@ -3081,6 +3519,18 @@ async function createService(db, T, b, opts = {}) {
   const sup = await db.collection('suppliers').findOne({ id: b.supplier_id, tenant_id: T })
   if (!sup) return { error: 'المورد غير موجود' }
   if (paymentMethod === 'credit' && !cli) return { error: 'العميل غير موجود' }
+  // v3.10.6 — Credit limit + freeze check
+  if (paymentMethod === 'credit' && !opts.existingId) {
+    const _settings_credit = await db.collection('tenant_settings').findOne({ tenant_id: T }) || {}
+    const _cc = await checkClientCredit(db, T, b.client_id, sale || Number(b.sale_price) || 0, b.currency, _settings_credit)
+    if (!_cc.ok) return { error: _cc.error }
+  }
+  // v3.10.7 — Below-cost sale prevention (Phase 6)
+  const _cost = Number(b.cost) || 0
+  const _sale = Number(b.sale_price) || 0
+  if (_cost > 0 && _sale > 0 && _sale < _cost && !b.allow_below_cost) {
+    return { error: `⚠️ سعر البيع (${_sale}) أقل من التكلفة (${_cost}) — لتجاوز هذا الحد أضف \"allow_below_cost: true\" في الطلب أو ارفع السعر أعلى من التكلفة.` }
+  }
   let box = null
   if (paymentMethod === 'cash') {
     if (!b.box_id) return { error: 'اختر الصندوق/البنك للدفع النقدي' }
