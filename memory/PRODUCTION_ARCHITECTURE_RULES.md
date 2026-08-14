@@ -568,3 +568,30 @@ Do not create a new database.
 Do not create duplicate users.
 Do not reset Production.
 Do not silently change architecture.
+
+==================================================
+25. VERIFIED PRODUCTION MONGODB DEPLOYMENT (LIVE SERVER)
+==================================================
+
+The following facts about the Rahaal Live Server MongoDB deployment
+have been verified end-to-end (PING=1, DB_NAME=rahaal, 29 collections):
+
+- MongoDB is EXTERNAL to the Rahaal application container.
+  It runs directly on the Live Server host as a system service.
+
+- Production uses the existing Host MongoDB database named:
+    rahaal
+
+- The Rahaal Docker container reaches MongoDB via the docker bridge:
+    mongodb://host.docker.internal:27017
+
+- MongoDB must NEVER be exposed publicly.
+  Access is restricted to the local Docker bridge/network only.
+  Do NOT change mongod bindIp to 0.0.0.0.
+  Do NOT open port 27017 in any external firewall rule.
+
+- Live Server firewall / network configuration is a deployment
+  PREREQUISITE — it is NOT part of the application source code
+  and must be managed by the server administrator, not by the
+  Rahaal codebase or by any automated deploy step.
+
