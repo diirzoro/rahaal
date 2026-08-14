@@ -121,6 +121,12 @@ const AFFILIATE_MIN_CASHOUT_INDIVIDUAL = 10
 const AFFILIATE_MIN_CASHOUT_OFFICE = 50
 
 async function seedInitial(db) {
+  // Production safety guard (permanent architecture rule):
+  // When DISABLE_AUTO_SEED=true is set in the environment, skip ALL seed / insert / delete /
+  // index-creation operations below. The application will only READ from the existing
+  // production database. Set this to 'true' on the Live Server env file (/etc/rahaal.env).
+  if (process.env.DISABLE_AUTO_SEED === 'true') return
+
   // Purge legacy data lacking tenant_id (from earlier MVP)
   for (const c of ['accounts', 'boxes', 'clients', 'suppliers', 'tickets', 'visas', 'vouchers', 'journal_entries', 'settings']) {
     await db.collection(c).deleteMany({ tenant_id: { $exists: false } }).catch(() => {})
