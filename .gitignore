@@ -76,6 +76,11 @@ agenthub/agents/youtube/db
 .cache/
 
 memory/test_credentials.md
+memory/film_credentials.md
+
+# MongoDB BSON dumps and historical backups (never commit database contents)
+backups/
+backups/**
 
 # Mobile development
 android-sdk/node_modules/@next/swc-linux-arm64-musl/next-swc.linux-arm64-musl.node
