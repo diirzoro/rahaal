@@ -90,6 +90,10 @@ node_modules/@next/swc-linux-arm64-musl/next-swc.linux-arm64-musl.node
 .env
 .env.*
 *.env
+
+# Allow the env template (no secrets) to be committed
+!.env.example
 credentials.json
 *.key
 .credentials
+.next/cache/webpack/client-production/0.pack

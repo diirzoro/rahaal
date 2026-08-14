@@ -1,0 +1,79 @@
+# ============================================================
+# Rahaal — Docker build context exclusions
+# Keeps the image small and prevents leaking secrets/dev files.
+# ============================================================
+
+# --- Dependencies & build outputs (rebuilt inside container) ---
+node_modules
+.next
+out
+dist
+build
+
+# --- Git & VCS ---
+.git
+.gitignore
+.gitconfig
+.gitattributes
+
+# --- Environment & secrets (NEVER copy into image) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+.credentials
+
+# --- Backups & database dumps (kept locally only) ---
+backups
+backups/**
+*.bson
+*.tar.gz
+*.zip
+!public/samples/*.xlsx
+
+# --- Memory / documentation / planning ---
+memory
+memory/**
+test_result.md
+
+# --- Python test files (not needed at runtime) ---
+backend_test.py
+backend_test_v*.py
+phase5_test.py
+verify_phone_storage.py
+verify_trial_balance.py
+test_v3_9_21_*
+test_v3_9_22_*
+tests
+test_reports
+
+# --- Editor / OS files ---
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# --- Logs ---
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Emergent-specific (not for Live Server) ---
+.emergent
+
+# --- Chrome extension zip artifacts ---
+chrome-extension/lib/*.zip
+public/rahal-extension.zip
+
+# --- Docker / infra files (not needed inside image) ---
+Dockerfile
+.dockerignore
+run.sh
+docker-compose*.yml
+README.md
