@@ -8834,7 +8834,7 @@ function App() {
 
   return (
     <AuthCtx.Provider value={{ ...auth, refreshMe, logout }}>
-      {auth.user.role === 'super_admin' ? <AdminRelocationNotice logout={logout} user={auth.user} /> : <TenantApp />}
+      {auth.user.role === 'super_admin' ? <SuperAdminPanel /> : <TenantApp />}
     </AuthCtx.Provider>
   )
 }
