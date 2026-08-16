@@ -3268,7 +3268,10 @@ async function createTicket(db, T, b, opts = {}) {
   // v3.10.2 — Strict validation for mandatory ticket fields
   if (!b.passenger_name || !String(b.passenger_name).trim()) return { error: 'اسم المسافر مطلوب' }
   if (!b.travel_date) return { error: 'تاريخ السفر مطلوب' }
-  if (!b.phone || !String(b.phone).trim()) return { error: 'رقم الجوال مطلوب' }
+  // v3.10.7 — Accept the real ticket phone fields (passenger_phone / passenger_whatsapp).
+  // Legacy 'phone' key is still accepted for backward compatibility.
+  const _ticketPhone = (b.passenger_phone || b.passenger_whatsapp || b.phone || '').toString().trim()
+  if (!_ticketPhone) return { error: 'رقم الجوال مطلوب' }
   // v3.10.2 — Reject negative amounts across all numeric fields
   const numFields = ['cost', 'sale_price', 'discount', 'commission', 'partner_commission_share', 'partner_commission', 'commission_office_share']
   for (const f of numFields) if (b[f] !== undefined && Number(b[f]) < 0) return { error: `القيمة السالبة غير مسموحة في الحقل: ${f}` }
@@ -3396,7 +3399,10 @@ async function createVisa(db, T, b, opts = {}) {
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   // v3.10.2 — Strict validation for mandatory visa fields
   if (!b.beneficiary_name || !String(b.beneficiary_name).trim()) return { error: 'اسم صاحب التأشيرة / المعتمر مطلوب' }
-  if (!b.phone || !String(b.phone).trim()) return { error: 'رقم الجوال مطلوب' }
+  // v3.10.7 — Accept the real visa phone fields (beneficiary_phone / beneficiary_whatsapp / passenger_phone).
+  // Legacy 'phone' key is still accepted for backward compatibility.
+  const _visaPhone = (b.beneficiary_phone || b.beneficiary_whatsapp || b.passenger_phone || b.passenger_whatsapp || b.phone || '').toString().trim()
+  if (!_visaPhone) return { error: 'رقم الجوال مطلوب' }
   // v3.10.2 — Reject negative amounts
   const numFields = ['cost', 'sale_price', 'discount', 'commission']
   for (const f of numFields) if (b[f] !== undefined && Number(b[f]) < 0) return { error: `القيمة السالبة غير مسموحة في الحقل: ${f}` }
