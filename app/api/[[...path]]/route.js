@@ -63,8 +63,14 @@ async function seedTenantDefaults(db, tenantId) {
     { id: uuidv4(), tenant_id: t, code: '4105', name_ar: 'رسوم إلغاء واسترداد', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '4104', name_ar: 'أرباح وخسائر فروق العملات (مصارفة)', type: 'revenue', parent: '4', is_group: false, created_at: now },
     { id: uuidv4(), tenant_id: t, code: '5', name_ar: 'المصروفات', type: 'expense', parent: null, is_group: true, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '5101', name_ar: 'مصاريف تشغيلية', type: 'expense', parent: '5', is_group: true, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '5201', name_ar: 'فروق عملة وتسويات', type: 'expense', parent: '5', is_group: false, created_at: now },
+    // v3.10.7 — Restructured expenses per user COA requirements:
+    //   51 = مصاريف تشغيلية,  52 = مصاريف إدارية عمومية,  53 = فروق العمولات
+    { id: uuidv4(), tenant_id: t, code: '51', name_ar: 'مصاريف تشغيلية', type: 'expense', parent: '5', is_group: true, created_at: now },
+    { id: uuidv4(), tenant_id: t, code: '52', name_ar: 'مصاريف إدارية عمومية', type: 'expense', parent: '5', is_group: true, created_at: now },
+    { id: uuidv4(), tenant_id: t, code: '53', name_ar: 'فروق العمولات', type: 'expense', parent: '5', is_group: true, created_at: now },
+    // Legacy 4-digit expense sub-accounts kept for backward compatibility with existing data
+    { id: uuidv4(), tenant_id: t, code: '5101', name_ar: 'مصاريف تشغيلية (تفصيلي)', type: 'expense', parent: '51', is_group: true, created_at: now },
+    { id: uuidv4(), tenant_id: t, code: '5201', name_ar: 'فروق عملة وتسويات', type: 'expense', parent: '52', is_group: false, created_at: now },
   ])
   // v3.0 — Seed default dynamic service catalog for the Services module
   await db.collection('service_types').insertMany([
@@ -341,20 +347,38 @@ async function updateBalance(db, col, filter, currency, delta) {
   await db.collection(col).updateOne(filter, { $inc: { [`balances.${currency}`]: delta } })
 }
 
-// v3.10.0 — Chart of Accounts tree: atomic sequential code generator
-// Returns new account_code in form: <parent_code><4-digit-sequence>
+// v3.10.7 — Chart of Accounts tree: atomic sequential code generator
+// Hierarchy (strict inheritance):
+//   L1 = 1 digit  (e.g. 1 = الأصول, 5 = المصاريف)
+//   L2 = 2 digits (e.g. 11 = أصول متداولة, 52 = مصاريف إدارية عمومية)
+//   L3 = 4 digits (e.g. 1201 = الصناديق)   -> 2-digit sequence appended to L2
+//   L4 = 7 digits (e.g. 1201001 = صندوق سالم) -> 3-digit sequence appended to L3
+//   L4 is a TERMINAL node — creating children under an L4 code is FORBIDDEN.
+// Returns new account_code in form: <parent_code><padded-sequence>
 async function generateSubAccountCode(db, tenantId, parentCode) {
+  const parentStr = String(parentCode)
+  // v3.10.7 — Terminal node protection: L4 (7-digit) accounts cannot have children.
+  if (parentStr.length >= 7) {
+    throw new Error(`الحساب ${parentStr} حساب تحليلي نهائي (Level 4) — لا يمكن إنشاء حسابات فرعية تحته. القيود المحاسبية فقط تتم على هذا المستوى.`)
+  }
   const parent = await db.collection('accounts').findOneAndUpdate(
-    { tenant_id: tenantId, code: String(parentCode) },
+    { tenant_id: tenantId, code: parentStr },
     { $inc: { next_child_seq: 1 }, $set: { is_parent: true } },
     { returnDocument: 'after' }
   )
   const parentDoc = parent?.value || parent
-  if (!parentDoc) throw new Error(`الحساب الأب ${parentCode} غير موجود في الدليل`)
+  if (!parentDoc) throw new Error(`الحساب الأب ${parentStr} غير موجود في الدليل`)
   const seq = parentDoc.next_child_seq || 1
+  // Determine padding based on parent level:
+  //   parent L1 (1 digit) -> child L2 = 1-digit sequence appended -> total 2 digits
+  //   parent L2 (2 digits) -> child L3 = 2-digit sequence appended -> total 4 digits
+  //   parent L3 (4 digits) -> child L4 = 3-digit sequence appended -> total 7 digits
+  const parentLen = parentStr.length
+  const seqPad = parentLen === 1 ? 1 : parentLen === 2 ? 2 : parentLen === 4 ? 3 : 3
+  const newCode = parentStr + String(seq).padStart(seqPad, '0')
   return {
-    account_code: String(parentCode) + String(seq).padStart(4, '0'),
-    account_parent_code: String(parentCode),
+    account_code: newCode,
+    account_parent_code: parentStr,
     account_seq: seq,
   }
 }
