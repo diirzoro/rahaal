@@ -2303,76 +2303,130 @@ async function handleRoute(request, { params }) {
       return false
     }
 
-    // GET /visa-monitor — list with filters
-    // Query: ?status=active|exited|acknowledged&has_fines=0|1&country=SA&search=text
-    if (route === '/visa-monitor' && method === 'GET') {
-      const status = String(q.status || 'active').toLowerCase()
-      const finesOnly = String(q.has_fines || '0') === '1'
-      const country = q.country || null
-      const searchText = (q.search || '').toString().trim().toLowerCase()
-      const filter = { tenant_id: T }
-      if (status !== 'all') filter.status = status
-      if (country) filter.destination_country = country
-      const rows = await db.collection('visa_monitoring').find(filter).sort({ max_exit_date: 1 }).toArray()
-      // Enrich with computed fields
-      const today = new Date().toISOString().slice(0, 10)
-      const enriched = []
-      for (const r of rows) {
-        const hasFines = await resolveHasFines(r.destination_country, r.visa_type)
-        const maxExit = r.max_exit_date ? new Date(r.max_exit_date) : null
-        const todayDt = new Date(today)
-        const remainingDays = maxExit ? Math.floor((maxExit - todayDt) / (1000 * 60 * 60 * 24)) : null
-        const isOverdue = remainingDays !== null && remainingDays < 0
-        const alertLevel = r.status === 'active' && isOverdue ? (hasFines ? 'red' : 'yellow') : (r.status === 'active' && remainingDays !== null && remainingDays <= 3 ? 'orange' : 'none')
-        enriched.push({ ...r, has_fines: hasFines, remaining_days: remainingDays, is_overdue: isOverdue, alert_level: alertLevel })
+    // ===== v3.11 — Visa Monitoring Grid (B2B) =====
+    // Track-status algorithm: green >30d | yellow ≤30d | red ≤15d | overstay <0d | departed (actual exit)
+    const monCompute = (r) => {
+      const todayDt = new Date(new Date().toISOString().slice(0, 10))
+      const allowed = Number(r.allowed_days || 0) || null
+      let expected = r.expected_exit_date || r.max_exit_date || null
+      if (!expected && r.entry_date && allowed) {
+        const d = new Date(r.entry_date); d.setDate(d.getDate() + allowed)
+        expected = d.toISOString().slice(0, 10)
       }
-      const filtered = finesOnly ? enriched.filter(x => x.has_fines) : enriched
-      const searched = searchText ? filtered.filter(x =>
-        String(x.traveler_name || '').toLowerCase().includes(searchText) ||
-        String(x.passport_no || '').toLowerCase().includes(searchText) ||
-        String(x.phone || '').includes(searchText)
-      ) : filtered
-      return ok(clean(searched))
+      const departed = !!r.actual_exit_date || r.status === 'exited'
+      const remaining = expected ? Math.floor((new Date(expected) - todayDt) / 86400000) : null
+      let track = 'green'
+      if (departed) track = 'departed'
+      else if (remaining === null) track = 'green'
+      else if (remaining < 0) track = 'overstay'
+      else if (remaining <= 15) track = 'red'
+      else if (remaining <= 30) track = 'yellow'
+      return { expected_exit_date: expected, remaining_days: remaining, track_status: track }
+    }
+    const monExpected = (entryDate, allowedDays) => {
+      if (!entryDate || !allowedDays) return null
+      const d = new Date(entryDate); d.setDate(d.getDate() + Number(allowedDays))
+      return d.toISOString().slice(0, 10)
     }
 
-    // POST /visa-monitor — add manual record
+    // GET /visa-monitor — list with filters
+    // Query: ?track=all|inside|green|yellow|red|overstay|departed|alerts&agent=text&search=text
+    if (route === '/visa-monitor' && method === 'GET') {
+      const track = String(q.track || 'inside').toLowerCase()
+      const agentText = (q.agent || '').toString().trim().toLowerCase()
+      const searchText = (q.search || '').toString().trim().toLowerCase()
+      const rows = await db.collection('visa_monitoring').find({ tenant_id: T }).toArray()
+      let enriched = rows.map(r => ({ ...r, ...monCompute(r) }))
+      // Track filter
+      if (track === 'inside') enriched = enriched.filter(x => x.track_status !== 'departed')
+      else if (track === 'alerts') enriched = enriched.filter(x => ['yellow', 'red', 'overstay'].includes(x.track_status))
+      else if (track !== 'all') enriched = enriched.filter(x => x.track_status === track)
+      // Agent filter (free-text contains)
+      if (agentText) enriched = enriched.filter(x => String(x.agent_name || '').toLowerCase().includes(agentText))
+      // Search by name / passport / visa_no
+      if (searchText) enriched = enriched.filter(x =>
+        String(x.traveler_name || '').toLowerCase().includes(searchText) ||
+        String(x.passport_no || '').toLowerCase().includes(searchText) ||
+        String(x.visa_no || '').toLowerCase().includes(searchText)
+      )
+      // Sort: overstay first (most negative), then ascending remaining; departed last
+      enriched.sort((a, b) => {
+        const da = a.track_status === 'departed' ? 1 : 0, db2 = b.track_status === 'departed' ? 1 : 0
+        if (da !== db2) return da - db2
+        const ra = a.remaining_days === null ? 99999 : a.remaining_days
+        const rb = b.remaining_days === null ? 99999 : b.remaining_days
+        return ra - rb
+      })
+      return ok(clean(enriched))
+    }
+
+    // POST /visa-monitor — add manual record (B2B mandatory fields)
     if (route === '/visa-monitor' && method === 'POST') {
       const b = await request.json()
-      if (!b.traveler_name || !String(b.traveler_name).trim()) return bad('اسم المسافر مطلوب')
+      if (!b.traveler_name || !String(b.traveler_name).trim()) return bad('اسم المعتمر مطلوب')
       if (!b.passport_no || !String(b.passport_no).trim()) return bad('رقم الجواز مطلوب')
-      if (!b.destination_country) return bad('الدولة مطلوبة')
+      if (!b.agent_name || !String(b.agent_name).trim()) return bad('اسم الوكيل مطلوب')
+      if (!b.agent_phone || !String(b.agent_phone).trim()) return bad('رقم جوال الوكيل (واتساب) مطلوب')
+      if (!b.visa_no || !String(b.visa_no).trim()) return bad('رقم التأشيرة مطلوب')
+      if (!b.visa_issue_date) return bad('تاريخ إصدار التأشيرة مطلوب')
       if (!b.entry_date) return bad('تاريخ الدخول مطلوب')
+      const allowedDays = Number(b.allowed_days) > 0 ? Number(b.allowed_days) : 85
       const doc = {
         id: uuidv4(), tenant_id: T,
         traveler_name: String(b.traveler_name).trim(),
-        phone: b.phone || '',
         passport_no: String(b.passport_no).trim().toUpperCase(),
-        destination_country: b.destination_country,
-        visa_type: b.visa_type || '',
+        nationality: b.nationality || '',
+        agent_name: String(b.agent_name).trim(),
+        agent_phone: String(b.agent_phone).trim(),
+        phone: b.phone || '',
+        visa_no: String(b.visa_no).trim(),
+        visa_issue_date: b.visa_issue_date,
+        host_name: b.host_name || '',
         entry_date: b.entry_date,
-        max_exit_date: b.max_exit_date || null,
-        actual_exit_date: null,
-        status: 'active',
+        entry_port: b.entry_port || '',
+        allowed_days: allowedDays,
+        expected_exit_date: monExpected(b.entry_date, allowedDays),
+        actual_exit_date: b.actual_exit_date || null,
+        exit_port: b.exit_port || '',
+        destination_country: b.destination_country || 'SA',
+        visa_type: b.visa_type || 'تأشيرة عمرة',
+        status: b.actual_exit_date ? 'exited' : 'active',
         linked_visa_id: b.linked_visa_id || null,
         source: b.source || 'manual',
         notes: b.notes || '',
         created_at: new Date(), updated_at: new Date()
       }
       await db.collection('visa_monitoring').insertOne(doc)
-      const { _id, ...r } = doc; return ok(r)
+      const { _id, ...r } = doc; return ok({ ...r, ...monCompute(r) })
     }
 
-    // PATCH /visa-monitor/:id — action buttons (exited / acknowledged / update)
+    // PATCH /visa-monitor/:id — action buttons (exited / reactivate / update)
     {
       const m = route.match(/^\/visa-monitor\/([^/]+)$/)
       if (m && method === 'PATCH') {
         const b = await request.json()
         const upd = { updated_at: new Date() }
-        if (b.action === 'exited') { upd.status = 'exited'; upd.actual_exit_date = b.actual_exit_date || new Date().toISOString().slice(0, 10) }
+        if (b.action === 'exited') {
+          upd.status = 'exited'
+          upd.actual_exit_date = b.actual_exit_date || new Date().toISOString().slice(0, 10)
+          if (b.exit_port !== undefined) upd.exit_port = b.exit_port
+        }
         else if (b.action === 'acknowledge') upd.status = 'acknowledged'
         else if (b.action === 'reactivate') { upd.status = 'active'; upd.actual_exit_date = null }
         else {
-          ['traveler_name', 'phone', 'passport_no', 'destination_country', 'visa_type', 'entry_date', 'max_exit_date', 'notes'].forEach(f => { if (b[f] !== undefined) upd[f] = b[f] })
+          ['traveler_name', 'phone', 'passport_no', 'nationality', 'agent_name', 'agent_phone', 'visa_no', 'visa_issue_date', 'host_name', 'entry_date', 'entry_port', 'allowed_days', 'actual_exit_date', 'exit_port', 'destination_country', 'visa_type', 'max_exit_date', 'notes'].forEach(f => { if (b[f] !== undefined) upd[f] = b[f] })
+          if (upd.allowed_days !== undefined) upd.allowed_days = Number(upd.allowed_days) > 0 ? Number(upd.allowed_days) : 85
+          // Recompute expected exit if entry/allowed changed
+          if (upd.entry_date !== undefined || upd.allowed_days !== undefined) {
+            const existing = await db.collection('visa_monitoring').findOne({ id: m[1], tenant_id: T })
+            if (existing) {
+              const entry = upd.entry_date !== undefined ? upd.entry_date : existing.entry_date
+              const allowed = upd.allowed_days !== undefined ? upd.allowed_days : (existing.allowed_days || 85)
+              upd.expected_exit_date = monExpected(entry, allowed)
+            }
+          }
+          // Departure logic: setting actual_exit_date marks departed, clearing it reactivates
+          if (upd.actual_exit_date !== undefined) upd.status = upd.actual_exit_date ? 'exited' : 'active'
         }
         await db.collection('visa_monitoring').updateOne({ id: m[1], tenant_id: T }, { $set: upd })
         return ok({ success: true })
@@ -2383,59 +2437,82 @@ async function handleRoute(request, { params }) {
       }
     }
 
-    // POST /visa-monitor/import — bulk upsert by passport_no
+    // POST /visa-monitor/import — bulk upsert by passport_no (new B2B columns)
     if (route === '/visa-monitor/import' && method === 'POST') {
       const b = await request.json()
       const rows = Array.isArray(b.rows) ? b.rows : []
       let inserted = 0, updated = 0, skipped = 0
+      const skipReasons = []
       for (const r of rows) {
-        if (!r.passport_no) { skipped++; continue }
+        if (!r.passport_no) { skipped++; skipReasons.push('صف بدون رقم جواز'); continue }
         const passport = String(r.passport_no).trim().toUpperCase()
         const existing = await db.collection('visa_monitoring').findOne({ tenant_id: T, passport_no: passport })
         if (existing) {
-          // Upsert: only update entry/exit dates, keep original record
           const upd = { updated_at: new Date() }
-          if (r.entry_date) upd.entry_date = r.entry_date
-          if (r.max_exit_date) upd.max_exit_date = r.max_exit_date
+          ;['traveler_name', 'nationality', 'agent_name', 'agent_phone', 'phone', 'visa_no', 'visa_issue_date', 'host_name', 'entry_date', 'entry_port', 'exit_port', 'notes'].forEach(f => { if (r[f]) upd[f] = r[f] })
+          if (Number(r.allowed_days) > 0) upd.allowed_days = Number(r.allowed_days)
+          const entry = upd.entry_date || existing.entry_date
+          const allowed = upd.allowed_days || existing.allowed_days || 85
+          upd.expected_exit_date = monExpected(entry, allowed)
           if (r.actual_exit_date) { upd.actual_exit_date = r.actual_exit_date; upd.status = 'exited' }
           await db.collection('visa_monitoring').updateOne({ id: existing.id }, { $set: upd })
           updated++
         } else {
-          if (!r.traveler_name || !r.destination_country || !r.entry_date) { skipped++; continue }
+          // Mandatory for new rows: name, agent, agent_phone, visa_no, issue date, entry date
+          const missing = []
+          if (!r.traveler_name) missing.push('الاسم')
+          if (!r.agent_name) missing.push('الوكيل')
+          if (!r.agent_phone) missing.push('جوال الوكيل')
+          if (!r.visa_no) missing.push('رقم التأشيرة')
+          if (!r.visa_issue_date) missing.push('تاريخ الإصدار')
+          if (!r.entry_date) missing.push('تاريخ الدخول')
+          if (missing.length) { skipped++; skipReasons.push(`${passport}: ينقصه ${missing.join('، ')}`); continue }
+          const allowedDays = Number(r.allowed_days) > 0 ? Number(r.allowed_days) : 85
           await db.collection('visa_monitoring').insertOne({
             id: uuidv4(), tenant_id: T,
-            traveler_name: r.traveler_name, phone: r.phone || '', passport_no: passport,
-            destination_country: r.destination_country, visa_type: r.visa_type || '',
-            entry_date: r.entry_date, max_exit_date: r.max_exit_date || null,
+            traveler_name: r.traveler_name, passport_no: passport,
+            nationality: r.nationality || '',
+            agent_name: r.agent_name, agent_phone: r.agent_phone,
+            phone: r.phone || '',
+            visa_no: r.visa_no, visa_issue_date: r.visa_issue_date,
+            host_name: r.host_name || '',
+            entry_date: r.entry_date, entry_port: r.entry_port || '',
+            allowed_days: allowedDays,
+            expected_exit_date: monExpected(r.entry_date, allowedDays),
             actual_exit_date: r.actual_exit_date || null,
+            exit_port: r.exit_port || '',
+            destination_country: r.destination_country || 'SA',
+            visa_type: r.visa_type || 'تأشيرة عمرة',
             status: r.actual_exit_date ? 'exited' : 'active',
-            source: 'nusuk_import', notes: r.notes || '',
+            source: 'excel_import', notes: r.notes || '',
             created_at: new Date(), updated_at: new Date()
           })
           inserted++
         }
       }
-      return ok({ inserted, updated, skipped, total: rows.length })
+      return ok({ inserted, updated, skipped, skip_reasons: skipReasons.slice(0, 20), total: rows.length })
     }
 
-    // GET /visa-monitor/stats
+    // GET /visa-monitor/stats — counters per track status
     if (route === '/visa-monitor/stats' && method === 'GET') {
-      const active = await db.collection('visa_monitoring').countDocuments({ tenant_id: T, status: 'active' })
-      const exited = await db.collection('visa_monitoring').countDocuments({ tenant_id: T, status: 'exited' })
-      const acknowledged = await db.collection('visa_monitoring').countDocuments({ tenant_id: T, status: 'acknowledged' })
-      const today = new Date().toISOString().slice(0, 10)
-      const activeRows = await db.collection('visa_monitoring').find({ tenant_id: T, status: 'active' }).toArray()
-      let redAlerts = 0, yellowAlerts = 0, orangeAlerts = 0
-      const todayDt = new Date(today)
-      for (const r of activeRows) {
-        if (!r.max_exit_date) continue
-        const rem = Math.floor((new Date(r.max_exit_date) - todayDt) / (1000 * 60 * 60 * 24))
-        const hasFines = await resolveHasFines(r.destination_country, r.visa_type)
-        if (rem < 0 && hasFines) redAlerts++
-        else if (rem < 0) yellowAlerts++
-        else if (rem <= 3) orangeAlerts++
+      const rows = await db.collection('visa_monitoring').find({ tenant_id: T }).toArray()
+      const counts = { green: 0, yellow: 0, red: 0, overstay: 0, departed: 0, total: rows.length }
+      for (const r of rows) {
+        const { track_status } = monCompute(r)
+        counts[track_status] = (counts[track_status] || 0) + 1
       }
-      return ok({ active, exited, acknowledged, red_alerts: redAlerts, yellow_alerts: yellowAlerts, orange_alerts: orangeAlerts })
+      return ok({ ...counts, inside: counts.green + counts.yellow + counts.red + counts.overstay, alerts: counts.yellow + counts.red + counts.overstay })
+    }
+
+    // GET /visa-monitor/alerts — dashboard widget (yellow + red + overstay only)
+    if (route === '/visa-monitor/alerts' && method === 'GET') {
+      const rows = await db.collection('visa_monitoring').find({ tenant_id: T }).toArray()
+      const alerts = rows.map(r => ({ ...r, ...monCompute(r) }))
+        .filter(x => ['yellow', 'red', 'overstay'].includes(x.track_status))
+        .sort((a, b) => (a.remaining_days ?? 99999) - (b.remaining_days ?? 99999))
+      const counts = { yellow: 0, red: 0, overstay: 0 }
+      alerts.forEach(a => { counts[a.track_status]++ })
+      return ok({ counts, rows: clean(alerts.slice(0, 25)), total: alerts.length })
     }
 
 

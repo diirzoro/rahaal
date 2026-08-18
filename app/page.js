@@ -975,12 +975,17 @@ function TopBar({ title, subtitle, right }) {
 function Dashboard({ setTab }) {
   const [data, setData] = useState(null)
   const [tomorrow, setTomorrow] = useState([])
+  const [monAlerts, setMonAlerts] = useState(null)
   const [loading, setLoading] = useState(true)
   const load = useCallback(async () => {
     try {
       setLoading(true)
-      const [d, tw] = await Promise.all([api('/dashboard'), api('/dashboard/tomorrow-travelers').catch(() => [])])
-      setData(d); setTomorrow(tw || [])
+      const [d, tw, ma] = await Promise.all([
+        api('/dashboard'),
+        api('/dashboard/tomorrow-travelers').catch(() => []),
+        api('/visa-monitor/alerts').catch(() => null),
+      ])
+      setData(d); setTomorrow(tw || []); setMonAlerts(ma)
     } catch (e) { toast.error(e.message) } finally { setLoading(false) }
   }, [])
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t) }, [load])
@@ -1015,6 +1020,57 @@ function Dashboard({ setTab }) {
           bigValue={new Date().toLocaleDateString('ar-EG', { day: 'numeric', month: 'long' })}
           details={[{ label: '', value: new Date().toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric' }) }]} loading={loading} />
       </div>
+
+      {/* v3.11 — Visa Monitoring Alerts Widget (yellow + red + overstay ONLY) */}
+      {monAlerts && monAlerts.total > 0 && (
+        <Card className="border-red-300 bg-gradient-to-l from-red-50 to-slate-50 shadow-md">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-red-900 flex-wrap">
+              <span className="text-xl">🛃</span> تنبيهات مراقبة التأشيرات ({monAlerts.total})
+              {monAlerts.counts?.overstay > 0 && <Badge className="bg-slate-900 text-white">⚫ مخالف: {monAlerts.counts.overstay}</Badge>}
+              {monAlerts.counts?.red > 0 && <Badge className="bg-red-600 text-white">🔴 خطر: {monAlerts.counts.red}</Badge>}
+              {monAlerts.counts?.yellow > 0 && <Badge className="bg-yellow-400 text-yellow-950">🟡 قريب: {monAlerts.counts.yellow}</Badge>}
+              <Button size="sm" variant="outline" onClick={() => setTab('visa-monitor')} className="ms-auto h-7 text-xs">فتح مركز المراقبة ←</Button>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader><TableRow>
+                  <TableHead>المعتمر</TableHead>
+                  <TableHead>الجواز</TableHead>
+                  <TableHead>الوكيل</TableHead>
+                  <TableHead>الانتهاء المتوقع</TableHead>
+                  <TableHead className="text-center">الأيام المتبقية</TableHead>
+                  <TableHead className="text-center">الحالة</TableHead>
+                  <TableHead className="text-center">إجراء</TableHead>
+                </TableRow></TableHeader>
+                <TableBody>
+                  {monAlerts.rows.slice(0, 8).map(r => {
+                    const meta = MON_TRACK[r.track_status] || {}
+                    return (
+                      <TableRow key={r.id} className={meta.row || ''}>
+                        <TableCell className="font-semibold text-xs">{r.traveler_name}</TableCell>
+                        <TableCell className="font-mono text-xs">{r.passport_no}</TableCell>
+                        <TableCell className="text-xs">{r.agent_name || '—'}</TableCell>
+                        <TableCell className="text-xs font-bold">{r.expected_exit_date || '—'}</TableCell>
+                        <TableCell className="text-center text-xs">
+                          {r.remaining_days < 0
+                            ? <span className="font-black text-white bg-slate-900 px-2 py-0.5 rounded">متجاوز {Math.abs(r.remaining_days)} يوم</span>
+                            : <span className={`font-black ${r.remaining_days <= 15 ? 'text-red-700' : 'text-yellow-700'}`}>{r.remaining_days} يوم</span>}
+                        </TableCell>
+                        <TableCell className="text-center"><Badge className={`${meta.badge || ''} border text-[10px] whitespace-nowrap`}>{meta.icon} {meta.label}</Badge></TableCell>
+                        <TableCell className="text-center"><WaBtn phone={r.agent_phone} message={monWaMessage(r)} size="xs" label="إشعار الوكيل" iconOnly={false} /></TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+              {monAlerts.total > 8 && <div className="text-center text-xs text-slate-500 mt-2">... و {monAlerts.total - 8} حالة أخرى — افتح مركز المراقبة للاطلاع الكامل</div>}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* v3.0 — Visa Expiration Alerts Widget (10 days ahead + overdue) */}
       {data?.visa_alerts && data.visa_alerts.length > 0 && (
@@ -4709,17 +4765,18 @@ function QueryCenterScreen() {
   )
 }
 
-// v3.10.5 — VISA MONITORING CENTER — Full implementation
+// v3.11 — VISA MONITORING CENTER (B2B Grid + WhatsApp alerts + 5-state tracker)
 function VisaMonitorScreen() {
   const [rows, setRows] = useState([])
   const [stats, setStats] = useState({})
   const [countries, setCountries] = useState([])
-  const [filters, setFilters] = useState({ status: 'active', has_fines: '0', country: '', search: '' })
+  const [filters, setFilters] = useState({ track: 'inside', agent: '', search: '' })
   const [loading, setLoading] = useState(false)
   const [dlgOpen, setDlgOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [importOpen, setImportOpen] = useState(false)
   const [countryDlgOpen, setCountryDlgOpen] = useState(false)
+  const [exitRow, setExitRow] = useState(null)
 
   const load = async () => {
     setLoading(true)
@@ -4728,73 +4785,128 @@ function VisaMonitorScreen() {
       const [list, s, c] = await Promise.all([
         api(`/visa-monitor?${qs}`),
         api('/visa-monitor/stats'),
-        api('/countries'),
+        api('/countries').catch(() => []),
       ])
       setRows(list || []); setStats(s || {}); setCountries(c || [])
     } catch (e) { toast.error(e.message) } finally { setLoading(false) }
   }
-  useEffect(() => { load() }, [])
-
-  const doAction = async (row, action) => {
-    if (!confirm(action === 'exited' ? 'تأكيد تم الخروج؟' : action === 'acknowledge' ? 'إخفاء من القائمة النشطة (يبقى في الأرشيف)؟' : 'إعادة تفعيل السجل؟')) return
-    try {
-      await api(`/visa-monitor/${row.id}`, { method: 'PATCH', body: { action } })
-      toast.success('✅ تم التحديث'); load()
-    } catch (e) { toast.error(e.message) }
-  }
+  useEffect(() => { load() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [filters.track])
 
   const del = async (row) => {
     if (!confirm(`حذف سجل ${row.traveler_name} نهائياً؟`)) return
     try { await api(`/visa-monitor/${row.id}`, { method: 'DELETE' }); toast.success('حُذف'); load() } catch (e) { toast.error(e.message) }
   }
+  const reactivate = async (row) => {
+    if (!confirm('إعادة تفعيل السجل (إلغاء المغادرة)؟')) return
+    try { await api(`/visa-monitor/${row.id}`, { method: 'PATCH', body: { action: 'reactivate' } }); toast.success('✅ أُعيد التفعيل'); load() } catch (e) { toast.error(e.message) }
+  }
 
-  const alertColor = { red: 'bg-red-100 border-r-4 border-red-500', yellow: 'bg-yellow-100 border-r-4 border-yellow-500', orange: 'bg-orange-100 border-r-4 border-orange-400', none: '' }
-  const countryLabel = (code) => { const c = countries.find(x => x.code === code); return c ? `${c.flag} ${c.name_ar}` : code }
+  const EXPORT_HEADERS = (r, i) => ({
+    'م': i + 1,
+    'اسم المعتمر': r.traveler_name || '',
+    'رقم الجواز': r.passport_no || '',
+    'الجنسية': r.nationality || '',
+    'اسم الوكيل': r.agent_name || '',
+    'جوال الوكيل': r.agent_phone || '',
+    'رقم التأشيرة': r.visa_no || '',
+    'تاريخ إصدار التأشيرة': r.visa_issue_date || '',
+    'المستضيف / رقم الإقامة': r.host_name || '',
+    'تاريخ الدخول': r.entry_date || '',
+    'منفذ الدخول': r.entry_port || '',
+    'مدة الإقامة (يوم)': r.allowed_days || '',
+    'تاريخ الانتهاء المتوقع': r.expected_exit_date || '',
+    'الأيام المتبقية': r.remaining_days ?? '',
+    'تاريخ المغادرة الفعلي': r.actual_exit_date || '',
+    'منفذ المغادرة': r.exit_port || '',
+    'الحالة': (MON_TRACK[r.track_status] || {}).label || '',
+    'ملاحظات': r.notes || ''
+  })
+
+  const exportExcel = () => {
+    if (rows.length === 0) return toast.error('لا توجد سجلات للتصدير')
+    const ws = XLSX.utils.json_to_sheet(rows.map((r, i) => EXPORT_HEADERS(r, i)))
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'مراقبة التأشيرات')
+    XLSX.writeFile(wb, `visa-monitoring-${new Date().toISOString().slice(0, 10)}.xlsx`)
+    toast.success('📥 تم تنزيل ملف Excel')
+  }
+
+  const printPDF = () => {
+    if (rows.length === 0) return toast.error('لا توجد سجلات للطباعة')
+    const heads = Object.keys(EXPORT_HEADERS(rows[0] || {}, 0))
+    const body = rows.map((r, i) => `<tr class="tr-${r.track_status}">${Object.values(EXPORT_HEADERS(r, i)).map(v => `<td>${String(v ?? '')}</td>`).join('')}</tr>`).join('')
+    const w = window.open('', '_blank')
+    if (!w) return toast.error('فضلاً اسمح بالنوافذ المنبثقة للطباعة')
+    w.document.write(`<!doctype html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>تقرير مراقبة التأشيرات</title>
+      <style>
+        body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;padding:16px;color:#0f172a}
+        h1{font-size:18px;margin:0 0 4px} .sub{font-size:11px;color:#64748b;margin-bottom:12px}
+        table{width:100%;border-collapse:collapse;font-size:9.5px}
+        th,td{border:1px solid #cbd5e1;padding:3px 5px;text-align:right}
+        th{background:#f1f5f9;font-weight:700}
+        .tr-yellow td{background:#fefce8}.tr-red td{background:#fef2f2}.tr-overstay td{background:#e2e8f0}.tr-departed td{color:#94a3b8}
+        @media print{@page{size:A4 landscape;margin:8mm}}
+      </style></head><body>
+      <h1>🛃 تقرير مراقبة التأشيرات</h1>
+      <div class="sub">تاريخ التقرير: ${new Date().toLocaleDateString('ar-EG')} — عدد السجلات: ${rows.length}</div>
+      <table><thead><tr>${heads.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>
+      </body></html>`)
+    w.document.close(); w.focus(); setTimeout(() => w.print(), 400)
+  }
+
+  const remainCell = (r) => {
+    if (r.track_status === 'departed') return <span className="text-slate-400">—</span>
+    if (r.remaining_days === null) return <span className="text-slate-400">—</span>
+    if (r.remaining_days < 0) return <span className="font-black text-white bg-slate-900 px-2 py-0.5 rounded">متجاوز {Math.abs(r.remaining_days)} يوم</span>
+    return <span className={`font-black ${r.remaining_days <= 15 ? 'text-red-700' : r.remaining_days <= 30 ? 'text-yellow-700' : 'text-emerald-700'}`}>{r.remaining_days} يوم</span>
+  }
 
   return (
     <div className="space-y-6">
-      <TopBar title="🛃 مركز مراقبة التأشيرات" subtitle="تتبع الإقامات وتنبيهات الغرامات — مستقل عن المبيعات والمالية"
-        right={<div className="flex gap-2">
+      <TopBar title="🛃 مركز مراقبة التأشيرات" subtitle="جدول المراقبة الحية B2B — عدّاد آلي وتنبيهات واتساب حسب الحالة"
+        right={<div className="flex gap-2 flex-wrap">
           <Button onClick={() => setCountryDlgOpen(true)} variant="outline" size="sm">🌍 إعدادات الدول</Button>
-          <Button onClick={() => setImportOpen(true)} variant="outline" size="sm">📥 استيراد نسك</Button>
-          <Button onClick={() => { setEditing(null); setDlgOpen(true) }} className="grad-brand text-white" size="sm"><Plus className="w-4 h-4 me-1" /> إضافة سجل</Button>
+          <Button onClick={exportExcel} variant="outline" size="sm">📤 تصدير Excel</Button>
+          <Button onClick={printPDF} variant="outline" size="sm">🖨️ طباعة PDF</Button>
+          <Button onClick={() => setImportOpen(true)} variant="outline" size="sm">📥 استيراد Excel</Button>
+          <Button onClick={() => { setEditing(null); setDlgOpen(true) }} className="grad-brand text-white" size="sm"><Plus className="w-4 h-4 me-1" /> إضافة معتمر</Button>
         </div>} />
 
-      {/* Stats Cards */}
+      {/* Stats Cards — new 5-state tracking */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-        <Card className="border-l-4 border-l-red-500 bg-red-50/40">
+        <Card className="border-l-4 border-l-emerald-500 bg-emerald-50/40 cursor-pointer hover:shadow-md" onClick={() => setFilters(f => ({ ...f, track: 'green' }))}>
           <CardContent className="p-3">
-            <div className="text-xs text-slate-500">🚨 تنبيهات حمراء</div>
-            <div className="text-3xl font-black text-red-700">{stats.red_alerts || 0}</div>
-            <div className="text-[10px] text-slate-500">تجاوز + غرامات</div>
+            <div className="text-xs text-slate-500">🟢 في المهلة</div>
+            <div className="text-3xl font-black text-emerald-700">{stats.green || 0}</div>
+            <div className="text-[10px] text-slate-500">أكثر من 30 يوم متبقية</div>
           </CardContent>
         </Card>
-        <Card className="border-l-4 border-l-yellow-500 bg-yellow-50/40">
+        <Card className="border-l-4 border-l-yellow-500 bg-yellow-50/40 cursor-pointer hover:shadow-md" onClick={() => setFilters(f => ({ ...f, track: 'yellow' }))}>
           <CardContent className="p-3">
-            <div className="text-xs text-slate-500">⚠️ تنبيهات صفراء</div>
-            <div className="text-3xl font-black text-yellow-700">{stats.yellow_alerts || 0}</div>
-            <div className="text-[10px] text-slate-500">تجاوز بدون غرامات</div>
+            <div className="text-xs text-slate-500">🟡 قريب من الانتهاء</div>
+            <div className="text-3xl font-black text-yellow-700">{stats.yellow || 0}</div>
+            <div className="text-[10px] text-slate-500">30 يوم أو أقل</div>
           </CardContent>
         </Card>
-        <Card className="border-l-4 border-l-orange-400 bg-orange-50/40">
+        <Card className="border-l-4 border-l-red-500 bg-red-50/40 cursor-pointer hover:shadow-md" onClick={() => setFilters(f => ({ ...f, track: 'red' }))}>
           <CardContent className="p-3">
-            <div className="text-xs text-slate-500">⏰ تحذيرات</div>
-            <div className="text-3xl font-black text-orange-600">{stats.orange_alerts || 0}</div>
-            <div className="text-[10px] text-slate-500">3 أيام أو أقل</div>
+            <div className="text-xs text-slate-500">🔴 متأخر — خطر</div>
+            <div className="text-3xl font-black text-red-700">{stats.red || 0}</div>
+            <div className="text-[10px] text-slate-500">15 يوم أو أقل</div>
           </CardContent>
         </Card>
-        <Card className="border-l-4 border-l-blue-500 bg-blue-50/40">
+        <Card className="border-l-4 border-l-slate-900 bg-slate-100 cursor-pointer hover:shadow-md" onClick={() => setFilters(f => ({ ...f, track: 'overstay' }))}>
           <CardContent className="p-3">
-            <div className="text-xs text-slate-500">👁️ نشطة</div>
-            <div className="text-3xl font-black text-blue-700">{stats.active || 0}</div>
-            <div className="text-[10px] text-slate-500">قيد المتابعة</div>
+            <div className="text-xs text-slate-500">⚫ مخالف Overstay</div>
+            <div className="text-3xl font-black text-slate-900">{stats.overstay || 0}</div>
+            <div className="text-[10px] text-red-600 font-bold">تجاوز المدة — غرامات!</div>
           </CardContent>
         </Card>
-        <Card className="border-l-4 border-l-emerald-500 bg-emerald-50/40">
+        <Card className="border-l-4 border-l-slate-400 bg-slate-50 cursor-pointer hover:shadow-md" onClick={() => setFilters(f => ({ ...f, track: 'departed' }))}>
           <CardContent className="p-3">
-            <div className="text-xs text-slate-500">🛫 مؤرشفة</div>
-            <div className="text-3xl font-black text-emerald-700">{(stats.exited || 0) + (stats.acknowledged || 0)}</div>
-            <div className="text-[10px] text-slate-500">{stats.exited || 0} خروج · {stats.acknowledged || 0} مطّلع</div>
+            <div className="text-xs text-slate-500">⚪ غادر</div>
+            <div className="text-3xl font-black text-slate-500">{stats.departed || 0}</div>
+            <div className="text-[10px] text-slate-500">تم تسجيل مغادرتهم</div>
           </CardContent>
         </Card>
       </div>
@@ -4802,88 +4914,98 @@ function VisaMonitorScreen() {
       {/* Filters */}
       <Card>
         <CardContent className="p-3">
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <Field label="الحالة">
-              <Select value={filters.status} onValueChange={v => setFilters({ ...filters, status: v })}>
+              <Select value={filters.track} onValueChange={v => setFilters({ ...filters, track: v })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="active">👁️ النشطة</SelectItem>
-                  <SelectItem value="exited">🛫 تم الخروج</SelectItem>
-                  <SelectItem value="acknowledged">👁️ تم الاطلاع</SelectItem>
+                  <SelectItem value="inside">🏠 داخل المملكة (الكل عدا المغادرين)</SelectItem>
+                  <SelectItem value="alerts">🚨 تنبيهات فقط (أصفر + أحمر + مخالف)</SelectItem>
+                  <SelectItem value="green">🟢 في المهلة</SelectItem>
+                  <SelectItem value="yellow">🟡 قريب من الانتهاء</SelectItem>
+                  <SelectItem value="red">🔴 متأخر — خطر</SelectItem>
+                  <SelectItem value="overstay">⚫ مخالف Overstay</SelectItem>
+                  <SelectItem value="departed">⚪ غادر</SelectItem>
                   <SelectItem value="all">📋 الكل</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="الدولة">
-              <Select value={filters.country || 'all'} onValueChange={v => setFilters({ ...filters, country: v === 'all' ? '' : v })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">🌍 كل الدول</SelectItem>
-                  {countries.map(c => <SelectItem key={c.code} value={c.code}>{c.flag} {c.name_ar}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </Field>
-            <div className="col-span-2"><Field label="بحث (اسم/جواز/جوال)"><Input value={filters.search} onChange={e => setFilters({ ...filters, search: e.target.value })} placeholder="اكتب للبحث..." /></Field></div>
+            <Field label="اسم الوكيل / المكتب"><Input value={filters.agent} onChange={e => setFilters({ ...filters, agent: e.target.value })} onKeyDown={e => e.key === 'Enter' && load()} placeholder="فلترة حسب الوكيل..." /></Field>
+            <Field label="بحث (اسم / جواز / رقم تأشيرة)"><Input value={filters.search} onChange={e => setFilters({ ...filters, search: e.target.value })} onKeyDown={e => e.key === 'Enter' && load()} placeholder="اكتب للبحث..." /></Field>
             <Field label=" ">
-              <label className="flex items-center gap-2 cursor-pointer p-2 rounded border bg-red-50">
-                <input type="checkbox" checked={filters.has_fines === '1'} onChange={e => setFilters({ ...filters, has_fines: e.target.checked ? '1' : '0' })} />
-                <span className="text-xs font-bold text-red-700">🚨 المسؤولية المالية فقط</span>
-              </label>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={() => setFilters({ track: 'inside', agent: '', search: '' })} size="sm" className="flex-1">🧹 مسح</Button>
+                <Button onClick={load} className="grad-brand text-white flex-1" size="sm"><Search className="w-4 h-4 me-1" /> تطبيق</Button>
+              </div>
             </Field>
-          </div>
-          <div className="mt-3 flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setFilters({ status: 'active', has_fines: '0', country: '', search: '' })} size="sm">🧹 مسح</Button>
-            <Button onClick={load} className="grad-brand text-white" size="sm"><Search className="w-4 h-4 me-1" /> تطبيق</Button>
           </div>
         </CardContent>
       </Card>
 
-      {/* Table */}
+      {/* Monitoring Grid — 16 approved columns */}
       <Card>
         <CardContent className="p-0">
           <div className="overflow-x-auto">
             <Table>
-              <TableHeader><TableRow>
-                <TableHead>#</TableHead><TableHead>المسافر</TableHead><TableHead>الجواز</TableHead>
-                <TableHead>الدولة</TableHead><TableHead>النوع</TableHead>
-                <TableHead>دخول</TableHead><TableHead>خروج أقصى</TableHead><TableHead className="text-center">الأيام المتبقية</TableHead>
-                <TableHead className="text-center">حالة</TableHead><TableHead>الإجراءات</TableHead>
+              <TableHeader><TableRow className="bg-slate-50">
+                <TableHead className="text-[11px]">م</TableHead>
+                <TableHead className="text-[11px] min-w-[130px]">اسم المعتمر</TableHead>
+                <TableHead className="text-[11px]">رقم الجواز</TableHead>
+                <TableHead className="text-[11px]">الجنسية</TableHead>
+                <TableHead className="text-[11px] min-w-[120px]">الوكيل / المكتب</TableHead>
+                <TableHead className="text-[11px]">رقم التأشيرة</TableHead>
+                <TableHead className="text-[11px]">تاريخ الإصدار</TableHead>
+                <TableHead className="text-[11px]">المستضيف / الإقامة</TableHead>
+                <TableHead className="text-[11px]">تاريخ الدخول</TableHead>
+                <TableHead className="text-[11px]">منفذ الدخول</TableHead>
+                <TableHead className="text-[11px] text-center">المدة</TableHead>
+                <TableHead className="text-[11px]">الانتهاء المتوقع</TableHead>
+                <TableHead className="text-[11px] text-center">الأيام المتبقية</TableHead>
+                <TableHead className="text-[11px]">المغادرة الفعلية</TableHead>
+                <TableHead className="text-[11px]">منفذ المغادرة</TableHead>
+                <TableHead className="text-[11px] text-center">الحالة</TableHead>
+                <TableHead className="text-[11px] text-center">واتساب / إجراءات</TableHead>
+                <TableHead className="text-[11px]">ملاحظات</TableHead>
               </TableRow></TableHeader>
               <TableBody>
-                {loading && <TableRow><TableCell colSpan={10} className="text-center py-6"><Loader2 className="w-6 h-6 animate-spin inline" /></TableCell></TableRow>}
-                {!loading && rows.length === 0 && <TableRow><TableCell colSpan={10} className="text-center text-slate-400 py-6">لا توجد سجلات مطابقة</TableCell></TableRow>}
-                {!loading && rows.map((r, i) => (
-                  <TableRow key={r.id} className={alertColor[r.alert_level] || ''}>
-                    <TableCell className="text-xs text-slate-400">{i + 1}</TableCell>
-                    <TableCell className="font-semibold">{r.traveler_name}<div className="text-[10px] text-slate-500">{r.phone}</div></TableCell>
-                    <TableCell className="text-xs font-mono font-bold">{r.passport_no}</TableCell>
-                    <TableCell>{countryLabel(r.destination_country)}{r.has_fines && <div className="text-[9px] mt-0.5"><Badge className="bg-red-600 text-white text-[9px]">غرامات</Badge></div>}</TableCell>
-                    <TableCell><Badge variant="outline" className="text-[10px]">{r.visa_type || '-'}</Badge></TableCell>
-                    <TableCell className="text-xs">{r.entry_date}</TableCell>
-                    <TableCell className="text-xs">{r.max_exit_date || '—'}</TableCell>
-                    <TableCell className="text-center">
-                      {r.remaining_days === null ? <span className="text-slate-400">—</span> :
-                        r.remaining_days < 0 ? <span className="font-bold text-red-700">-{Math.abs(r.remaining_days)} يوم متأخر</span> :
-                          <span className={`font-bold ${r.remaining_days <= 3 ? 'text-orange-600' : 'text-slate-700'}`}>{r.remaining_days} يوم</span>}
-                    </TableCell>
-                    <TableCell className="text-center">
-                      {r.status === 'active' && <Badge className="bg-blue-100 text-blue-700">نشط</Badge>}
-                      {r.status === 'exited' && <Badge className="bg-emerald-100 text-emerald-700">🛫 خرج</Badge>}
-                      {r.status === 'acknowledged' && <Badge className="bg-slate-200 text-slate-700">👁️ مطّلع</Badge>}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-1">
-                        {r.status === 'active' && <>
-                          <Button size="sm" variant="outline" onClick={() => doAction(r, 'exited')} className="h-7 px-2 text-[10px] bg-emerald-50 hover:bg-emerald-100 border-emerald-300" title="تم الخروج">🛫 خرج</Button>
-                          {!r.has_fines && <Button size="sm" variant="outline" onClick={() => doAction(r, 'acknowledge')} className="h-7 px-2 text-[10px]" title="تم الاطلاع">👁️</Button>}
-                        </>}
-                        {r.status !== 'active' && <Button size="sm" variant="outline" onClick={() => doAction(r, 'reactivate')} className="h-7 px-2 text-[10px]" title="إعادة تفعيل">🔄</Button>}
-                        <Button size="sm" variant="ghost" onClick={() => { setEditing(r); setDlgOpen(true) }} className="h-7 w-7 p-0"><Pencil className="w-3 h-3" /></Button>
-                        <Button size="sm" variant="ghost" onClick={() => del(r)} className="h-7 w-7 p-0 text-rose-600"><Trash2 className="w-3 h-3" /></Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {loading && <TableRow><TableCell colSpan={18} className="text-center py-6"><Loader2 className="w-6 h-6 animate-spin inline" /></TableCell></TableRow>}
+                {!loading && rows.length === 0 && <TableRow><TableCell colSpan={18} className="text-center text-slate-400 py-6">لا توجد سجلات مطابقة</TableCell></TableRow>}
+                {!loading && rows.map((r, i) => {
+                  const meta = MON_TRACK[r.track_status] || MON_TRACK.green
+                  return (
+                    <TableRow key={r.id} className={meta.row}>
+                      <TableCell className="text-xs text-slate-400">{i + 1}</TableCell>
+                      <TableCell className="font-semibold text-xs">{r.traveler_name}</TableCell>
+                      <TableCell className="text-xs font-mono font-bold">{r.passport_no}</TableCell>
+                      <TableCell className="text-xs">{r.nationality || '—'}</TableCell>
+                      <TableCell className="text-xs">{r.agent_name || '—'}<div className="text-[10px] text-slate-500 font-mono" dir="ltr">{r.agent_phone || ''}</div></TableCell>
+                      <TableCell className="text-xs font-mono">{r.visa_no || '—'}</TableCell>
+                      <TableCell className="text-xs">{r.visa_issue_date || '—'}</TableCell>
+                      <TableCell className="text-xs">{r.host_name || '—'}</TableCell>
+                      <TableCell className="text-xs font-semibold">{r.entry_date || '—'}</TableCell>
+                      <TableCell className="text-xs">{r.entry_port || '—'}</TableCell>
+                      <TableCell className="text-xs text-center font-bold">{r.allowed_days || '—'}</TableCell>
+                      <TableCell className="text-xs font-semibold">{r.expected_exit_date || '—'}</TableCell>
+                      <TableCell className="text-center text-xs">{remainCell(r)}</TableCell>
+                      <TableCell className="text-xs">{r.actual_exit_date || '—'}</TableCell>
+                      <TableCell className="text-xs">{r.exit_port || '—'}</TableCell>
+                      <TableCell className="text-center"><Badge className={`${meta.badge} border text-[10px] whitespace-nowrap`}>{meta.icon} {meta.label}</Badge></TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1 justify-center">
+                          {['yellow', 'red', 'overstay'].includes(r.track_status) && (
+                            <WaBtn phone={r.agent_phone} message={monWaMessage(r)} size="xs" label="إشعار" iconOnly={false} />
+                          )}
+                          {r.track_status !== 'departed'
+                            ? <Button size="sm" variant="outline" onClick={() => setExitRow(r)} className="h-7 px-2 text-[10px] bg-emerald-50 hover:bg-emerald-100 border-emerald-300" title="تسجيل المغادرة">🛫 غادر</Button>
+                            : <Button size="sm" variant="outline" onClick={() => reactivate(r)} className="h-7 px-2 text-[10px]" title="إعادة تفعيل">🔄</Button>}
+                          <Button size="sm" variant="ghost" onClick={() => { setEditing(r); setDlgOpen(true) }} className="h-7 w-7 p-0"><Pencil className="w-3 h-3" /></Button>
+                          <Button size="sm" variant="ghost" onClick={() => del(r)} className="h-7 w-7 p-0 text-rose-600"><Trash2 className="w-3 h-3" /></Button>
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-[10px] text-slate-500 max-w-[140px] truncate" title={r.notes}>{r.notes || '—'}</TableCell>
+                    </TableRow>
+                  )
+                })}
               </TableBody>
             </Table>
           </div>
@@ -4893,52 +5015,139 @@ function VisaMonitorScreen() {
       <VisaMonitorDialog open={dlgOpen} onOpenChange={setDlgOpen} record={editing} countries={countries} onSaved={load} />
       <VisaMonitorImportDialog open={importOpen} onOpenChange={setImportOpen} countries={countries} onDone={load} />
       <CountriesSettingsDialog open={countryDlgOpen} onOpenChange={setCountryDlgOpen} onChanged={load} />
+      <MonitorExitDialog row={exitRow} onOpenChange={() => setExitRow(null)} onSaved={load} />
     </div>
   )
 }
 
-// v3.10.5 — Add/Edit Monitor Record Dialog
+// v3.11 — Track status meta (5 states)
+const MON_TRACK = {
+  green: { label: 'في المهلة', icon: '🟢', badge: 'bg-emerald-100 text-emerald-800 border-emerald-300', row: '' },
+  yellow: { label: 'قريب من الانتهاء', icon: '🟡', badge: 'bg-yellow-100 text-yellow-800 border-yellow-300', row: 'bg-yellow-50/70 border-r-4 border-yellow-400' },
+  red: { label: 'متأخر — خطر', icon: '🔴', badge: 'bg-red-100 text-red-800 border-red-300', row: 'bg-red-50/70 border-r-4 border-red-500' },
+  overstay: { label: 'مخالف Overstay', icon: '⚫', badge: 'bg-slate-900 text-white border-slate-900', row: 'bg-red-100/60 border-r-4 border-slate-900' },
+  departed: { label: 'غادر', icon: '⚪', badge: 'bg-slate-200 text-slate-600 border-slate-300', row: 'opacity-60' },
+}
+
+// v3.11 — WhatsApp message templates per status (tone escalates)
+function monWaMessage(r) {
+  const name = r.traveler_name || '', pass = r.passport_no || '', exp = r.expected_exit_date || '', rem = r.remaining_days
+  if (r.track_status === 'overstay') {
+    return `🚨 مخالفة إقامة — عاجل جداً:\nالمعتمر ${name} (جواز ${pass}) تجاوز مدة الإقامة المسموحة منذ ${Math.abs(rem)} يوم (انتهت بتاريخ ${exp}).\nمكتبكم يتحمل كافة الغرامات والتبعات القانونية المترتبة. يجب التواصل والترتيب لمغادرته فوراً دون أي تأخير.`
+  }
+  if (r.track_status === 'red') {
+    return `⚠️ عاجل وهام:\nالمعتمر ${name} (جواز ${pass}) متبقي له ${rem} يوماً فقط على انتهاء فترة إقامته (تنتهي بتاريخ ${exp}).\nيجب خروج المعتمر فوراً وإلا سيتحمل مكتبكم كافة الغرامات والتبعات القانونية. يجب متابعة المعتمر فوراً.`
+  }
+  return `عزيزنا الوكيل ${r.agent_name || ''}،\nنود تذكيركم بأن المعتمر ${name} (جواز ${pass}) متبقي له ${rem} يوماً على انتهاء فترة إقامته (تنتهي بتاريخ ${exp}).\nنرجو الترتيب لمغادرته في الوقت المحدد. شاكرين حسن تعاونكم 🌹`
+}
+
+// v3.11 — Exit registration dialog (actual exit date + port)
+function MonitorExitDialog({ row, onOpenChange, onSaved }) {
+  const [form, setForm] = useState({ actual_exit_date: new Date().toISOString().slice(0, 10), exit_port: '' })
+  useEffect(() => { if (row) setForm({ actual_exit_date: new Date().toISOString().slice(0, 10), exit_port: row.exit_port || '' }) }, [row])
+  const submit = async () => {
+    if (!form.actual_exit_date) return toast.error('تاريخ المغادرة مطلوب')
+    try {
+      await api(`/visa-monitor/${row.id}`, { method: 'PATCH', body: { action: 'exited', ...form } })
+      toast.success('🛫 تم تسجيل المغادرة — الحالة الآن: ⚪ غادر')
+      onOpenChange(); onSaved()
+    } catch (e) { toast.error(e.message) }
+  }
+  return (
+    <Dialog open={!!row} onOpenChange={v => { if (!v) onOpenChange() }}>
+      <DialogContent className="max-w-md" dir="rtl">
+        <DialogHeader><DialogTitle>🛫 تسجيل مغادرة: {row?.traveler_name}</DialogTitle>
+          <DialogDescription>سيتحول السجل تلقائياً إلى حالة ⚪ غادر ويختفي من التنبيهات</DialogDescription></DialogHeader>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="تاريخ المغادرة الفعلي" required><Input type="date" value={form.actual_exit_date} onChange={e => setForm({ ...form, actual_exit_date: e.target.value })} /></Field>
+          <Field label="منفذ المغادرة"><Input value={form.exit_port} onChange={e => setForm({ ...form, exit_port: e.target.value })} placeholder="مطار جدة / منفذ الوديعة..." /></Field>
+        </div>
+        <DialogFooter><Button variant="outline" onClick={onOpenChange}>إلغاء</Button><Button onClick={submit} className="bg-emerald-600 hover:bg-emerald-700 text-white">✅ تأكيد المغادرة</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// v3.11 — Add/Edit Monitor Record Dialog (B2B mandatory fields + auto 85 days)
 function VisaMonitorDialog({ open, onOpenChange, record, countries, onSaved }) {
-  const [form, setForm] = useState({ traveler_name: '', phone: '', passport_no: '', destination_country: 'SA', visa_type: 'تأشيرة عمرة', entry_date: new Date().toISOString().slice(0, 10), max_exit_date: '', notes: '' })
+  const EMPTY = { traveler_name: '', passport_no: '', nationality: '', agent_name: '', agent_phone: '', phone: '', visa_no: '', visa_issue_date: new Date().toISOString().slice(0, 10), host_name: '', entry_date: new Date().toISOString().slice(0, 10), entry_port: '', allowed_days: 85, actual_exit_date: '', exit_port: '', visa_type: 'تأشيرة عمرة', notes: '' }
+  const [form, setForm] = useState(EMPTY)
   useEffect(() => {
-    if (record) setForm({ ...form, ...record })
-    else setForm({ traveler_name: '', phone: '', passport_no: '', destination_country: 'SA', visa_type: 'تأشيرة عمرة', entry_date: new Date().toISOString().slice(0, 10), max_exit_date: '', notes: '' })
+    if (record) setForm({ ...EMPTY, ...record, allowed_days: record.allowed_days || 85, actual_exit_date: record.actual_exit_date || '' })
+    else setForm(EMPTY)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [record, open])
+  // Live computed expected exit date
+  const expectedExit = (() => {
+    if (!form.entry_date || !Number(form.allowed_days)) return '—'
+    const d = new Date(form.entry_date); d.setDate(d.getDate() + Number(form.allowed_days))
+    return d.toISOString().slice(0, 10)
+  })()
   const submit = async () => {
-    if (!form.traveler_name?.trim()) return toast.error('اسم المسافر مطلوب')
+    if (!form.traveler_name?.trim()) return toast.error('اسم المعتمر مطلوب')
     if (!form.passport_no?.trim()) return toast.error('رقم الجواز مطلوب')
-    if (!form.destination_country) return toast.error('الدولة مطلوبة')
+    if (!form.agent_name?.trim()) return toast.error('اسم الوكيل مطلوب')
+    if (!form.agent_phone?.trim()) return toast.error('رقم جوال الوكيل (واتساب) مطلوب')
+    if (!form.visa_no?.trim()) return toast.error('رقم التأشيرة مطلوب')
+    if (!form.visa_issue_date) return toast.error('تاريخ إصدار التأشيرة مطلوب')
     if (!form.entry_date) return toast.error('تاريخ الدخول مطلوب')
     try {
-      if (record?.id) await api(`/visa-monitor/${record.id}`, { method: 'PATCH', body: form })
-      else await api('/visa-monitor', { method: 'POST', body: form })
+      const body = { ...form, allowed_days: Number(form.allowed_days) || 85, actual_exit_date: form.actual_exit_date || null }
+      if (record?.id) await api(`/visa-monitor/${record.id}`, { method: 'PATCH', body })
+      else await api('/visa-monitor', { method: 'POST', body })
       toast.success('✅ تم الحفظ'); onOpenChange(false); onSaved()
     } catch (e) { toast.error(e.message) }
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl" dir="rtl">
-        <DialogHeader><DialogTitle className="flex items-center gap-2"><span className="text-2xl">🛃</span>{record ? 'تعديل سجل مراقبة' : 'إضافة سجل مراقبة جديد'}</DialogTitle></DialogHeader>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="اسم المسافر" required><Input value={form.traveler_name} onChange={e => setForm({ ...form, traveler_name: e.target.value })} /></Field>
-          <Field label="رقم الجوال"><Input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="7XXXXXXXX" /></Field>
-          <Field label="رقم الجواز" required><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value.toUpperCase() })} placeholder="A1234567" className="font-mono" /></Field>
-          <Field label="الدولة" required>
-            <Select value={form.destination_country} onValueChange={v => setForm({ ...form, destination_country: v })}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>{countries.map(c => <SelectItem key={c.code} value={c.code}>{c.flag} {c.name_ar}</SelectItem>)}</SelectContent>
-            </Select>
-          </Field>
-          <Field label="نوع التأشيرة">
-            <Select value={form.visa_type} onValueChange={v => setForm({ ...form, visa_type: v })}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>{VISA_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
-            </Select>
-          </Field>
-          <Field label="تاريخ الدخول" required><Input type="date" value={form.entry_date} onChange={e => setForm({ ...form, entry_date: e.target.value })} /></Field>
-          <Field label="أقصى تاريخ للخروج"><Input type="date" value={form.max_exit_date || ''} onChange={e => setForm({ ...form, max_exit_date: e.target.value })} /></Field>
-          <div className="col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></Field></div>
+      <DialogContent className="max-w-3xl max-h-[92vh] overflow-y-auto" dir="rtl">
+        <DialogHeader><DialogTitle className="flex items-center gap-2"><span className="text-2xl">🛃</span>{record ? 'تعديل سجل مراقبة' : 'إضافة معتمر للمراقبة'}</DialogTitle>
+          <DialogDescription>الحقول المعلّمة بـ * إجبارية — مدة الإقامة الافتراضية 85 يوم وقابلة للتعديل</DialogDescription></DialogHeader>
+        <div className="space-y-4">
+          <div className="text-xs font-bold text-slate-500 border-b pb-1">👤 بيانات المعتمر</div>
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="اسم المعتمر" required><Input value={form.traveler_name} onChange={e => setForm({ ...form, traveler_name: e.target.value })} /></Field>
+            <Field label="رقم الجواز" required><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value.toUpperCase() })} placeholder="A1234567" className="font-mono" /></Field>
+            <Field label="الجنسية"><Input value={form.nationality} onChange={e => setForm({ ...form, nationality: e.target.value })} placeholder="يمني / مصري..." /></Field>
+          </div>
+          <div className="text-xs font-bold text-slate-500 border-b pb-1">🏢 الوكيل (B2B)</div>
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="اسم الوكيل / المكتب" required><Input value={form.agent_name} onChange={e => setForm({ ...form, agent_name: e.target.value })} placeholder="كتابة حرة — اسم المكتب الوكيل" /></Field>
+            <Field label="جوال الوكيل (واتساب)" required><Input dir="ltr" value={form.agent_phone} onChange={e => setForm({ ...form, agent_phone: e.target.value })} placeholder="9677XXXXXXXX" className="font-mono" /></Field>
+            <Field label="جوال المعتمر (اختياري)"><Input dir="ltr" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} className="font-mono" /></Field>
+          </div>
+          <div className="text-xs font-bold text-slate-500 border-b pb-1">🛂 التأشيرة والمستضيف</div>
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="رقم التأشيرة" required><Input value={form.visa_no} onChange={e => setForm({ ...form, visa_no: e.target.value })} className="font-mono" /></Field>
+            <Field label="تاريخ إصدار التأشيرة" required><Input type="date" value={form.visa_issue_date} onChange={e => setForm({ ...form, visa_issue_date: e.target.value })} /></Field>
+            <Field label="نوع التأشيرة">
+              <Select value={form.visa_type} onValueChange={v => setForm({ ...form, visa_type: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>{VISA_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
+              </Select>
+            </Field>
+            <div className="col-span-3"><Field label="اسم المستضيف / رقم الإقامة"><Input value={form.host_name} onChange={e => setForm({ ...form, host_name: e.target.value })} /></Field></div>
+          </div>
+          <div className="text-xs font-bold text-slate-500 border-b pb-1">🛬 الحركة والمراقبة</div>
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="تاريخ الدخول" required><Input type="date" value={form.entry_date} onChange={e => setForm({ ...form, entry_date: e.target.value })} /></Field>
+            <Field label="منفذ الدخول"><Input value={form.entry_port} onChange={e => setForm({ ...form, entry_port: e.target.value })} placeholder="منفذ الوديعة / مطار جدة..." /></Field>
+            <Field label="مدة الإقامة المسموحة (يوم)" required><Input type="number" min="1" value={form.allowed_days} onChange={e => setForm({ ...form, allowed_days: e.target.value })} className="font-bold text-lg" /></Field>
+          </div>
+          <div className="p-2.5 rounded-lg bg-blue-50 border border-blue-200 text-sm flex items-center gap-2">
+            📅 <b>تاريخ المغادرة المتوقع (يُحسب آلياً):</b> <span className="font-mono font-black text-blue-700">{expectedExit}</span>
+            <span className="text-[11px] text-slate-500">= تاريخ الدخول + {form.allowed_days || 0} يوم</span>
+          </div>
+          {record && (
+            <>
+              <div className="text-xs font-bold text-slate-500 border-b pb-1">🛫 المغادرة (عند الخروج)</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="تاريخ المغادرة الفعلي"><Input type="date" value={form.actual_exit_date || ''} onChange={e => setForm({ ...form, actual_exit_date: e.target.value })} /></Field>
+                <Field label="منفذ المغادرة"><Input value={form.exit_port} onChange={e => setForm({ ...form, exit_port: e.target.value })} /></Field>
+              </div>
+            </>
+          )}
+          <Field label="ملاحظات"><Textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></Field>
         </div>
         <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} className="grad-brand text-white">✅ حفظ</Button></DialogFooter>
       </DialogContent>
@@ -4946,30 +5155,49 @@ function VisaMonitorDialog({ open, onOpenChange, record, countries, onSaved }) {
   )
 }
 
-// v3.10.5 — Excel Import Dialog (Nusuk)
+// v3.11 — Excel Import Dialog (B2B columns) with template download
 function VisaMonitorImportDialog({ open, onOpenChange, countries, onDone }) {
   const [file, setFile] = useState(null)
   const [rows, setRows] = useState([])
   const [uploading, setUploading] = useState(false)
+  const TPL_HEADERS = ['اسم المعتمر', 'رقم الجواز', 'الجنسية', 'اسم الوكيل', 'جوال الوكيل', 'رقم التأشيرة', 'تاريخ إصدار التأشيرة', 'اسم المستضيف / رقم الإقامة', 'تاريخ الدخول', 'منفذ الدخول', 'مدة الإقامة (يوم)', 'تاريخ المغادرة الفعلي', 'منفذ المغادرة', 'ملاحظات']
+  const downloadTemplate = () => {
+    const example = { 'اسم المعتمر': 'محمد أحمد علي', 'رقم الجواز': 'A1234567', 'الجنسية': 'يمني', 'اسم الوكيل': 'مكتب النور للعمرة', 'جوال الوكيل': '967781455584', 'رقم التأشيرة': 'V998877', 'تاريخ إصدار التأشيرة': '2026-08-01', 'اسم المستضيف / رقم الإقامة': 'شركة الرحاب - 2233445566', 'تاريخ الدخول': '2026-08-10', 'منفذ الدخول': 'منفذ الوديعة', 'مدة الإقامة (يوم)': 85, 'تاريخ المغادرة الفعلي': '', 'منفذ المغادرة': '', 'ملاحظات': '' }
+    const ws = XLSX.utils.json_to_sheet([example], { header: TPL_HEADERS })
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'قالب المراقبة')
+    XLSX.writeFile(wb, 'visa-monitoring-template.xlsx')
+    toast.success('📥 تم تنزيل القالب — عبّئه ثم ارفعه هنا')
+  }
   const parseExcel = async (f) => {
     try {
       const buf = await f.arrayBuffer()
       const wb = XLSX.read(buf, { type: 'array', cellDates: true })
       const ws = wb.Sheets[wb.SheetNames[0]]
       const parsed = XLSX.utils.sheet_to_json(ws, { defval: '' })
-      // Map common Nusuk column names → our schema
+      const fmtDate = (v) => { if (!v) return ''; if (v instanceof Date) return v.toISOString().slice(0, 10); return String(v).slice(0, 10) }
       const mapped = parsed.map(row => {
-        const findVal = (keys) => { for (const k of keys) { for (const key in row) if (String(key).toLowerCase().includes(k.toLowerCase())) return row[key] } return '' }
-        const fmtDate = (v) => { if (!v) return ''; if (v instanceof Date) return v.toISOString().slice(0, 10); return String(v).slice(0, 10) }
+        // Exact template header first, then fuzzy fallback
+        const findVal = (exact, fuzzy = []) => {
+          for (const key in row) { if (String(key).trim() === exact) return row[key] }
+          for (const fz of fuzzy) { for (const key in row) { if (String(key).toLowerCase().includes(fz.toLowerCase())) return row[key] } }
+          return ''
+        }
         return {
-          traveler_name: findVal(['name', 'اسم', 'traveler', 'passenger', 'معتمر']),
-          phone: findVal(['phone', 'جوال', 'mobile']),
-          passport_no: String(findVal(['passport', 'جواز', 'passport_no'])).toUpperCase(),
-          destination_country: findVal(['country', 'دولة', 'destination']) || 'SA',
-          visa_type: findVal(['visa_type', 'نوع', 'type']) || 'تأشيرة عمرة',
-          entry_date: fmtDate(findVal(['entry', 'دخول', 'entry_date'])),
-          max_exit_date: fmtDate(findVal(['exit', 'خروج', 'max_exit'])),
-          actual_exit_date: fmtDate(findVal(['actual_exit', 'خرج فعلياً']))
+          traveler_name: findVal('اسم المعتمر', ['معتمر', 'traveler', 'passenger', 'name', 'اسم']),
+          passport_no: String(findVal('رقم الجواز', ['جواز', 'passport'])).toUpperCase().trim(),
+          nationality: findVal('الجنسية', ['nationality', 'جنسية']),
+          agent_name: findVal('اسم الوكيل', ['وكيل', 'agent']),
+          agent_phone: String(findVal('جوال الوكيل', ['جوال الوكيل', 'رقم الوكيل', 'agent_phone', 'agent phone', 'whatsapp', 'واتساب'])).trim(),
+          visa_no: String(findVal('رقم التأشيرة', ['visa_no', 'visa no', 'visa number'])).trim(),
+          visa_issue_date: fmtDate(findVal('تاريخ إصدار التأشيرة', ['إصدار', 'issue'])),
+          host_name: findVal('اسم المستضيف / رقم الإقامة', ['مستضيف', 'host']),
+          entry_date: fmtDate(findVal('تاريخ الدخول', ['entry date', 'entry_date'])),
+          entry_port: findVal('منفذ الدخول', ['entry port', 'entry_port']),
+          allowed_days: Number(findVal('مدة الإقامة (يوم)', ['مدة الإقامة', 'allowed', 'duration'])) || 85,
+          actual_exit_date: fmtDate(findVal('تاريخ المغادرة الفعلي', ['actual exit', 'خرج فعلياً'])),
+          exit_port: findVal('منفذ المغادرة', ['exit port', 'exit_port']),
+          notes: findVal('ملاحظات', ['note', 'ملاحظ'])
         }
       }).filter(r => r.passport_no && r.traveler_name)
       setRows(mapped)
@@ -4978,19 +5206,24 @@ function VisaMonitorImportDialog({ open, onOpenChange, countries, onDone }) {
   }
   const submit = async () => {
     if (rows.length === 0) return toast.error('لا توجد بيانات صالحة')
+    // Client-side validation of mandatory columns
+    const invalid = rows.filter(r => !r.agent_name || !r.agent_phone || !r.visa_no || !r.visa_issue_date || !r.entry_date)
+    if (invalid.length > 0 && !confirm(`⚠️ ${invalid.length} سجل ينقصه حقول إجبارية (وكيل/جوال/تأشيرة/تواريخ) وسيتم تجاهله عند الإدراج الجديد. متابعة؟`)) return
     setUploading(true)
     try {
       const res = await api('/visa-monitor/import', { method: 'POST', body: { rows } })
       toast.success(`✅ تم: ${res.inserted} إضافة، ${res.updated} تحديث، ${res.skipped} متجاهل`)
+      if (res.skip_reasons?.length) console.warn('Import skips:', res.skip_reasons)
       onOpenChange(false); setFile(null); setRows([]); onDone()
     } catch (e) { toast.error(e.message) } finally { setUploading(false) }
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl" dir="rtl">
-        <DialogHeader><DialogTitle className="flex items-center gap-2"><span className="text-2xl">📥</span>استيراد سجلات المراقبة من ملف نُسك</DialogTitle>
-          <DialogDescription>يقوم النظام بتحديث السجلات الموجودة (Upsert بواسطة رقم الجواز) دون إنشاء حركات مالية</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle className="flex items-center gap-2"><span className="text-2xl">📥</span>استيراد سجلات المراقبة من Excel</DialogTitle>
+          <DialogDescription>تحديث تلقائي للسجلات الموجودة (Upsert برقم الجواز) — بنفس أعمدة الشاشة المعتمدة</DialogDescription></DialogHeader>
         <div className="space-y-3">
+          <Button variant="outline" onClick={downloadTemplate} className="w-full border-dashed border-2 border-blue-300 text-blue-700 hover:bg-blue-50">📄 تنزيل قالب Excel الجاهز (بالأعمدة المعتمدة)</Button>
           <Field label="اختر ملف Excel">
             <Input type="file" accept=".xlsx,.xls,.csv" onChange={e => { const f = e.target.files?.[0]; if (f) { setFile(f); parseExcel(f) } }} />
           </Field>
@@ -4998,13 +5231,13 @@ function VisaMonitorImportDialog({ open, onOpenChange, countries, onDone }) {
             <div className="text-xs bg-slate-50 p-3 rounded border">
               <div className="font-bold mb-2">معاينة ({rows.length} سجل):</div>
               <div className="max-h-40 overflow-y-auto space-y-1">
-                {rows.slice(0, 5).map((r, i) => <div key={i} className="font-mono text-[10px]">{r.passport_no} · {r.traveler_name} · {r.destination_country} · {r.entry_date} → {r.max_exit_date}</div>)}
+                {rows.slice(0, 5).map((r, i) => <div key={i} className="font-mono text-[10px]">{r.passport_no} · {r.traveler_name} · وكيل: {r.agent_name || '؟'} ({r.agent_phone || 'بدون جوال!'}) · دخول {r.entry_date} · {r.allowed_days} يوم</div>)}
                 {rows.length > 5 && <div className="text-slate-500">... و {rows.length - 5} آخرين</div>}
               </div>
             </div>
           )}
           <div className="text-[11px] text-blue-700 bg-blue-50 p-2 rounded border border-blue-200">
-            💡 الأعمدة المتوقّعة: <b>name / اسم</b>, <b>passport / جواز</b>, <b>country / دولة</b>, <b>entry / دخول</b>, <b>max_exit / خروج</b>
+            💡 الأعمدة الإجبارية: <b>اسم المعتمر · رقم الجواز · اسم الوكيل · جوال الوكيل · رقم التأشيرة · تاريخ الإصدار · تاريخ الدخول</b> — مدة الإقامة الافتراضية 85 يوم إن تُركت فارغة
           </div>
         </div>
         <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} disabled={rows.length === 0 || uploading} className="grad-brand text-white">{uploading ? 'جاري الاستيراد...' : '📤 استيراد'}</Button></DialogFooter>
