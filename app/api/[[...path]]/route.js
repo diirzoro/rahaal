@@ -670,6 +670,41 @@ async function handleRoute(request, { params }) {
       return ok({ ok: true }, cookie)
     }
 
+    // v3.12 — Forgot Password (admin-mediated: request goes to Super Admin inbox)
+    // PUBLIC endpoint. Unified response always (no email enumeration).
+    if (route === '/auth/forgot-password' && method === 'POST') {
+      const b = await request.json()
+      const email = String(b.email || '').toLowerCase().trim()
+      if (!email || !email.includes('@')) return bad('البريد الإلكتروني مطلوب')
+      const user = await db.collection('users').findOne({ email })
+      if (user && user.active) {
+        // Avoid duplicate pending requests for the same user
+        const existing = await db.collection('password_reset_requests').findOne({ user_id: user.id, status: 'pending' })
+        if (!existing) {
+          let tenantName = null
+          if (user.tenant_id) {
+            const t = await db.collection('tenants').findOne({ id: user.tenant_id })
+            tenantName = t?.name || null
+          }
+          await db.collection('password_reset_requests').insertOne({
+            id: uuidv4(),
+            user_id: user.id,
+            email,
+            user_name: user.name || '',
+            role: user.role,
+            tenant_id: user.tenant_id || null,
+            tenant_name: tenantName,
+            note: String(b.note || '').slice(0, 300),
+            status: 'pending',
+            created_at: new Date(),
+            resolved_at: null,
+            resolved_by: null,
+          })
+        }
+      }
+      return ok({ message: 'تم استلام طلبك — ستقوم الإدارة بمعالجته والتواصل معك قريباً' })
+    }
+
     // Everything below requires session (except /auth/me which returns null gracefully)
     // v3.8 — Support Bearer PAT auth in addition to cookie session (for Chrome Extension / API clients)
     let sess = await getSession(request, db)
@@ -698,6 +733,43 @@ async function handleRoute(request, { params }) {
     // ============ SUPER ADMIN ============
     if (route.startsWith('/admin/')) {
       if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+
+      // v3.12 — Password reset requests inbox (admin-mediated forgot password)
+      if (route === '/admin/password-reset-requests' && method === 'GET') {
+        const reqs = await db.collection('password_reset_requests').find({}).sort({ created_at: -1 }).limit(200).toArray()
+        return ok(clean(reqs))
+      }
+      {
+        const m = route.match(/^\/admin\/password-reset-requests\/([^/]+)$/)
+        if (m && method === 'PATCH') {
+          const b = await request.json()
+          const reqDoc = await db.collection('password_reset_requests').findOne({ id: m[1] })
+          if (!reqDoc) return bad('الطلب غير موجود', 404)
+          if (reqDoc.status !== 'pending') return bad('هذا الطلب تمت معالجته مسبقاً')
+          if (b.action === 'reset') {
+            if (!b.new_password || String(b.new_password).length < 6) return bad('كلمة المرور الجديدة يجب ألا تقل عن 6 أحرف')
+            await db.collection('users').updateOne(
+              { id: reqDoc.user_id },
+              { $set: { password_hash: bcrypt.hashSync(String(b.new_password), 8), updated_at: new Date() } }
+            )
+            // Security: invalidate that user's active sessions so only the new password works
+            await db.collection('sessions').deleteMany({ user_id: reqDoc.user_id })
+            await db.collection('password_reset_requests').updateOne(
+              { id: m[1] },
+              { $set: { status: 'done', resolved_at: new Date(), resolved_by: sess.user.email } }
+            )
+            return ok({ success: true, message: 'تم تعيين كلمة المرور الجديدة — بلّغ المستخدم بها' })
+          }
+          if (b.action === 'reject') {
+            await db.collection('password_reset_requests').updateOne(
+              { id: m[1] },
+              { $set: { status: 'rejected', resolved_at: new Date(), resolved_by: sess.user.email } }
+            )
+            return ok({ success: true })
+          }
+          return bad('إجراء غير معروف')
+        }
+      }
 
       if (route === '/admin/tenants' && method === 'GET') {
         const tenants = await db.collection('tenants').find({}).sort({ created_at: -1 }).toArray()

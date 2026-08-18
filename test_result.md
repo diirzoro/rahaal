@@ -8485,3 +8485,29 @@ agent_communication:
       comment: "Please test the upgraded /api/visa-monitor endpoints. Login as owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> (tenant slug demo, header X-Tenant or via /api/auth/login to get token). Test: 1) POST validation of each mandatory field, 2) default allowed_days=85 and expected_exit_date=entry+85d, 3) status computation for green (>30d), yellow (<=30), red (<=15), overstay (remaining<0), departed (actual_exit_date), 4) GET filters track=inside/alerts/departed/all, agent=..., search=..., 5) PATCH action=exited with exit_port then reactivate, 6) import upsert + skip reasons, 7) stats + alerts endpoints counts. Cleanup created test records afterwards if possible."
     - agent: "testing"
       comment: "✅ ALL TESTS PASSED (7/7) - Visa Monitoring API v3.11 fully tested and working. All mandatory field validations, status computations (green/yellow/red/overstay/departed), GET filters (track/agent/search), PATCH actions (exited/reactivate/field updates), import bulk upsert, stats endpoint, and alerts endpoint verified. Applied minor fix to alerts endpoint (clean() function usage). All test records cleaned up successfully."
+
+## v3.12 — Admin-Mediated Password Reset — Current Session
+backend:
+  - task: "Forgot password (admin-mediated) API: POST /auth/forgot-password (public, unified response), GET /admin/password-reset-requests, PATCH /admin/password-reset-requests/:id (reset/reject, bcrypt update, session invalidation)"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Full E2E verified via browser automation: request submitted from login screen, appeared in super admin inbox, admin set new password, user logged in with new password successfully. New collection: password_reset_requests."
+frontend:
+  - task: "Forgot password UI: login screen link + request form + success state; SuperAdminPanel inbox card + AdminResetPasswordDialog (generate/copy password)"
+    implemented: true
+    working: true
+    file: "app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Verified E2E with playwright screenshots (4 steps all passed)."

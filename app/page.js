@@ -240,6 +240,22 @@ function LoginPage({ onLogin, onBack, initialSignup }) {
     finally { setLoading(false) }
   }
 
+  // v3.12 — Forgot password (admin-mediated request)
+  const [mode, setMode] = useState('login')
+  const [fpEmail, setFpEmail] = useState('')
+  const [fpNote, setFpNote] = useState('')
+  const [fpLoading, setFpLoading] = useState(false)
+  const [fpSent, setFpSent] = useState(false)
+  const sendForgot = async () => {
+    if (!fpEmail || !fpEmail.includes('@')) return toast.error('أدخل بريدك الإلكتروني المسجل')
+    try {
+      setFpLoading(true)
+      await api('/auth/forgot-password', { method: 'POST', body: { email: fpEmail, note: fpNote } })
+      setFpSent(true)
+    } catch (e) { toast.error(e.message) }
+    finally { setFpLoading(false) }
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[#0f1e4d] via-[#1e3a8a] to-[#0f1e4d] p-4">
       <div className="absolute inset-0 opacity-25" style={{ backgroundImage: 'radial-gradient(circle at 20% 20%, rgba(249,115,22,0.35), transparent 45%), radial-gradient(circle at 80% 80%, rgba(30,64,175,0.4), transparent 45%)' }} />
@@ -260,6 +276,36 @@ function LoginPage({ onLogin, onBack, initialSignup }) {
             <CardDescription className="text-slate-400">أدخل بيانات حسابك للوصول للنظام</CardDescription>
           </CardHeader>
           <CardContent>
+            {mode === 'forgot' ? (
+              <div className="space-y-4">
+                {fpSent ? (
+                  <div className="text-center space-y-3 py-4">
+                    <div className="text-4xl">📨</div>
+                    <div className="text-emerald-300 font-bold">تم استلام طلبك بنجاح</div>
+                    <div className="text-slate-300 text-sm">ستقوم الإدارة بمعالجة الطلب وتعيين كلمة مرور جديدة لك، ثم التواصل معك قريباً.</div>
+                    <Button variant="outline" onClick={() => { setMode('login'); setFpSent(false); setFpEmail(''); setFpNote('') }} className="mt-2">← العودة لتسجيل الدخول</Button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="text-slate-300 text-sm">أدخل بريدك الإلكتروني المسجل وسيصل طلبك إلى الإدارة لتعيين كلمة مرور جديدة والتواصل معك.</div>
+                    <div className="space-y-2">
+                      <Label className="text-slate-300">البريد الإلكتروني</Label>
+                      <Input dir="ltr" type="email" value={fpEmail} onChange={e => setFpEmail(e.target.value)} placeholder="you@company.com" className="bg-slate-800 border-slate-700 text-white" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-slate-300">ملاحظة للإدارة (اختياري)</Label>
+                      <Input value={fpNote} onChange={e => setFpNote(e.target.value)} placeholder="مثال: رقم جوالي للتواصل 77xxxxxxx" className="bg-slate-800 border-slate-700 text-white" />
+                    </div>
+                    <Button onClick={sendForgot} disabled={fpLoading} className="w-full grad-brand text-white h-11 font-bold">
+                      {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '📨 إرسال الطلب للإدارة'}
+                    </Button>
+                    <div className="text-center">
+                      <button type="button" onClick={() => setMode('login')} className="text-xs text-slate-400 hover:text-slate-200">← العودة لتسجيل الدخول</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
             <form onSubmit={submit} className="space-y-4">
               <div className="space-y-2">
                 <Label className="text-slate-300">البريد الإلكتروني</Label>
@@ -269,10 +315,14 @@ function LoginPage({ onLogin, onBack, initialSignup }) {
                 <Label className="text-slate-300">كلمة المرور</Label>
                 <Input dir="ltr" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" className="bg-slate-800 border-slate-700 text-white" />
               </div>
+              <div className="text-left">
+                <button type="button" onClick={() => setMode('forgot')} className="text-xs text-slate-400 hover:text-orange-300 font-semibold">🔑 نسيت كلمة المرور؟</button>
+              </div>
               <Button type="submit" disabled={loading} className="w-full grad-brand text-white h-11 font-bold">
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'دخول'}
               </Button>
             </form>
+            )}
             <div className="text-center mt-3">
               <a href="/signup" className="text-xs text-orange-300 hover:text-orange-200 font-bold">🎁 ليس لديك حساب؟ احصل على 30 قيد عند التسجيل، و+50 قيد إضافي عند دعوة أي مكتب آخر</a>
             </div>
@@ -292,8 +342,23 @@ function SuperAdminPanel() {
   const [data, setData] = useState(null)
   const [openNew, setOpenNew] = useState(false)
   const [editing, setEditing] = useState(null)
-  const load = async () => { try { setData(await api('/admin/tenants')) } catch (e) { toast.error(e.message) } }
+  const [resetReqs, setResetReqs] = useState([])
+  const [resetTarget, setResetTarget] = useState(null)
+  const load = async () => {
+    try {
+      const [d, rr] = await Promise.all([
+        api('/admin/tenants'),
+        api('/admin/password-reset-requests').catch(() => []),
+      ])
+      setData(d); setResetReqs(rr || [])
+    } catch (e) { toast.error(e.message) }
+  }
   useEffect(() => { load() }, [])
+  const pendingResets = resetReqs.filter(r => r.status === 'pending')
+  const rejectReset = async (r) => {
+    if (!confirm(`رفض طلب ${r.email}؟`)) return
+    try { await api(`/admin/password-reset-requests/${r.id}`, { method: 'PATCH', body: { action: 'reject' } }); toast.success('تم الرفض'); load() } catch (e) { toast.error(e.message) }
+  }
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -324,6 +389,47 @@ function SuperAdminPanel() {
           <StatCard icon={Plane} label="إجمالي التذاكر" value={data?.global_stats?.tickets ?? '—'} grad="grad-green" />
           <StatCard icon={FileBadge2} label="إجمالي التأشيرات" value={data?.global_stats?.visas ?? '—'} grad="grad-gold" />
         </div>
+
+        {/* v3.12 — Password reset requests inbox */}
+        {pendingResets.length > 0 && (
+          <Card className="border-orange-300 bg-orange-50/50">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-orange-900">
+                🔑 طلبات استعادة كلمة المرور
+                <Badge className="bg-orange-500 text-white">{pendingResets.length} معلق</Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader><TableRow>
+                  <TableHead>البريد</TableHead>
+                  <TableHead>الاسم</TableHead>
+                  <TableHead>المكتب</TableHead>
+                  <TableHead>ملاحظة المستخدم</TableHead>
+                  <TableHead>تاريخ الطلب</TableHead>
+                  <TableHead className="text-center">إجراء</TableHead>
+                </TableRow></TableHeader>
+                <TableBody>
+                  {pendingResets.map(r => (
+                    <TableRow key={r.id}>
+                      <TableCell className="font-mono text-xs" dir="ltr">{r.email}</TableCell>
+                      <TableCell className="text-sm">{r.user_name || '—'}</TableCell>
+                      <TableCell className="text-sm">{r.tenant_name || (r.role === 'super_admin' ? 'إدارة' : '—')}</TableCell>
+                      <TableCell className="text-xs text-slate-500 max-w-[200px] truncate" title={r.note}>{r.note || '—'}</TableCell>
+                      <TableCell className="text-xs">{r.created_at ? new Date(r.created_at).toLocaleString('ar-EG') : '—'}</TableCell>
+                      <TableCell>
+                        <div className="flex gap-2 justify-center">
+                          <Button size="sm" onClick={() => setResetTarget(r)} className="bg-emerald-600 hover:bg-emerald-700 text-white h-8 text-xs">🔐 تعيين كلمة جديدة</Button>
+                          <Button size="sm" variant="outline" onClick={() => rejectReset(r)} className="h-8 text-xs text-rose-600">رفض</Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        )}
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
@@ -437,6 +543,7 @@ function SuperAdminPanel() {
 
       <NewTenantDialog open={openNew} onOpenChange={setOpenNew} onSaved={() => { load(); setOpenNew(false) }} />
       <EditTenantDialog tenant={editing} onOpenChange={() => setEditing(null)} onSaved={() => { load(); setEditing(null) }} />
+      <AdminResetPasswordDialog req={resetTarget} onClose={() => setResetTarget(null)} onDone={load} />
     </div>
   )
 }
@@ -535,6 +642,70 @@ function StatCard({ icon: Icon, label, value, grad }) {
         <div className={`w-14 h-14 rounded-xl ${grad} flex items-center justify-center shadow-lg`}><Icon className="w-6 h-6 text-white" /></div>
       </CardContent>
     </Card>
+  )
+}
+
+// v3.12 — Admin sets a new password for a reset request
+function AdminResetPasswordDialog({ req, onClose, onDone }) {
+  const [pw, setPw] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [doneInfo, setDoneInfo] = useState(null)
+  useEffect(() => { if (req) { setPw(''); setDoneInfo(null) } }, [req])
+  const generate = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'
+    let s = ''
+    for (let i = 0; i < 10; i++) s += chars[Math.floor(Math.random() * chars.length)]
+    setPw(s)
+  }
+  const submit = async () => {
+    if (!pw || pw.length < 6) return toast.error('كلمة المرور يجب ألا تقل عن 6 أحرف')
+    try {
+      setSaving(true)
+      await api(`/admin/password-reset-requests/${req.id}`, { method: 'PATCH', body: { action: 'reset', new_password: pw } })
+      setDoneInfo({ email: req.email, pw })
+      toast.success('✅ تم تعيين كلمة المرور الجديدة')
+      onDone()
+    } catch (e) { toast.error(e.message) }
+    finally { setSaving(false) }
+  }
+  return (
+    <Dialog open={!!req} onOpenChange={v => { if (!v) onClose() }}>
+      <DialogContent className="max-w-md" dir="rtl">
+        <DialogHeader>
+          <DialogTitle>🔐 تعيين كلمة مرور جديدة</DialogTitle>
+          <DialogDescription dir="ltr" className="text-left font-mono">{req?.email}</DialogDescription>
+        </DialogHeader>
+        {doneInfo ? (
+          <div className="space-y-3 text-center py-2">
+            <div className="text-3xl">✅</div>
+            <div className="font-bold text-emerald-700">تم التغيير بنجاح</div>
+            <div className="p-3 rounded-lg bg-slate-100 border">
+              <div className="text-xs text-slate-500 mb-1">بلّغ المستخدم بكلمة المرور الجديدة (لن تظهر مرة أخرى):</div>
+              <div className="font-mono font-black text-lg select-all" dir="ltr">{doneInfo.pw}</div>
+            </div>
+            <Button onClick={() => { navigator.clipboard?.writeText(doneInfo.pw); toast.success('نُسخت') }} variant="outline" size="sm">📋 نسخ الكلمة</Button>
+            <DialogFooter><Button onClick={onClose} className="w-full">إغلاق</Button></DialogFooter>
+          </div>
+        ) : (
+          <>
+            <div className="space-y-3">
+              {req?.note && <div className="text-xs bg-amber-50 border border-amber-200 rounded p-2">📝 ملاحظة المستخدم: {req.note}</div>}
+              <Field label="كلمة المرور الجديدة" required>
+                <div className="flex gap-2">
+                  <Input dir="ltr" value={pw} onChange={e => setPw(e.target.value)} placeholder="6 أحرف على الأقل" className="font-mono" />
+                  <Button type="button" variant="outline" onClick={generate} className="whitespace-nowrap">🎲 توليد</Button>
+                </div>
+              </Field>
+              <div className="text-[11px] text-slate-500">بعد الحفظ: تُغلق جلسات المستخدم الحالية ويدخل بالكلمة الجديدة فقط. أنت من يبلّغه بها (هاتف/واتساب).</div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={onClose}>إلغاء</Button>
+              <Button onClick={submit} disabled={saving} className="bg-emerald-600 hover:bg-emerald-700 text-white">{saving ? 'جارٍ الحفظ...' : '✅ تعيين وإنهاء الطلب'}</Button>
+            </DialogFooter>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
   )
 }
 
