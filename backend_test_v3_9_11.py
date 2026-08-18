@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 # Configuration
 BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
 EMAIL = "owner@demo.com"
-PASSWORD = "Demo@2025"
+PASSWORD = "<DEMO_PASSWORD-see-memory/test_credentials.md>"
 
 # Global session
 session = requests.Session()

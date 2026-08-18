@@ -1008,7 +1008,7 @@ def main():
     try:
         r = session.post(f"{BASE_URL}/auth/login", json={
             "email": "owner@demo.com",
-            "password": "Demo@2025"
+            "password": "<DEMO_PASSWORD-see-memory/test_credentials.md>"
         }, timeout=10)
         
         if r.status_code != 200:

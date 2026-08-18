@@ -12,7 +12,7 @@ import sys
 # Configuration
 BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
 AUTH_EMAIL = "owner@demo.com"
-AUTH_PASSWORD = "Demo@2025"
+AUTH_PASSWORD = "<DEMO_PASSWORD-see-memory/test_credentials.md>"
 
 # Global variables
 session = requests.Session()

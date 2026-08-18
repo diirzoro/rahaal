@@ -10,7 +10,7 @@ from datetime import datetime
 
 BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
 LOGIN_EMAIL = "owner@demo.com"
-LOGIN_PASSWORD = "Demo@2025"
+LOGIN_PASSWORD = "<DEMO_PASSWORD-see-memory/test_credentials.md>"
 
 session = requests.Session()
 session.headers.update({"Content-Type": "application/json"})

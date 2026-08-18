@@ -204,16 +204,21 @@ async function seedInitial(db) {
     }
   }
 
-  // Super Admin bootstrap
+  // Super Admin bootstrap — password comes ONLY from env (Secrets Policy §24/25).
+  // If SEED_SUPER_ADMIN_PASSWORD is not set, the super admin is NOT created.
   const admins = db.collection('users')
   const superAdmin = await admins.findOne({ role: 'super_admin' })
   if (!superAdmin) {
-    await admins.insertOne({
-      id: uuidv4(), tenant_id: null, email: 'admin@targetmedia.com', name: 'Target Media Admin',
-      role: 'super_admin', active: true,
-      password_hash: bcrypt.hashSync('Target@2025', 8),
-      created_at: new Date(),
-    })
+    if (process.env.SEED_SUPER_ADMIN_PASSWORD) {
+      await admins.insertOne({
+        id: uuidv4(), tenant_id: null, email: process.env.SEED_SUPER_ADMIN_EMAIL || 'admin@targetmedia.com', name: 'Target Media Admin',
+        role: 'super_admin', active: true,
+        password_hash: bcrypt.hashSync(process.env.SEED_SUPER_ADMIN_PASSWORD, 8),
+        created_at: new Date(),
+      })
+    } else {
+      console.warn('[seed] SEED_SUPER_ADMIN_PASSWORD not set — skipping super admin creation')
+    }
   }
 
   // Demo tenant
@@ -230,12 +235,16 @@ async function seedInitial(db) {
   }
   const owner = await admins.findOne({ email: 'owner@demo.com' })
   if (!owner) {
-    await admins.insertOne({
-      id: uuidv4(), tenant_id: demo.id, email: 'owner@demo.com', name: 'مالك المكتب التجريبي',
-      role: 'owner', active: true,
-      password_hash: bcrypt.hashSync('Demo@2025', 8),
-      created_at: new Date(),
-    })
+    if (process.env.SEED_DEMO_PASSWORD) {
+      await admins.insertOne({
+        id: uuidv4(), tenant_id: demo.id, email: 'owner@demo.com', name: 'مالك المكتب التجريبي',
+        role: 'owner', active: true,
+        password_hash: bcrypt.hashSync(process.env.SEED_DEMO_PASSWORD, 8),
+        created_at: new Date(),
+      })
+    } else {
+      console.warn('[seed] SEED_DEMO_PASSWORD not set — skipping demo owner creation')
+    }
   }
   await seedTenantDefaults(db, demo.id)
 

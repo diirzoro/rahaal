@@ -7,7 +7,7 @@ rm -f $COOKIE
 
 echo "==> LOGIN"
 curl -s -c $COOKIE -X POST "$BASE/auth/login" -H "Content-Type: application/json" \
-  -d '{"email":"owner@demo.com","password":"Demo@2025"}' > /tmp/login.json
+  -d '{"email":"owner@demo.com","password":"<DEMO_PASSWORD-see-memory/test_credentials.md>"}' > /tmp/login.json
 grep -o '"email":"[^"]*"' /tmp/login.json | head -1
 
 echo; echo "==> VERSION"

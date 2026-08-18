@@ -14,7 +14,7 @@ BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
 
 # Test credentials
 OWNER_EMAIL = "owner@demo.com"
-OWNER_PASSWORD = "Demo@2025"
+OWNER_PASSWORD = "<DEMO_PASSWORD-see-memory/test_credentials.md>"
 
 # Session for cookies
 session = requests.Session()

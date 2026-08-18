@@ -14,7 +14,7 @@ BASE_URL = os.getenv('NEXT_PUBLIC_BASE_URL', 'https://visa-booking-5.preview.eme
 API_BASE = f"{BASE_URL}/api"
 
 # Test credentials
-DEMO_OWNER = {"email": "owner@demo.com", "password": "Demo@2025"}
+DEMO_OWNER = {"email": "owner@demo.com", "password": "<DEMO_PASSWORD-see-memory/test_credentials.md>"}
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")

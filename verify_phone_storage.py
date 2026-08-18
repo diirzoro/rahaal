@@ -88,7 +88,7 @@ def verify_phone_in_signup():
     print("[4] Verify tenant.owner_phone via super admin...")
     resp = requests.post(f"{API_BASE}/auth/login", json={
         "email": "admin@targetmedia.com",
-        "password": "Target@2025"
+        "password": "<SUPER_ADMIN_PASSWORD-see-memory/test_credentials.md>"
     }, timeout=10)
     
     if resp.status_code != 200:

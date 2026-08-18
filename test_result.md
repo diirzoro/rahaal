@@ -585,7 +585,7 @@ agent_communication:
       Please test the following NEW backend endpoints & behaviors:
 
       1) **Quota field on tenants:**
-         - GET /api/auth/me (as owner@demo.com / Demo@2025) → response.tenant.journal_quota exists with { used, limit, top_ups }
+         - GET /api/auth/me (as owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>) → response.tenant.journal_quota exists with { used, limit, top_ups }
          - The 'used' counter should be ≥0 and equal to actual journal_entries count for that tenant (approximately)
 
       2) **Delete endpoints (all reverse balance changes + delete linked JE + decrement quota):**
@@ -945,8 +945,8 @@ agent_communication:
         - Existing POST/DELETE flows still functional (regression check).
 
       Credentials (memory/test_credentials.md):
-        - Super Admin: admin@targetmedia.com / Target@2025
-        - Demo owner: owner@demo.com / Demo@2025
+        - Super Admin: admin@targetmedia.com / <SUPER_ADMIN_PASSWORD-see-memory/test_credentials.md>
+        - Demo owner: owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>
 
 backend:
   - task: "v2.5 Edit Mode Engine — PUT /tickets/:id with balance reversal + JE reversal + quota preservation"
@@ -1040,7 +1040,7 @@ backend:
     status_history:
       - working: true
         agent: "testing"
-        comment: "✅ PASSED (8/8 tests) - POST /api/admin/tenants/{id}/reset-password works correctly. Auto-generate password: When body is empty {}, generates 10-char strong password. Response has all required fields (success, tenant_id, owner_email, new_password, note). Session invalidation: Old owner sessions correctly invalidated (GET /auth/me returns {user: null, tenant: null}). Password change verified: Old password returns 401, new password works for login. Can reset to specific password: Reset back to 'Demo@2025' works. Edge cases: password < 6 chars → 400 'كلمة السر يجب أن تكون 6 أحرف على الأقل'. Authorization: non-admin user → 403 'غير مصرح'. Password hashing uses bcrypt cost 8. All sessions for owner deleted on reset (force re-login)."
+        comment: "✅ PASSED (8/8 tests) - POST /api/admin/tenants/{id}/reset-password works correctly. Auto-generate password: When body is empty {}, generates 10-char strong password. Response has all required fields (success, tenant_id, owner_email, new_password, note). Session invalidation: Old owner sessions correctly invalidated (GET /auth/me returns {user: null, tenant: null}). Password change verified: Old password returns 401, new password works for login. Can reset to specific password: Reset back to '<DEMO_PASSWORD-see-memory/test_credentials.md>' works. Edge cases: password < 6 chars → 400 'كلمة السر يجب أن تكون 6 أحرف على الأقل'. Authorization: non-admin user → 403 'غير مصرح'. Password hashing uses bcrypt cost 8. All sessions for owner deleted on reset (force re-login)."
   - task: "v3.9.17: Health endpoint version check"
     implemented: true
     working: true
@@ -1385,7 +1385,7 @@ backend:
           box_id (only when cash), notes. Optional manual override for total_cost/total_sale.
           Save calls PATCH /api/packages/{pkgId}/bookings/{bookingId} and shows one of two
           success toasts depending on response._light_update vs _full_recalc.
-          Credentials: owner@demo.com / Demo@2025.
+          Credentials: owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>.
       - working: "NA"
         agent: "testing"
         comment: |
@@ -1459,7 +1459,7 @@ backend:
           3. OR increase server resources to prevent restarts
           
           **Manual Test Steps (if needed):**
-          1. Login as owner@demo.com / Demo@2025
+          1. Login as owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>
           2. Navigate to الباقات (Packages)
           3. Find "باكج اختبار الواجهة v3.9.21" card
           4. Click "التفاصيل والتسجيل" button
@@ -1474,7 +1474,7 @@ backend:
           ⚠️ PARTIAL TEST - Automated testing blocked by UI selector issues. Server is stable (2GB memory), but complex Arabic RTL UI with nested dialogs makes automated testing unreliable.
           
           **What was successfully tested:**
-          - ✅ Login flow working (owner@demo.com / Demo@2025)
+          - ✅ Login flow working (owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>)
           - ✅ Navigation to packages screen successful
           - ✅ Test package "باكج اختبار الواجهة v3.9.21" visible in UI
           - ✅ Package has correct test data (1 component, 1 booking)
@@ -1584,7 +1584,7 @@ backend:
           
           Auth: standard tenant-scoped session (owner/staff of same tenant), NOT super_admin.
           
-          Test credentials: owner@demo.com / Demo@2025 (demo tenant).
+          Test credentials: owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> (demo tenant).
       - working: true
         agent: "testing"
         comment: |
@@ -1670,7 +1670,7 @@ agent_communication:
       
       PATCH /api/packages/{pkgId}/bookings/{bookingId}
       
-      Login as: owner@demo.com / Demo@2025
+      Login as: owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>
       
       Set-up steps (helpful for the test):
         1) Create a client (POST /api/clients {name:"عميل باقة"}) 
@@ -1813,12 +1813,12 @@ agent_communication:
          - This is CORRECT behavior (not 401/403, but 200 with null user)
       
       ✅ Password change verified:
-         - Old password (Demo@2025) → 401 "بيانات الدخول غير صحيحة"
+         - Old password (<DEMO_PASSWORD-see-memory/test_credentials.md>) → 401 "بيانات الدخول غير صحيحة"
          - New password (auto-generated) → 200 (login successful)
       
       ✅ Reset to specific password:
-         - POST with {new_password: "Demo@2025"} → 200
-         - Login with "Demo@2025" → 200 (credential restored)
+         - POST with {new_password: "<DEMO_PASSWORD-see-memory/test_credentials.md>"} → 200
+         - Login with "<DEMO_PASSWORD-see-memory/test_credentials.md>" → 200 (credential restored)
       
       ✅ Edge cases:
          - new_password="abc" (< 6 chars) → 400 "كلمة السر يجب أن تكون 6 أحرف على الأقل"
@@ -1849,7 +1849,7 @@ agent_communication:
       The /auth/me endpoint returns 200 with {user: null, tenant: null} when session is invalid (not 401/403). This is by design (line 532 in route.js). The session IS correctly deleted from the database, and subsequent requests with the old cookie will have no authenticated user.
       
       **DEMO CREDENTIAL RESTORED:**
-      owner@demo.com password has been reset back to Demo@2025 for future tests.
+      owner@demo.com password has been reset back to <DEMO_PASSWORD-see-memory/test_credentials.md> for future tests.
       
       Backend v3.9.17 is production-ready. Both new admin endpoints working flawlessly for Target Media Holding dashboard integration.
 
@@ -1984,7 +1984,7 @@ agent_communication:
       The backend edit engine is fully functional and tested. The frontend UI is rendering correctly with proper toolbar and button states. However, the complete end-to-end edit flow needs MANUAL VERIFICATION due to automated testing limitations with RTL Arabic UI.
       
       **MANUAL TEST CHECKLIST (for user or main agent):**
-      1. Login as owner@demo.com / Demo@2025
+      1. Login as owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>
       2. Navigate to حجز التذاكر (Tickets)
       3. Click "تذكرة جديدة", fill form, save
       4. Click radio button next to new ticket
@@ -2440,7 +2440,7 @@ agent_communication:
       1. ✅ Signup with Referral - VERIFIED via automated test
       
       2. Referrals Tab:
-         - Login as owner@demo.com / Demo@2025
+         - Login as owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>
          - Navigate to إعدادات المكتب → نظام الإحالة
          - Verify: stats cards (signups, activations, bonus), referral code UQ7Z98W8 in emerald, signup link, copy/share buttons, invitees table
       
@@ -2467,7 +2467,7 @@ agent_communication:
          - Verify: dialog opens
       
       7. Super Admin:
-         - Login as admin@targetmedia.com / Target@2025
+         - Login as admin@targetmedia.com / <SUPER_ADMIN_PASSWORD-see-memory/test_credentials.md>
          - Verify: "الإحالة" column, referral codes in emerald, "مُحال بواسطة" indicator, "💳 تأكيد دفع" button
          - Open "إنشاء مكتب جديد" → verify "🎁 رمز الإحالة (اختياري)" field
       
@@ -3277,7 +3277,7 @@ agent_communication:
       5. /api/dashboard now returns visa_alerts[] with days_left calculation
       6. /import/tickets/preview and /import/visas/preview reject rows where client/supplier not in DB
       7. /import/tickets and /import/visas do NOT auto-create parties — they fail rows
-      Use owner@demo.com / Demo@2025 for tenant-scoped tests.
+      Use owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> for tenant-scoped tests.
       Existing v2.8 features must continue working (regression check).
   - agent: "testing"
     message: |
@@ -3493,7 +3493,7 @@ agent_communication:
   - agent: "main"
     message: |
       v3.0 backend is stable (32/32 tests passed). Now testing FRONTEND flows end-to-end.
-      Credentials: owner@demo.com / Demo@2025 at process.env.NEXT_PUBLIC_BASE_URL.
+      Credentials: owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> at process.env.NEXT_PUBLIC_BASE_URL.
 
       COVER:
       1. Sidebar has new "الخدمات" tab with Briefcase icon
@@ -3851,7 +3851,7 @@ agent_communication:
       4. NEW Chart of Accounts CRUD: POST/PUT/DELETE /accounts with parent validation
       5. Dashboard tomorrow-travelers now returns travel_mode, departure_time, passenger_phone, passenger_whatsapp, client_whatsapp
       6. Dashboard visa_alerts now resolves passenger_phone/whatsapp (visa row → linked client)
-      Use owner@demo.com / Demo@2025.
+      Use owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>.
   - agent: "testing"
     message: |
       ✅ v3.2 FRONTEND TESTING COMPLETED — ALL 6 TASKS PASSED
@@ -3958,7 +3958,7 @@ agent_communication:
       
       **REGRESSION TESTS (2/2 PASSED)**
       1. ✅ Ticket without travel_mode defaults to 'air', without departure_time defaults to empty string
-      2. ✅ Super admin admin@targetmedia.com/Target@2025 authentication working
+      2. ✅ Super admin admin@targetmedia.com/<SUPER_ADMIN_PASSWORD-see-memory/test_credentials.md> authentication working
       
       **CRITICAL VERIFICATIONS:**
       ✅ Travel mode field working - 'land' and 'air' modes supported, defaults to 'air'
@@ -4188,7 +4188,7 @@ agent_communication:
          POST /affiliate/cashout (min $10 individual / $50 office, deducts + reserves)
          POST /affiliate/apply-to-subscription (moves balance to subscription_credit_usd)
          POST /affiliate/dev-seed-balance (TEST-ONLY helper to seed balance)
-      Use owner@demo.com / Demo@2025. Please regression-check that v3.3 features still work.
+      Use owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>. Please regression-check that v3.3 features still work.
 metadata:
   version: "3.4"
 
@@ -4683,7 +4683,7 @@ frontend:
           
           **Test Environment:**
           - URL: https://visa-booking-5.preview.emergentagent.com
-          - Credentials: owner@demo.com / Demo@2025 ✅
+          - Credentials: owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> ✅
           - Login: ✅ SUCCESSFUL
           - Dashboard: ✅ LOADED
           
@@ -4728,7 +4728,7 @@ frontend:
           
           **Test Environment:**
           - URL: http://localhost:3000 (switched from public URL due to 502 error)
-          - Credentials: owner@demo.com / Demo@2025 ✅
+          - Credentials: owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> ✅
           - Login: ✅ SUCCESSFUL
           - Announcement Modal: ✅ DETECTED AND DISMISSED
           
@@ -4851,7 +4851,7 @@ agent_communication:
       10. Verify journal entry with ref_type='package_booking'
       11. Regression: v3.5 refunds still work
       12. Regression: v3.4 permissions still work
-      Use owner@demo.com / Demo@2025.
+      Use owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>.
   - agent: "testing"
     message: |
       ✅ v3.6 BACKEND TESTING COMPLETED — ALL 18 TESTS PASSED
@@ -5006,7 +5006,7 @@ agent_communication:
       **Test Results Summary:**
       
       **Frontend UI Verification: 11/11 PASSED**
-      1. ✅ Login successful (owner@demo.com / Demo@2025)
+      1. ✅ Login successful (owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>)
       2. ✅ Announcement modal detected and dismissed ("Future announcement" with "فهمت — إغلاق" button)
       3. ✅ Dashboard loaded after modal dismissal
       4. ✅ Packages screen navigation successful (sidebar tab "الباكجات والبرامج" clicked)
@@ -5274,7 +5274,7 @@ agent_communication:
       6. PATCH /api/packages/{id} with { end_date: "2026-08-15" } → verify end_date updates on open package
       7. Regression: v3.6 packages endpoints still work (list, create, book, report, close, reopen, delete).
       8. Regression: v3.5 refunds still work.
-      Use owner@demo.com / Demo@2025.
+      Use owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>.
 
       Main agent should summarize and finish. The v3.6 implementation is complete and production-ready. Only manual verification recommended for component/booking form submission flow, but backend tests confirm these are functionally correct.
   - agent: "testing"
@@ -5504,7 +5504,7 @@ frontend:
           - Backend API integration is 100% functional (27/27 tests passed)
           
           **MANUAL VERIFICATION RECOMMENDED:**
-          1. Login as owner@demo.com / Demo@2025
+          1. Login as owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>
           2. Dismiss announcement modal if present (click "فهمت" button)
           3. Navigate to إعدادات المكتب → 🕋 إضافة المتصفح tab
           4. Verify hero card, tokens table, create PAT flow, revoke flow, install guide
@@ -5524,7 +5524,7 @@ agent_communication:
     message: |
       v3.8 backend implemented. Please test:
       1. GET /api/health → version should be "3.8".
-      2. Auth as owner (owner@demo.com / Demo@2025) and:
+      2. Auth as owner (owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>) and:
          - GET /api/pats → empty list initially or existing tokens.
          - POST /api/pats {name:"test"} → returns full token starting with rhl_pat_
          - GET /api/pats → new token appears with prefix, no full token exposed.
@@ -5551,7 +5551,7 @@ agent_communication:
       5. Do the same with doc_type="umrah_visa" → verify visa created with service_type="تأشيرة عمرة".
       6. Verify tenant isolation: create PAT for owner@demo.com, try using it to access another tenant's data — must fail.
       7. Regression: v3.7 comparison endpoint still works; v3.6 packages CRUD still works.
-      Use owner@demo.com / Demo@2025 for owner login.
+      Use owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> for owner login.
 
       
       **FEATURE 1: Top Profitable Package KPI Card (PASSED)**
@@ -5825,7 +5825,7 @@ agent_communication:
          - Re-check tenant A: journal_quota.limit=80 (30 + 50), referral_stats.activations==1, bonus_earned==50,
            pending_referrals entry now has paid=true.
       4. Regression: v3.8 PATs + scraper ingest still work; v3.7 packages/comparison still works.
-      Use owner@demo.com / Demo@2025 for existing owner login; use admin@targetmedia.com / Target@2025 for super admin.
+      Use owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> for existing owner login; use admin@targetmedia.com / <SUPER_ADMIN_PASSWORD-see-memory/test_credentials.md> for super admin.
 
       - working: true
         agent: "testing"
@@ -6074,7 +6074,7 @@ agent_communication:
       
       1. ✅ Navigated to root URL → landing page visible (user not logged in)
       2. ✅ Clicked "تسجيل الدخول" → login page loaded
-      3. ✅ Filled form with owner@demo.com / Demo@2025
+      3. ✅ Filled form with owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>
       4. ✅ Submitted login form
       5. ✅ Redirected to dashboard successfully
       6. ✅ Dashboard loaded with "لوحة التحكم" title
@@ -6096,7 +6096,7 @@ agent_communication:
       ✅ Pricing section with 3 plans and "الأكثر مبيعاً" badge on Gold
       ✅ Footer with copyright 2025 and Rahaal ERP v3.8
       ✅ Login flow working (navigation, back button, form submission)
-      ✅ Real login successful with owner@demo.com / Demo@2025
+      ✅ Real login successful with owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>
       ✅ Dashboard loads after login with announcement modal
       ✅ Arabic RTL layout correct throughout
       ✅ No critical console errors
@@ -6464,7 +6464,7 @@ agent_communication:
 
       Also, `createTicket()` and `createVisa()` were relaxed to allow client_id=null when payment_method='cash' with a valid box_id (was previously forcing client mandatory).
 
-      **Endpoints to test (auth as owner@demo.com / Demo@2025):**
+      **Endpoints to test (auth as owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>):**
 
       1) POST /api/import/tickets/preview
          - Send rows array where one row has `client_name: "<name of an existing box/bank>"` (use one of the demo tenant's boxes; you can list via GET /api/boxes)
@@ -6576,7 +6576,7 @@ agent_communication:
       - POST /api/import/tickets execute — still creates for valid rows.
       - v3.9.8 flexible receipt (box name in client_name column) — still works (execute path).
 
-      **Test tenant:** owner@demo.com / Demo@2025 (demo tenant may be trial tier; use direct DB update to set plan_tier='gold' if needed for user creation tests).
+      **Test tenant:** owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> (demo tenant may be trial tier; use direct DB update to set plan_tier='gold' if needed for user creation tests).
 
 metadata:
   version: "3.9.9"
@@ -6630,7 +6630,7 @@ agent_communication_history:
          - OPTIONS /api/scraper/ingest should not fail (used by extension preflight-less fetch but ensure headers ok)
 
       **Test tenant credentials:**
-      - Demo Office Owner: owner@demo.com / Demo@2025 (create a PAT first via /api/scraper/pats or reuse an existing PAT)
+      - Demo Office Owner: owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> (create a PAT first via /api/scraper/pats or reuse an existing PAT)
       - If a PAT doesn't exist, mint one via the app's Settings → Extension tab, OR call POST /api/scraper/pats as authenticated owner and use the returned raw token (`rhl_pat_...`) for /scraper/* calls.
 
       **Regression must-still-pass:** /health returns 200; /packages GET works; Auth /me returns journal_quota.
@@ -7060,7 +7060,7 @@ agent_communication:
       3. > 300 ids: 400 "الحد الأقصى للتعديل الجماعي 300 سجل في المرة"
       4. Non-existent id: returns failed:1, errors:[{id, error:'غير موجود'}]
 
-      **Test flow (as owner@demo.com / Demo@2025):**
+      **Test flow (as owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>):**
       1. Setup: existing client, 2 suppliers (X and Y), 1 box.
       2. POST /api/tickets — create 2 credit tickets under supplier X (note IDs, balances of client + supplier X + supplier Y).
       3. POST /api/tickets/bulk-edit `{ ids:[t1,t2], changes:{ supplier_id:"<Y>" } }` → verify supplier X balance decremented by 2*cost, supplier Y credited by 2*cost, client balance unchanged.
@@ -7281,7 +7281,7 @@ metadata:
       - Empty ids → 400
       - Default status = 'closed' if not 'open'
 
-      **Test flow (owner@demo.com / Demo@2025):**
+      **Test flow (owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>):**
       1. Create 3 packages via POST /api/packages { name, package_type:'umrah', currency:'SAR', start_date:'2026-09-01' }. Note IDs p1, p2, p3.
       2. POST /api/packages/bulk-close `{ ids:[p1,p2], status:"closed" }` → response `{ updated:2 }`. GET /api/packages → confirm p1,p2 status='closed'.
       3. POST /api/packages/bulk-close `{ ids:[p1], status:"open" }` → updated:1, p1 back to open.
@@ -7457,7 +7457,7 @@ agent_communication:
       **Fix Applied:** Added `const { user } = useAuth()` at line 3419 in VoucherDialog function.
       
       **Verification Steps Requested:**
-      1. Login as owner@demo.com / Demo@2025
+      1. Login as owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>
       2. Navigate to Receipt Voucher (سند قبض) - verify no error
       3. Open new voucher dialog - verify no "user is not defined" error
       4. Navigate to Payment Voucher (سند صرف) - verify no error
@@ -7553,7 +7553,7 @@ agent_communication:
     status_history:
       - working: true
         agent: "testing"
-        comment: "✅ PASSED (4/4 tests) - Health endpoint returns version '3.9.18'. Existing tenant (owner@demo.com) can login normally with Demo@2025. POST /api/admin/tenants/{id}/topup still works (added 10 credits). POST /api/admin/tenants/{id}/reset-password still works (reset to Demo@2025). All v3.9.17 features remain functional."
+        comment: "✅ PASSED (4/4 tests) - Health endpoint returns version '3.9.18'. Existing tenant (owner@demo.com) can login normally with <DEMO_PASSWORD-see-memory/test_credentials.md>. POST /api/admin/tenants/{id}/topup still works (added 10 credits). POST /api/admin/tenants/{id}/reset-password still works (reset to <DEMO_PASSWORD-see-memory/test_credentials.md>). All v3.9.17 features remain functional."
 
 agent_communication:
   - agent: "testing"
@@ -7615,7 +7615,7 @@ agent_communication:
          - version: "3.9.18" ✅
       
       ✅ Existing tenant login:
-         - owner@demo.com / Demo@2025 → 200
+         - owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> → 200
          - Login successful, no impact from phone requirement on existing accounts
       
       ✅ v3.9.17 topup endpoint:
@@ -7623,9 +7623,9 @@ agent_communication:
          - Still working correctly
       
       ✅ v3.9.17 reset-password endpoint:
-         - POST /api/admin/tenants/{id}/reset-password {new_password: "Demo@2025"} → 200
+         - POST /api/admin/tenants/{id}/reset-password {new_password: "<DEMO_PASSWORD-see-memory/test_credentials.md>"} → 200
          - Still working correctly
-         - Password reset back to Demo@2025 for future tests
+         - Password reset back to <DEMO_PASSWORD-see-memory/test_credentials.md> for future tests
       
       **CRITICAL VERIFICATIONS:**
       ✅ Phone validation - All edge cases covered (missing, invalid, too short, too long)
@@ -7687,7 +7687,7 @@ agent_communication:
     status_history:
       - working: true
         agent: "testing"
-        comment: "✅ PASSED (5/5 tests) - All regression checks passed. Health endpoint returns version='3.9.20'. POST /api/tickets still creates tickets normally (200, ticket created and deleted successfully). v3.9.18 signup with phone still works (200, requires Gmail address). v3.9.17 topup still works (200, added 10 credits to demo tenant). v3.9.17 reset-password still works (200, password reset to Demo@2025). All previous features remain functional."
+        comment: "✅ PASSED (5/5 tests) - All regression checks passed. Health endpoint returns version='3.9.20'. POST /api/tickets still creates tickets normally (200, ticket created and deleted successfully). v3.9.18 signup with phone still works (200, requires Gmail address). v3.9.17 topup still works (200, added 10 credits to demo tenant). v3.9.17 reset-password still works (200, password reset to <DEMO_PASSWORD-see-memory/test_credentials.md>). All previous features remain functional."
 
 metadata:
   version: "3.9.20"
@@ -7784,7 +7784,7 @@ agent_communication:
       
       ✅ v3.9.17 reset-password still works:
          - POST /api/admin/tenants/{id}/reset-password → 200
-         - Password reset to Demo@2025 for future tests
+         - Password reset to <DEMO_PASSWORD-see-memory/test_credentials.md> for future tests
       
       **CRITICAL BUG FIX APPLIED DURING TESTING:**
       
@@ -7894,7 +7894,7 @@ agent_communication:
       3. **OR** Increase server resources to prevent restarts
       
       **Manual Test Steps (if needed):**
-      1. Login: owner@demo.com / Demo@2025
+      1. Login: owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md>
       2. Navigate to الباقات (Packages)
       3. Find "باكج اختبار الواجهة v3.9.21" card
       4. Click "التفاصيل والتسجيل" button
@@ -8403,7 +8403,7 @@ agent_communication:
       - Verify dialogs open without errors
       - Check console for "e is not defined" errors
       
-      Login: owner@demo.com / Demo@2025 at https://visa-booking-5.preview.emergentagent.com
+      Login: owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> at https://visa-booking-5.preview.emergentagent.com
 
   - agent: "testing"
     message: |
@@ -8482,6 +8482,6 @@ test_plan:
 
 agent_communication:
     - agent: "main"
-      comment: "Please test the upgraded /api/visa-monitor endpoints. Login as owner@demo.com / Demo@2025 (tenant slug demo, header X-Tenant or via /api/auth/login to get token). Test: 1) POST validation of each mandatory field, 2) default allowed_days=85 and expected_exit_date=entry+85d, 3) status computation for green (>30d), yellow (<=30), red (<=15), overstay (remaining<0), departed (actual_exit_date), 4) GET filters track=inside/alerts/departed/all, agent=..., search=..., 5) PATCH action=exited with exit_port then reactivate, 6) import upsert + skip reasons, 7) stats + alerts endpoints counts. Cleanup created test records afterwards if possible."
+      comment: "Please test the upgraded /api/visa-monitor endpoints. Login as owner@demo.com / <DEMO_PASSWORD-see-memory/test_credentials.md> (tenant slug demo, header X-Tenant or via /api/auth/login to get token). Test: 1) POST validation of each mandatory field, 2) default allowed_days=85 and expected_exit_date=entry+85d, 3) status computation for green (>30d), yellow (<=30), red (<=15), overstay (remaining<0), departed (actual_exit_date), 4) GET filters track=inside/alerts/departed/all, agent=..., search=..., 5) PATCH action=exited with exit_port then reactivate, 6) import upsert + skip reasons, 7) stats + alerts endpoints counts. Cleanup created test records afterwards if possible."
     - agent: "testing"
       comment: "✅ ALL TESTS PASSED (7/7) - Visa Monitoring API v3.11 fully tested and working. All mandatory field validations, status computations (green/yellow/red/overstay/departed), GET filters (track/agent/search), PATCH actions (exited/reactivate/field updates), import bulk upsert, stats endpoint, and alerts endpoint verified. Applied minor fix to alerts endpoint (clean() function usage). All test records cleaned up successfully."

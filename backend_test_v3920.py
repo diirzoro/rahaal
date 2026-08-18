@@ -17,8 +17,8 @@ BASE_URL = os.getenv('NEXT_PUBLIC_BASE_URL', 'https://visa-booking-5.preview.eme
 API_BASE = f"{BASE_URL}/api"
 
 # Test credentials
-SUPER_ADMIN = {"email": "admin@targetmedia.com", "password": "Target@2025"}
-DEMO_OWNER = {"email": "owner@demo.com", "password": "Demo@2025"}
+SUPER_ADMIN = {"email": "admin@targetmedia.com", "password": "<SUPER_ADMIN_PASSWORD-see-memory/test_credentials.md>"}
+DEMO_OWNER = {"email": "owner@demo.com", "password": "<DEMO_PASSWORD-see-memory/test_credentials.md>"}
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
@@ -651,7 +651,7 @@ def test_regression():
                 if demo_tenant:
                     tenant_id = demo_tenant['id']
                     resp = requests.post(f"{API_BASE}/admin/tenants/{tenant_id}/reset-password", 
-                                        json={"new_password": "Demo@2025"},
+                                        json={"new_password": "<DEMO_PASSWORD-see-memory/test_credentials.md>"},
                                         cookies=cookies, timeout=10)
                     log(f"Status: {resp.status_code}")
                     

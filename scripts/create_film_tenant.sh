@@ -8,7 +8,7 @@ rm -f $COOKIE
 
 echo "==> Login as Super Admin"
 curl -s -c $COOKIE -X POST "$BASE/auth/login" -H "Content-Type: application/json" \
-  -d '{"email":"admin@targetmedia.com","password":"Target@2025"}' >/dev/null
+  -d '{"email":"admin@targetmedia.com","password":"<SUPER_ADMIN_PASSWORD-see-memory/test_credentials.md>"}' >/dev/null
 
 echo "==> Check if film tenant already exists"
 EXISTS=$(curl -s -b $COOKIE "$BASE/admin/tenants" | python3 -c "

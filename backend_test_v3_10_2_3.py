@@ -16,7 +16,7 @@ BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
 # Test credentials
 DEMO_TENANT = {
     "email": "owner@demo.com",
-    "password": "Demo@2025",
+    "password": "<DEMO_PASSWORD-see-memory/test_credentials.md>",
     "tenant_id": "d89bc41d-e19b-430f-be93-e3f8ca6d404a"
 }
 

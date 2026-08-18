@@ -15,7 +15,7 @@ API_URL = f"{BASE_URL}/api"
 
 # Test credentials
 OWNER_EMAIL = "owner@demo.com"
-OWNER_PASSWORD = "Demo@2025"
+OWNER_PASSWORD = "<DEMO_PASSWORD-see-memory/test_credentials.md>"
 
 # Global session
 session = requests.Session()
