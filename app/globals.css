@@ -143,3 +143,23 @@ table { min-width: max-content; }
 @media print {
   table { min-width: 100%; }
 }
+
+/* ============================================================
+   v3.13 — Numeric & money fields UX (Phase 1)
+   1) Hide number input spinners (up/down arrows) system-wide
+   2) Comfortable minimum width + tabular digits so amounts never clip
+   ============================================================ */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+  min-width: 110px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+/* Inside table cells keep amounts readable without breaking layout */
+td input[type="number"] { min-width: 120px; }

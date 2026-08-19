@@ -8511,3 +8511,28 @@ frontend:
         - working: true
           agent: "main"
           comment: "Verified E2E with playwright screenshots (4 steps all passed)."
+
+## v3.13 Phase 1 — Import duplicate rule + numeric fields UX — Current Session
+backend:
+  - task: "Import duplicate rule v3.13: duplicates only when (PNR/passport OR name) + SAME date match; different date accepted (tickets & visas import previews)"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Changed /import/tickets/preview: existingSet & seenInBatch keys now `pnr|date` instead of pnr alone. Changed /import/visas/preview: keys now `passport|date` instead of passport alone. Name+date logic unchanged (already compliant)."
+        - working: true
+          agent: "testing"
+          comment: "✅ PASSED (11/11 tests - 100%) - Comprehensive testing of v3.13 duplicate detection rule completed successfully. All scenarios verified: TICKETS: (1) Same PNR + same date → correctly flagged 'موجود مسبقاً (PNR + نفس التاريخ)'. (2) Same PNR + different date → NOT flagged (✅ core fix verified). (3) Same name + same date → correctly flagged 'موجود مسبقاً (اسم المسافر + التاريخ)'. (4) Same name + different date → NOT flagged (✅ core fix verified). (5a) First occurrence in batch → NOT flagged. (5b) In-batch duplicate (same PNR+date) → correctly flagged 'مكرر داخل نفس الملف (PNR + نفس التاريخ)'. (5c) Same PNR + different date in batch → NOT flagged (✅ core fix verified). VISAS: (6) Same passport + same date → correctly flagged 'موجود مسبقاً (جواز + نفس التاريخ)'. (7) Same passport + different date → NOT flagged (✅ core fix verified). (8a) Same name + same date → correctly flagged 'موجود مسبقاً (اسم المعتمر + التاريخ)'. (8b) Same name + different date → NOT flagged (✅ core fix verified). CLEANUP: Test ticket and visa deleted successfully. The NEW duplicate detection rule is working perfectly: records are ONLY flagged as duplicates when (identifier OR name) matches TOGETHER WITH THE SAME DATE. Different dates are correctly accepted as new operations."
+test_plan:
+  current_focus: []
+  test_all: false
+agent_communication:
+    - agent: "main"
+      comment: "Test /api/import/tickets/preview and /api/import/visas/preview with demo tenant (owner@demo.com, see memory/test_credentials.md). Cases: same PNR/passport+same date => dup; same PNR/passport+different date => NOT dup; same name+same date => dup; same name+different date => NOT dup; in-batch duplicates same rules. Do not actually import (preview only) OR if importing for verification, delete created records afterwards."
+    - agent: "testing"
+      comment: "✅ ALL TESTS PASSED (11/11 - 100%) - v3.13 duplicate detection rule fully tested and working correctly. All core scenarios verified: same identifier/name + same date = duplicate, same identifier/name + different date = NOT duplicate. Both tickets and visas import preview endpoints working as expected. Test data cleaned up successfully."

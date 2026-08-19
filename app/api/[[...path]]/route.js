@@ -2834,9 +2834,16 @@ async function handleRoute(request, { params }) {
     if (route === '/import/tickets/preview' && method === 'POST') {
       const b = await request.json()  // { rows: [normalized rows], skip_duplicates:true }
       const rows = Array.isArray(b.rows) ? b.rows : []
+      // v3.13 — Duplicate rule: (PNR + date) — a different travel date is NOT a duplicate
       const pnrs = rows.map(r => r.pnr).filter(Boolean)
-      const existing = await db.collection('tickets').find({ tenant_id: T, pnr: { $in: pnrs } }).project({ pnr: 1 }).toArray()
-      const existingSet = new Set(existing.map(x => x.pnr))
+      const existingSet = new Set()
+      if (pnrs.length) {
+        const existing = await db.collection('tickets').find({ tenant_id: T, pnr: { $in: pnrs } }).project({ pnr: 1, travel_date: 1, date: 1 }).toArray()
+        for (const t of existing) {
+          const d = t.travel_date ? new Date(t.travel_date).toISOString().slice(0, 10) : (t.date ? new Date(t.date).toISOString().slice(0, 10) : '')
+          existingSet.add(`${t.pnr}|${d}`)
+        }
+      }
       // v3.9.9 — Name+Date dedup (main key for offices without PNR)
       const nameDateKeys = rows.map(r => `${String(r.passenger_name || '').trim().toLowerCase()}|${String(r.travel_date || r.date || '').slice(0, 10)}`).filter(k => !k.startsWith('|'))
       const existingByNameDate = new Set()
@@ -2872,10 +2879,11 @@ async function handleRoute(request, { params }) {
         if (!r.supplier_name) errors.push('اسم المورد مطلوب')
         else if (!supplierSet.has(String(r.supplier_name).trim().toLowerCase())) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
         let dup = false
-        // 1) PNR-based dedup (when PNR is provided)
-        if (r.pnr && existingSet.has(r.pnr)) dup = 'موجود مسبقاً في قاعدة البيانات (PNR)'
-        if (r.pnr && seenInBatch.has(r.pnr)) dup = 'مكرر داخل نفس الملف (PNR)'
-        if (r.pnr) seenInBatch.add(r.pnr)
+        // v3.13 — Duplicate rule: (PNR OR name) + SAME date. Different date => accepted as a new operation.
+        const rowDate = String(r.travel_date || r.date || '').slice(0, 10)
+        if (r.pnr && existingSet.has(`${r.pnr}|${rowDate}`)) dup = 'موجود مسبقاً (PNR + نفس التاريخ)'
+        if (r.pnr && seenInBatch.has(`${r.pnr}|${rowDate}`)) dup = 'مكرر داخل نفس الملف (PNR + نفس التاريخ)'
+        if (r.pnr) seenInBatch.add(`${r.pnr}|${rowDate}`)
         // 2) Name+Date dedup (main check for offices without PNR)
         if (!dup && r.passenger_name) {
           const nd = `${String(r.passenger_name).trim().toLowerCase()}|${String(r.travel_date || r.date || '').slice(0, 10)}`
@@ -2923,9 +2931,16 @@ async function handleRoute(request, { params }) {
     if (route === '/import/visas/preview' && method === 'POST') {
       const b = await request.json()
       const rows = Array.isArray(b.rows) ? b.rows : []
+      // v3.13 — Duplicate rule: (passport + date) — a different entry date is NOT a duplicate
       const passports = rows.map(r => r.passport_no).filter(Boolean)
-      const existing = await db.collection('visas').find({ tenant_id: T, passport_no: { $in: passports } }).project({ passport_no: 1 }).toArray()
-      const existingSet = new Set(existing.map(x => x.passport_no))
+      const existingSet = new Set()
+      if (passports.length) {
+        const existing = await db.collection('visas').find({ tenant_id: T, passport_no: { $in: passports } }).project({ passport_no: 1, entry_date: 1, date: 1 }).toArray()
+        for (const v of existing) {
+          const d = v.entry_date ? new Date(v.entry_date).toISOString().slice(0, 10) : (v.date ? new Date(v.date).toISOString().slice(0, 10) : '')
+          existingSet.add(`${v.passport_no}|${d}`)
+        }
+      }
       // v3.9.9 — Name+Date dedup (main key)
       const existingByNameDate = new Set()
       const names = rows.map(r => String(r.passenger_name || '').trim()).filter(Boolean)
@@ -2961,9 +2976,11 @@ async function handleRoute(request, { params }) {
         if (!r.supplier_name) errors.push('اسم المورد مطلوب')
         else if (!supplierSet.has(String(r.supplier_name).trim().toLowerCase())) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
         let dup = false
-        if (r.passport_no && existingSet.has(r.passport_no)) dup = 'رقم الجواز موجود مسبقاً'
-        if (r.passport_no && seenInBatch.has(r.passport_no)) dup = 'مكرر داخل الملف (جواز)'
-        if (r.passport_no) seenInBatch.add(r.passport_no)
+        // v3.13 — Duplicate rule: (passport OR name) + SAME date. Different date => accepted as a new operation.
+        const rowDate = String(r.entry_date || r.date || '').slice(0, 10)
+        if (r.passport_no && existingSet.has(`${r.passport_no}|${rowDate}`)) dup = 'موجود مسبقاً (جواز + نفس التاريخ)'
+        if (r.passport_no && seenInBatch.has(`${r.passport_no}|${rowDate}`)) dup = 'مكرر داخل الملف (جواز + نفس التاريخ)'
+        if (r.passport_no) seenInBatch.add(`${r.passport_no}|${rowDate}`)
         // Name+Date dedup
         if (!dup && r.passenger_name) {
           const nd = `${String(r.passenger_name).trim().toLowerCase()}|${String(r.entry_date || r.date || '').slice(0, 10)}`
