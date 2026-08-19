@@ -151,12 +151,14 @@ table { min-width: max-content; }
    ============================================================ */
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  margin: 0 !important;
+  display: none !important;
 }
 input[type="number"] {
-  -moz-appearance: textfield;
-  appearance: textfield;
+  -moz-appearance: textfield !important;
+  appearance: textfield !important;
   min-width: 110px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;

@@ -8995,3 +8995,127 @@ agent_communication:
       
       **OVERALL ASSESSMENT:**
       v3.17b fix is PRODUCTION-READY. All package booking PATCH operations now correctly preserve room-based pricing. The architectural concern from v3.17 is fully resolved.
+
+## v3.18 URGENT — Duplicate rule root-cause fix — Current Session
+backend:
+  - task: "v3.18 dedup fix: tickets use travel_date ONLY, visas use entry_date ONLY (transaction-date fallback REMOVED — it made all same-name rows collide when file had one issue date); empty travel/entry date => no dedup block. Frontend: auto-fix no longer fills travel_date with today; added travel date column aliases"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (8/8 tests) - Comprehensive v3.18 dedup fix regression test completed. TICKETS: (1) User's exact scenario - same name 'صالح محمد قائد', same transaction date 2026-08-19, DIFFERENT travel dates (2026-09-01 vs 2026-10-15) → BOTH __dup=false ✅ NO FALSE DUPLICATE. (2) Same name + SAME travel_date in batch → second row correctly flagged 'مكرر داخل نفس الملف (اسم + نفس تاريخ السفر)' ✅. (3) Same name, EMPTY travel_date, same transaction date → BOTH __dup=false ✅ (empty date = no dedup). (4) PNR dedup: same PNR different travel dates → both false ✅; same PNR same travel_date → second flagged 'مكرر داخل نفس الملف (PNR + نفس تاريخ السفر)' ✅. (5) DB-side: created ticket 'اختبار قاعدة v318' travel_date=2026-09-10 pnr=V318P; preview same name same date → dup ✅; same name different date (2026-09-11) → NOT dup ✅; same PNR different date → NOT dup ✅; cleanup successful. VISAS: (6) Same name 'معتمر تجربة v318', same transaction date, DIFFERENT entry dates (2026-09-01 vs 2026-10-01) → BOTH __dup=false ✅. (7) Passport dedup: same passport same entry_date → second flagged 'مكرر داخل الملف (جواز + نفس تاريخ الدخول)' ✅; same passport different entry dates → both false ✅. (8) Same name, EMPTY entry_date → BOTH __dup=false ✅. CRITICAL VERIFICATIONS: ✅ Tickets use travel_date ONLY (NOT transaction date fallback). ✅ Visas use entry_date ONLY (NOT transaction date fallback). ✅ Empty travel_date/entry_date = NO dedup blocking (this was the root cause of the user's bug). ✅ Different travel/entry dates = NOT duplicates (even with same name/PNR/passport). ✅ Same travel/entry dates = correctly flagged as duplicates. ✅ DB-side dedup working correctly. The critical bug that blocked the user's data entry is FIXED. The transaction date fallback has been completely removed from the dedup logic."
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      ✅ v3.18 DEDUP FIX REGRESSION TEST COMPLETED - ALL 8 TESTS PASSED (100%)
+      
+      Executed comprehensive regression test covering the exact user scenario that blocked data entry.
+      
+      **CRITICAL BUG CONTEXT:**
+      Previously, the dedup key fell back to transaction date (r.date) when travel_date was empty.
+      This caused a file where every row had the same issue date to flag all same-name passengers
+      as duplicates even when their travel dates differed. This blocked a real user's data entry.
+      
+      **FIX VERIFICATION:**
+      NOW: tickets dedup uses travel_date ONLY, visas use entry_date ONLY.
+      If that date is empty → NO dedup blocking at all.
+      
+      **TEST RESULTS: 8/8 PASSED**
+      
+      ### TICKETS TESTS (5/5 PASSED)
+      
+      ✅ CASE 1: User's Exact Scenario (THE CRITICAL TEST)
+         - Same passenger name: "صالح محمد قائد"
+         - Same transaction date: "2026-08-19" (this was causing the false duplicate)
+         - NO PNR
+         - Row A travel_date: "2026-09-01"
+         - Row B travel_date: "2026-10-15"
+         - RESULT: BOTH __dup = false ✅
+         - This is the exact scenario that was failing before the fix
+      
+      ✅ CASE 2: Same name + SAME travel_date in batch
+         - Row A: __dup = false
+         - Row B: __dup = "مكرر داخل نفس الملف (اسم + نفس تاريخ السفر)"
+         - Correctly detects actual duplicates
+      
+      ✅ CASE 3: Empty travel_date (no dedup)
+         - Same name: "خالد سعيد"
+         - Same transaction date: "2026-08-19"
+         - NO travel_date on both rows
+         - RESULT: BOTH __dup = false ✅
+         - Empty travel_date = no dedup blocking (as designed)
+      
+      ✅ CASE 4: PNR dedup
+         - 4a: Same PNR "XX99", different travel dates (2026-09-01 vs 2026-10-01)
+           → BOTH __dup = false ✅
+         - 4b: Same PNR "YY88", same travel_date (2026-09-15)
+           → Second row flagged "مكرر داخل نفس الملف (PNR + نفس تاريخ السفر)" ✅
+      
+      ✅ CASE 5: DB-side dedup
+         - Created real ticket: passenger="اختبار قاعدة v318", travel_date="2026-09-10", pnr="V318P"
+         - Test 5a: Preview same name + same travel_date → detected as duplicate ✅
+         - Test 5b: Preview same name + different travel_date (2026-09-11) → NOT duplicate ✅
+         - Test 5c: Preview same PNR + different travel_date (2026-09-11) → NOT duplicate ✅
+         - Cleanup: Ticket deleted successfully
+      
+      ### VISAS TESTS (3/3 PASSED)
+      
+      ✅ CASE 6: Different entry dates
+         - Same passenger name: "معتمر تجربة v318"
+         - Same transaction date: "2026-08-19"
+         - Row A entry_date: "2026-09-01"
+         - Row B entry_date: "2026-10-01"
+         - RESULT: BOTH __dup = false ✅
+      
+      ✅ CASE 7: Passport dedup
+         - 7a: Same passport "V318PP", same entry_date (2026-09-01)
+           → Second row flagged "مكرر داخل الملف (جواز + نفس تاريخ الدخول)" ✅
+         - 7b: Same passport "V318PP2", different entry dates (2026-09-01 vs 2026-10-01)
+           → BOTH __dup = false ✅
+      
+      ✅ CASE 8: Empty entry_date (no dedup)
+         - Same name: "معتمر بدون تاريخ"
+         - NO entry_date on both rows
+         - RESULT: BOTH __dup = false ✅
+      
+      **CRITICAL VERIFICATIONS:**
+      ✅ Transaction date (r.date) is NO LONGER used as fallback for dedup
+      ✅ Tickets use travel_date ONLY for dedup key
+      ✅ Visas use entry_date ONLY for dedup key
+      ✅ Empty travel_date/entry_date = NO dedup blocking
+      ✅ Different travel/entry dates = NOT duplicates (even with same name/PNR/passport)
+      ✅ Same travel/entry dates = correctly flagged as duplicates
+      ✅ DB-side dedup working correctly
+      ✅ Batch dedup working correctly
+      
+      **ROOT CAUSE ANALYSIS:**
+      The bug was in lines 3102 and 3197-3204 of route.js where the dedup key construction
+      used `r.travel_date || r.date` and `r.entry_date || r.date` as fallback. This caused
+      all rows with the same transaction date to be treated as duplicates when the specific
+      date field (travel_date/entry_date) was empty.
+      
+      **FIX VERIFICATION:**
+      Lines 3138 and 3234 now use ONLY the specific date field:
+      - Tickets: `const rowDate = String(r.travel_date || '').slice(0, 10)`
+      - Visas: `const rowDate = String(r.entry_date || '').slice(0, 10)`
+      
+      If rowDate is empty, the dedup checks are skipped entirely (lines 3139-3148 for tickets,
+      3235-3244 for visas).
+      
+      **USER IMPACT:**
+      The critical bug that blocked the user's data entry is FIXED. Users can now import
+      files where all rows share the same transaction date but have different travel/entry
+      dates without false duplicate errors.
+      
+      Backend v3.18 is production-ready. The dedup fix is working correctly.

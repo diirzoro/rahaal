@@ -1,540 +1,824 @@
 #!/usr/bin/env python3
 """
-Backend Test Suite for Rahaal ERP v3.17 - Booking Manual Discount Feature
-Tests the packages module booking discount functionality
+v3.18 Duplicate Rule Fix - Regression Test
+Tests the critical bug fix where dedup key fell back to transaction date (r.date)
+when travel_date was empty, causing false duplicates.
+
+NOW: tickets dedup uses travel_date ONLY, visas use entry_date ONLY.
+If that date is empty → NO dedup blocking at all.
 """
 
-import asyncio
-import aiohttp
+import requests
 import json
-import os
 from datetime import datetime, timedelta
 
-# Configuration
-BASE_URL = os.getenv('NEXT_PUBLIC_BASE_URL', 'https://visa-booking-5.preview.emergentagent.com')
-API_URL = f"{BASE_URL}/api"
+BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
+LOGIN_EMAIL = "owner@demo.com"
+LOGIN_PASSWORD = "Demo@2025"
 
-# Test credentials
-OWNER_EMAIL = "owner@demo.com"
-OWNER_PASSWORD = "Demo@2025"
+session = requests.Session()
 
-# Global session cookie
-session_cookie = None
-
-# Test data storage
-test_data = {
-    'package_id': None,
-    'client_id': None,
-    'supplier_id': None,
-    'booking1_id': None,
-    'booking2_id': None,
-    'booking3_id': None,
-    'client_balance_before': None,
-}
-
-async def login():
+def login():
     """Login and get session cookie"""
-    global session_cookie
-    print("\n=== LOGIN ===")
-    async with aiohttp.ClientSession() as session:
-        try:
-            payload = {"email": OWNER_EMAIL, "password": OWNER_PASSWORD}
-            async with session.post(f"{API_URL}/auth/login", json=payload) as resp:
-                if resp.status == 200:
-                    cookies = resp.cookies
-                    if 'rahaal_session' in cookies:
-                        session_cookie = cookies['rahaal_session'].value
-                        print(f"✅ Login successful - Session cookie obtained")
-                        return True
-                    else:
-                        print(f"❌ Login failed - No session cookie in response")
-                        return False
-                else:
-                    text = await resp.text()
-                    print(f"❌ Login failed - Status {resp.status}: {text}")
-                    return False
-        except Exception as e:
-            print(f"❌ Login exception: {e}")
+    print("=" * 80)
+    print("STEP 1: LOGIN")
+    print("=" * 80)
+    try:
+        resp = session.post(f"{BASE_URL}/auth/login", json={
+            "email": LOGIN_EMAIL,
+            "password": LOGIN_PASSWORD
+        })
+        print(f"Login status: {resp.status_code}")
+        if resp.status_code == 200:
+            data = resp.json()
+            print(f"✅ Logged in as: {data.get('user', {}).get('email')}")
+            print(f"   Tenant: {data.get('tenant', {}).get('name')}")
+            return True
+        else:
+            print(f"❌ Login failed: {resp.text}")
             return False
+    except Exception as e:
+        print(f"❌ Login error: {e}")
+        return False
 
-async def api_request(method, endpoint, data=None, expect_status=200):
-    """Make authenticated API request"""
-    global session_cookie
-    url = f"{API_URL}{endpoint}"
-    headers = {'Cookie': f'rahaal_session={session_cookie}'}
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            if method == 'GET':
-                async with session.get(url, headers=headers) as resp:
-                    status = resp.status
-                    body = await resp.json() if resp.content_type == 'application/json' else await resp.text()
-                    return status, body
-            elif method == 'POST':
-                async with session.post(url, json=data, headers=headers) as resp:
-                    status = resp.status
-                    body = await resp.json() if resp.content_type == 'application/json' else await resp.text()
-                    return status, body
-            elif method == 'PATCH':
-                async with session.patch(url, json=data, headers=headers) as resp:
-                    status = resp.status
-                    body = await resp.json() if resp.content_type == 'application/json' else await resp.text()
-                    return status, body
-            elif method == 'DELETE':
-                async with session.delete(url, headers=headers) as resp:
-                    status = resp.status
-                    body = await resp.json() if resp.content_type == 'application/json' else await resp.text()
-                    return status, body
-        except Exception as e:
-            print(f"❌ API request exception: {e}")
-            return None, str(e)
-
-async def setup_test_data():
-    """Setup: Create package with components and record client balance"""
-    print("\n=== SETUP: CREATE PACKAGE AND COMPONENTS ===")
-    
-    # Get existing client for balance tracking
-    status, body = await api_request('GET', '/clients')
-    if status == 200 and isinstance(body, dict) and body.get('data'):
-        test_data['client_id'] = body['data'][0]['id']
-        client_balances = body['data'][0].get('balances', {})
-        client_balance_sar = client_balances.get('SAR') or 0
-        test_data['client_balance_before'] = client_balance_sar
-        print(f"✅ Using existing client: {body['data'][0]['name']} (ID: {test_data['client_id']})")
-        print(f"   Client balance BEFORE tests: {client_balance_sar} SAR")
-    elif status == 200 and isinstance(body, list) and len(body) > 0:
-        test_data['client_id'] = body[0]['id']
-        client_balances = body[0].get('balances', {})
-        client_balance_sar = client_balances.get('SAR') or 0
-        test_data['client_balance_before'] = client_balance_sar
-        print(f"✅ Using existing client: {body[0]['name']} (ID: {test_data['client_id']})")
-        print(f"   Client balance BEFORE tests: {client_balance_sar} SAR")
-    else:
-        print(f"❌ Failed to get existing client")
-        return False
-    
-    # Get existing supplier
-    status, body = await api_request('GET', '/suppliers')
-    if status == 200 and isinstance(body, dict) and body.get('data'):
-        test_data['supplier_id'] = body['data'][0]['id']
-        print(f"✅ Using existing supplier: {body['data'][0]['name']} (ID: {test_data['supplier_id']})")
-    elif status == 200 and isinstance(body, list) and len(body) > 0:
-        test_data['supplier_id'] = body[0]['id']
-        print(f"✅ Using existing supplier: {body[0]['name']} (ID: {test_data['supplier_id']})")
-    else:
-        print(f"❌ Failed to get existing supplier")
-        return False
-    
-    # Create package with room pricing
-    today = datetime.now().strftime('%Y-%m-%d')
-    package_data = {
-        "name": "باكج AUTOTEST-V317",
-        "package_type": "umrah",
-        "currency": "SAR",
-        "start_date": today,
-        "room_pricing": [
-            {"type": "ثنائي", "sale_per_pax": 1000},
-            {"type": "ثلاثي", "sale_per_pax": 800}
-        ]
-    }
-    
-    status, body = await api_request('POST', '/packages', package_data)
-    if status == 200 and body.get('id'):
-        test_data['package_id'] = body['id']
-        print(f"✅ Package created: {body['name']} (ID: {test_data['package_id']})")
-    else:
-        print(f"❌ Failed to create package - Status {status}: {body}")
-        return False
-    
-    # Add component to package
-    component_data = {
-        "name": "مكون اختبار V317",
-        "supplier_id": test_data['supplier_id'],
-        "cost_per_pax": 300,
-        "sale_per_pax": 500
-    }
-    
-    status, body = await api_request('POST', f"/packages/{test_data['package_id']}/components", component_data)
-    if status == 200:
-        print(f"✅ Component added to package")
-    else:
-        print(f"❌ Failed to add component - Status {status}: {body}")
-        return False
-    
-    return True
-
-async def test_booking_with_registrants_and_discount():
-    """Test 3: POST booking WITH registrants + discount"""
-    print("\n=== TEST 3: POST BOOKING WITH REGISTRANTS + DISCOUNT ===")
-    
-    booking_data = {
-        "payment_method": "credit",
-        "client_id": test_data['client_id'],
-        "registrants": [
-            {"name": "أ", "passport_no": "V317A", "age": 30, "room_type": "ثنائي"},
-            {"name": "ب", "passport_no": "V317B", "age": 30, "room_type": "ثلاثي"}
-        ],
-        "discount": 300,
-        "discount_reason": "مجاملة وكيل"
-    }
-    
-    status, body = await api_request('POST', f"/packages/{test_data['package_id']}/bookings", booking_data)
-    
-    if status == 200:
-        test_data['booking1_id'] = body['id']
+def get_clients_and_suppliers():
+    """Get existing client and supplier names"""
+    print("\n" + "=" * 80)
+    print("STEP 2: GET CLIENTS AND SUPPLIERS")
+    print("=" * 80)
+    try:
+        clients_resp = session.get(f"{BASE_URL}/clients")
+        suppliers_resp = session.get(f"{BASE_URL}/suppliers")
         
-        # Verify calculations
-        base_room_sale = 1000 + 800  # ثنائي + ثلاثي = 1800
-        expected_total_sale = 1500  # 1800 - 300 discount
-        expected_total_cost = 600  # 300 * 2 pax
-        expected_commission = 900  # 1500 - 600
-        
-        actual_total_sale = body.get('total_sale')
-        actual_total_cost = body.get('total_cost')
-        actual_commission = body.get('commission')
-        actual_discount = body.get('discount')
-        actual_discount_reason = body.get('discount_reason')
-        
-        print(f"   Base room sale: {base_room_sale} SAR")
-        print(f"   Discount: {actual_discount} SAR")
-        print(f"   Total sale: {actual_total_sale} SAR (expected: {expected_total_sale})")
-        print(f"   Total cost: {actual_total_cost} SAR (expected: {expected_total_cost})")
-        print(f"   Commission: {actual_commission} SAR (expected: {expected_commission})")
-        print(f"   Discount reason: '{actual_discount_reason}'")
-        
-        # Verify all calculations
-        if (actual_total_sale == expected_total_sale and 
-            actual_total_cost == expected_total_cost and 
-            actual_commission == expected_commission and
-            actual_discount == 300 and
-            actual_discount_reason == "مجاملة وكيل"):
+        if clients_resp.status_code == 200 and suppliers_resp.status_code == 200:
+            clients = clients_resp.json()
+            suppliers = suppliers_resp.json()
             
-            # Check client balance increased by exactly 1500 (not 1800)
-            status2, client_body = await api_request('GET', f"/clients")
-            if status2 == 200:
-                clients_list = client_body if isinstance(client_body, list) else client_body.get('data', [])
-                client = next((c for c in clients_list if c['id'] == test_data['client_id']), None)
-                if client:
-                    client_balances = client.get('balances', {})
-                    new_balance = client_balances.get('SAR') or 0
-                    balance_increase = new_balance - test_data['client_balance_before']
-                    print(f"   Client balance after booking: {new_balance} SAR")
-                    print(f"   Client balance before booking: {test_data['client_balance_before']} SAR")
-                    print(f"   Client balance increased by: {balance_increase} SAR (expected: 1500)")
-                    
-                    # Update the before balance for subsequent tests
-                    test_data['client_balance_before'] = new_balance
-                    
-                    if abs(balance_increase - 1500) < 0.01:  # Allow small floating point differences
-                        # Check journal entry
-                        status3, je_body = await api_request('GET', '/journal-entries')
-                        if status3 == 200:
-                            je_list = je_body if isinstance(je_body, list) else je_body.get('data', [])
-                            # Find the journal entry for this booking
-                            je = next((j for j in je_list if j.get('ref_type') == 'package_booking' and j.get('ref_id') == test_data['booking1_id']), None)
-                            if je:
-                                # Check for client receivable debit of 1500
-                                client_line = next((l for l in je['lines'] if l.get('account_code') == '1301'), None)
-                                if client_line and client_line.get('debit') == 1500:
-                                    print(f"✅ TEST 3 PASSED - Booking with registrants + discount working correctly")
-                                    print(f"   - Base room sale: 1800 SAR")
-                                    print(f"   - Discount: 300 SAR")
-                                    print(f"   - Total sale: 1500 SAR")
-                                    print(f"   - Total cost: 600 SAR")
-                                    print(f"   - Commission: 900 SAR")
-                                    print(f"   - Discount reason stored correctly")
-                                    print(f"   - Client balance increased by exactly 1500 SAR")
-                                    print(f"   - Journal entry has debit 1500 on client receivable")
-                                    return True
-                                else:
-                                    print(f"❌ TEST 3 FAILED - Journal entry client debit incorrect: {client_line.get('debit') if client_line else 'not found'}")
-                            else:
-                                print(f"❌ TEST 3 FAILED - Journal entry not found for booking")
-                    else:
-                        print(f"❌ TEST 3 FAILED - Client balance increase incorrect: {balance_increase} (expected 1500)")
-            else:
-                print(f"❌ TEST 3 FAILED - Could not verify client balance")
-        else:
-            print(f"❌ TEST 3 FAILED - Calculation mismatch")
-    else:
-        print(f"❌ TEST 3 FAILED - Status {status}: {body}")
-    
-    return False
-
-async def test_booking_without_registrants_with_discount():
-    """Test 4: POST booking WITHOUT registrants but WITH discount"""
-    print("\n=== TEST 4: POST BOOKING WITHOUT REGISTRANTS BUT WITH DISCOUNT ===")
-    
-    booking_data = {
-        "payment_method": "credit",
-        "client_id": test_data['client_id'],
-        "pax_adults": 2,
-        "discount": 100,
-        "discount_reason": "خصم رضيع"
-    }
-    
-    status, body = await api_request('POST', f"/packages/{test_data['package_id']}/bookings", booking_data)
-    
-    if status == 200:
-        test_data['booking2_id'] = body['id']
-        
-        # Component sale: 500 * 2 = 1000
-        # After discount: 1000 - 100 = 900
-        expected_total_sale = 900
-        actual_total_sale = body.get('total_sale')
-        
-        print(f"   Component sale (500 * 2): 1000 SAR")
-        print(f"   Discount: {body.get('discount')} SAR")
-        print(f"   Total sale: {actual_total_sale} SAR (expected: {expected_total_sale})")
-        
-        if actual_total_sale == expected_total_sale:
-            print(f"✅ TEST 4 PASSED - Booking without registrants but with discount working correctly")
-            print(f"   - Component sale: 1000 SAR")
-            print(f"   - Discount: 100 SAR")
-            print(f"   - Total sale: 900 SAR")
-            return True
-        else:
-            print(f"❌ TEST 4 FAILED - Total sale mismatch: {actual_total_sale} (expected {expected_total_sale})")
-    else:
-        print(f"❌ TEST 4 FAILED - Status {status}: {body}")
-    
-    return False
-
-async def test_discount_floor():
-    """Test 5: Discount floor - total_sale should not go negative"""
-    print("\n=== TEST 5: DISCOUNT FLOOR (TOTAL_SALE >= 0) ===")
-    
-    booking_data = {
-        "payment_method": "credit",
-        "client_id": test_data['client_id'],
-        "pax_adults": 1,
-        "discount": 99999,
-        "discount_reason": "خصم كبير جداً"
-    }
-    
-    status, body = await api_request('POST', f"/packages/{test_data['package_id']}/bookings", booking_data)
-    
-    if status == 200:
-        test_data['booking3_id'] = body['id']
-        
-        actual_total_sale = body.get('total_sale')
-        
-        print(f"   Component sale (500 * 1): 500 SAR")
-        print(f"   Discount requested: 99999 SAR")
-        print(f"   Total sale: {actual_total_sale} SAR (expected: 0)")
-        
-        if actual_total_sale == 0:
-            print(f"✅ TEST 5 PASSED - Discount floor working correctly (total_sale = 0, not negative)")
-            return True
-        else:
-            print(f"❌ TEST 5 FAILED - Total sale should be 0, got: {actual_total_sale}")
-    else:
-        print(f"❌ TEST 5 FAILED - Status {status}: {body}")
-    
-    return False
-
-async def test_patch_edit_reason_only():
-    """Test 6: PATCH edit - reason only (light update)"""
-    print("\n=== TEST 6: PATCH EDIT - REASON ONLY (LIGHT UPDATE) ===")
-    
-    if not test_data['booking1_id']:
-        print(f"❌ TEST 6 SKIPPED - Booking 1 not created")
-        return False
-    
-    patch_data = {
-        "discount_reason": "سبب معدل"
-    }
-    
-    status, body = await api_request('PATCH', f"/packages/{test_data['package_id']}/bookings/{test_data['booking1_id']}", patch_data)
-    
-    if status == 200:
-        has_light_update = body.get('_light_update')
-        actual_discount = body.get('discount')
-        actual_total_sale = body.get('total_sale')
-        actual_discount_reason = body.get('discount_reason')
-        
-        print(f"   _light_update: {has_light_update}")
-        print(f"   Discount: {actual_discount} SAR (should stay 300)")
-        print(f"   Total sale: {actual_total_sale} SAR (should stay 1500)")
-        print(f"   Discount reason: '{actual_discount_reason}' (should be 'سبب معدل')")
-        
-        if (has_light_update == True and 
-            actual_discount == 300 and 
-            actual_total_sale == 1500 and
-            actual_discount_reason == "سبب معدل"):
-            print(f"✅ TEST 6 PASSED - Light update working correctly")
-            print(f"   - _light_update flag present")
-            print(f"   - Discount unchanged (300)")
-            print(f"   - Total sale unchanged (1500)")
-            print(f"   - Discount reason updated to 'سبب معدل'")
-            return True
-        else:
-            print(f"❌ TEST 6 FAILED - Light update not working as expected")
-    else:
-        print(f"❌ TEST 6 FAILED - Status {status}: {body}")
-    
-    return False
-
-async def test_patch_edit_amount_change():
-    """Test 7: PATCH edit - amount change (full recalc)"""
-    print("\n=== TEST 7: PATCH EDIT - AMOUNT CHANGE (FULL RECALC) ===")
-    
-    if not test_data['booking1_id']:
-        print(f"❌ TEST 7 SKIPPED - Booking 1 not created")
-        return False
-    
-    # Get client balance before edit
-    status_pre, client_body_pre = await api_request('GET', '/clients')
-    if status_pre != 200:
-        print(f"❌ TEST 7 FAILED - Could not get client balance before edit")
-        return False
-    
-    clients_list_pre = client_body_pre if isinstance(client_body_pre, list) else client_body_pre.get('data', [])
-    client_pre = next((c for c in clients_list_pre if c['id'] == test_data['client_id']), None)
-    client_balances_pre = client_pre.get('balances', {}) if client_pre else {}
-    balance_before_edit = client_balances_pre.get('SAR') or 0
-    print(f"   Client balance before edit: {balance_before_edit} SAR")
-    
-    patch_data = {
-        "discount": 500
-    }
-    
-    status, body = await api_request('PATCH', f"/packages/{test_data['package_id']}/bookings/{test_data['booking1_id']}", patch_data)
-    
-    if status == 200:
-        has_light_update = body.get('_light_update')
-        actual_discount = body.get('discount')
-        actual_total_sale = body.get('total_sale')
-        
-        # Base room sale: 1800, new discount: 500, expected total_sale: 1300
-        expected_total_sale = 1300
-        
-        print(f"   _light_update: {has_light_update} (should be False or absent)")
-        print(f"   Discount: {actual_discount} SAR (should be 500)")
-        print(f"   Total sale: {actual_total_sale} SAR (expected: {expected_total_sale})")
-        
-        if (not has_light_update and 
-            actual_discount == 500 and 
-            actual_total_sale == expected_total_sale):
+            client_name = clients[0]['name'] if clients else None
+            supplier_name = suppliers[0]['name'] if suppliers else None
             
-            # Check client balance adjustment
-            status_post, client_body_post = await api_request('GET', '/clients')
-            if status_post == 200:
-                clients_list_post = client_body_post if isinstance(client_body_post, list) else client_body_post.get('data', [])
-                client_post = next((c for c in clients_list_post if c['id'] == test_data['client_id']), None)
-                client_balances_post = client_post.get('balances', {}) if client_post else {}
-                balance_after_edit = client_balances_post.get('SAR') or 0
-                balance_change = balance_after_edit - balance_before_edit
-                
-                # Net change should be -200 (from 1500 to 1300)
-                expected_change = -200
-                
-                print(f"   Client balance after edit: {balance_after_edit} SAR")
-                print(f"   Net balance change: {balance_change} SAR (expected: {expected_change})")
-                
-                if balance_change == expected_change:
-                    print(f"✅ TEST 7 PASSED - Full recalc on amount change working correctly")
-                    print(f"   - No _light_update flag (full recalc)")
-                    print(f"   - Discount changed to 500 SAR")
-                    print(f"   - Total sale recalculated to 1300 SAR (1800 - 500)")
-                    print(f"   - Client balance adjusted by -200 SAR (net effect)")
-                    return True
-                else:
-                    print(f"❌ TEST 7 FAILED - Client balance change incorrect: {balance_change} (expected {expected_change})")
-            else:
-                print(f"❌ TEST 7 FAILED - Could not verify client balance after edit")
+            print(f"✅ Found {len(clients)} clients, using: {client_name}")
+            print(f"✅ Found {len(suppliers)} suppliers, using: {supplier_name}")
+            
+            return client_name, supplier_name
         else:
-            print(f"❌ TEST 7 FAILED - Full recalc not working as expected")
-    else:
-        print(f"❌ TEST 7 FAILED - Status {status}: {body}")
-    
-    return False
+            print(f"❌ Failed to get clients/suppliers")
+            return None, None
+    except Exception as e:
+        print(f"❌ Error getting clients/suppliers: {e}")
+        return None, None
 
-async def cleanup():
-    """Cleanup: Delete all bookings and package, verify client balance restored"""
-    print("\n=== CLEANUP: DELETE BOOKINGS AND PACKAGE ===")
+def test_tickets_case_1(client_name, supplier_name):
+    """
+    CASE 1: THE USER'S EXACT SCENARIO
+    Rows all sharing date:"2026-08-19" (transaction date), same passenger_name "صالح محمد قائد",
+    NO pnr, travel_date "2026-09-01" for row A and travel_date "2026-10-15" for row B
+    → BOTH must have __dup === false.
+    """
+    print("\n" + "=" * 80)
+    print("TICKETS CASE 1: User's Exact Scenario - Same name, same transaction date, DIFFERENT travel dates")
+    print("=" * 80)
     
-    # Delete all bookings
-    bookings_to_delete = [
-        ('booking1', test_data['booking1_id']),
-        ('booking2', test_data['booking2_id']),
-        ('booking3', test_data['booking3_id'])
+    rows = [
+        {
+            "date": "2026-08-19",
+            "passenger_name": "صالح محمد قائد",
+            "travel_date": "2026-09-01",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        },
+        {
+            "date": "2026-08-19",
+            "passenger_name": "صالح محمد قائد",
+            "travel_date": "2026-10-15",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        }
     ]
     
-    deleted_count = 0
-    for name, booking_id in bookings_to_delete:
-        if booking_id:
-            status, body = await api_request('DELETE', f"/packages/{test_data['package_id']}/bookings/{booking_id}")
-            if status == 200:
-                print(f"✅ Deleted {name} (ID: {booking_id})")
-                deleted_count += 1
-            else:
-                print(f"❌ Failed to delete {name} - Status {status}: {body}")
-    
-    # Delete package
-    if test_data['package_id']:
-        status, body = await api_request('DELETE', f"/packages/{test_data['package_id']}")
-        if status == 200:
-            print(f"✅ Deleted package (ID: {test_data['package_id']})")
-        else:
-            print(f"❌ Failed to delete package - Status {status}: {body}")
-    
-    # Verify client balance returned to original
-    status, client_body = await api_request('GET', '/clients')
-    if status == 200:
-        clients_list = client_body if isinstance(client_body, list) else client_body.get('data', [])
-        client = next((c for c in clients_list if c['id'] == test_data['client_id']), None)
-        if client:
-            client_balances = client.get('balances', {})
-            final_balance = client_balances.get('SAR') or 0
-            print(f"   Client balance AFTER cleanup: {final_balance} SAR")
-            print(f"   Client balance BEFORE tests: {test_data['client_balance_before']} SAR")
+    try:
+        resp = session.post(f"{BASE_URL}/import/tickets/preview", json={"rows": rows})
+        print(f"Status: {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            result_rows = data.get('rows', [])
             
-            if final_balance == test_data['client_balance_before']:
-                print(f"✅ CLEANUP VERIFIED - Client balance restored to original value")
+            row_a_dup = result_rows[0].get('__dup', False)
+            row_b_dup = result_rows[1].get('__dup', False)
+            
+            print(f"Row A (travel_date=2026-09-01): __dup = {row_a_dup}")
+            print(f"Row B (travel_date=2026-10-15): __dup = {row_b_dup}")
+            
+            if row_a_dup == False and row_b_dup == False:
+                print("✅ CASE 1 PASSED: Both rows accepted (no false duplicate)")
                 return True
             else:
-                print(f"❌ CLEANUP FAILED - Client balance not restored (diff: {final_balance - test_data['client_balance_before']} SAR)")
-    
-    # Verify package deleted
-    status, pkg_body = await api_request('GET', '/packages')
-    if status == 200:
-        pkg_list = pkg_body if isinstance(pkg_body, list) else pkg_body.get('data', [])
-        pkg_exists = any(p['id'] == test_data['package_id'] for p in pkg_list)
-        if not pkg_exists:
-            print(f"✅ CLEANUP VERIFIED - Package removed from GET /api/packages")
+                print(f"❌ CASE 1 FAILED: Expected both __dup=false, got A={row_a_dup}, B={row_b_dup}")
+                return False
         else:
-            print(f"❌ CLEANUP FAILED - Package still exists in database")
-    
-    return True
+            print(f"❌ Request failed: {resp.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
 
-async def main():
-    """Main test runner"""
+def test_tickets_case_2(client_name, supplier_name):
+    """
+    CASE 2: Same name + SAME travel_date "2026-09-01" twice in batch
+    → second row __dup mentions 'اسم + نفس تاريخ السفر'.
+    """
+    print("\n" + "=" * 80)
+    print("TICKETS CASE 2: Same name + SAME travel_date in batch")
     print("=" * 80)
-    print("RAHAAL ERP v3.17 - BOOKING MANUAL DISCOUNT TESTS")
+    
+    rows = [
+        {
+            "date": "2026-08-19",
+            "passenger_name": "أحمد علي محمد",
+            "travel_date": "2026-09-01",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        },
+        {
+            "date": "2026-08-19",
+            "passenger_name": "أحمد علي محمد",
+            "travel_date": "2026-09-01",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        }
+    ]
+    
+    try:
+        resp = session.post(f"{BASE_URL}/import/tickets/preview", json={"rows": rows})
+        print(f"Status: {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            result_rows = data.get('rows', [])
+            
+            row_a_dup = result_rows[0].get('__dup', False)
+            row_b_dup = result_rows[1].get('__dup', False)
+            
+            print(f"Row A: __dup = {row_a_dup}")
+            print(f"Row B: __dup = {row_b_dup}")
+            
+            if row_a_dup == False and row_b_dup and 'اسم' in str(row_b_dup) and 'تاريخ السفر' in str(row_b_dup):
+                print(f"✅ CASE 2 PASSED: Second row flagged as duplicate with message: {row_b_dup}")
+                return True
+            else:
+                print(f"❌ CASE 2 FAILED: Expected second row to be flagged, got A={row_a_dup}, B={row_b_dup}")
+                return False
+        else:
+            print(f"❌ Request failed: {resp.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+def test_tickets_case_3(client_name, supplier_name):
+    """
+    CASE 3: Same name, travel_date EMPTY on both rows, date:"2026-08-19" identical
+    → BOTH __dup === false (no date => no block).
+    """
+    print("\n" + "=" * 80)
+    print("TICKETS CASE 3: Same name, EMPTY travel_date, same transaction date")
+    print("=" * 80)
+    
+    rows = [
+        {
+            "date": "2026-08-19",
+            "passenger_name": "خالد سعيد",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        },
+        {
+            "date": "2026-08-19",
+            "passenger_name": "خالد سعيد",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        }
+    ]
+    
+    try:
+        resp = session.post(f"{BASE_URL}/import/tickets/preview", json={"rows": rows})
+        print(f"Status: {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            result_rows = data.get('rows', [])
+            
+            row_a_dup = result_rows[0].get('__dup', False)
+            row_b_dup = result_rows[1].get('__dup', False)
+            
+            print(f"Row A (no travel_date): __dup = {row_a_dup}")
+            print(f"Row B (no travel_date): __dup = {row_b_dup}")
+            
+            if row_a_dup == False and row_b_dup == False:
+                print("✅ CASE 3 PASSED: Both rows accepted (empty travel_date = no dedup)")
+                return True
+            else:
+                print(f"❌ CASE 3 FAILED: Expected both __dup=false, got A={row_a_dup}, B={row_b_dup}")
+                return False
+        else:
+            print(f"❌ Request failed: {resp.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+def test_tickets_case_4(client_name, supplier_name):
+    """
+    CASE 4: PNR "XX99" on two rows with different travel_dates → both false;
+    same travel_date → second flagged (PNR + نفس تاريخ السفر).
+    """
+    print("\n" + "=" * 80)
+    print("TICKETS CASE 4: PNR dedup with different and same travel dates")
+    print("=" * 80)
+    
+    # Test 4a: Same PNR, different travel dates
+    rows_4a = [
+        {
+            "date": "2026-08-19",
+            "pnr": "XX99",
+            "passenger_name": "محمد أحمد",
+            "travel_date": "2026-09-01",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        },
+        {
+            "date": "2026-08-19",
+            "pnr": "XX99",
+            "passenger_name": "محمد أحمد",
+            "travel_date": "2026-10-01",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        }
+    ]
+    
+    try:
+        resp = session.post(f"{BASE_URL}/import/tickets/preview", json={"rows": rows_4a})
+        print(f"Status (4a - different dates): {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            result_rows = data.get('rows', [])
+            
+            row_a_dup = result_rows[0].get('__dup', False)
+            row_b_dup = result_rows[1].get('__dup', False)
+            
+            print(f"  Row A (PNR=XX99, travel=2026-09-01): __dup = {row_a_dup}")
+            print(f"  Row B (PNR=XX99, travel=2026-10-01): __dup = {row_b_dup}")
+            
+            test_4a_pass = (row_a_dup == False and row_b_dup == False)
+            if test_4a_pass:
+                print("  ✅ 4a PASSED: Different travel dates accepted")
+            else:
+                print(f"  ❌ 4a FAILED: Expected both false, got A={row_a_dup}, B={row_b_dup}")
+        else:
+            print(f"  ❌ Request failed: {resp.text}")
+            test_4a_pass = False
+    except Exception as e:
+        print(f"  ❌ Error: {e}")
+        test_4a_pass = False
+    
+    # Test 4b: Same PNR, same travel date
+    rows_4b = [
+        {
+            "date": "2026-08-19",
+            "pnr": "YY88",
+            "passenger_name": "علي حسن",
+            "travel_date": "2026-09-15",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        },
+        {
+            "date": "2026-08-19",
+            "pnr": "YY88",
+            "passenger_name": "علي حسن",
+            "travel_date": "2026-09-15",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        }
+    ]
+    
+    try:
+        resp = session.post(f"{BASE_URL}/import/tickets/preview", json={"rows": rows_4b})
+        print(f"\nStatus (4b - same date): {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            result_rows = data.get('rows', [])
+            
+            row_a_dup = result_rows[0].get('__dup', False)
+            row_b_dup = result_rows[1].get('__dup', False)
+            
+            print(f"  Row A (PNR=YY88, travel=2026-09-15): __dup = {row_a_dup}")
+            print(f"  Row B (PNR=YY88, travel=2026-09-15): __dup = {row_b_dup}")
+            
+            test_4b_pass = (row_a_dup == False and row_b_dup and 'PNR' in str(row_b_dup) and 'تاريخ السفر' in str(row_b_dup))
+            if test_4b_pass:
+                print(f"  ✅ 4b PASSED: Second row flagged with: {row_b_dup}")
+            else:
+                print(f"  ❌ 4b FAILED: Expected second row flagged, got A={row_a_dup}, B={row_b_dup}")
+        else:
+            print(f"  ❌ Request failed: {resp.text}")
+            test_4b_pass = False
+    except Exception as e:
+        print(f"  ❌ Error: {e}")
+        test_4b_pass = False
+    
+    if test_4a_pass and test_4b_pass:
+        print("\n✅ CASE 4 PASSED: PNR dedup working correctly")
+        return True
+    else:
+        print("\n❌ CASE 4 FAILED")
+        return False
+
+def test_tickets_case_5(client_name, supplier_name):
+    """
+    CASE 5: DB-side test
+    Create ONE real ticket via POST /api/tickets (passenger "اختبار قاعدة v318", 
+    travel_date "2026-09-10", pnr "V318P") then preview rows:
+    - same name travel_date "2026-09-10" → dup
+    - same name travel_date "2026-09-11" → NOT dup
+    - same pnr "V318P" with travel_date "2026-09-11" → NOT dup
+    Then DELETE that ticket (cleanup).
+    """
+    print("\n" + "=" * 80)
+    print("TICKETS CASE 5: DB-side dedup test")
+    print("=" * 80)
+    
+    # Get client and supplier IDs
+    try:
+        clients_resp = session.get(f"{BASE_URL}/clients")
+        suppliers_resp = session.get(f"{BASE_URL}/suppliers")
+        
+        if clients_resp.status_code != 200 or suppliers_resp.status_code != 200:
+            print("❌ Failed to get client/supplier IDs")
+            return False
+        
+        clients = clients_resp.json()
+        suppliers = suppliers_resp.json()
+        
+        client_id = clients[0]['id'] if clients else None
+        supplier_id = suppliers[0]['id'] if suppliers else None
+        
+        if not client_id or not supplier_id:
+            print("❌ No client or supplier found")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error getting IDs: {e}")
+        return False
+    
+    # Create a real ticket
+    ticket_payload = {
+        "passenger_name": "اختبار قاعدة v318",
+        "travel_date": "2026-09-10",
+        "pnr": "V318P",
+        "currency": "USD",
+        "cost": 100,
+        "sale_price": 150,
+        "client_id": client_id,
+        "supplier_id": supplier_id,
+        "date": "2026-08-19",
+        "passport_no": "V318PASS",
+        "route": "صنعاء - القاهرة",
+        "passenger_phone": "777123456"
+    }
+    
+    ticket_id = None
+    
+    try:
+        # Create ticket
+        resp = session.post(f"{BASE_URL}/tickets", json=ticket_payload)
+        print(f"Create ticket status: {resp.status_code}")
+        
+        if resp.status_code != 200:
+            print(f"❌ Failed to create ticket: {resp.text}")
+            return False
+        
+        ticket_data = resp.json()
+        ticket_id = ticket_data.get('id')
+        print(f"✅ Created ticket with ID: {ticket_id}")
+        
+        # Test 5a: Same name, same travel_date → should be dup
+        rows_5a = [{
+            "date": "2026-08-19",
+            "passenger_name": "اختبار قاعدة v318",
+            "travel_date": "2026-09-10",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        }]
+        
+        resp = session.post(f"{BASE_URL}/import/tickets/preview", json={"rows": rows_5a})
+        print(f"\nTest 5a (same name, same date) status: {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            row_dup = data.get('rows', [{}])[0].get('__dup', False)
+            print(f"  __dup = {row_dup}")
+            test_5a_pass = bool(row_dup) and 'موجود مسبقاً' in str(row_dup)
+            if test_5a_pass:
+                print(f"  ✅ 5a PASSED: Detected as duplicate: {row_dup}")
+            else:
+                print(f"  ❌ 5a FAILED: Expected duplicate, got {row_dup}")
+        else:
+            print(f"  ❌ Request failed: {resp.text}")
+            test_5a_pass = False
+        
+        # Test 5b: Same name, different travel_date → should NOT be dup
+        rows_5b = [{
+            "date": "2026-08-19",
+            "passenger_name": "اختبار قاعدة v318",
+            "travel_date": "2026-09-11",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        }]
+        
+        resp = session.post(f"{BASE_URL}/import/tickets/preview", json={"rows": rows_5b})
+        print(f"\nTest 5b (same name, different date) status: {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            row_dup = data.get('rows', [{}])[0].get('__dup', False)
+            print(f"  __dup = {row_dup}")
+            test_5b_pass = (row_dup == False)
+            if test_5b_pass:
+                print(f"  ✅ 5b PASSED: NOT detected as duplicate")
+            else:
+                print(f"  ❌ 5b FAILED: Expected NOT duplicate, got {row_dup}")
+        else:
+            print(f"  ❌ Request failed: {resp.text}")
+            test_5b_pass = False
+        
+        # Test 5c: Same PNR, different travel_date → should NOT be dup
+        rows_5c = [{
+            "date": "2026-08-19",
+            "pnr": "V318P",
+            "passenger_name": "مسافر آخر",
+            "travel_date": "2026-09-11",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name
+        }]
+        
+        resp = session.post(f"{BASE_URL}/import/tickets/preview", json={"rows": rows_5c})
+        print(f"\nTest 5c (same PNR, different date) status: {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            row_dup = data.get('rows', [{}])[0].get('__dup', False)
+            print(f"  __dup = {row_dup}")
+            test_5c_pass = (row_dup == False)
+            if test_5c_pass:
+                print(f"  ✅ 5c PASSED: NOT detected as duplicate")
+            else:
+                print(f"  ❌ 5c FAILED: Expected NOT duplicate, got {row_dup}")
+        else:
+            print(f"  ❌ Request failed: {resp.text}")
+            test_5c_pass = False
+        
+        # Cleanup: Delete the ticket
+        if ticket_id:
+            resp = session.delete(f"{BASE_URL}/tickets/{ticket_id}")
+            print(f"\nCleanup - Delete ticket status: {resp.status_code}")
+            if resp.status_code == 200:
+                print("✅ Ticket deleted successfully")
+            else:
+                print(f"⚠️ Failed to delete ticket: {resp.text}")
+        
+        if test_5a_pass and test_5b_pass and test_5c_pass:
+            print("\n✅ CASE 5 PASSED: DB-side dedup working correctly")
+            return True
+        else:
+            print("\n❌ CASE 5 FAILED")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        # Cleanup on error
+        if ticket_id:
+            try:
+                session.delete(f"{BASE_URL}/tickets/{ticket_id}")
+                print("Cleanup: Deleted ticket after error")
+            except Exception:
+                pass
+        return False
+
+def test_visas_case_6(client_name, supplier_name):
+    """
+    CASE 6: Two rows same passenger_name "معتمر تجربة v318", same date:"2026-08-19",
+    entry_date "2026-09-01" vs "2026-10-01" → both __dup false.
+    """
+    print("\n" + "=" * 80)
+    print("VISAS CASE 6: Same name, same transaction date, DIFFERENT entry dates")
+    print("=" * 80)
+    
+    rows = [
+        {
+            "date": "2026-08-19",
+            "passenger_name": "معتمر تجربة v318",
+            "entry_date": "2026-09-01",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name,
+            "service_type": "تأشيرة عمرة"
+        },
+        {
+            "date": "2026-08-19",
+            "passenger_name": "معتمر تجربة v318",
+            "entry_date": "2026-10-01",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name,
+            "service_type": "تأشيرة عمرة"
+        }
+    ]
+    
+    try:
+        resp = session.post(f"{BASE_URL}/import/visas/preview", json={"rows": rows})
+        print(f"Status: {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            result_rows = data.get('rows', [])
+            
+            row_a_dup = result_rows[0].get('__dup', False)
+            row_b_dup = result_rows[1].get('__dup', False)
+            
+            print(f"Row A (entry_date=2026-09-01): __dup = {row_a_dup}")
+            print(f"Row B (entry_date=2026-10-01): __dup = {row_b_dup}")
+            
+            if row_a_dup == False and row_b_dup == False:
+                print("✅ CASE 6 PASSED: Both rows accepted (different entry dates)")
+                return True
+            else:
+                print(f"❌ CASE 6 FAILED: Expected both __dup=false, got A={row_a_dup}, B={row_b_dup}")
+                return False
+        else:
+            print(f"❌ Request failed: {resp.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+def test_visas_case_7(client_name, supplier_name):
+    """
+    CASE 7: Same passport_no "V318PP" same entry_date twice → second flagged;
+    different entry dates → both false.
+    """
+    print("\n" + "=" * 80)
+    print("VISAS CASE 7: Passport dedup with same and different entry dates")
+    print("=" * 80)
+    
+    # Test 7a: Same passport, same entry_date
+    rows_7a = [
+        {
+            "date": "2026-08-19",
+            "passport_no": "V318PP",
+            "passenger_name": "معتمر أول",
+            "entry_date": "2026-09-01",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name,
+            "service_type": "تأشيرة عمرة"
+        },
+        {
+            "date": "2026-08-19",
+            "passport_no": "V318PP",
+            "passenger_name": "معتمر أول",
+            "entry_date": "2026-09-01",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name,
+            "service_type": "تأشيرة عمرة"
+        }
+    ]
+    
+    try:
+        resp = session.post(f"{BASE_URL}/import/visas/preview", json={"rows": rows_7a})
+        print(f"Status (7a - same entry date): {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            result_rows = data.get('rows', [])
+            
+            row_a_dup = result_rows[0].get('__dup', False)
+            row_b_dup = result_rows[1].get('__dup', False)
+            
+            print(f"  Row A: __dup = {row_a_dup}")
+            print(f"  Row B: __dup = {row_b_dup}")
+            
+            test_7a_pass = (row_a_dup == False and row_b_dup and 'جواز' in str(row_b_dup))
+            if test_7a_pass:
+                print(f"  ✅ 7a PASSED: Second row flagged: {row_b_dup}")
+            else:
+                print(f"  ❌ 7a FAILED: Expected second row flagged, got A={row_a_dup}, B={row_b_dup}")
+        else:
+            print(f"  ❌ Request failed: {resp.text}")
+            test_7a_pass = False
+    except Exception as e:
+        print(f"  ❌ Error: {e}")
+        test_7a_pass = False
+    
+    # Test 7b: Same passport, different entry dates
+    rows_7b = [
+        {
+            "date": "2026-08-19",
+            "passport_no": "V318PP2",
+            "passenger_name": "معتمر ثاني",
+            "entry_date": "2026-09-01",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name,
+            "service_type": "تأشيرة عمرة"
+        },
+        {
+            "date": "2026-08-19",
+            "passport_no": "V318PP2",
+            "passenger_name": "معتمر ثاني",
+            "entry_date": "2026-10-01",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name,
+            "service_type": "تأشيرة عمرة"
+        }
+    ]
+    
+    try:
+        resp = session.post(f"{BASE_URL}/import/visas/preview", json={"rows": rows_7b})
+        print(f"\nStatus (7b - different entry dates): {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            result_rows = data.get('rows', [])
+            
+            row_a_dup = result_rows[0].get('__dup', False)
+            row_b_dup = result_rows[1].get('__dup', False)
+            
+            print(f"  Row A: __dup = {row_a_dup}")
+            print(f"  Row B: __dup = {row_b_dup}")
+            
+            test_7b_pass = (row_a_dup == False and row_b_dup == False)
+            if test_7b_pass:
+                print(f"  ✅ 7b PASSED: Both rows accepted (different entry dates)")
+            else:
+                print(f"  ❌ 7b FAILED: Expected both false, got A={row_a_dup}, B={row_b_dup}")
+        else:
+            print(f"  ❌ Request failed: {resp.text}")
+            test_7b_pass = False
+    except Exception as e:
+        print(f"  ❌ Error: {e}")
+        test_7b_pass = False
+    
+    if test_7a_pass and test_7b_pass:
+        print("\n✅ CASE 7 PASSED: Passport dedup working correctly")
+        return True
+    else:
+        print("\n❌ CASE 7 FAILED")
+        return False
+
+def test_visas_case_8(client_name, supplier_name):
+    """
+    CASE 8: Empty entry_date on both, same name → both false.
+    """
+    print("\n" + "=" * 80)
+    print("VISAS CASE 8: Same name, EMPTY entry_date")
+    print("=" * 80)
+    
+    rows = [
+        {
+            "date": "2026-08-19",
+            "passenger_name": "معتمر بدون تاريخ",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name,
+            "service_type": "تأشيرة عمرة"
+        },
+        {
+            "date": "2026-08-19",
+            "passenger_name": "معتمر بدون تاريخ",
+            "currency": "USD",
+            "cost": 100,
+            "sale_price": 150,
+            "client_name": client_name,
+            "supplier_name": supplier_name,
+            "service_type": "تأشيرة عمرة"
+        }
+    ]
+    
+    try:
+        resp = session.post(f"{BASE_URL}/import/visas/preview", json={"rows": rows})
+        print(f"Status: {resp.status_code}")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            result_rows = data.get('rows', [])
+            
+            row_a_dup = result_rows[0].get('__dup', False)
+            row_b_dup = result_rows[1].get('__dup', False)
+            
+            print(f"Row A (no entry_date): __dup = {row_a_dup}")
+            print(f"Row B (no entry_date): __dup = {row_b_dup}")
+            
+            if row_a_dup == False and row_b_dup == False:
+                print("✅ CASE 8 PASSED: Both rows accepted (empty entry_date = no dedup)")
+                return True
+            else:
+                print(f"❌ CASE 8 FAILED: Expected both __dup=false, got A={row_a_dup}, B={row_b_dup}")
+                return False
+        else:
+            print(f"❌ Request failed: {resp.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+def main():
+    """Run all v3.18 dedup tests"""
+    print("\n" + "=" * 80)
+    print("v3.18 DUPLICATE RULE FIX - COMPREHENSIVE REGRESSION TEST")
+    print("=" * 80)
+    print("Testing the critical bug fix where dedup key fell back to transaction date")
+    print("when travel_date/entry_date was empty, causing false duplicates.")
     print("=" * 80)
     
     # Login
-    if not await login():
-        print("\n❌ TESTS ABORTED - Login failed")
+    if not login():
+        print("\n❌ FATAL: Login failed, cannot proceed")
         return
     
-    # Setup
-    if not await setup_test_data():
-        print("\n❌ TESTS ABORTED - Setup failed")
+    # Get client and supplier
+    client_name, supplier_name = get_clients_and_suppliers()
+    if not client_name or not supplier_name:
+        print("\n❌ FATAL: Could not get client/supplier names")
         return
     
-    # Run tests
+    # Run all test cases
     results = {
-        'Test 3: Booking with registrants + discount': await test_booking_with_registrants_and_discount(),
-        'Test 4: Booking without registrants + discount': await test_booking_without_registrants_with_discount(),
-        'Test 5: Discount floor (total_sale >= 0)': await test_discount_floor(),
-        'Test 6: PATCH edit - reason only (light)': await test_patch_edit_reason_only(),
-        'Test 7: PATCH edit - amount change (full recalc)': await test_patch_edit_amount_change(),
+        "TICKETS CASE 1 (User's Exact Scenario)": test_tickets_case_1(client_name, supplier_name),
+        "TICKETS CASE 2 (Same name + same travel_date)": test_tickets_case_2(client_name, supplier_name),
+        "TICKETS CASE 3 (Empty travel_date)": test_tickets_case_3(client_name, supplier_name),
+        "TICKETS CASE 4 (PNR dedup)": test_tickets_case_4(client_name, supplier_name),
+        "TICKETS CASE 5 (DB-side dedup)": test_tickets_case_5(client_name, supplier_name),
+        "VISAS CASE 6 (Different entry dates)": test_visas_case_6(client_name, supplier_name),
+        "VISAS CASE 7 (Passport dedup)": test_visas_case_7(client_name, supplier_name),
+        "VISAS CASE 8 (Empty entry_date)": test_visas_case_8(client_name, supplier_name),
     }
-    
-    # Cleanup
-    await cleanup()
     
     # Summary
     print("\n" + "=" * 80)
@@ -545,11 +829,24 @@ async def main():
     total = len(results)
     
     for test_name, result in results.items():
-        status = "✅ PASS" if result else "❌ FAIL"
-        print(f"{status} - {test_name}")
+        status = "✅ PASSED" if result else "❌ FAILED"
+        print(f"{status}: {test_name}")
     
-    print(f"\nTotal: {passed}/{total} tests passed")
+    print("\n" + "=" * 80)
+    print(f"FINAL RESULT: {passed}/{total} tests passed")
     print("=" * 80)
+    
+    if passed == total:
+        print("\n🎉 ALL TESTS PASSED - v3.18 dedup fix is working correctly!")
+        print("\nKEY VERIFICATIONS:")
+        print("✅ Tickets use travel_date ONLY for dedup (not transaction date)")
+        print("✅ Visas use entry_date ONLY for dedup (not transaction date)")
+        print("✅ Empty travel_date/entry_date = NO dedup blocking")
+        print("✅ Different travel/entry dates = NOT duplicates")
+        print("✅ Same travel/entry dates = correctly flagged as duplicates")
+        print("✅ DB-side dedup working correctly")
+    else:
+        print(f"\n⚠️ {total - passed} test(s) failed - review output above")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

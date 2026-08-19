@@ -2882,7 +2882,7 @@ const TICKET_FIELDS = [
   { key: 'passenger_name', label: 'اسم المسافر', aliases: ['passenger', 'name', 'اسم المسافر', 'الاسم'] },
   { key: 'passport_no', label: 'رقم الجواز', aliases: ['passport', 'passport no', 'رقم الجواز'] },
   { key: 'phone', label: 'رقم الجوال', aliases: ['phone', 'mobile', 'الجوال', 'رقم الجوال', 'رقم الاتصال'] },
-  { key: 'travel_date', label: 'تاريخ السفر', aliases: ['travel date', 'departure date', 'تاريخ السفر'] },
+  { key: 'travel_date', label: 'تاريخ السفر', aliases: ['travel date', 'departure date', 'تاريخ السفر', 'تاريخ الرحلة', 'تاريخ المغادرة', 'flight date', 'departure', 'موعد السفر'] },
   { key: 'departure_time', label: 'وقت الإقلاع', aliases: ['departure time', 'وقت الإقلاع', 'وقت المغادرة'] },
   { key: 'return_date', label: 'تاريخ العودة', aliases: ['return date', 'تاريخ العودة'] },
   { key: 'ticket_type', label: 'نوع التذكرة', aliases: ['ticket type', 'نوع التذكرة'] },
@@ -3063,9 +3063,9 @@ function BulkImportDialog({ open, onOpenChange, kind, onDone }) {
       }
       if (!out.currency) out.currency = defaultCurrency
       else if (typeof out.currency === 'string') out.currency = out.currency.toUpperCase().trim()
-      // Auto-fix: default missing date to today
+      // Auto-fix: default missing TRANSACTION date to today (travel/entry dates must NEVER be auto-filled —
+      // v3.18: filling them with "today" made all same-name rows collide in the duplicate check)
       if (autoFix && (!out.date || out.date === '')) out.date = todayISO()
-      if (autoFix && (!out.travel_date || out.travel_date === '')) out.travel_date = todayISO()
       out.cost = Number(out.cost) || 0
       out.sale_price = Number(out.sale_price) || 0
       return out
