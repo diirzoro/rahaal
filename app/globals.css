@@ -149,12 +149,19 @@ table { min-width: max-content; }
    1) Hide number input spinners (up/down arrows) system-wide
    2) Comfortable minimum width + tabular digits so amounts never clip
    ============================================================ */
+/* v3.20 — broadened: catch spinners on ALL inputs (number, and any browser-added steppers) */
+input::-webkit-inner-spin-button,
+input::-webkit-outer-spin-button,
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button {
   -webkit-appearance: none !important;
   appearance: none !important;
   margin: 0 !important;
   display: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 input[type="number"] {
   -moz-appearance: textfield !important;

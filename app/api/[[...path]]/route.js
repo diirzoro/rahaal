@@ -1983,6 +1983,11 @@ async function handleRoute(request, { params }) {
         body.total_cost === undefined && body.total_sale === undefined &&
         // v3.17 — a discount amount change affects money => full recalc required
         (body.discount === undefined || Number(body.discount) === Number(oldBooking.discount || 0)) &&
+        // v3.19 — smart-discount flag or partner-commission changes => full recalc required
+        (body.discount_apply_cost === undefined || !!body.discount_apply_cost === !!oldBooking.discount_apply_cost) &&
+        (body.commission_partner_id === undefined || (body.commission_partner_id || null) === (oldBooking.commission_partner_id || null)) &&
+        (body.commission_share_mode === undefined || body.commission_share_mode === (oldBooking.commission_share_mode || 'amount')) &&
+        (body.commission_share_value === undefined || Number(body.commission_share_value) === Number(oldBooking.commission_share_value || 0)) &&
         (body.registrants === undefined)
       )
       if (lightOnly) {
@@ -2016,6 +2021,11 @@ async function handleRoute(request, { params }) {
             await updateBalance(db, 'suppliers', { id: comp.supplier_id, tenant_id: T }, cur, -(comp.cost_total || 0))
           }
         }
+      }
+      // v3.19 — Reverse old partner-commission share balance (it was applied as a negative on create)
+      if ((Number(oldBooking.commission_share_amount) || 0) > 0 && oldBooking.commission_partner_id) {
+        const oldPcCol = oldBooking.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
+        await updateBalance(db, oldPcCol, { id: oldBooking.commission_partner_id, tenant_id: T }, cur, +(Number(oldBooking.commission_share_amount) || 0))
       }
       const oldJe = await db.collection('journal_entries').findOne({ ref_type: 'package_booking', ref_id: bookingId2, tenant_id: T })
       const existingJeId = oldJe?.id || undefined
@@ -2094,10 +2104,30 @@ async function handleRoute(request, { params }) {
       // v3.17 — Manual discount on edit: explicit total_sale override wins; otherwise apply discount on computed sale
       const newDiscount = body.discount !== undefined ? Math.max(0, Number(body.discount) || 0) : (Number(oldBooking.discount) || 0)
       const newDiscountReason = body.discount_reason !== undefined ? String(body.discount_reason || '').trim().slice(0, 120) : (oldBooking.discount_reason || '')
+      // v3.19 — Smart discount: flag to also reduce COST (mirrors POST logic)
+      const newDiscountApplyCost = body.discount_apply_cost !== undefined ? !!body.discount_apply_cost : !!oldBooking.discount_apply_cost
       if (body.total_cost !== undefined && Number(body.total_cost) >= 0) total_cost = +Number(body.total_cost).toFixed(2)
+      const baseCostBeforeDiscount = total_cost
       if (body.total_sale !== undefined && Number(body.total_sale) >= 0) total_sale = +Number(body.total_sale).toFixed(2)
       else if (newDiscount > 0) total_sale = +Math.max(0, total_sale - newDiscount).toFixed(2)
+      if (newDiscount > 0 && newDiscountApplyCost) total_cost = +Math.max(0, total_cost - newDiscount).toFixed(2)
+      // Distribute any cost-discount proportionally over supplier snapshots (keeps supplier balances + JE consistent)
+      const costFactor = baseCostBeforeDiscount > 0 ? total_cost / baseCostBeforeDiscount : 1
+      if (costFactor !== 1) {
+        for (const c of newSnapshots) c.cost_total = +((c.cost_total || 0) * costFactor).toFixed(2)
+      }
       const commission = +(total_sale - total_cost).toFixed(2)
+      // v3.19 — Partner-commission share on edit: use new values if provided, otherwise keep old ones
+      const pcType = body.commission_partner_type !== undefined ? (body.commission_partner_type || null) : (oldBooking.commission_partner_type || null)
+      const pcId = body.commission_partner_id !== undefined ? (body.commission_partner_id || null) : (oldBooking.commission_partner_id || null)
+      const pcName = body.commission_partner_name !== undefined ? String(body.commission_partner_name || '').trim().slice(0, 80) : (oldBooking.commission_partner_name || '')
+      const pcMode = body.commission_share_mode !== undefined ? (body.commission_share_mode === 'percent' ? 'percent' : 'amount') : (oldBooking.commission_share_mode || 'amount')
+      const pcValue = body.commission_share_value !== undefined ? Math.max(0, Number(body.commission_share_value) || 0) : (Number(oldBooking.commission_share_value) || 0)
+      let newPartnerShare = 0
+      if (pcId && pcValue > 0 && commission > 0) {
+        newPartnerShare = pcMode === 'percent' ? +(commission * (pcValue / 100)).toFixed(2) : +pcValue.toFixed(2)
+        newPartnerShare = Math.min(newPartnerShare, commission)
+      }
       if (newPay === 'cash') {
         await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
       } else {
@@ -2107,6 +2137,11 @@ async function handleRoute(request, { params }) {
         if (c.supplier_id && c.cost_total) {
           await updateBalance(db, 'suppliers', { id: c.supplier_id, tenant_id: T }, cur, c.cost_total)
         }
+      }
+      // v3.19 — Apply new partner-commission share balance (negative = we owe the partner)
+      if (newPartnerShare > 0 && pcId) {
+        const pcCol = pcType === 'supplier' ? 'suppliers' : 'clients'
+        await updateBalance(db, pcCol, { id: pcId, tenant_id: T }, cur, -newPartnerShare)
       }
       const updatedBooking = {
         ...oldBooking,
@@ -2118,7 +2153,13 @@ async function handleRoute(request, { params }) {
         rooms_summary: newRoomsSummary,
         pax_count: newPax, currency: cur,
         total_cost, total_sale, commission,
-        discount: newDiscount, discount_reason: newDiscountReason,
+        discount: newDiscount, discount_reason: newDiscountReason, discount_apply_cost: newDiscountApplyCost,
+        commission_partner_type: pcType,
+        commission_partner_id: pcId,
+        commission_partner_name: pcName,
+        commission_share_mode: pcMode,
+        commission_share_value: pcValue,
+        commission_share_amount: newPartnerShare,
         payment_method: newPay,
         box_id: box?.id || null, box_name: box?.name_ar || null,
         transport_id: newTransport?.id || null,
@@ -2154,10 +2195,15 @@ async function handleRoute(request, { params }) {
         supGrouped[c.supplier_id].amount += c.cost_total
       }
       for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
-      if (commission > 0) lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkgDoc.name}`, debit: 0, credit: commission })
+      // v3.19 — Balanced JE: revenue = sale - Σ(supplier credits) - partnerShare (mirrors POST logic)
+      const supSumJE = +Object.values(supGrouped).reduce((s, x) => s + +x.amount.toFixed(2), 0).toFixed(2)
+      const commissionJE = +(total_sale - supSumJE).toFixed(2)
+      const revenueNet = +(commissionJE - newPartnerShare).toFixed(2)
+      if (revenueNet !== 0) lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkgDoc.name}`, debit: 0, credit: revenueNet })
+      if (newPartnerShare > 0) lines.push({ account_code: pcType === 'supplier' ? '2101' : '1301', account_name: pcType === 'supplier' ? 'الموردون' : 'العملاء', party_type: pcType, party_id: pcId, party_name: pcName || 'شريك عمولة', debit: 0, credit: newPartnerShare })
       await createJournalEntry(db, T, {
         date: oldJe?.date || updatedBooking.created_at || new Date(),
-        description: `تسجيل ${updatedBooking.pilgrim_name} في ${pkgDoc.name} — ${newPax} فرد (تعديل)`,
+        description: `تسجيل ${updatedBooking.pilgrim_name} في ${pkgDoc.name} — ${newPax} فرد (تعديل)${newPartnerShare > 0 ? ` — عمولة مشتركة ${newPartnerShare} مع ${pcName || 'شريك'}` : ''}`,
         ref_type: 'package_booking', ref_id: bookingId2, currency: cur, lines,
       }, { skipQuota: true, existingJeId, createdAt: oldJe?.created_at || new Date() })
       return ok({ ...updatedBooking, _id: undefined, _full_recalc: true })
@@ -2237,7 +2283,7 @@ async function handleRoute(request, { params }) {
       if (comps.length === 0) return bad('لا توجد مكونات في الباكج — أضف المكونات قبل التسجيل')
       const pax = totalPax
       const cur = pkg.currency
-      const total_cost = +comps.reduce((s, c) => s + (c.cost_per_pax * paxBilled), 0).toFixed(2)
+      let total_cost = +comps.reduce((s, c) => s + (c.cost_per_pax * paxBilled), 0).toFixed(2)
       let total_sale = +comps.reduce((s, c) => s + (c.sale_per_pax * paxBilled), 0).toFixed(2)
       // v3.15 — Room-type pricing: when the package defines room prices and registrants chose rooms,
       // the sale side is computed from room prices (billed persons only: infants excluded).
@@ -2255,9 +2301,16 @@ async function handleRoute(request, { params }) {
         if (roomSale > 0) total_sale = +roomSale.toFixed(2)
       }
       // v3.17 — Manual booking discount (B2B flexibility: child no-bed, infant, partner-office courtesy...)
+      // v3.19 — Smart discount: optional checkbox also reduces COST (keeps margin when a service like a bed is excluded)
       const discount = Math.max(0, Number(b.discount) || 0)
       const discountReason = String(b.discount_reason || '').trim().slice(0, 120)
-      if (discount > 0) total_sale = +Math.max(0, total_sale - discount).toFixed(2)
+      const discountApplyCost = !!b.discount_apply_cost
+      const baseCostBeforeDiscount = total_cost
+      if (discount > 0) {
+        total_sale = +Math.max(0, total_sale - discount).toFixed(2)
+        if (discountApplyCost) total_cost = +Math.max(0, total_cost - discount).toFixed(2)
+      }
+      const costFactor = baseCostBeforeDiscount > 0 ? total_cost / baseCostBeforeDiscount : 1
       const commission = +(total_sale - total_cost).toFixed(2)
       let box = null
       if (payMethod === 'cash') {
@@ -2283,12 +2336,12 @@ async function handleRoute(request, { params }) {
         birth_date: b.birth_date || null,
         age_category: b.age_category || null,
         total_cost, total_sale, commission,
-        discount, discount_reason: discountReason,
+        discount, discount_reason: discountReason, discount_apply_cost: discountApplyCost,
         payment_method: payMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
         transport_id: transport?.id || null,
         transport_name: transport?.name || null,
         transport_type: transport?.type || null,
-        component_snapshots: comps.map(c => ({ id: c.id, name: c.name, supplier_id: c.supplier_id, supplier_name: c.supplier_name, cost_per_pax: c.cost_per_pax, sale_per_pax: c.sale_per_pax, cost_total: c.cost_per_pax * paxBilled, sale_total: c.sale_per_pax * paxBilled })),
+        component_snapshots: comps.map(c => ({ id: c.id, name: c.name, supplier_id: c.supplier_id, supplier_name: c.supplier_name, cost_per_pax: c.cost_per_pax, sale_per_pax: c.sale_per_pax, cost_total: +(c.cost_per_pax * paxBilled * costFactor).toFixed(2), sale_total: c.sale_per_pax * paxBilled })),
         notes: b.notes || '', created_at: new Date(), created_by: sess.user.email,
       }
       await db.collection('package_bookings').insertOne(bookingDoc)
@@ -2299,21 +2352,55 @@ async function handleRoute(request, { params }) {
         const newStatus = newBooked >= transport.capacity ? 'full' : transport.status
         await db.collection('package_transports').updateOne({ id: transport.id, tenant_id: T }, { $set: { seats_booked: newBooked, status: newStatus } })
       }
-      // Balances
+      // v3.19 — Partner commission share (generalized from tickets)
+      bookingDoc.commission_partner_type = b.commission_partner_type || null
+      bookingDoc.commission_partner_id = b.commission_partner_id || null
+      bookingDoc.commission_partner_name = b.commission_partner_name || ''
+      bookingDoc.commission_share_mode = b.commission_share_mode === 'percent' ? 'percent' : 'amount'
+      bookingDoc.commission_share_value = Number(b.commission_share_value) || 0
+      let partnerShare = 0
+      if (bookingDoc.commission_partner_id && bookingDoc.commission_share_value > 0 && commission > 0) {
+        if (bookingDoc.commission_share_mode === 'percent') partnerShare = +(commission * (bookingDoc.commission_share_value / 100)).toFixed(2)
+        else partnerShare = +Number(bookingDoc.commission_share_value).toFixed(2)
+        partnerShare = Math.min(partnerShare, commission)
+      }
+      bookingDoc.commission_share_amount = partnerShare
+      const officeNetCommission = +(commission - partnerShare).toFixed(2)
+      // Persist partner-share fields (booking was already inserted above)
+      if (bookingDoc.commission_partner_id || partnerShare > 0) {
+        await db.collection('package_bookings').updateOne({ id: bookingDoc.id, tenant_id: T }, {
+          $set: {
+            commission_partner_type: bookingDoc.commission_partner_type,
+            commission_partner_id: bookingDoc.commission_partner_id,
+            commission_partner_name: bookingDoc.commission_partner_name,
+            commission_share_mode: bookingDoc.commission_share_mode,
+            commission_share_value: bookingDoc.commission_share_value,
+            commission_share_amount: partnerShare,
+          }
+        })
+      }
+      // Balances (v3.19: costFactor distributes any cost-discount proportionally over suppliers)
       if (payMethod === 'cash') await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
       else await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
-      for (const c of comps) await updateBalance(db, 'suppliers', { id: c.supplier_id, tenant_id: T }, cur, c.cost_per_pax * paxBilled)
-      // Single combined JE
+      for (const c of comps) await updateBalance(db, 'suppliers', { id: c.supplier_id, tenant_id: T }, cur, +(c.cost_per_pax * paxBilled * costFactor).toFixed(2))
+      if (partnerShare > 0 && bookingDoc.commission_partner_id) {
+        const col = bookingDoc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
+        await updateBalance(db, col, { id: bookingDoc.commission_partner_id, tenant_id: T }, cur, -partnerShare)
+      }
+      // Single combined JE — mathematically balanced: revenue = sale - Σ(supplier credits) - partnerShare
       const lines = []
       if (payMethod === 'cash') lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
       else lines.push({ account_code: '1301', account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
-      // Group supplier credits (one line per supplier)
       const supGrouped = {}
-      for (const c of comps) { supGrouped[c.supplier_id] = (supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }); supGrouped[c.supplier_id].amount += c.cost_per_pax * pax }
-      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
-      if (commission > 0) lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name}`, debit: 0, credit: commission })
+      for (const c of comps) { supGrouped[c.supplier_id] = (supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }); supGrouped[c.supplier_id].amount += c.cost_per_pax * paxBilled * costFactor }
+      let supSum = 0
+      for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
+      const commissionJE = +(total_sale - supSum).toFixed(2)
+      const revenueNet = +(commissionJE - partnerShare).toFixed(2)
+      if (revenueNet !== 0) lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name}`, debit: 0, credit: revenueNet })
+      if (partnerShare > 0) lines.push({ account_code: bookingDoc.commission_partner_type === 'supplier' ? '2101' : '1301', account_name: bookingDoc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: bookingDoc.commission_partner_type, party_id: bookingDoc.commission_partner_id, party_name: bookingDoc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
       await createJournalEntry(db, T, {
-        date: new Date(), description: `تسجيل ${bookingDoc.pilgrim_name} في ${pkg.name} — ${pax} فرد`,
+        date: new Date(), description: `تسجيل ${bookingDoc.pilgrim_name} في ${pkg.name} — ${pax} فرد${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${bookingDoc.commission_partner_name}` : ''}`,
         ref_type: 'package_booking', ref_id: bookingDoc.id, currency: cur, lines,
       })
       const { _id, ...rest } = bookingDoc; return ok(rest)
@@ -3909,12 +3996,32 @@ async function createVisa(db, T, b, opts = {}) {
     expected_exit_date: b.expected_exit_date ? new Date(b.expected_exit_date) : null,
     is_exited: !!b.is_exited,
     cost, sale_price: sale, commission,
+    // v3.19 — Commission Sharing (partner split) — generalized from tickets v3.9.27
+    commission_partner_type: b.commission_partner_type || null,   // 'client' | 'supplier' | null
+    commission_partner_id: b.commission_partner_id || null,
+    commission_partner_name: b.commission_partner_name || '',
+    commission_share_mode: b.commission_share_mode === 'percent' ? 'percent' : 'amount',
+    commission_share_value: Number(b.commission_share_value) || 0,
+    commission_share_amount: 0,
     payment_method: paymentMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
     created_at: opts.createdAt || new Date(),
     ...(opts.existingId ? { updated_at: new Date() } : {}),
   }
+  // v3.19 — Compute partner commission share amount (same rules as tickets)
+  let partnerShare = 0
+  if (doc.commission_partner_id && doc.commission_share_value > 0 && commission > 0) {
+    if (doc.commission_share_mode === 'percent') partnerShare = +(commission * (doc.commission_share_value / 100)).toFixed(2)
+    else partnerShare = +Number(doc.commission_share_value).toFixed(2)
+    partnerShare = Math.min(partnerShare, commission)
+  }
+  doc.commission_share_amount = partnerShare
+  const officeNetCommission = +(commission - partnerShare).toFixed(2)
   await db.collection('visas').insertOne(doc)
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
+  if (partnerShare > 0 && doc.commission_partner_id) {
+    const col = doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
+    await updateBalance(db, col, { id: doc.commission_partner_id, tenant_id: T }, b.currency, -partnerShare)
+  }
   const lines = []
   if (paymentMethod === 'cash') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
@@ -3924,9 +4031,14 @@ async function createVisa(db, T, b, opts = {}) {
     lines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
   }
   lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
-  lines.push({ account_code: '4102', account_name: 'إيرادات عمولات التأشيرات', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التأشيرات', debit: 0, credit: commission })
+  if (officeNetCommission !== 0) {
+    lines.push({ account_code: '4102', account_name: 'إيرادات عمولات التأشيرات', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التأشيرات', debit: 0, credit: officeNetCommission })
+  }
+  if (partnerShare > 0) {
+    lines.push({ account_code: doc.commission_partner_type === 'supplier' ? '2101' : '1301', account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+  }
   await createJournalEntry(db, T, {
-    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.passenger_name || cli?.name || doc.client_name || sup.name}`,
+    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.passenger_name || cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
     ref_type: 'visa', ref_id: doc.id, currency: b.currency, lines,
   }, { skipQuota: !!opts.skipQuota })
   // v3.10.5 — Auto-create Visa Monitor record if destination_country + passport are provided
@@ -4014,12 +4126,32 @@ async function createService(db, T, b, opts = {}) {
     beneficiary_whatsapp: b.beneficiary_whatsapp || b.beneficiary_phone || '',
     notes: b.notes || '',
     cost, sale_price: sale, commission,
+    // v3.19 — Commission Sharing (partner split) — generalized from tickets v3.9.27
+    commission_partner_type: b.commission_partner_type || null,
+    commission_partner_id: b.commission_partner_id || null,
+    commission_partner_name: b.commission_partner_name || '',
+    commission_share_mode: b.commission_share_mode === 'percent' ? 'percent' : 'amount',
+    commission_share_value: Number(b.commission_share_value) || 0,
+    commission_share_amount: 0,
     payment_method: paymentMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
     created_at: opts.createdAt || new Date(),
     ...(opts.existingId ? { updated_at: new Date() } : {}),
   }
+  // v3.19 — Compute partner commission share amount
+  let partnerShare = 0
+  if (doc.commission_partner_id && doc.commission_share_value > 0 && commission > 0) {
+    if (doc.commission_share_mode === 'percent') partnerShare = +(commission * (doc.commission_share_value / 100)).toFixed(2)
+    else partnerShare = +Number(doc.commission_share_value).toFixed(2)
+    partnerShare = Math.min(partnerShare, commission)
+  }
+  doc.commission_share_amount = partnerShare
+  const officeNetCommission = +(commission - partnerShare).toFixed(2)
   await db.collection('services').insertOne(doc)
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
+  if (partnerShare > 0 && doc.commission_partner_id) {
+    const col = doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
+    await updateBalance(db, col, { id: doc.commission_partner_id, tenant_id: T }, b.currency, -partnerShare)
+  }
   const lines = []
   if (paymentMethod === 'cash') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
@@ -4029,9 +4161,14 @@ async function createService(db, T, b, opts = {}) {
     lines.push({ account_code: '1301', account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
   }
   lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
-  lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيرادات ${doc.service_type}`, debit: 0, credit: commission })
+  if (officeNetCommission !== 0) {
+    lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيرادات ${doc.service_type}`, debit: 0, credit: officeNetCommission })
+  }
+  if (partnerShare > 0) {
+    lines.push({ account_code: doc.commission_partner_type === 'supplier' ? '2101' : '1301', account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+  }
   await createJournalEntry(db, T, {
-    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.beneficiary_name || cli?.name || doc.client_name || sup.name}`,
+    date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.beneficiary_name || cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
     ref_type: 'service', ref_id: doc.id, currency: b.currency, lines,
   }, { skipQuota: !!opts.skipQuota })
   const { _id, ...rest } = doc; return { doc: rest }

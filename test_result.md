@@ -9119,3 +9119,31 @@ agent_communication:
       dates without false duplicate errors.
       
       Backend v3.18 is production-ready. The dedup fix is working correctly.
+
+backend:
+  - task: "v3.20 - PATCH package booking: Smart Discount (discount_apply_cost) + Partner Commission full recalc"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Completed PATCH /api/packages/:id/bookings/:booking_id to mirror POST logic: (1) lightOnly guard now forces full recalc when discount_apply_cost, commission_partner_id, commission_share_mode, or commission_share_value change. (2) Reversal phase now reverses old partner-commission balance (+oldShare back to partner client/supplier). (3) Recalc applies smart discount to COST when discount_apply_cost=true, distributing via costFactor over supplier snapshots. (4) New partner share computed (percent or amount mode, capped at commission), applied as -newPartnerShare to partner balance. (5) Journal Entry rebuilt balanced: debit=total_sale, credits=suppliers+revenueNet+partnerShare where revenueNet=(total_sale-supSum)-partnerShare. revenueNet pushed even if negative (loss) to keep JE balanced. Booking doc persists discount_apply_cost + all commission_* fields. Needs backend testing."
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (8/8 tests) - PATCH /api/packages/:pkgId/bookings/:bookingId with Smart Discount + Partner Commission working correctly. CRITICAL BUG FIXED: Line 2286 in route.js declared total_cost as const but line 2311 tried to reassign it when discount_apply_cost=true. Changed const to let. All tests passed: (A) POST booking with discount=50, discount_apply_cost=true, partner commission (amount mode)=30 → sale=250, cost=150, commission=100, partner_share=30. JE balanced (debit 250 = credits: supplier 150 + revenue 70 + partner 30). Balances: client +250, supplier +150, partner -30. (B) Light update (pilgrim_name only) → _light_update flag present, no balance changes. (C) PATCH discount to 80 with apply_cost=true → sale=220, cost=120, commission=100, partner_share=30 (kept). JE balanced. Balances correctly show NET values (client 220 not 250+220, supplier 120, partner -30). Old amounts fully reversed. (D) PATCH commission to percent mode 50% → partner_share=50. JE balanced, partner line 50. Partner balance changed by -20 (old -30 reversed, new -50 applied). (E) PATCH remove partner (commission_partner_id='', value=0) → partner_share=0, no partner line in JE. Partner balance restored (+50 change). (F) PATCH discount_apply_cost=false → sale=220, cost=200, commission=20. JE balanced, supplier credit 200. (G) PATCH pax_count 2→3 → sale=370, cost=300, commission=70. JE balanced. (H) Edge case: pax=1, discount=50, apply_cost=false → sale=100, cost=100, commission=0. JE balanced even with zero commission. NO double-application of balances across multiple PATCHes. All test data cleaned up successfully."
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: "Please test PATCH /api/packages/:pkgId/bookings/:bookingId end-to-end. Setup: login as owner@demo.com / Demo@2025 (see /app/memory/test_credentials.md). Create supplier, client, partner client, box, package with components, then POST a booking WITH discount+discount_apply_cost+partner commission. Then PATCH with changed discount/commission values and verify: booking doc fields, balanced journal entry (sum debits == sum credits), supplier/client/partner balances correctly reversed and re-applied (net effect = only new values), and lightOnly path still works for name-only edits. CRITICAL: verify no double-application of balances after multiple PATCHes. Cleanup all test data afterwards (delete created bookings/packages/clients/suppliers) - NEVER touch existing tenant data."
+  - agent: "testing"
+    message: "✅ COMPREHENSIVE TESTING COMPLETED - ALL 8 TESTS PASSED. Found and FIXED critical bug: total_cost was declared as const but code tried to reassign it when discount_apply_cost=true (line 2286→2311). Changed to let. All PATCH scenarios verified: light update, discount changes, partner commission (amount/percent modes), partner removal, cost discount toggle, pax count changes, edge cases. Journal entries always balanced. Balances correctly reversed and reapplied (no double-application). Smart Discount and Partner Commission features working perfectly. Backend v3.20 is production-ready."
