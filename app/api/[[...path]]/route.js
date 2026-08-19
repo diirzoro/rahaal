@@ -333,7 +333,42 @@ async function getPatSession(request, db) {
   }
 }
 function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
-function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price } : null }
+function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price, billing_mode: t.billing_mode || null, unlimited_journals: !!t.unlimited_journals } : null }
+
+// ============ v3.14 — PRICING & PLANS (Phase 2) ============
+// Annual payment => unlimited journals. Installments => limited journals.
+// Manual super-admin override: tenant.unlimited_journals = true
+function isUnlimitedTenant(t) {
+  return !!t && (t.unlimited_journals === true || t.billing_mode === 'annual' || t.subscription === 'paid' || !!t.activation_confirmed)
+}
+
+const DEFAULT_PRICING_CONFIG = {
+  id: 'pricing_config',
+  discount_enabled: true,
+  discount_percent: 50,
+  installments_count: 5,
+  plans: [
+    {
+      key: 'silver', name_ar: 'سيلفر', icon: '🥈', annual_price: 500,
+      max_users: 2, max_branches: 1,
+      features: ['فرع واحد', 'مستخدمان إجمالاً (المالك + مستخدم إضافي)', 'التذاكر والتأشيرات والخدمات', 'مراقبة التأشيرات — كاملة', 'إدارة البكجات والتسكين — كاملة', 'المحاسبة وسندات القبض والصرف', 'التقارير الأساسية'],
+    },
+    {
+      key: 'gold', name_ar: 'جولد', icon: '🥇', annual_price: 1000,
+      max_users: 8, max_branches: 3,
+      features: ['حتى 8 مستخدمين', 'إدارة الفروع', 'كل مزايا سيلفر', 'مراقبة التأشيرات — كاملة', 'إدارة البكجات والتسكين — كاملة', 'مصارفة العملات', 'تقارير متقدمة وميزان مراجعة'],
+    },
+    {
+      key: 'enterprise', name_ar: 'إنتربرايز / مؤسسات', icon: '🏢', annual_price: 2000,
+      max_users: 0, max_branches: 0, // 0 = unlimited
+      features: ['مستخدمون غير محدودين', 'فروع غير محدودة', 'كل مزايا جولد', 'مراقبة التأشيرات — كاملة', 'إدارة البكجات والتسكين — كاملة', 'برنامج العمولات والتسويق', 'دعم فني بأولوية قصوى'],
+    },
+  ],
+}
+async function getPricingConfig(db) {
+  const cfg = await db.collection('platform_settings').findOne({ id: 'pricing_config' })
+  return cfg ? { ...DEFAULT_PRICING_CONFIG, ...cfg } : DEFAULT_PRICING_CONFIG
+}
 
 // Referral helpers
 function genReferralCode() {
@@ -453,14 +488,16 @@ async function checkClientCredit(db, tenantId, clientId, saleAmount, currency, s
 }
 
 async function createJournalEntry(db, tenantId, { date, description, ref_type, ref_id, currency, lines }, opts = {}) {
-  // Enforce quota (skipped in edit mode)
+  // Enforce quota (skipped in edit mode, and bypassed entirely for unlimited tenants)
   if (!opts.skipQuota) {
     const t = await db.collection('tenants').findOne({ id: tenantId })
-    const q = t?.journal_quota || { used: 0, limit: 500 }
-    if (q.used >= q.limit) {
-      const err = new Error(`انتهت حصة قيود اليومية (${q.used}/${q.limit}). يرجى تجديد الاشتراك مع الإدارة العامة.`)
-      err.code = 'QUOTA_EXCEEDED'
-      throw err
+    if (!isUnlimitedTenant(t)) {
+      const q = t?.journal_quota || { used: 0, limit: 500 }
+      if (q.used >= q.limit) {
+        const err = new Error(`انتهت حصة قيود اليومية (${q.used}/${q.limit}). يرجى تجديد الاشتراك مع الإدارة العامة.`)
+        err.code = 'QUOTA_EXCEEDED'
+        throw err
+      }
     }
   }
   const je = { id: opts.existingJeId || uuidv4(), tenant_id: tenantId, date: new Date(date || Date.now()), description, ref_type, ref_id, currency, lines, created_at: opts.createdAt || new Date() }
@@ -734,6 +771,37 @@ async function handleRoute(request, { params }) {
     if (route.startsWith('/admin/')) {
       if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
 
+      // v3.14 — Pricing config management (flexible discount + dynamic features)
+      if (route === '/admin/pricing-config' && method === 'GET') {
+        const cfg = await getPricingConfig(db)
+        return ok({ ...cfg, _id: undefined })
+      }
+      if (route === '/admin/pricing-config' && method === 'PUT') {
+        const b = await request.json()
+        const upd = { id: 'pricing_config', updated_at: new Date(), updated_by: sess.user.email }
+        if (b.discount_enabled !== undefined) upd.discount_enabled = !!b.discount_enabled
+        if (b.discount_percent !== undefined) upd.discount_percent = Math.min(95, Math.max(0, Number(b.discount_percent) || 0))
+        if (b.installments_count !== undefined) upd.installments_count = Math.max(1, Number(b.installments_count) || 5)
+        if (Array.isArray(b.plans)) {
+          upd.plans = b.plans
+            .filter(p => p && ['silver', 'gold', 'enterprise'].includes(p.key))
+            .map(p => ({
+              key: p.key,
+              name_ar: String(p.name_ar || '').slice(0, 60),
+              icon: String(p.icon || '').slice(0, 8),
+              annual_price: Math.max(0, Number(p.annual_price) || 0),
+              max_users: Math.max(0, Number(p.max_users) || 0),
+              max_branches: Math.max(0, Number(p.max_branches) || 0),
+              features: (Array.isArray(p.features) ? p.features : []).map(f => String(f).slice(0, 120)).filter(Boolean).slice(0, 25),
+            }))
+        }
+        const existing = await db.collection('platform_settings').findOne({ id: 'pricing_config' })
+        const merged = { ...(existing ? { ...DEFAULT_PRICING_CONFIG, ...existing } : DEFAULT_PRICING_CONFIG), ...upd }
+        delete merged._id // MongoDB immutable field must never be in $set
+        await db.collection('platform_settings').updateOne({ id: 'pricing_config' }, { $set: merged }, { upsert: true })
+        return ok({ success: true, config: merged })
+      }
+
       // v3.12 — Password reset requests inbox (admin-mediated forgot password)
       if (route === '/admin/password-reset-requests' && method === 'GET') {
         const reqs = await db.collection('password_reset_requests').find({}).sort({ created_at: -1 }).limit(200).toArray()
@@ -877,6 +945,24 @@ async function handleRoute(request, { params }) {
           if (b.max_branches !== undefined) upd.max_branches = b.max_branches === null ? null : Number(b.max_branches)
           if (b.quota_limit !== undefined) upd['journal_quota.limit'] = Number(b.quota_limit)
           if (b.plan_tier !== undefined) upd.plan_tier = b.plan_tier
+          // v3.14 — Assign 6-tier plan: auto-apply user/branch limits from pricing config
+          if (b.plan_key !== undefined && ['silver', 'gold', 'enterprise'].includes(b.plan_key)) {
+            upd.plan_tier = b.plan_key
+            const cfg = await getPricingConfig(db)
+            const p = (cfg.plans || []).find(x => x.key === b.plan_key)
+            if (p) {
+              upd.max_users = Number(p.max_users) === 0 ? 9999 : Number(p.max_users)
+              upd.max_branches = Number(p.max_branches) === 0 ? 9999 : Number(p.max_branches)
+            }
+          }
+          // v3.14 — Billing mode: annual => unlimited journals immediately; installments => limited
+          if (b.billing_mode !== undefined && ['annual', 'installments', null].includes(b.billing_mode)) {
+            upd.billing_mode = b.billing_mode
+            if (b.billing_mode === 'annual') upd.unlimited_journals = true
+            if (b.billing_mode === 'installments' && b.unlimited_journals === undefined) upd.unlimited_journals = false
+          }
+          // v3.14 — Manual unlimited-journals toggle (e.g. after final installment is paid)
+          if (b.unlimited_journals !== undefined) upd.unlimited_journals = !!b.unlimited_journals
           if (b.subscription !== undefined) upd.subscription = b.subscription
           if (b.subscription_price !== undefined) upd.subscription_price = Number(b.subscription_price) || 0
           if (b.subscription_expires_at !== undefined) upd.subscription_expires_at = b.subscription_expires_at ? new Date(b.subscription_expires_at) : null
@@ -1123,6 +1209,28 @@ async function handleRoute(request, { params }) {
     if (route === '/plans' && method === 'GET') {
       const list = await db.collection('subscription_plans').find({ active: { $ne: false } }).toArray()
       return ok(list.map(p => ({ ...p, _id: undefined })))
+    }
+
+    // v3.14 — Pricing config (6-tier: silver/gold/enterprise × installments/annual)
+    // Returns config with server-computed final prices based on the flexible discount.
+    if (route === '/pricing' && method === 'GET') {
+      const cfg = await getPricingConfig(db)
+      const disc = cfg.discount_enabled ? Math.min(95, Math.max(0, Number(cfg.discount_percent) || 0)) : 0
+      const n = Number(cfg.installments_count) || 5
+      const plans = (cfg.plans || []).map(p => {
+        const annualOriginal = Number(p.annual_price) || 0
+        const annualFinal = Math.round(annualOriginal * (100 - disc)) / 100
+        const instOriginal = Math.round((annualOriginal / n) * 100) / 100
+        const instFinal = Math.round((annualFinal / n) * 100) / 100
+        return {
+          ...p,
+          pricing: {
+            annual: { original: annualOriginal, final: annualFinal },
+            installment: { count: n, original_per: instOriginal, final_per: instFinal, total_final: annualFinal },
+          },
+        }
+      })
+      return ok({ discount_enabled: cfg.discount_enabled, discount_percent: disc, installments_count: n, plans, current: { plan_tier: sess.tenant?.plan_tier || null, billing_mode: sess.tenant?.billing_mode || null, unlimited: isUnlimitedTenant(sess.tenant) } })
     }
 
     // v2.8 — Active announcements for tenant popup + banner
@@ -1454,7 +1562,7 @@ async function handleRoute(request, { params }) {
     // Verifies PAT works, then routes to createTicket / createVisa based on doc_type.
     if (route === '/scraper/ping' && method === 'GET') {
       // v3.9.7 — Return usage/limit info for trial gating in the extension popup
-      const isPaid = sess.tenant?.subscription === 'paid' || !!sess.tenant?.activation_confirmed
+      const isPaid = isUnlimitedTenant(sess.tenant)
       const used = sess.tenant?.scraper_usage?.count || 0
       const limit = 30
       return ok({
@@ -1467,7 +1575,7 @@ async function handleRoute(request, { params }) {
     }
     if (route === '/scraper/ingest' && method === 'POST') {
       // v3.9.7 — enforce trial cap (30) for non-paid tenants
-      const isPaidT = sess.tenant?.subscription === 'paid' || !!sess.tenant?.activation_confirmed
+      const isPaidT = isUnlimitedTenant(sess.tenant)
       if (!isPaidT) {
         const usedT = sess.tenant?.scraper_usage?.count || 0
         if (usedT >= 30) return cors(NextResponse.json({

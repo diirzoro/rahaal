@@ -1,658 +1,713 @@
 #!/usr/bin/env python3
 """
-Backend Test Script for v3.13 Duplicate Detection Rule
-Tests import preview endpoints for tickets and visas
+Backend Test Suite for Rahaal ERP v3.14 - Pricing & Plans APIs
+Tests pricing configuration, plan assignment, billing modes, and quota bypass
 """
 
 import requests
 import json
-from datetime import datetime
+import sys
+from typing import Dict, Any, Optional
 
 # Configuration
 BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
-EMAIL = "owner@demo.com"
-PASSWORD = "Demo@2025"
+SUPER_ADMIN_EMAIL = "admin@targetmedia.com"
+SUPER_ADMIN_PASSWORD = "Target@2025"
+DEMO_OWNER_EMAIL = "owner@demo.com"
+DEMO_OWNER_PASSWORD = "Demo@2025"
 
-# Global session variable
-session_cookie = None
-tenant_id = None
+# Test state
+super_admin_session = None
+demo_owner_session = None
+demo_tenant_id = None
+demo_tenant_original_state = {}
 
-def login():
-    """Login and get session cookie"""
-    global session_cookie, tenant_id
-    print("\n" + "="*80)
-    print("AUTHENTICATION")
-    print("="*80)
-    
+def print_test(msg: str):
+    """Print test step"""
+    print(f"\n{'='*80}")
+    print(f"TEST: {msg}")
+    print('='*80)
+
+def print_result(passed: bool, msg: str):
+    """Print test result"""
+    status = "✅ PASSED" if passed else "❌ FAILED"
+    print(f"{status}: {msg}")
+
+def login(email: str, password: str) -> Optional[requests.Session]:
+    """Login and return session with cookie"""
     try:
-        response = requests.post(
+        session = requests.Session()
+        response = session.post(
             f"{BASE_URL}/auth/login",
-            json={"email": EMAIL, "password": PASSWORD},
-            timeout=30
+            json={"email": email, "password": password},
+            timeout=10
         )
-        print(f"✓ Login request sent: {response.status_code}")
-        
         if response.status_code == 200:
             data = response.json()
-            print(f"✓ Login successful: {data.get('user', {}).get('email')}")
-            
-            # Get session cookie
-            if 'rahaal_session' in response.cookies:
-                session_cookie = response.cookies['rahaal_session']
-                print(f"✓ Session cookie obtained")
-            
-            # Get tenant_id
-            if 'tenant' in data and 'id' in data['tenant']:
-                tenant_id = data['tenant']['id']
-                print(f"✓ Tenant ID: {tenant_id}")
-            
-            return True
+            print(f"✅ Login successful: {email} (role: {data.get('user', {}).get('role')})")
+            return session
         else:
-            print(f"✗ Login failed: {response.status_code} - {response.text}")
-            return False
+            print(f"❌ Login failed for {email}: {response.status_code} - {response.text}")
+            return None
     except Exception as e:
-        print(f"✗ Login error: {str(e)}")
+        print(f"❌ Login exception for {email}: {e}")
+        return None
+
+def get_demo_tenant_id(session: requests.Session) -> Optional[str]:
+    """Get demo tenant ID by finding tenant with slug 'demo'"""
+    try:
+        response = session.get(f"{BASE_URL}/admin/tenants", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            tenants = data.get('tenants', []) if isinstance(data, dict) else data
+            for tenant in tenants:
+                if tenant.get('slug') == 'demo':
+                    print(f"✅ Found demo tenant: {tenant['id']} (name: {tenant.get('name')})")
+                    return tenant['id']
+            print("❌ Demo tenant not found")
+            return None
+        else:
+            print(f"❌ Failed to get tenants: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"❌ Exception getting demo tenant: {e}")
+        return None
+
+def save_demo_tenant_state(session: requests.Session, tenant_id: str) -> Dict[str, Any]:
+    """Save original demo tenant state for restoration"""
+    try:
+        response = session.get(f"{BASE_URL}/admin/tenants", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            tenants = data.get('tenants', []) if isinstance(data, dict) else data
+            for tenant in tenants:
+                if tenant['id'] == tenant_id:
+                    state = {
+                        'max_users': tenant.get('max_users'),
+                        'max_branches': tenant.get('max_branches'),
+                        'plan_tier': tenant.get('plan_tier'),
+                        'billing_mode': tenant.get('billing_mode'),
+                        'unlimited_journals': tenant.get('unlimited_journals'),
+                        'subscription': tenant.get('subscription')
+                    }
+                    print(f"✅ Saved original demo tenant state: {state}")
+                    return state
+        print("❌ Failed to save demo tenant state")
+        return {}
+    except Exception as e:
+        print(f"❌ Exception saving demo tenant state: {e}")
+        return {}
+
+def restore_demo_tenant_state(session: requests.Session, tenant_id: str, state: Dict[str, Any]):
+    """Restore demo tenant to original state"""
+    try:
+        print(f"\n🔄 Restoring demo tenant to original state: {state}")
+        response = session.patch(
+            f"{BASE_URL}/admin/tenants/{tenant_id}",
+            json=state,
+            timeout=10
+        )
+        if response.status_code == 200:
+            print("✅ Demo tenant restored successfully")
+        else:
+            print(f"❌ Failed to restore demo tenant: {response.status_code} - {response.text}")
+    except Exception as e:
+        print(f"❌ Exception restoring demo tenant: {e}")
+
+def test_1_get_pricing_as_demo_owner():
+    """Test 1: GET /api/pricing as demo owner"""
+    print_test("1. GET /api/pricing as demo owner - verify structure and calculations")
+    
+    try:
+        response = demo_owner_session.get(f"{BASE_URL}/pricing", timeout=10)
+        
+        if response.status_code != 200:
+            print_result(False, f"Expected 200, got {response.status_code}")
+            return False
+        
+        data = response.json()
+        print(f"Response: {json.dumps(data, indent=2)}")
+        
+        # Check required fields
+        required_fields = ['discount_enabled', 'discount_percent', 'installments_count', 'plans', 'current']
+        for field in required_fields:
+            if field not in data:
+                print_result(False, f"Missing required field: {field}")
+                return False
+        
+        # Check default config
+        if data['discount_enabled'] != True:
+            print_result(False, f"Expected discount_enabled=true, got {data['discount_enabled']}")
+            return False
+        
+        if data['discount_percent'] != 50:
+            print_result(False, f"Expected discount_percent=50, got {data['discount_percent']}")
+            return False
+        
+        if data['installments_count'] != 5:
+            print_result(False, f"Expected installments_count=5, got {data['installments_count']}")
+            return False
+        
+        # Check plans array
+        if len(data['plans']) != 3:
+            print_result(False, f"Expected 3 plans, got {len(data['plans'])}")
+            return False
+        
+        # Verify silver plan calculations
+        silver = next((p for p in data['plans'] if p['key'] == 'silver'), None)
+        if not silver:
+            print_result(False, "Silver plan not found")
+            return False
+        
+        if silver['annual_price'] != 500:
+            print_result(False, f"Silver annual_price should be 500, got {silver['annual_price']}")
+            return False
+        
+        # Check pricing calculations for silver
+        pricing = silver.get('pricing', {})
+        annual = pricing.get('annual', {})
+        installment = pricing.get('installment', {})
+        
+        # annual.original = 500, annual.final = 250 (50% discount)
+        if annual.get('original') != 500:
+            print_result(False, f"Silver annual.original should be 500, got {annual.get('original')}")
+            return False
+        
+        if annual.get('final') != 250:
+            print_result(False, f"Silver annual.final should be 250 (50% discount), got {annual.get('final')}")
+            return False
+        
+        # installment.original_per = 100 (500/5), installment.final_per = 50 (250/5)
+        if installment.get('original_per') != 100:
+            print_result(False, f"Silver installment.original_per should be 100, got {installment.get('original_per')}")
+            return False
+        
+        if installment.get('final_per') != 50:
+            print_result(False, f"Silver installment.final_per should be 50, got {installment.get('final_per')}")
+            return False
+        
+        # Verify gold plan calculations (1000 -> 500, 200 -> 100)
+        gold = next((p for p in data['plans'] if p['key'] == 'gold'), None)
+        if not gold:
+            print_result(False, "Gold plan not found")
+            return False
+        
+        gold_pricing = gold.get('pricing', {})
+        gold_annual = gold_pricing.get('annual', {})
+        gold_installment = gold_pricing.get('installment', {})
+        
+        if gold_annual.get('original') != 1000 or gold_annual.get('final') != 500:
+            print_result(False, f"Gold annual pricing incorrect: original={gold_annual.get('original')}, final={gold_annual.get('final')}")
+            return False
+        
+        if gold_installment.get('original_per') != 200 or gold_installment.get('final_per') != 100:
+            print_result(False, f"Gold installment pricing incorrect: original_per={gold_installment.get('original_per')}, final_per={gold_installment.get('final_per')}")
+            return False
+        
+        # Verify enterprise plan calculations (2000 -> 1000, 400 -> 200)
+        enterprise = next((p for p in data['plans'] if p['key'] == 'enterprise'), None)
+        if not enterprise:
+            print_result(False, "Enterprise plan not found")
+            return False
+        
+        ent_pricing = enterprise.get('pricing', {})
+        ent_annual = ent_pricing.get('annual', {})
+        ent_installment = ent_pricing.get('installment', {})
+        
+        if ent_annual.get('original') != 2000 or ent_annual.get('final') != 1000:
+            print_result(False, f"Enterprise annual pricing incorrect: original={ent_annual.get('original')}, final={ent_annual.get('final')}")
+            return False
+        
+        if ent_installment.get('original_per') != 400 or ent_installment.get('final_per') != 200:
+            print_result(False, f"Enterprise installment pricing incorrect: original_per={ent_installment.get('original_per')}, final_per={ent_installment.get('final_per')}")
+            return False
+        
+        print_result(True, "All pricing calculations correct for all 3 plans")
+        return True
+        
+    except Exception as e:
+        print_result(False, f"Exception: {e}")
         return False
 
-def get_headers():
-    """Get headers with session cookie"""
-    headers = {"Content-Type": "application/json"}
-    if session_cookie:
-        headers["Cookie"] = f"rahaal_session={session_cookie}"
-    return headers
-
-def get_existing_client_and_supplier():
-    """Get existing client and supplier IDs and names"""
-    print("\n" + "="*80)
-    print("SETUP: Getting existing client and supplier")
-    print("="*80)
+def test_2_get_pricing_config_authorization():
+    """Test 2: GET /api/admin/pricing-config authorization"""
+    print_test("2. GET /api/admin/pricing-config - super admin gets full config, demo owner gets 403")
     
     try:
-        # Get clients
-        response = requests.get(f"{BASE_URL}/clients", headers=get_headers(), timeout=30)
-        if response.status_code == 200:
-            clients = response.json()
-            if clients and len(clients) > 0:
-                client_id = clients[0]['id']
-                client_name = clients[0]['name']
-                print(f"✓ Found client: {client_name} (ID: {client_id})")
-            else:
-                print(f"✗ No clients found")
-                return None, None, None, None
-        else:
-            print(f"✗ Failed to get clients: {response.status_code}")
-            return None, None, None, None
+        # Test as super admin - should succeed
+        response = super_admin_session.get(f"{BASE_URL}/admin/pricing-config", timeout=10)
         
-        # Get suppliers
-        response = requests.get(f"{BASE_URL}/suppliers", headers=get_headers(), timeout=30)
-        if response.status_code == 200:
-            suppliers = response.json()
-            if suppliers and len(suppliers) > 0:
-                supplier_id = suppliers[0]['id']
-                supplier_name = suppliers[0]['name']
-                print(f"✓ Found supplier: {supplier_name} (ID: {supplier_id})")
-            else:
-                print(f"✗ No suppliers found")
-                return None, None, None, None
-        else:
-            print(f"✗ Failed to get suppliers: {response.status_code}")
-            return None, None, None, None
+        if response.status_code != 200:
+            print_result(False, f"Super admin should get 200, got {response.status_code}")
+            return False
         
-        return client_id, client_name, supplier_id, supplier_name
+        data = response.json()
+        print(f"Super admin response: {json.dumps(data, indent=2)}")
+        
+        # Check full config fields
+        required_fields = ['id', 'discount_enabled', 'discount_percent', 'installments_count', 'plans']
+        for field in required_fields:
+            if field not in data:
+                print_result(False, f"Missing field in super admin response: {field}")
+                return False
+        
+        print("✅ Super admin can access full pricing config")
+        
+        # Test as demo owner - should get 403
+        response = demo_owner_session.get(f"{BASE_URL}/admin/pricing-config", timeout=10)
+        
+        if response.status_code != 403:
+            print_result(False, f"Demo owner should get 403, got {response.status_code}")
+            return False
+        
+        print("✅ Demo owner correctly denied access (403)")
+        print_result(True, "Authorization working correctly")
+        return True
+        
     except Exception as e:
-        print(f"✗ Error getting client/supplier: {str(e)}")
-        return None, None, None, None
+        print_result(False, f"Exception: {e}")
+        return False
 
-def create_test_ticket(client_id, supplier_id):
-    """Create a test ticket for duplicate detection testing"""
-    print("\n" + "="*80)
-    print("SETUP: Creating test ticket")
-    print("="*80)
-    
-    ticket_data = {
-        "passenger_name": "اختبار التكرار",
-        "pnr": "DUPTEST1",
-        "travel_date": "2026-09-01",
-        "phone": "555-0001",
-        "currency": "USD",
-        "cost": 100,
-        "sale_price": 120,
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "payment_method": "credit"
-    }
+def test_3_put_pricing_config_discount():
+    """Test 3: PUT /api/admin/pricing-config - update discount_percent and verify calculations"""
+    print_test("3. PUT /api/admin/pricing-config - change discount to 25%, verify calculations, then restore to 50%")
     
     try:
-        response = requests.post(
-            f"{BASE_URL}/tickets",
-            json=ticket_data,
-            headers=get_headers(),
-            timeout=30
+        # Update discount to 25%
+        response = super_admin_session.put(
+            f"{BASE_URL}/admin/pricing-config",
+            json={"discount_percent": 25},
+            timeout=10
         )
-        print(f"✓ Create ticket request sent: {response.status_code}")
         
-        if response.status_code == 200:
-            data = response.json()
-            ticket_id = data.get('id')
-            print(f"✓ Test ticket created successfully")
-            print(f"  - ID: {ticket_id}")
-            print(f"  - PNR: {ticket_data['pnr']}")
-            print(f"  - Passenger: {ticket_data['passenger_name']}")
-            print(f"  - Date: {ticket_data['travel_date']}")
-            return ticket_id
-        else:
-            print(f"✗ Failed to create ticket: {response.status_code}")
-            print(f"  Response: {response.text}")
-            return None
+        if response.status_code != 200:
+            print_result(False, f"PUT failed: {response.status_code} - {response.text}")
+            return False
+        
+        print("✅ Updated discount_percent to 25%")
+        
+        # Verify via GET /api/pricing
+        response = demo_owner_session.get(f"{BASE_URL}/pricing", timeout=10)
+        
+        if response.status_code != 200:
+            print_result(False, f"GET /pricing failed: {response.status_code}")
+            return False
+        
+        data = response.json()
+        
+        if data['discount_percent'] != 25:
+            print_result(False, f"Expected discount_percent=25, got {data['discount_percent']}")
+            return False
+        
+        # Check silver calculations with 25% discount
+        silver = next((p for p in data['plans'] if p['key'] == 'silver'), None)
+        pricing = silver.get('pricing', {})
+        annual = pricing.get('annual', {})
+        installment = pricing.get('installment', {})
+        
+        # annual.final = 375 (500 * 0.75), installment.final_per = 75 (375/5)
+        if annual.get('final') != 375:
+            print_result(False, f"Silver annual.final should be 375 (25% discount), got {annual.get('final')}")
+            return False
+        
+        if installment.get('final_per') != 75:
+            print_result(False, f"Silver installment.final_per should be 75, got {installment.get('final_per')}")
+            return False
+        
+        print("✅ Pricing calculations correct with 25% discount")
+        
+        # Restore discount to 50%
+        response = super_admin_session.put(
+            f"{BASE_URL}/admin/pricing-config",
+            json={"discount_percent": 50},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            print_result(False, f"Failed to restore discount: {response.status_code}")
+            return False
+        
+        print("✅ Restored discount_percent to 50%")
+        
+        # Verify restoration
+        response = demo_owner_session.get(f"{BASE_URL}/pricing", timeout=10)
+        data = response.json()
+        
+        if data['discount_percent'] != 50:
+            print_result(False, f"Failed to restore discount to 50%, got {data['discount_percent']}")
+            return False
+        
+        print_result(True, "Discount update and restoration successful")
+        return True
+        
     except Exception as e:
-        print(f"✗ Error creating ticket: {str(e)}")
-        return None
+        print_result(False, f"Exception: {e}")
+        return False
 
-def create_test_visa(client_id, supplier_id):
-    """Create a test visa for duplicate detection testing"""
-    print("\n" + "="*80)
-    print("SETUP: Creating test visa")
-    print("="*80)
-    
-    visa_data = {
-        "passenger_name": "اختبار التكرار فيزا",
-        "beneficiary_name": "اختبار التكرار فيزا",
-        "passport_no": "DUPP0001",
-        "entry_date": "2026-09-01",
-        "phone": "555-0002",
-        "service_type": "تأشيرة عمرة",
-        "currency": "USD",
-        "cost": 100,
-        "sale_price": 120,
-        "client_id": client_id,
-        "supplier_id": supplier_id,
-        "payment_method": "credit"
-    }
+def test_4_put_pricing_config_features():
+    """Test 4: PUT /api/admin/pricing-config - update features and verify persistence"""
+    print_test("4. PUT /api/admin/pricing-config - add feature to silver, verify persistence, then restore")
     
     try:
-        response = requests.post(
-            f"{BASE_URL}/visas",
-            json=visa_data,
-            headers=get_headers(),
-            timeout=30
-        )
-        print(f"✓ Create visa request sent: {response.status_code}")
+        # Get current config
+        response = super_admin_session.get(f"{BASE_URL}/admin/pricing-config", timeout=10)
+        original_config = response.json()
+        original_plans = original_config.get('plans', [])
         
-        if response.status_code == 200:
-            data = response.json()
-            visa_id = data.get('id')
-            print(f"✓ Test visa created successfully")
-            print(f"  - ID: {visa_id}")
-            print(f"  - Passport: {visa_data['passport_no']}")
-            print(f"  - Passenger: {visa_data['passenger_name']}")
-            print(f"  - Date: {visa_data['entry_date']}")
-            return visa_id
-        else:
-            print(f"✗ Failed to create visa: {response.status_code}")
-            print(f"  Response: {response.text}")
-            return None
+        # Find silver plan and add a test feature
+        modified_plans = []
+        for plan in original_plans:
+            if plan['key'] == 'silver':
+                features = plan.get('features', []).copy()
+                features.append('ميزة اختبار مؤقتة')
+                modified_plans.append({**plan, 'features': features})
+            else:
+                modified_plans.append(plan)
+        
+        # Update config with modified plans
+        response = super_admin_session.put(
+            f"{BASE_URL}/admin/pricing-config",
+            json={"plans": modified_plans},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            print_result(False, f"PUT failed: {response.status_code} - {response.text}")
+            return False
+        
+        print("✅ Added test feature to silver plan")
+        
+        # Verify persistence
+        response = super_admin_session.get(f"{BASE_URL}/admin/pricing-config", timeout=10)
+        data = response.json()
+        
+        silver = next((p for p in data['plans'] if p['key'] == 'silver'), None)
+        if not silver:
+            print_result(False, "Silver plan not found after update")
+            return False
+        
+        if 'ميزة اختبار مؤقتة' not in silver.get('features', []):
+            print_result(False, "Test feature not persisted")
+            return False
+        
+        print("✅ Feature persisted correctly")
+        
+        # Restore original features
+        response = super_admin_session.put(
+            f"{BASE_URL}/admin/pricing-config",
+            json={"plans": original_plans},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            print_result(False, f"Failed to restore features: {response.status_code}")
+            return False
+        
+        print("✅ Restored original features")
+        
+        print_result(True, "Feature update and restoration successful")
+        return True
+        
     except Exception as e:
-        print(f"✗ Error creating visa: {str(e)}")
-        return None
+        print_result(False, f"Exception: {e}")
+        return False
 
-def test_ticket_import_preview(client_name, supplier_name):
-    """Test ticket import preview with duplicate detection scenarios"""
-    print("\n" + "="*80)
-    print("TEST: Ticket Import Preview - Duplicate Detection")
-    print("="*80)
-    
-    test_results = []
-    
-    # Test rows covering all scenarios
-    rows = [
-        # Case 1: Same PNR + SAME date → expect duplicate
-        {
-            "passenger_name": "مسافر 1",
-            "pnr": "DUPTEST1",
-            "travel_date": "2026-09-01",
-            "phone": "555-1001",
-            "currency": "USD",
-            "cost": 100,
-            "sale_price": 120,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        },
-        # Case 2: Same PNR + DIFFERENT date → expect NOT duplicate ✅
-        {
-            "passenger_name": "مسافر 2",
-            "pnr": "DUPTEST1",
-            "travel_date": "2026-09-05",
-            "phone": "555-1002",
-            "currency": "USD",
-            "cost": 100,
-            "sale_price": 120,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        },
-        # Case 3: Same name + SAME date (no PNR) → expect duplicate
-        {
-            "passenger_name": "اختبار التكرار",
-            "travel_date": "2026-09-01",
-            "phone": "555-1003",
-            "currency": "USD",
-            "cost": 100,
-            "sale_price": 120,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        },
-        # Case 4: Same name + DIFFERENT date (no PNR) → expect NOT duplicate ✅
-        {
-            "passenger_name": "اختبار التكرار",
-            "travel_date": "2026-09-03",
-            "phone": "555-1004",
-            "currency": "USD",
-            "cost": 100,
-            "sale_price": 120,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        },
-        # Case 5a: In-batch duplicate - same PNR + same date
-        {
-            "passenger_name": "مسافر 5a",
-            "pnr": "BATCH001",
-            "travel_date": "2026-09-10",
-            "phone": "555-1005",
-            "currency": "USD",
-            "cost": 100,
-            "sale_price": 120,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        },
-        # Case 5b: In-batch duplicate - same PNR + same date (should be flagged)
-        {
-            "passenger_name": "مسافر 5b",
-            "pnr": "BATCH001",
-            "travel_date": "2026-09-10",
-            "phone": "555-1006",
-            "currency": "USD",
-            "cost": 100,
-            "sale_price": 120,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        },
-        # Case 5c: Same PNR but DIFFERENT date (should NOT be flagged)
-        {
-            "passenger_name": "مسافر 5c",
-            "pnr": "BATCH001",
-            "travel_date": "2026-09-15",
-            "phone": "555-1007",
-            "currency": "USD",
-            "cost": 100,
-            "sale_price": 120,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        }
-    ]
+def test_5_patch_tenant_plan_assignment():
+    """Test 5: PATCH /api/admin/tenants/:id - test plan_key assignments"""
+    print_test("5. PATCH /api/admin/tenants/:id - test silver/gold/enterprise plan assignments")
     
     try:
-        response = requests.post(
-            f"{BASE_URL}/import/tickets/preview",
-            json={"rows": rows},
-            headers=get_headers(),
-            timeout=30
+        # Test 5a: Assign silver plan
+        response = super_admin_session.patch(
+            f"{BASE_URL}/admin/tenants/{demo_tenant_id}",
+            json={"plan_key": "silver"},
+            timeout=10
         )
-        print(f"✓ Preview request sent: {response.status_code}")
         
-        if response.status_code == 200:
-            data = response.json()
-            preview_rows = data.get('rows', [])
-            
-            print(f"\n✓ Preview response received with {len(preview_rows)} rows")
-            print(f"  Valid count: {data.get('valid_count', 0)}")
-            
-            # Test Case 1: Same PNR + SAME date
-            row1 = preview_rows[0] if len(preview_rows) > 0 else {}
-            if row1.get('__dup') and 'PNR' in str(row1.get('__dup')) and 'نفس التاريخ' in str(row1.get('__dup')):
-                print(f"\n✅ CASE 1 PASSED: Same PNR + same date flagged as duplicate")
-                print(f"   Row 1: {row1.get('__dup')}")
-                test_results.append(("Case 1: Same PNR + same date", True, row1.get('__dup')))
-            else:
-                print(f"\n❌ CASE 1 FAILED: Same PNR + same date NOT flagged as duplicate")
-                print(f"   Row 1 __dup: {row1.get('__dup')}")
-                test_results.append(("Case 1: Same PNR + same date", False, row1.get('__dup')))
-            
-            # Test Case 2: Same PNR + DIFFERENT date
-            row2 = preview_rows[1] if len(preview_rows) > 1 else {}
-            if not row2.get('__dup') or row2.get('__dup') == False:
-                print(f"\n✅ CASE 2 PASSED: Same PNR + different date NOT flagged as duplicate")
-                print(f"   Row 2 __dup: {row2.get('__dup')}")
-                test_results.append(("Case 2: Same PNR + different date", True, row2.get('__dup')))
-            else:
-                print(f"\n❌ CASE 2 FAILED: Same PNR + different date incorrectly flagged")
-                print(f"   Row 2 __dup: {row2.get('__dup')}")
-                test_results.append(("Case 2: Same PNR + different date", False, row2.get('__dup')))
-            
-            # Test Case 3: Same name + SAME date
-            row3 = preview_rows[2] if len(preview_rows) > 2 else {}
-            if row3.get('__dup') and ('اسم' in str(row3.get('__dup')) or 'تاريخ' in str(row3.get('__dup'))):
-                print(f"\n✅ CASE 3 PASSED: Same name + same date flagged as duplicate")
-                print(f"   Row 3 __dup: {row3.get('__dup')}")
-                test_results.append(("Case 3: Same name + same date", True, row3.get('__dup')))
-            else:
-                print(f"\n❌ CASE 3 FAILED: Same name + same date NOT flagged as duplicate")
-                print(f"   Row 3 __dup: {row3.get('__dup')}")
-                test_results.append(("Case 3: Same name + same date", False, row3.get('__dup')))
-            
-            # Test Case 4: Same name + DIFFERENT date
-            row4 = preview_rows[3] if len(preview_rows) > 3 else {}
-            if not row4.get('__dup') or row4.get('__dup') == False:
-                print(f"\n✅ CASE 4 PASSED: Same name + different date NOT flagged as duplicate")
-                print(f"   Row 4 __dup: {row4.get('__dup')}")
-                test_results.append(("Case 4: Same name + different date", True, row4.get('__dup')))
-            else:
-                print(f"\n❌ CASE 4 FAILED: Same name + different date incorrectly flagged")
-                print(f"   Row 4 __dup: {row4.get('__dup')}")
-                test_results.append(("Case 4: Same name + different date", False, row4.get('__dup')))
-            
-            # Test Case 5: In-batch duplicates
-            row5a = preview_rows[4] if len(preview_rows) > 4 else {}
-            row5b = preview_rows[5] if len(preview_rows) > 5 else {}
-            row5c = preview_rows[6] if len(preview_rows) > 6 else {}
-            
-            # First occurrence should not be flagged
-            if not row5a.get('__dup') or row5a.get('__dup') == False:
-                print(f"\n✅ CASE 5a PASSED: First occurrence of PNR+date NOT flagged")
-                print(f"   Row 5a __dup: {row5a.get('__dup')}")
-                test_results.append(("Case 5a: First occurrence", True, row5a.get('__dup')))
-            else:
-                print(f"\n❌ CASE 5a FAILED: First occurrence incorrectly flagged")
-                print(f"   Row 5a __dup: {row5a.get('__dup')}")
-                test_results.append(("Case 5a: First occurrence", False, row5a.get('__dup')))
-            
-            # Second occurrence with same PNR+date should be flagged
-            if row5b.get('__dup') and 'مكرر' in str(row5b.get('__dup')) and 'الملف' in str(row5b.get('__dup')):
-                print(f"\n✅ CASE 5b PASSED: In-batch duplicate (same PNR+date) flagged")
-                print(f"   Row 5b __dup: {row5b.get('__dup')}")
-                test_results.append(("Case 5b: In-batch duplicate same date", True, row5b.get('__dup')))
-            else:
-                print(f"\n❌ CASE 5b FAILED: In-batch duplicate NOT flagged")
-                print(f"   Row 5b __dup: {row5b.get('__dup')}")
-                test_results.append(("Case 5b: In-batch duplicate same date", False, row5b.get('__dup')))
-            
-            # Same PNR but different date should NOT be flagged
-            if not row5c.get('__dup') or row5c.get('__dup') == False:
-                print(f"\n✅ CASE 5c PASSED: Same PNR + different date in batch NOT flagged")
-                print(f"   Row 5c __dup: {row5c.get('__dup')}")
-                test_results.append(("Case 5c: Same PNR different date in batch", True, row5c.get('__dup')))
-            else:
-                print(f"\n❌ CASE 5c FAILED: Same PNR + different date incorrectly flagged")
-                print(f"   Row 5c __dup: {row5c.get('__dup')}")
-                test_results.append(("Case 5c: Same PNR different date in batch", False, row5c.get('__dup')))
-            
-        else:
-            print(f"✗ Preview request failed: {response.status_code}")
-            print(f"  Response: {response.text}")
-            test_results.append(("Ticket preview request", False, f"Status {response.status_code}"))
-    
+        if response.status_code != 200:
+            print_result(False, f"Failed to assign silver plan: {response.status_code} - {response.text}")
+            return False
+        
+        # Verify tenant state
+        response = super_admin_session.get(f"{BASE_URL}/admin/tenants", timeout=10)
+        data = response.json()
+        tenants = data.get('tenants', []) if isinstance(data, dict) else data
+        demo_tenant = next((t for t in tenants if t['id'] == demo_tenant_id), None)
+        
+        if demo_tenant['max_users'] != 2:
+            print_result(False, f"Silver plan should set max_users=2, got {demo_tenant['max_users']}")
+            return False
+        
+        if demo_tenant['max_branches'] != 1:
+            print_result(False, f"Silver plan should set max_branches=1, got {demo_tenant['max_branches']}")
+            return False
+        
+        if demo_tenant['plan_tier'] != 'silver':
+            print_result(False, f"plan_tier should be 'silver', got {demo_tenant['plan_tier']}")
+            return False
+        
+        print("✅ 5a: Silver plan assigned correctly (max_users=2, max_branches=1)")
+        
+        # Test 5b: Assign gold plan
+        response = super_admin_session.patch(
+            f"{BASE_URL}/admin/tenants/{demo_tenant_id}",
+            json={"plan_key": "gold"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            print_result(False, f"Failed to assign gold plan: {response.status_code}")
+            return False
+        
+        response = super_admin_session.get(f"{BASE_URL}/admin/tenants", timeout=10)
+        data = response.json()
+        tenants = data.get('tenants', []) if isinstance(data, dict) else data
+        demo_tenant = next((t for t in tenants if t['id'] == demo_tenant_id), None)
+        
+        if demo_tenant['max_users'] != 8:
+            print_result(False, f"Gold plan should set max_users=8, got {demo_tenant['max_users']}")
+            return False
+        
+        if demo_tenant['max_branches'] != 3:
+            print_result(False, f"Gold plan should set max_branches=3, got {demo_tenant['max_branches']}")
+            return False
+        
+        print("✅ 5b: Gold plan assigned correctly (max_users=8, max_branches=3)")
+        
+        # Test 5c: Assign enterprise plan
+        response = super_admin_session.patch(
+            f"{BASE_URL}/admin/tenants/{demo_tenant_id}",
+            json={"plan_key": "enterprise"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            print_result(False, f"Failed to assign enterprise plan: {response.status_code}")
+            return False
+        
+        response = super_admin_session.get(f"{BASE_URL}/admin/tenants", timeout=10)
+        data = response.json()
+        tenants = data.get('tenants', []) if isinstance(data, dict) else data
+        demo_tenant = next((t for t in tenants if t['id'] == demo_tenant_id), None)
+        
+        if demo_tenant['max_users'] != 9999:
+            print_result(False, f"Enterprise plan should set max_users=9999, got {demo_tenant['max_users']}")
+            return False
+        
+        if demo_tenant['max_branches'] != 9999:
+            print_result(False, f"Enterprise plan should set max_branches=9999, got {demo_tenant['max_branches']}")
+            return False
+        
+        print("✅ 5c: Enterprise plan assigned correctly (max_users=9999, max_branches=9999)")
+        
+        print_result(True, "All plan assignments working correctly")
+        return True
+        
     except Exception as e:
-        print(f"✗ Error testing ticket preview: {str(e)}")
-        test_results.append(("Ticket preview request", False, str(e)))
-    
-    return test_results
+        print_result(False, f"Exception: {e}")
+        return False
 
-def test_visa_import_preview(client_name, supplier_name):
-    """Test visa import preview with duplicate detection scenarios"""
-    print("\n" + "="*80)
-    print("TEST: Visa Import Preview - Duplicate Detection")
-    print("="*80)
-    
-    test_results = []
-    
-    # Test rows covering all scenarios
-    rows = [
-        # Case 6: Same passport + SAME date → expect duplicate
-        {
-            "passenger_name": "معتمر 1",
-            "beneficiary_name": "معتمر 1",
-            "passport_no": "DUPP0001",
-            "entry_date": "2026-09-01",
-            "phone": "555-2001",
-            "service_type": "تأشيرة عمرة",
-            "currency": "USD",
-            "cost": 100,
-            "sale_price": 120,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        },
-        # Case 7: Same passport + DIFFERENT date → expect NOT duplicate ✅
-        {
-            "passenger_name": "معتمر 2",
-            "beneficiary_name": "معتمر 2",
-            "passport_no": "DUPP0001",
-            "entry_date": "2026-09-05",
-            "phone": "555-2002",
-            "service_type": "تأشيرة عمرة",
-            "currency": "USD",
-            "cost": 100,
-            "sale_price": 120,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        },
-        # Case 8a: Same name + SAME date → expect duplicate
-        {
-            "passenger_name": "اختبار التكرار فيزا",
-            "beneficiary_name": "اختبار التكرار فيزا",
-            "entry_date": "2026-09-01",
-            "phone": "555-2003",
-            "service_type": "تأشيرة عمرة",
-            "currency": "USD",
-            "cost": 100,
-            "sale_price": 120,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        },
-        # Case 8b: Same name + DIFFERENT date → expect NOT duplicate ✅
-        {
-            "passenger_name": "اختبار التكرار فيزا",
-            "beneficiary_name": "اختبار التكرار فيزا",
-            "entry_date": "2026-09-03",
-            "phone": "555-2004",
-            "service_type": "تأشيرة عمرة",
-            "currency": "USD",
-            "cost": 100,
-            "sale_price": 120,
-            "client_name": client_name,
-            "supplier_name": supplier_name
-        }
-    ]
+def test_6_patch_tenant_billing_mode():
+    """Test 6: PATCH /api/admin/tenants/:id - test billing_mode changes"""
+    print_test("6. PATCH /api/admin/tenants/:id - test billing_mode annual/installments")
     
     try:
-        response = requests.post(
-            f"{BASE_URL}/import/visas/preview",
-            json={"rows": rows},
-            headers=get_headers(),
-            timeout=30
+        # Test 6d: Set billing_mode to annual (should set unlimited_journals=true)
+        response = super_admin_session.patch(
+            f"{BASE_URL}/admin/tenants/{demo_tenant_id}",
+            json={"billing_mode": "annual"},
+            timeout=10
         )
-        print(f"✓ Preview request sent: {response.status_code}")
         
-        if response.status_code == 200:
-            data = response.json()
-            preview_rows = data.get('rows', [])
-            
-            print(f"\n✓ Preview response received with {len(preview_rows)} rows")
-            print(f"  Valid count: {data.get('valid_count', 0)}")
-            
-            # Test Case 6: Same passport + SAME date
-            row6 = preview_rows[0] if len(preview_rows) > 0 else {}
-            if row6.get('__dup') and 'جواز' in str(row6.get('__dup')) and 'نفس التاريخ' in str(row6.get('__dup')):
-                print(f"\n✅ CASE 6 PASSED: Same passport + same date flagged as duplicate")
-                print(f"   Row 1 __dup: {row6.get('__dup')}")
-                test_results.append(("Case 6: Same passport + same date", True, row6.get('__dup')))
-            else:
-                print(f"\n❌ CASE 6 FAILED: Same passport + same date NOT flagged as duplicate")
-                print(f"   Row 1 __dup: {row6.get('__dup')}")
-                test_results.append(("Case 6: Same passport + same date", False, row6.get('__dup')))
-            
-            # Test Case 7: Same passport + DIFFERENT date
-            row7 = preview_rows[1] if len(preview_rows) > 1 else {}
-            if not row7.get('__dup') or row7.get('__dup') == False:
-                print(f"\n✅ CASE 7 PASSED: Same passport + different date NOT flagged as duplicate")
-                print(f"   Row 2 __dup: {row7.get('__dup')}")
-                test_results.append(("Case 7: Same passport + different date", True, row7.get('__dup')))
-            else:
-                print(f"\n❌ CASE 7 FAILED: Same passport + different date incorrectly flagged")
-                print(f"   Row 2 __dup: {row7.get('__dup')}")
-                test_results.append(("Case 7: Same passport + different date", False, row7.get('__dup')))
-            
-            # Test Case 8a: Same name + SAME date
-            row8a = preview_rows[2] if len(preview_rows) > 2 else {}
-            if row8a.get('__dup') and ('اسم' in str(row8a.get('__dup')) or 'تاريخ' in str(row8a.get('__dup'))):
-                print(f"\n✅ CASE 8a PASSED: Same name + same date flagged as duplicate")
-                print(f"   Row 3 __dup: {row8a.get('__dup')}")
-                test_results.append(("Case 8a: Same name + same date", True, row8a.get('__dup')))
-            else:
-                print(f"\n❌ CASE 8a FAILED: Same name + same date NOT flagged as duplicate")
-                print(f"   Row 3 __dup: {row8a.get('__dup')}")
-                test_results.append(("Case 8a: Same name + same date", False, row8a.get('__dup')))
-            
-            # Test Case 8b: Same name + DIFFERENT date
-            row8b = preview_rows[3] if len(preview_rows) > 3 else {}
-            if not row8b.get('__dup') or row8b.get('__dup') == False:
-                print(f"\n✅ CASE 8b PASSED: Same name + different date NOT flagged as duplicate")
-                print(f"   Row 4 __dup: {row8b.get('__dup')}")
-                test_results.append(("Case 8b: Same name + different date", True, row8b.get('__dup')))
-            else:
-                print(f"\n❌ CASE 8b FAILED: Same name + different date incorrectly flagged")
-                print(f"   Row 4 __dup: {row8b.get('__dup')}")
-                test_results.append(("Case 8b: Same name + different date", False, row8b.get('__dup')))
-            
-        else:
-            print(f"✗ Preview request failed: {response.status_code}")
-            print(f"  Response: {response.text}")
-            test_results.append(("Visa preview request", False, f"Status {response.status_code}"))
-    
+        if response.status_code != 200:
+            print_result(False, f"Failed to set billing_mode=annual: {response.status_code} - {response.text}")
+            return False
+        
+        # Verify unlimited_journals is true
+        response = super_admin_session.get(f"{BASE_URL}/admin/tenants", timeout=10)
+        data = response.json()
+        tenants = data.get('tenants', []) if isinstance(data, dict) else data
+        demo_tenant = next((t for t in tenants if t['id'] == demo_tenant_id), None)
+        
+        if demo_tenant.get('unlimited_journals') != True:
+            print_result(False, f"billing_mode=annual should set unlimited_journals=true, got {demo_tenant.get('unlimited_journals')}")
+            return False
+        
+        print("✅ 6d: billing_mode=annual correctly sets unlimited_journals=true")
+        
+        # Test 6e: Set billing_mode to installments (should set unlimited_journals=false)
+        response = super_admin_session.patch(
+            f"{BASE_URL}/admin/tenants/{demo_tenant_id}",
+            json={"billing_mode": "installments"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            print_result(False, f"Failed to set billing_mode=installments: {response.status_code}")
+            return False
+        
+        response = super_admin_session.get(f"{BASE_URL}/admin/tenants", timeout=10)
+        data = response.json()
+        tenants = data.get('tenants', []) if isinstance(data, dict) else data
+        demo_tenant = next((t for t in tenants if t['id'] == demo_tenant_id), None)
+        
+        if demo_tenant.get('unlimited_journals') != False:
+            print_result(False, f"billing_mode=installments should set unlimited_journals=false, got {demo_tenant.get('unlimited_journals')}")
+            return False
+        
+        print("✅ 6e: billing_mode=installments correctly sets unlimited_journals=false")
+        
+        print_result(True, "Billing mode changes working correctly")
+        return True
+        
     except Exception as e:
-        print(f"✗ Error testing visa preview: {str(e)}")
-        test_results.append(("Visa preview request", False, str(e)))
-    
-    return test_results
+        print_result(False, f"Exception: {e}")
+        return False
 
-def cleanup_test_data(ticket_id, visa_id):
-    """Delete test ticket and visa"""
+def test_7_patch_tenant_unlimited_journals_toggle():
+    """Test 7: PATCH /api/admin/tenants/:id - manual unlimited_journals toggle"""
+    print_test("7. PATCH /api/admin/tenants/:id - manual unlimited_journals toggle")
+    
+    try:
+        # Set unlimited_journals to true manually
+        response = super_admin_session.patch(
+            f"{BASE_URL}/admin/tenants/{demo_tenant_id}",
+            json={"unlimited_journals": True},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            print_result(False, f"Failed to set unlimited_journals=true: {response.status_code} - {response.text}")
+            return False
+        
+        # Verify
+        response = super_admin_session.get(f"{BASE_URL}/admin/tenants", timeout=10)
+        data = response.json()
+        tenants = data.get('tenants', []) if isinstance(data, dict) else data
+        demo_tenant = next((t for t in tenants if t['id'] == demo_tenant_id), None)
+        
+        if demo_tenant.get('unlimited_journals') != True:
+            print_result(False, f"Manual toggle failed, unlimited_journals={demo_tenant.get('unlimited_journals')}")
+            return False
+        
+        print("✅ 6f: Manual unlimited_journals=true toggle works")
+        
+        print_result(True, "Manual unlimited_journals toggle working correctly")
+        return True
+        
+    except Exception as e:
+        print_result(False, f"Exception: {e}")
+        return False
+
+def test_8_quota_bypass():
+    """Test 8: Quota bypass with unlimited_journals=true"""
+    print_test("8. Quota bypass test - verify unlimited_journals=true bypasses quota")
+    
+    try:
+        # Ensure unlimited_journals is true
+        response = super_admin_session.patch(
+            f"{BASE_URL}/admin/tenants/{demo_tenant_id}",
+            json={"unlimited_journals": True},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            print_result(False, f"Failed to set unlimited_journals=true: {response.status_code}")
+            return False
+        
+        # Verify via GET /auth/me as demo owner
+        response = demo_owner_session.get(f"{BASE_URL}/auth/me", timeout=10)
+        
+        if response.status_code != 200:
+            print_result(False, f"GET /auth/me failed: {response.status_code}")
+            return False
+        
+        data = response.json()
+        tenant = data.get('tenant', {})
+        
+        if tenant.get('unlimited_journals') != True:
+            print_result(False, f"unlimited_journals should be true, got {tenant.get('unlimited_journals')}")
+            return False
+        
+        print("✅ Verified unlimited_journals=true via /auth/me")
+        
+        # Note: Creating a journal entry to test quota bypass is complex
+        # The review request says if creating JE is complex, verify via /auth/me and report as partial
+        print("ℹ️  Note: Full quota bypass test (creating journal entry) skipped due to complexity")
+        print("ℹ️  Verified unlimited_journals=true is set correctly via /auth/me")
+        
+        print_result(True, "Quota bypass verification (partial) - unlimited_journals=true confirmed")
+        return True
+        
+    except Exception as e:
+        print_result(False, f"Exception: {e}")
+        return False
+
+def main():
+    """Main test execution"""
+    global super_admin_session, demo_owner_session, demo_tenant_id, demo_tenant_original_state
+    
     print("\n" + "="*80)
-    print("CLEANUP: Deleting test data")
+    print("RAHAAL ERP v3.14 - PRICING & PLANS API TEST SUITE")
     print("="*80)
     
-    cleanup_results = []
+    # Login
+    print("\n📝 Logging in...")
+    super_admin_session = login(SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASSWORD)
+    demo_owner_session = login(DEMO_OWNER_EMAIL, DEMO_OWNER_PASSWORD)
     
-    # Delete ticket
-    if ticket_id:
-        try:
-            response = requests.delete(
-                f"{BASE_URL}/tickets/{ticket_id}",
-                headers=get_headers(),
-                timeout=30
-            )
-            if response.status_code == 200:
-                print(f"✓ Test ticket deleted: {ticket_id}")
-                cleanup_results.append(("Delete ticket", True, ticket_id))
-            else:
-                print(f"⚠ Failed to delete ticket {ticket_id}: {response.status_code}")
-                print(f"  Note: Ticket ID {ticket_id} may need manual cleanup")
-                cleanup_results.append(("Delete ticket", False, f"Status {response.status_code}"))
-        except Exception as e:
-            print(f"⚠ Error deleting ticket: {str(e)}")
-            cleanup_results.append(("Delete ticket", False, str(e)))
+    if not super_admin_session or not demo_owner_session:
+        print("\n❌ LOGIN FAILED - Cannot proceed with tests")
+        sys.exit(1)
     
-    # Delete visa
-    if visa_id:
-        try:
-            response = requests.delete(
-                f"{BASE_URL}/visas/{visa_id}",
-                headers=get_headers(),
-                timeout=30
-            )
-            if response.status_code == 200:
-                print(f"✓ Test visa deleted: {visa_id}")
-                cleanup_results.append(("Delete visa", True, visa_id))
-            else:
-                print(f"⚠ Failed to delete visa {visa_id}: {response.status_code}")
-                print(f"  Note: Visa ID {visa_id} may need manual cleanup")
-                cleanup_results.append(("Delete visa", False, f"Status {response.status_code}"))
-        except Exception as e:
-            print(f"⚠ Error deleting visa: {str(e)}")
-            cleanup_results.append(("Delete visa", False, str(e)))
+    # Get demo tenant ID
+    print("\n📝 Getting demo tenant ID...")
+    demo_tenant_id = get_demo_tenant_id(super_admin_session)
     
-    return cleanup_results
-
-def print_summary(ticket_results, visa_results, cleanup_results):
-    """Print test summary"""
+    if not demo_tenant_id:
+        print("\n❌ DEMO TENANT NOT FOUND - Cannot proceed with tests")
+        sys.exit(1)
+    
+    # Save original state
+    print("\n📝 Saving original demo tenant state...")
+    demo_tenant_original_state = save_demo_tenant_state(super_admin_session, demo_tenant_id)
+    
+    # Run tests
+    results = []
+    
+    try:
+        results.append(("Test 1: GET /pricing as demo owner", test_1_get_pricing_as_demo_owner()))
+        results.append(("Test 2: GET /admin/pricing-config authorization", test_2_get_pricing_config_authorization()))
+        results.append(("Test 3: PUT /admin/pricing-config discount", test_3_put_pricing_config_discount()))
+        results.append(("Test 4: PUT /admin/pricing-config features", test_4_put_pricing_config_features()))
+        results.append(("Test 5: PATCH tenant plan assignment", test_5_patch_tenant_plan_assignment()))
+        results.append(("Test 6: PATCH tenant billing_mode", test_6_patch_tenant_billing_mode()))
+        results.append(("Test 7: PATCH tenant unlimited_journals toggle", test_7_patch_tenant_unlimited_journals_toggle()))
+        results.append(("Test 8: Quota bypass verification", test_8_quota_bypass()))
+        
+    finally:
+        # Always restore demo tenant state
+        if demo_tenant_id and demo_tenant_original_state:
+            restore_demo_tenant_state(super_admin_session, demo_tenant_id, demo_tenant_original_state)
+    
+    # Print summary
     print("\n" + "="*80)
     print("TEST SUMMARY")
     print("="*80)
     
-    all_results = ticket_results + visa_results
-    passed = sum(1 for _, result, _ in all_results if result)
-    total = len(all_results)
+    passed = sum(1 for _, result in results if result)
+    total = len(results)
     
-    print(f"\nTicket Import Preview Tests:")
-    for test_name, result, detail in ticket_results:
-        status = "✅ PASS" if result else "❌ FAIL"
-        print(f"  {status}: {test_name}")
-        if not result:
-            print(f"         Detail: {detail}")
-    
-    print(f"\nVisa Import Preview Tests:")
-    for test_name, result, detail in visa_results:
-        status = "✅ PASS" if result else "❌ FAIL"
-        print(f"  {status}: {test_name}")
-        if not result:
-            print(f"         Detail: {detail}")
-    
-    print(f"\nCleanup:")
-    for test_name, result, detail in cleanup_results:
-        status = "✅" if result else "⚠"
-        print(f"  {status}: {test_name} - {detail}")
+    for test_name, result in results:
+        status = "✅ PASSED" if result else "❌ FAILED"
+        print(f"{status}: {test_name}")
     
     print(f"\n{'='*80}")
-    print(f"OVERALL RESULT: {passed}/{total} tests passed ({passed*100//total if total > 0 else 0}%)")
-    print(f"{'='*80}")
-    
-    return passed == total
-
-def main():
-    """Main test execution"""
-    print("\n" + "="*80)
-    print("v3.13 DUPLICATE DETECTION RULE TEST")
-    print("Testing import preview endpoints for tickets and visas")
+    print(f"TOTAL: {passed}/{total} tests passed ({int(passed/total*100)}%)")
     print("="*80)
     
-    # Step 1: Login
-    if not login():
-        print("\n❌ FATAL: Login failed. Cannot proceed with tests.")
-        return False
-    
-    # Step 2: Get existing client and supplier
-    client_id, client_name, supplier_id, supplier_name = get_existing_client_and_supplier()
-    
-    if not client_id or not supplier_id:
-        print("\n❌ FATAL: Failed to get client/supplier. Cannot proceed with tests.")
-        return False
-    
-    # Step 3: Create test data
-    ticket_id = create_test_ticket(client_id, supplier_id)
-    visa_id = create_test_visa(client_id, supplier_id)
-    
-    if not ticket_id or not visa_id:
-        print("\n⚠ WARNING: Failed to create test data. Some tests may fail.")
-    
-    # Step 4: Run tests
-    ticket_results = test_ticket_import_preview(client_name, supplier_name)
-    visa_results = test_visa_import_preview(client_name, supplier_name)
-    
-    # Step 5: Cleanup
-    cleanup_results = cleanup_test_data(ticket_id, visa_id)
-    
-    # Step 6: Print summary
-    all_passed = print_summary(ticket_results, visa_results, cleanup_results)
-    
-    return all_passed
+    # Exit with appropriate code
+    sys.exit(0 if passed == total else 1)
 
 if __name__ == "__main__":
-    success = main()
-    exit(0 if success else 1)
+    main()

@@ -344,6 +344,7 @@ function SuperAdminPanel() {
   const [editing, setEditing] = useState(null)
   const [resetReqs, setResetReqs] = useState([])
   const [resetTarget, setResetTarget] = useState(null)
+  const [pricingOpen, setPricingOpen] = useState(false)
   const load = async () => {
     try {
       const [d, rr] = await Promise.all([
@@ -434,7 +435,10 @@ function SuperAdminPanel() {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="flex items-center gap-2"><Building2 className="w-5 h-5 text-blue-600" /> إدارة المكاتب (Tenants)</CardTitle>
-            <Button onClick={() => setOpenNew(true)} className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> إنشاء مكتب جديد</Button>
+            <div className="flex gap-2">
+              <Button onClick={() => setPricingOpen(true)} variant="outline" className="gap-2">💲 التسعير والخصومات</Button>
+              <Button onClick={() => setOpenNew(true)} className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> إنشاء مكتب جديد</Button>
+            </div>
           </CardHeader>
           <CardContent>
             <Table>
@@ -544,6 +548,7 @@ function SuperAdminPanel() {
       <NewTenantDialog open={openNew} onOpenChange={setOpenNew} onSaved={() => { load(); setOpenNew(false) }} />
       <EditTenantDialog tenant={editing} onOpenChange={() => setEditing(null)} onSaved={() => { load(); setEditing(null) }} />
       <AdminResetPasswordDialog req={resetTarget} onClose={() => setResetTarget(null)} onDone={load} />
+      <PricingConfigDialog open={pricingOpen} onOpenChange={setPricingOpen} />
     </div>
   )
 }
@@ -709,6 +714,85 @@ function AdminResetPasswordDialog({ req, onClose, onDone }) {
   )
 }
 
+// v3.14 — Super Admin: pricing config (flexible discount toggle + dynamic features matrix)
+function PricingConfigDialog({ open, onOpenChange }) {
+  const [cfg, setCfg] = useState(null)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => { if (open) api('/admin/pricing-config').then(setCfg).catch(e => toast.error(e.message)) }, [open])
+  const setPlan = (key, patch) => setCfg(c => ({ ...c, plans: c.plans.map(p => p.key === key ? { ...p, ...patch } : p) }))
+  const save = async () => {
+    try {
+      setSaving(true)
+      await api('/admin/pricing-config', { method: 'PUT', body: cfg })
+      toast.success('✅ تم حفظ إعدادات التسعير — تنعكس فوراً على واجهة المشتركين')
+      onOpenChange(false)
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  if (!cfg) return null
+  const disc = cfg.discount_enabled ? (Number(cfg.discount_percent) || 0) : 0
+  const n = Number(cfg.installments_count) || 5
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto" dir="rtl">
+        <DialogHeader>
+          <DialogTitle>💲 إعدادات التسعير والخصومات</DialogTitle>
+          <DialogDescription>أي تغيير هنا ينعكس آلياً على شاشة الباقات لدى جميع المشتركين</DialogDescription>
+        </DialogHeader>
+        {/* Flexible discount */}
+        <div className={`p-3 rounded-lg border-2 ${cfg.discount_enabled ? 'bg-rose-50 border-rose-300' : 'bg-slate-50 border-slate-200'}`}>
+          <div className="flex items-center gap-4 flex-wrap">
+            <Button type="button" size="sm" onClick={() => setCfg({ ...cfg, discount_enabled: !cfg.discount_enabled })}
+              className={cfg.discount_enabled ? 'bg-rose-600 hover:bg-rose-700 text-white' : 'bg-slate-300 hover:bg-slate-400 text-slate-700'}>
+              {cfg.discount_enabled ? '🔥 الخصم مفعّل' : '⭕ الخصم متوقف'}
+            </Button>
+            <div className="flex items-center gap-2">
+              <Label className="text-xs">نسبة الخصم %</Label>
+              <Input type="number" min="0" max="95" value={cfg.discount_percent} onChange={e => setCfg({ ...cfg, discount_percent: Number(e.target.value) })} className="w-24 font-black text-center" disabled={!cfg.discount_enabled} />
+            </div>
+            <div className="flex items-center gap-2">
+              <Label className="text-xs">عدد الأقساط</Label>
+              <Input type="number" min="1" max="12" value={cfg.installments_count} onChange={e => setCfg({ ...cfg, installments_count: Number(e.target.value) })} className="w-20 font-black text-center" />
+            </div>
+          </div>
+        </div>
+        {/* Plans editor with live price preview */}
+        <div className="grid md:grid-cols-3 gap-3">
+          {cfg.plans.map(p => {
+            const final = Math.round(p.annual_price * (100 - disc)) / 100
+            return (
+              <Card key={p.key} className="border-2">
+                <CardHeader className="pb-2 bg-slate-50">
+                  <CardTitle className="text-sm">{p.icon} {p.name_ar} <span className="text-[10px] text-slate-400 font-mono">({p.key})</span></CardTitle>
+                </CardHeader>
+                <CardContent className="pt-3 space-y-2">
+                  <Field label="السعر السنوي الأساسي $"><Input type="number" min="0" value={p.annual_price} onChange={e => setPlan(p.key, { annual_price: Number(e.target.value) })} className="font-black" /></Field>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Field label="حد المستخدمين (0=∞)"><Input type="number" min="0" value={p.max_users} onChange={e => setPlan(p.key, { max_users: Number(e.target.value) })} /></Field>
+                    <Field label="حد الفروع (0=∞)"><Input type="number" min="0" value={p.max_branches} onChange={e => setPlan(p.key, { max_branches: Number(e.target.value) })} /></Field>
+                  </div>
+                  <Field label={`المزايا (سطر لكل ميزة — ${(p.features || []).length})`}>
+                    <Textarea rows={6} value={(p.features || []).join('\n')} onChange={e => setPlan(p.key, { features: e.target.value.split('\n') })} className="text-xs" />
+                  </Field>
+                  <div className="p-2 rounded bg-blue-50 border border-blue-200 text-[11px] space-y-0.5">
+                    <div className="font-bold text-blue-800">معاينة حية:</div>
+                    <div>سنوي: {disc > 0 && <span className="line-through text-slate-400">${p.annual_price}</span>} <b className="text-slate-900">${disc > 0 ? final : p.annual_price}</b></div>
+                    <div>قسط: {disc > 0 && <span className="line-through text-slate-400">${Math.round((p.annual_price / n) * 100) / 100}</span>} <b className="text-slate-900">${Math.round(((disc > 0 ? final : p.annual_price) / n) * 100) / 100}</b> × {n}</div>
+                  </div>
+                </CardContent>
+              </Card>
+            )
+          })}
+        </div>
+        <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ تذكير: مراقبة التأشيرات وإدارة البكجات متاحة في جميع الباقات بلا استثناء — أبقِها ضمن المزايا الثلاث.</div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
+          <Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? 'جارٍ الحفظ...' : '💾 حفظ ونشر التسعير'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function NewTenantDialog({ open, onOpenChange, onSaved }) {
   const [f, setF] = useState({ name: '', owner_name: '', owner_email: '', owner_password: '', max_users: 2, max_branches: 1, subscription: 'trial', referral_code: '' })
   const [saving, setSaving] = useState(false)
@@ -747,15 +831,22 @@ function NewTenantDialog({ open, onOpenChange, onSaved }) {
 
 function EditTenantDialog({ tenant, onOpenChange, onSaved }) {
   const [f, setF] = useState({})
-  useEffect(() => { if (tenant) setF({ name: tenant.name, max_users: tenant.max_users, max_branches: tenant.max_branches, status: tenant.status }) }, [tenant])
+  useEffect(() => { if (tenant) setF({ name: tenant.name, max_users: tenant.max_users, max_branches: tenant.max_branches, status: tenant.status, plan_key: ['silver', 'gold', 'enterprise'].includes(tenant.plan_tier) ? tenant.plan_tier : '', billing_mode: tenant.billing_mode || '', unlimited_journals: !!tenant.unlimited_journals }) }, [tenant])
   if (!tenant) return null
   const submit = async () => {
-    try { await api(`/admin/tenants/${tenant.id}`, { method: 'PATCH', body: f }); toast.success('تم التحديث'); onSaved() }
+    try {
+      const body = { ...f }
+      if (!body.plan_key) delete body.plan_key
+      if (!body.billing_mode) delete body.billing_mode
+      await api(`/admin/tenants/${tenant.id}`, { method: 'PATCH', body })
+      toast.success('تم التحديث'); onSaved()
+    }
     catch (e) { toast.error(e.message) }
   }
+  const PLAN_LIMITS = { silver: 'فرع واحد + مستخدمان', gold: 'حتى 8 مستخدمين + 3 فروع', enterprise: 'غير محدود (فروع ومستخدمين)' }
   return (
     <Dialog open={!!tenant} onOpenChange={onOpenChange}>
-      <DialogContent dir="rtl">
+      <DialogContent dir="rtl" className="max-w-lg">
         <DialogHeader><DialogTitle>تعديل المكتب: {tenant.name}</DialogTitle></DialogHeader>
         <div className="grid grid-cols-2 gap-4">
           <Field label="اسم المكتب"><Input value={f.name || ''} onChange={e => setF({ ...f, name: e.target.value })} /></Field>
@@ -765,8 +856,42 @@ function EditTenantDialog({ tenant, onOpenChange, onSaved }) {
               <SelectContent><SelectItem value="active">نشط</SelectItem><SelectItem value="suspended">موقوف</SelectItem></SelectContent>
             </Select>
           </Field>
+          <Field label="الباقة (تُطبّق الحدود آلياً)">
+            <Select value={f.plan_key || 'none'} onValueChange={v => setF({ ...f, plan_key: v === 'none' ? '' : v })}>
+              <SelectTrigger><SelectValue placeholder="بدون باقة" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">— بدون —</SelectItem>
+                <SelectItem value="silver">🥈 سيلفر</SelectItem>
+                <SelectItem value="gold">🥇 جولد</SelectItem>
+                <SelectItem value="enterprise">🏢 إنتربرايز</SelectItem>
+              </SelectContent>
+            </Select>
+            {f.plan_key && <div className="text-[10px] text-blue-600 mt-1">سيُطبّق: {PLAN_LIMITS[f.plan_key]}</div>}
+          </Field>
+          <Field label="طريقة الدفع">
+            <Select value={f.billing_mode || 'none'} onValueChange={v => setF({ ...f, billing_mode: v === 'none' ? '' : v, ...(v === 'annual' ? { unlimited_journals: true } : {}) })}>
+              <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">— بدون —</SelectItem>
+                <SelectItem value="installments">💳 أقساط (قيود محدودة)</SelectItem>
+                <SelectItem value="annual">📅 سنوي دفعة واحدة (قيود مفتوحة)</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
           <Field label="حد المستخدمين"><Input type="number" min="0" value={f.max_users || 1} onChange={e => setF({ ...f, max_users: Number(e.target.value) })} /></Field>
           <Field label="عدد الفروع"><Input type="number" min="0" value={f.max_branches || 1} onChange={e => setF({ ...f, max_branches: Number(e.target.value) })} /></Field>
+        </div>
+        {/* v3.14 — Manual unlimited-journals switch (e.g. after final installment payment) */}
+        <div className={`p-3 rounded-lg border flex items-center justify-between ${f.unlimited_journals ? 'bg-emerald-50 border-emerald-300' : 'bg-slate-50 border-slate-200'}`}>
+          <div>
+            <div className="font-bold text-sm">{f.unlimited_journals ? '♾️ القيود المحاسبية: مفتوحة (Unlimited)' : '🔒 القيود المحاسبية: محدودة بالحصة'}</div>
+            <div className="text-[11px] text-slate-500">فعّل يدوياً عند سداد آخر قسط أو الدفع الكلي المباشر</div>
+          </div>
+          <Button type="button" size="sm" variant={f.unlimited_journals ? 'outline' : 'default'}
+            className={f.unlimited_journals ? 'text-rose-600' : 'bg-emerald-600 hover:bg-emerald-700 text-white'}
+            onClick={() => setF({ ...f, unlimited_journals: !f.unlimited_journals })}>
+            {f.unlimited_journals ? 'إغلاق القيود' : '♾️ فتح القيود'}
+          </Button>
         </div>
         <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} className="grad-brand text-white">حفظ</Button></DialogFooter>
       </DialogContent>
@@ -8362,6 +8487,78 @@ function TenantApp() {
   )
 }
 
+// v3.14 — 6-tier pricing display (silver/gold/enterprise × installments/annual)
+// Strike-through original price (gray) + bold black final price, per approved spec.
+function PricingPlans({ tenant }) {
+  const [cfg, setCfg] = useState(null)
+  const [mode, setMode] = useState('annual') // 'annual' | 'installments'
+  useEffect(() => { api('/pricing').then(setCfg).catch(() => {}) }, [])
+  if (!cfg) return <div className="text-center py-6 text-slate-400"><Loader2 className="w-5 h-5 animate-spin inline" /> جاري تحميل الباقات...</div>
+  const hasDisc = cfg.discount_enabled && cfg.discount_percent > 0
+  const PLAN_STYLE = {
+    silver: { ring: 'border-slate-300', head: 'bg-gradient-to-l from-slate-100 to-slate-50', badge: 'bg-slate-500' },
+    gold: { ring: 'border-amber-400 shadow-lg', head: 'bg-gradient-to-l from-amber-100 to-yellow-50', badge: 'bg-amber-500' },
+    enterprise: { ring: 'border-indigo-400', head: 'bg-gradient-to-l from-indigo-100 to-blue-50', badge: 'bg-indigo-600' },
+  }
+  const contactWA = (p) => {
+    const modeTxt = mode === 'annual' ? 'سنوي (دفعة واحدة — قيود مفتوحة)' : `أقساط (${cfg.installments_count} أقساط)`
+    const price = mode === 'annual' ? `$${p.pricing.annual.final}` : `$${p.pricing.installment.final_per} × ${cfg.installments_count}`
+    const msg = `أرغب في الاشتراك بباقة ${p.name_ar} — ${modeTxt} بسعر ${price}\nالمكتب: ${tenant?.name || ''}`
+    window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
+  }
+  return (
+    <div className="space-y-4">
+      {/* Billing mode switch => 6 total offerings */}
+      <div className="flex items-center justify-center gap-2">
+        <button onClick={() => setMode('annual')} className={`px-4 py-2 rounded-full text-sm font-bold border transition ${mode === 'annual' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}`}>📅 سنوي — قيود مفتوحة ∞</button>
+        <button onClick={() => setMode('installments')} className={`px-4 py-2 rounded-full text-sm font-bold border transition ${mode === 'installments' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}`}>💳 {cfg.installments_count} أقساط — قيود محدودة</button>
+      </div>
+      {hasDisc && <div className="text-center"><Badge className="bg-rose-600 text-white text-sm px-3 py-1">🔥 خصم {cfg.discount_percent}% لفترة محدودة</Badge></div>}
+      <div className="grid md:grid-cols-3 gap-3">
+        {cfg.plans.map(p => {
+          const st = PLAN_STYLE[p.key] || PLAN_STYLE.silver
+          const isCurrent = tenant?.plan_tier === p.key
+          const ann = p.pricing.annual, inst = p.pricing.installment
+          return (
+            <Card key={p.key} className={`${st.ring} border-2 relative overflow-hidden`}>
+              {p.key === 'gold' && <div className="absolute top-2 left-2"><Badge className="bg-amber-500 text-white text-[10px]">⭐ الأكثر طلباً</Badge></div>}
+              {isCurrent && <div className="absolute top-2 right-2"><Badge className="bg-emerald-600 text-white text-[10px]">باقتك الحالية</Badge></div>}
+              <CardHeader className={`${st.head} pb-3`}>
+                <CardTitle className="text-center text-lg">{p.icon} {p.name_ar}</CardTitle>
+                <div className="text-center mt-1">
+                  {mode === 'annual' ? (
+                    <>
+                      {hasDisc && <div className="text-slate-400 line-through text-base font-light">${ann.original}</div>}
+                      <div className="text-3xl font-black text-slate-900">${hasDisc ? ann.final : ann.original}</div>
+                      <div className="text-[11px] text-slate-500">سنوياً — دفعة واحدة</div>
+                      <div className="text-[11px] font-bold text-emerald-700 mt-1">♾️ قيود محاسبية مفتوحة فوراً</div>
+                    </>
+                  ) : (
+                    <>
+                      {hasDisc && <div className="text-slate-400 line-through text-base font-light">${inst.original_per}</div>}
+                      <div className="text-3xl font-black text-slate-900">${hasDisc ? inst.final_per : inst.original_per}</div>
+                      <div className="text-[11px] text-slate-500">× {inst.count} أقساط (الإجمالي ${hasDisc ? inst.total_final : ann.original})</div>
+                      <div className="text-[11px] font-bold text-blue-700 mt-1">🔒 قيود محدودة حتى سداد آخر قسط</div>
+                    </>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent className="pt-3 space-y-2">
+                <ul className="space-y-1.5">
+                  {(p.features || []).map((ft, i) => (
+                    <li key={i} className="text-[11.5px] text-slate-700 flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✓</span>{ft}</li>
+                  ))}
+                </ul>
+                <Button onClick={() => contactWA(p)} className={`w-full ${st.badge} hover:opacity-90 text-white font-bold`}>📲 اشترك الآن — تواصل مع الإدارة</Button>
+              </CardContent>
+            </Card>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function OutOfQuotaModal({ open, onOpenChange, tenant }) {
   const [plans, setPlans] = useState([])
   const [refCode, setRefCode] = useState('')
@@ -8379,40 +8576,26 @@ function OutOfQuotaModal({ open, onOpenChange, tenant }) {
   const copy = (t) => { navigator.clipboard.writeText(t); toast.success('📋 تم النسخ') }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl" dir="rtl">
+      <DialogContent className="max-w-5xl max-h-[92vh] overflow-y-auto" dir="rtl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-xl text-rose-700">⚠️ انتهت حصّة القيود</DialogTitle>
-          <DialogDescription>لقد استنفدت جميع القيود المتاحة في باقتك. اختر إحدى الطريقتين لمواصلة العمل:</DialogDescription>
+          <DialogDescription>لقد استنفدت جميع القيود المتاحة في باقتك. اختر باقة اشتراك أو ادعُ مكتباً واحصل على قيود إضافية:</DialogDescription>
         </DialogHeader>
-        <div className="grid md:grid-cols-2 gap-3">
-          <Card className="border-emerald-300 bg-emerald-50">
-            <CardHeader className="pb-2"><CardTitle className="text-emerald-800">🎁 ادعُ مكتباً</CardTitle><CardDescription>احصل على +50 قيد فوراً</CardDescription></CardHeader>
-            <CardContent className="space-y-2">
-              <div className="text-xs text-emerald-800">ادعُ مكتب سفريات آخر عبر رابطك الخاص، وستحصل على <b>+50 قيد إضافي فوراً</b> عند تسجيله. لا حدود لعدد الإحالات!</div>
-              <div className="p-2 bg-white rounded border text-xs" dir="ltr">{inviteLink}</div>
-              <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => copy(inviteLink)} className="flex-1">📋 نسخ الرابط</Button>
-                <Button size="sm" onClick={shareWA} className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white">📲 مشاركة واتساب</Button>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-blue-300 bg-blue-50">
-            <CardHeader className="pb-2"><CardTitle className="text-blue-800">💳 حاسِب وسدّد</CardTitle><CardDescription>باقات متنوعة قابلة للترقية</CardDescription></CardHeader>
-            <CardContent className="space-y-2">
-              {plans.length === 0 ? <div className="text-xs text-slate-400">لا توجد باقات متاحة</div> : plans.map(p => (
-                <div key={p.id} className="p-2 bg-white rounded border flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-bold text-slate-800">{p.name}</div>
-                    <div className="text-[11px] text-slate-500">{p.description}</div>
-                  </div>
-                  <Badge className="bg-blue-600 text-white hover:bg-blue-600 text-sm">${p.price_usd}</Badge>
-                </div>
-              ))}
-              <div className="text-[11px] text-blue-800 mt-2">💬 للسداد والاشتراك، تواصل مع الإدارة العامة عبر واتساب أو البريد.</div>
-              <Button size="sm" onClick={() => window.open(`https://wa.me/?text=${encodeURIComponent('أرغب في ترقية باقة رحّال ERP لمكتب: ' + (tenant?.name || ''))}`, '_blank')} className="w-full bg-blue-600 hover:bg-blue-700 text-white">📲 تواصل مع الإدارة</Button>
-            </CardContent>
-          </Card>
-        </div>
+        {/* v3.14 — 6-tier pricing */}
+        <PricingPlans tenant={tenant} />
+        {/* Referral quick card */}
+        <Card className="border-emerald-300 bg-emerald-50">
+          <CardContent className="p-3 flex flex-col md:flex-row items-center gap-3">
+            <div className="flex-1">
+              <div className="font-bold text-emerald-800 text-sm">🎁 أو ادعُ مكتباً واحصل على +50 قيد فوراً</div>
+              <div className="p-2 bg-white rounded border text-xs mt-1" dir="ltr">{inviteLink}</div>
+            </div>
+            <div className="flex gap-2">
+              <Button size="sm" variant="outline" onClick={() => copy(inviteLink)}>📋 نسخ</Button>
+              <Button size="sm" onClick={shareWA} className="bg-emerald-500 hover:bg-emerald-600 text-white">📲 واتساب</Button>
+            </div>
+          </CardContent>
+        </Card>
         <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إغلاق</Button></DialogFooter>
       </DialogContent>
     </Dialog>
