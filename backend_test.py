@@ -1,595 +1,555 @@
 #!/usr/bin/env python3
 """
-Backend Test Suite for Rahaal ERP v3.16 - Installments Tracker
-Tests installments endpoints with comprehensive validation and cleanup
+Backend Test Suite for Rahaal ERP v3.17 - Booking Manual Discount Feature
+Tests the packages module booking discount functionality
 """
 
-import requests
+import asyncio
+import aiohttp
 import json
+import os
 from datetime import datetime, timedelta
 
-BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
+# Configuration
+BASE_URL = os.getenv('NEXT_PUBLIC_BASE_URL', 'https://visa-booking-5.preview.emergentagent.com')
+API_URL = f"{BASE_URL}/api"
 
 # Test credentials
-SUPER_ADMIN_EMAIL = "admin@targetmedia.com"
-SUPER_ADMIN_PASSWORD = "Target@2025"
-DEMO_OWNER_EMAIL = "owner@demo.com"
-DEMO_OWNER_PASSWORD = "Demo@2025"
+OWNER_EMAIL = "owner@demo.com"
+OWNER_PASSWORD = "Demo@2025"
 
-class TestSession:
-    def __init__(self):
-        self.session = requests.Session()
-        self.demo_tenant_id = None
-        self.demo_original_state = {}
+# Global session cookie
+session_cookie = None
+
+# Test data storage
+test_data = {
+    'package_id': None,
+    'client_id': None,
+    'supplier_id': None,
+    'booking1_id': None,
+    'booking2_id': None,
+    'booking3_id': None,
+    'client_balance_before': None,
+}
+
+async def login():
+    """Login and get session cookie"""
+    global session_cookie
+    print("\n=== LOGIN ===")
+    async with aiohttp.ClientSession() as session:
+        try:
+            payload = {"email": OWNER_EMAIL, "password": OWNER_PASSWORD}
+            async with session.post(f"{API_URL}/auth/login", json=payload) as resp:
+                if resp.status == 200:
+                    cookies = resp.cookies
+                    if 'rahaal_session' in cookies:
+                        session_cookie = cookies['rahaal_session'].value
+                        print(f"✅ Login successful - Session cookie obtained")
+                        return True
+                    else:
+                        print(f"❌ Login failed - No session cookie in response")
+                        return False
+                else:
+                    text = await resp.text()
+                    print(f"❌ Login failed - Status {resp.status}: {text}")
+                    return False
+        except Exception as e:
+            print(f"❌ Login exception: {e}")
+            return False
+
+async def api_request(method, endpoint, data=None, expect_status=200):
+    """Make authenticated API request"""
+    global session_cookie
+    url = f"{API_URL}{endpoint}"
+    headers = {'Cookie': f'rahaal_session={session_cookie}'}
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            if method == 'GET':
+                async with session.get(url, headers=headers) as resp:
+                    status = resp.status
+                    body = await resp.json() if resp.content_type == 'application/json' else await resp.text()
+                    return status, body
+            elif method == 'POST':
+                async with session.post(url, json=data, headers=headers) as resp:
+                    status = resp.status
+                    body = await resp.json() if resp.content_type == 'application/json' else await resp.text()
+                    return status, body
+            elif method == 'PATCH':
+                async with session.patch(url, json=data, headers=headers) as resp:
+                    status = resp.status
+                    body = await resp.json() if resp.content_type == 'application/json' else await resp.text()
+                    return status, body
+            elif method == 'DELETE':
+                async with session.delete(url, headers=headers) as resp:
+                    status = resp.status
+                    body = await resp.json() if resp.content_type == 'application/json' else await resp.text()
+                    return status, body
+        except Exception as e:
+            print(f"❌ API request exception: {e}")
+            return None, str(e)
+
+async def setup_test_data():
+    """Setup: Create package with components and record client balance"""
+    print("\n=== SETUP: CREATE PACKAGE AND COMPONENTS ===")
+    
+    # Get existing client for balance tracking
+    status, body = await api_request('GET', '/clients')
+    if status == 200 and isinstance(body, dict) and body.get('data'):
+        test_data['client_id'] = body['data'][0]['id']
+        client_balances = body['data'][0].get('balances', {})
+        client_balance_sar = client_balances.get('SAR') or 0
+        test_data['client_balance_before'] = client_balance_sar
+        print(f"✅ Using existing client: {body['data'][0]['name']} (ID: {test_data['client_id']})")
+        print(f"   Client balance BEFORE tests: {client_balance_sar} SAR")
+    elif status == 200 and isinstance(body, list) and len(body) > 0:
+        test_data['client_id'] = body[0]['id']
+        client_balances = body[0].get('balances', {})
+        client_balance_sar = client_balances.get('SAR') or 0
+        test_data['client_balance_before'] = client_balance_sar
+        print(f"✅ Using existing client: {body[0]['name']} (ID: {test_data['client_id']})")
+        print(f"   Client balance BEFORE tests: {client_balance_sar} SAR")
+    else:
+        print(f"❌ Failed to get existing client")
+        return False
+    
+    # Get existing supplier
+    status, body = await api_request('GET', '/suppliers')
+    if status == 200 and isinstance(body, dict) and body.get('data'):
+        test_data['supplier_id'] = body['data'][0]['id']
+        print(f"✅ Using existing supplier: {body['data'][0]['name']} (ID: {test_data['supplier_id']})")
+    elif status == 200 and isinstance(body, list) and len(body) > 0:
+        test_data['supplier_id'] = body[0]['id']
+        print(f"✅ Using existing supplier: {body[0]['name']} (ID: {test_data['supplier_id']})")
+    else:
+        print(f"❌ Failed to get existing supplier")
+        return False
+    
+    # Create package with room pricing
+    today = datetime.now().strftime('%Y-%m-%d')
+    package_data = {
+        "name": "باكج AUTOTEST-V317",
+        "package_type": "umrah",
+        "currency": "SAR",
+        "start_date": today,
+        "room_pricing": [
+            {"type": "ثنائي", "sale_per_pax": 1000},
+            {"type": "ثلاثي", "sale_per_pax": 800}
+        ]
+    }
+    
+    status, body = await api_request('POST', '/packages', package_data)
+    if status == 200 and body.get('id'):
+        test_data['package_id'] = body['id']
+        print(f"✅ Package created: {body['name']} (ID: {test_data['package_id']})")
+    else:
+        print(f"❌ Failed to create package - Status {status}: {body}")
+        return False
+    
+    # Add component to package
+    component_data = {
+        "name": "مكون اختبار V317",
+        "supplier_id": test_data['supplier_id'],
+        "cost_per_pax": 300,
+        "sale_per_pax": 500
+    }
+    
+    status, body = await api_request('POST', f"/packages/{test_data['package_id']}/components", component_data)
+    if status == 200:
+        print(f"✅ Component added to package")
+    else:
+        print(f"❌ Failed to add component - Status {status}: {body}")
+        return False
+    
+    return True
+
+async def test_booking_with_registrants_and_discount():
+    """Test 3: POST booking WITH registrants + discount"""
+    print("\n=== TEST 3: POST BOOKING WITH REGISTRANTS + DISCOUNT ===")
+    
+    booking_data = {
+        "payment_method": "credit",
+        "client_id": test_data['client_id'],
+        "registrants": [
+            {"name": "أ", "passport_no": "V317A", "age": 30, "room_type": "ثنائي"},
+            {"name": "ب", "passport_no": "V317B", "age": 30, "room_type": "ثلاثي"}
+        ],
+        "discount": 300,
+        "discount_reason": "مجاملة وكيل"
+    }
+    
+    status, body = await api_request('POST', f"/packages/{test_data['package_id']}/bookings", booking_data)
+    
+    if status == 200:
+        test_data['booking1_id'] = body['id']
         
-    def login(self, email, password):
-        """Login and store session cookie"""
-        print(f"\n🔐 Logging in as {email}...")
-        resp = self.session.post(f"{BASE_URL}/auth/login", json={"email": email, "password": password})
-        if resp.status_code == 200:
-            print(f"✅ Login successful")
+        # Verify calculations
+        base_room_sale = 1000 + 800  # ثنائي + ثلاثي = 1800
+        expected_total_sale = 1500  # 1800 - 300 discount
+        expected_total_cost = 600  # 300 * 2 pax
+        expected_commission = 900  # 1500 - 600
+        
+        actual_total_sale = body.get('total_sale')
+        actual_total_cost = body.get('total_cost')
+        actual_commission = body.get('commission')
+        actual_discount = body.get('discount')
+        actual_discount_reason = body.get('discount_reason')
+        
+        print(f"   Base room sale: {base_room_sale} SAR")
+        print(f"   Discount: {actual_discount} SAR")
+        print(f"   Total sale: {actual_total_sale} SAR (expected: {expected_total_sale})")
+        print(f"   Total cost: {actual_total_cost} SAR (expected: {expected_total_cost})")
+        print(f"   Commission: {actual_commission} SAR (expected: {expected_commission})")
+        print(f"   Discount reason: '{actual_discount_reason}'")
+        
+        # Verify all calculations
+        if (actual_total_sale == expected_total_sale and 
+            actual_total_cost == expected_total_cost and 
+            actual_commission == expected_commission and
+            actual_discount == 300 and
+            actual_discount_reason == "مجاملة وكيل"):
+            
+            # Check client balance increased by exactly 1500 (not 1800)
+            status2, client_body = await api_request('GET', f"/clients")
+            if status2 == 200:
+                clients_list = client_body if isinstance(client_body, list) else client_body.get('data', [])
+                client = next((c for c in clients_list if c['id'] == test_data['client_id']), None)
+                if client:
+                    client_balances = client.get('balances', {})
+                    new_balance = client_balances.get('SAR') or 0
+                    balance_increase = new_balance - test_data['client_balance_before']
+                    print(f"   Client balance after booking: {new_balance} SAR")
+                    print(f"   Client balance before booking: {test_data['client_balance_before']} SAR")
+                    print(f"   Client balance increased by: {balance_increase} SAR (expected: 1500)")
+                    
+                    # Update the before balance for subsequent tests
+                    test_data['client_balance_before'] = new_balance
+                    
+                    if abs(balance_increase - 1500) < 0.01:  # Allow small floating point differences
+                        # Check journal entry
+                        status3, je_body = await api_request('GET', '/journal-entries')
+                        if status3 == 200:
+                            je_list = je_body if isinstance(je_body, list) else je_body.get('data', [])
+                            # Find the journal entry for this booking
+                            je = next((j for j in je_list if j.get('ref_type') == 'package_booking' and j.get('ref_id') == test_data['booking1_id']), None)
+                            if je:
+                                # Check for client receivable debit of 1500
+                                client_line = next((l for l in je['lines'] if l.get('account_code') == '1301'), None)
+                                if client_line and client_line.get('debit') == 1500:
+                                    print(f"✅ TEST 3 PASSED - Booking with registrants + discount working correctly")
+                                    print(f"   - Base room sale: 1800 SAR")
+                                    print(f"   - Discount: 300 SAR")
+                                    print(f"   - Total sale: 1500 SAR")
+                                    print(f"   - Total cost: 600 SAR")
+                                    print(f"   - Commission: 900 SAR")
+                                    print(f"   - Discount reason stored correctly")
+                                    print(f"   - Client balance increased by exactly 1500 SAR")
+                                    print(f"   - Journal entry has debit 1500 on client receivable")
+                                    return True
+                                else:
+                                    print(f"❌ TEST 3 FAILED - Journal entry client debit incorrect: {client_line.get('debit') if client_line else 'not found'}")
+                            else:
+                                print(f"❌ TEST 3 FAILED - Journal entry not found for booking")
+                    else:
+                        print(f"❌ TEST 3 FAILED - Client balance increase incorrect: {balance_increase} (expected 1500)")
+            else:
+                print(f"❌ TEST 3 FAILED - Could not verify client balance")
+        else:
+            print(f"❌ TEST 3 FAILED - Calculation mismatch")
+    else:
+        print(f"❌ TEST 3 FAILED - Status {status}: {body}")
+    
+    return False
+
+async def test_booking_without_registrants_with_discount():
+    """Test 4: POST booking WITHOUT registrants but WITH discount"""
+    print("\n=== TEST 4: POST BOOKING WITHOUT REGISTRANTS BUT WITH DISCOUNT ===")
+    
+    booking_data = {
+        "payment_method": "credit",
+        "client_id": test_data['client_id'],
+        "pax_adults": 2,
+        "discount": 100,
+        "discount_reason": "خصم رضيع"
+    }
+    
+    status, body = await api_request('POST', f"/packages/{test_data['package_id']}/bookings", booking_data)
+    
+    if status == 200:
+        test_data['booking2_id'] = body['id']
+        
+        # Component sale: 500 * 2 = 1000
+        # After discount: 1000 - 100 = 900
+        expected_total_sale = 900
+        actual_total_sale = body.get('total_sale')
+        
+        print(f"   Component sale (500 * 2): 1000 SAR")
+        print(f"   Discount: {body.get('discount')} SAR")
+        print(f"   Total sale: {actual_total_sale} SAR (expected: {expected_total_sale})")
+        
+        if actual_total_sale == expected_total_sale:
+            print(f"✅ TEST 4 PASSED - Booking without registrants but with discount working correctly")
+            print(f"   - Component sale: 1000 SAR")
+            print(f"   - Discount: 100 SAR")
+            print(f"   - Total sale: 900 SAR")
             return True
         else:
-            print(f"❌ Login failed: {resp.status_code} - {resp.text}")
-            return False
-    
-    def get_demo_tenant(self):
-        """Get demo tenant and record original state"""
-        print("\n📋 Getting demo tenant...")
-        resp = self.session.get(f"{BASE_URL}/admin/tenants")
-        if resp.status_code != 200:
-            print(f"❌ Failed to get tenants: {resp.status_code} - {resp.text}")
-            return None
-        
-        try:
-            data = resp.json()
-            # Response has a 'tenants' key
-            tenants = data.get('tenants', []) if isinstance(data, dict) else data
-        except Exception as e:
-            print(f"❌ Failed to parse JSON: {e}")
-            print(f"Response text: {resp.text}")
-            return None
-        demo = next((t for t in tenants if t.get('slug') == 'demo'), None)
-        if not demo:
-            print("❌ Demo tenant not found")
-            return None
-        
-        self.demo_tenant_id = demo['id']
-        # Record original state
-        self.demo_original_state = {
-            'billing_mode': demo.get('billing_mode'),
-            'unlimited_journals': demo.get('unlimited_journals'),
-            'installments': demo.get('installments'),
-            'plan_tier': demo.get('plan_tier'),
-            'max_users': demo.get('max_users'),
-            'max_branches': demo.get('max_branches')
-        }
-        
-        print(f"✅ Demo tenant found: {demo['name']} (ID: {self.demo_tenant_id})")
-        print(f"📊 Original state:")
-        print(f"   - billing_mode: {self.demo_original_state['billing_mode']}")
-        print(f"   - unlimited_journals: {self.demo_original_state['unlimited_journals']}")
-        print(f"   - installments: {self.demo_original_state['installments']}")
-        print(f"   - plan_tier: {self.demo_original_state['plan_tier']}")
-        print(f"   - max_users: {self.demo_original_state['max_users']}")
-        print(f"   - max_branches: {self.demo_original_state['max_branches']}")
-        
-        return demo
-
-def test_installments_tracker():
-    """Main test function for v3.16 Installments Tracker"""
-    test = TestSession()
-    
-    print("=" * 80)
-    print("🧪 RAHAAL ERP v3.16 - INSTALLMENTS TRACKER BACKEND TESTS")
-    print("=" * 80)
-    
-    # Login as super admin
-    if not test.login(SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASSWORD):
-        print("\n❌ CRITICAL: Cannot login as super admin. Aborting tests.")
-        return False
-    
-    # Get demo tenant and record original state
-    demo = test.get_demo_tenant()
-    if not demo:
-        print("\n❌ CRITICAL: Cannot get demo tenant. Aborting tests.")
-        return False
-    
-    all_passed = True
-    
-    # TEST 1: PUT /api/admin/tenants/:id/installments - Create installment schedule
-    print("\n" + "=" * 80)
-    print("TEST 1: PUT /api/admin/tenants/:id/installments - Create installment schedule")
-    print("=" * 80)
-    try:
-        payload = {
-            "total": 250,
-            "count": 5,
-            "start_date": "2026-08-01"
-        }
-        print(f"📤 Sending: {json.dumps(payload, indent=2)}")
-        resp = test.session.put(f"{BASE_URL}/admin/tenants/{test.demo_tenant_id}/installments", json=payload)
-        print(f"📥 Response status: {resp.status_code}")
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            print(f"📥 Response: {json.dumps(data, indent=2)}")
-            
-            # Verify response structure
-            if 'installments' not in data:
-                print("❌ FAILED: Response missing 'installments' field")
-                all_passed = False
-            else:
-                installments = data['installments']
-                
-                # Verify count
-                if len(installments) != 5:
-                    print(f"❌ FAILED: Expected 5 installments, got {len(installments)}")
-                    all_passed = False
-                else:
-                    print(f"✅ Correct count: 5 installments")
-                
-                # Verify amounts (250 / 5 = 50 each)
-                expected_amount = 50
-                amounts_correct = all(inst['amount'] == expected_amount for inst in installments)
-                if not amounts_correct:
-                    print(f"❌ FAILED: Not all installments have amount {expected_amount}")
-                    all_passed = False
-                else:
-                    print(f"✅ All installments have correct amount: {expected_amount}")
-                
-                # Verify due dates (monthly: 2026-08-01, 2026-09-01, ...)
-                expected_dates = ["2026-08-01", "2026-09-01", "2026-10-01", "2026-11-01", "2026-12-01"]
-                actual_dates = [inst['due_date'] for inst in installments]
-                if actual_dates != expected_dates:
-                    print(f"❌ FAILED: Due dates mismatch")
-                    print(f"   Expected: {expected_dates}")
-                    print(f"   Actual: {actual_dates}")
-                    all_passed = False
-                else:
-                    print(f"✅ Due dates correct (monthly from 2026-08-01)")
-                
-                # Verify all paid=false
-                all_unpaid = all(inst['paid'] == False for inst in installments)
-                if not all_unpaid:
-                    print(f"❌ FAILED: Not all installments have paid=false")
-                    all_passed = False
-                else:
-                    print(f"✅ All installments have paid=false")
-                
-                # Verify installment numbers
-                expected_nos = [1, 2, 3, 4, 5]
-                actual_nos = [inst['no'] for inst in installments]
-                if actual_nos != expected_nos:
-                    print(f"❌ FAILED: Installment numbers mismatch")
-                    all_passed = False
-                else:
-                    print(f"✅ Installment numbers correct (1-5)")
-            
-            # Verify billing_mode set to 'installments'
-            # Check by getting tenant again
-            resp_tenant = test.session.get(f"{BASE_URL}/admin/tenants")
-            if resp_tenant.status_code == 200:
-                data = resp_tenant.json()
-                tenants = data.get('tenants', []) if isinstance(data, dict) else data
-                demo_updated = next((t for t in tenants if t['id'] == test.demo_tenant_id), None)
-                if demo_updated and demo_updated.get('billing_mode') == 'installments':
-                    print(f"✅ billing_mode set to 'installments'")
-                else:
-                    print(f"❌ FAILED: billing_mode not set to 'installments'")
-                    all_passed = False
-            
-            print("✅ TEST 1 PASSED")
-        else:
-            print(f"❌ TEST 1 FAILED: Status {resp.status_code} - {resp.text}")
-            all_passed = False
-    except Exception as e:
-        print(f"❌ TEST 1 FAILED with exception: {str(e)}")
-        all_passed = False
-    
-    # TEST 2: GET /api/admin/installments-overview - Verify demo tenant in overview
-    print("\n" + "=" * 80)
-    print("TEST 2: GET /api/admin/installments-overview - Verify demo tenant in overview")
-    print("=" * 80)
-    try:
-        resp = test.session.get(f"{BASE_URL}/admin/installments-overview")
-        print(f"📥 Response status: {resp.status_code}")
-        
-        if resp.status_code == 200:
-            rows = resp.json()
-            print(f"📥 Found {len(rows)} tenant(s) with installments")
-            
-            # Find demo tenant
-            demo_row = next((r for r in rows if r['id'] == test.demo_tenant_id), None)
-            if not demo_row:
-                print(f"❌ FAILED: Demo tenant not found in overview")
-                all_passed = False
-            else:
-                print(f"✅ Demo tenant found in overview")
-                print(f"📊 Demo tenant overview data:")
-                print(f"   - paid_count: {demo_row.get('paid_count')}")
-                print(f"   - total_count: {demo_row.get('total_count')}")
-                print(f"   - next_due: {demo_row.get('next_due')}")
-                print(f"   - next_amount: {demo_row.get('next_amount')}")
-                print(f"   - overdue: {demo_row.get('overdue')}")
-                print(f"   - all_paid: {demo_row.get('all_paid')}")
-                
-                # Verify values
-                if demo_row.get('paid_count') != 0:
-                    print(f"❌ FAILED: Expected paid_count=0, got {demo_row.get('paid_count')}")
-                    all_passed = False
-                else:
-                    print(f"✅ paid_count = 0")
-                
-                if demo_row.get('total_count') != 5:
-                    print(f"❌ FAILED: Expected total_count=5, got {demo_row.get('total_count')}")
-                    all_passed = False
-                else:
-                    print(f"✅ total_count = 5")
-                
-                if demo_row.get('next_due') != "2026-08-01":
-                    print(f"❌ FAILED: Expected next_due=2026-08-01, got {demo_row.get('next_due')}")
-                    all_passed = False
-                else:
-                    print(f"✅ next_due = 2026-08-01")
-                
-                if demo_row.get('next_amount') != 50:
-                    print(f"❌ FAILED: Expected next_amount=50, got {demo_row.get('next_amount')}")
-                    all_passed = False
-                else:
-                    print(f"✅ next_amount = 50")
-                
-                # Verify overdue (2026-08-01 is in the past relative to server date ~2026-08-19)
-                # Actually, we need to check the current date. Let's be flexible here.
-                # The test says it should be TRUE (overdue)
-                if demo_row.get('overdue') != True:
-                    print(f"⚠️  WARNING: Expected overdue=True (due date 2026-08-01 is in past), got {demo_row.get('overdue')}")
-                    # Don't fail the test, just warn
-                else:
-                    print(f"✅ overdue = True (due date in past)")
-                
-                if demo_row.get('all_paid') != False:
-                    print(f"❌ FAILED: Expected all_paid=False, got {demo_row.get('all_paid')}")
-                    all_passed = False
-                else:
-                    print(f"✅ all_paid = False")
-            
-            print("✅ TEST 2 PASSED")
-        else:
-            print(f"❌ TEST 2 FAILED: Status {resp.status_code} - {resp.text}")
-            all_passed = False
-    except Exception as e:
-        print(f"❌ TEST 2 FAILED with exception: {str(e)}")
-        all_passed = False
-    
-    # TEST 3: PATCH /api/admin/tenants/:id/installments - Mark installment 1 as paid
-    print("\n" + "=" * 80)
-    print("TEST 3: PATCH /api/admin/tenants/:id/installments - Mark installment 1 as paid")
-    print("=" * 80)
-    try:
-        payload = {"no": 1, "paid": True}
-        print(f"📤 Sending: {json.dumps(payload, indent=2)}")
-        resp = test.session.patch(f"{BASE_URL}/admin/tenants/{test.demo_tenant_id}/installments", json=payload)
-        print(f"📥 Response status: {resp.status_code}")
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            print(f"📥 Response: {json.dumps(data, indent=2)}")
-            
-            # Verify paid_count = 1
-            if data.get('paid_count') != 1:
-                print(f"❌ FAILED: Expected paid_count=1, got {data.get('paid_count')}")
-                all_passed = False
-            else:
-                print(f"✅ paid_count = 1")
-            
-            # Verify all_paid = False
-            if data.get('all_paid') != False:
-                print(f"❌ FAILED: Expected all_paid=False, got {data.get('all_paid')}")
-                all_passed = False
-            else:
-                print(f"✅ all_paid = False")
-            
-            print("✅ TEST 3 PASSED")
-        else:
-            print(f"❌ TEST 3 FAILED: Status {resp.status_code} - {resp.text}")
-            all_passed = False
-    except Exception as e:
-        print(f"❌ TEST 3 FAILED with exception: {str(e)}")
-        all_passed = False
-    
-    # TEST 3b: Verify overview updated (next_due should be 2026-09-01, overdue should be false)
-    print("\n" + "=" * 80)
-    print("TEST 3b: Verify overview updated after marking installment 1 paid")
-    print("=" * 80)
-    try:
-        resp = test.session.get(f"{BASE_URL}/admin/installments-overview")
-        if resp.status_code == 200:
-            rows = resp.json()
-            demo_row = next((r for r in rows if r['id'] == test.demo_tenant_id), None)
-            if demo_row:
-                print(f"📊 Updated overview data:")
-                print(f"   - next_due: {demo_row.get('next_due')}")
-                print(f"   - next_amount: {demo_row.get('next_amount')}")
-                print(f"   - overdue: {demo_row.get('overdue')}")
-                print(f"   - paid_count: {demo_row.get('paid_count')}")
-                
-                if demo_row.get('next_due') != "2026-09-01":
-                    print(f"❌ FAILED: Expected next_due=2026-09-01, got {demo_row.get('next_due')}")
-                    all_passed = False
-                else:
-                    print(f"✅ next_due = 2026-09-01")
-                
-                if demo_row.get('overdue') != False:
-                    print(f"⚠️  WARNING: Expected overdue=False (next due 2026-09-01 is in future), got {demo_row.get('overdue')}")
-                    # Don't fail, just warn
-                else:
-                    print(f"✅ overdue = False")
-                
-                if demo_row.get('paid_count') != 1:
-                    print(f"❌ FAILED: Expected paid_count=1, got {demo_row.get('paid_count')}")
-                    all_passed = False
-                else:
-                    print(f"✅ paid_count = 1")
-                
-                print("✅ TEST 3b PASSED")
-            else:
-                print(f"❌ TEST 3b FAILED: Demo tenant not found in overview")
-                all_passed = False
-        else:
-            print(f"❌ TEST 3b FAILED: Status {resp.status_code}")
-            all_passed = False
-    except Exception as e:
-        print(f"❌ TEST 3b FAILED with exception: {str(e)}")
-        all_passed = False
-    
-    # TEST 4: Mark installments 2, 3, 4, 5 as paid
-    print("\n" + "=" * 80)
-    print("TEST 4: Mark installments 2, 3, 4, 5 as paid")
-    print("=" * 80)
-    try:
-        for no in [2, 3, 4, 5]:
-            payload = {"no": no, "paid": True}
-            print(f"📤 Marking installment {no} as paid...")
-            resp = test.session.patch(f"{BASE_URL}/admin/tenants/{test.demo_tenant_id}/installments", json=payload)
-            if resp.status_code != 200:
-                print(f"❌ FAILED to mark installment {no}: {resp.status_code} - {resp.text}")
-                all_passed = False
-            else:
-                data = resp.json()
-                print(f"✅ Installment {no} marked paid (paid_count={data.get('paid_count')})")
-        
-        # Verify last PATCH returns all_paid=True
-        payload = {"no": 5, "paid": True}
-        resp = test.session.patch(f"{BASE_URL}/admin/tenants/{test.demo_tenant_id}/installments", json=payload)
-        if resp.status_code == 200:
-            data = resp.json()
-            print(f"📥 Final response: {json.dumps(data, indent=2)}")
-            
-            if data.get('all_paid') != True:
-                print(f"❌ FAILED: Expected all_paid=True after marking all installments paid, got {data.get('all_paid')}")
-                all_passed = False
-            else:
-                print(f"✅ all_paid = True")
-            
-            if data.get('paid_count') != 5:
-                print(f"❌ FAILED: Expected paid_count=5, got {data.get('paid_count')}")
-                all_passed = False
-            else:
-                print(f"✅ paid_count = 5")
-            
-            print("✅ TEST 4 PASSED")
-        else:
-            print(f"❌ TEST 4 FAILED: Status {resp.status_code}")
-            all_passed = False
-    except Exception as e:
-        print(f"❌ TEST 4 FAILED with exception: {str(e)}")
-        all_passed = False
-    
-    # TEST 4b: Verify overview shows all_paid=true
-    print("\n" + "=" * 80)
-    print("TEST 4b: Verify overview shows all_paid=true")
-    print("=" * 80)
-    try:
-        resp = test.session.get(f"{BASE_URL}/admin/installments-overview")
-        if resp.status_code == 200:
-            rows = resp.json()
-            demo_row = next((r for r in rows if r['id'] == test.demo_tenant_id), None)
-            if demo_row:
-                print(f"📊 Overview data:")
-                print(f"   - all_paid: {demo_row.get('all_paid')}")
-                print(f"   - paid_count: {demo_row.get('paid_count')}")
-                
-                if demo_row.get('all_paid') != True:
-                    print(f"❌ FAILED: Expected all_paid=True, got {demo_row.get('all_paid')}")
-                    all_passed = False
-                else:
-                    print(f"✅ all_paid = True")
-                
-                print("✅ TEST 4b PASSED")
-            else:
-                print(f"❌ TEST 4b FAILED: Demo tenant not found")
-                all_passed = False
-        else:
-            print(f"❌ TEST 4b FAILED: Status {resp.status_code}")
-            all_passed = False
-    except Exception as e:
-        print(f"❌ TEST 4b FAILED with exception: {str(e)}")
-        all_passed = False
-    
-    # TEST 5: Toggle installment 5 back to unpaid
-    print("\n" + "=" * 80)
-    print("TEST 5: PATCH installment 5 back to unpaid (toggle back)")
-    print("=" * 80)
-    try:
-        payload = {"no": 5, "paid": False}
-        print(f"📤 Sending: {json.dumps(payload, indent=2)}")
-        resp = test.session.patch(f"{BASE_URL}/admin/tenants/{test.demo_tenant_id}/installments", json=payload)
-        print(f"📥 Response status: {resp.status_code}")
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            print(f"📥 Response: {json.dumps(data, indent=2)}")
-            
-            if data.get('all_paid') != False:
-                print(f"❌ FAILED: Expected all_paid=False after unpaying installment 5, got {data.get('all_paid')}")
-                all_passed = False
-            else:
-                print(f"✅ all_paid = False (toggle back works)")
-            
-            if data.get('paid_count') != 4:
-                print(f"❌ FAILED: Expected paid_count=4, got {data.get('paid_count')}")
-                all_passed = False
-            else:
-                print(f"✅ paid_count = 4")
-            
-            print("✅ TEST 5 PASSED")
-        else:
-            print(f"❌ TEST 5 FAILED: Status {resp.status_code} - {resp.text}")
-            all_passed = False
-    except Exception as e:
-        print(f"❌ TEST 5 FAILED with exception: {str(e)}")
-        all_passed = False
-    
-    # TEST 6: Validation - PUT with total=0 should return 400
-    print("\n" + "=" * 80)
-    print("TEST 6: Validation - PUT with total=0 should return 400")
-    print("=" * 80)
-    try:
-        payload = {"total": 0, "count": 5, "start_date": "2026-08-01"}
-        print(f"📤 Sending: {json.dumps(payload, indent=2)}")
-        resp = test.session.put(f"{BASE_URL}/admin/tenants/{test.demo_tenant_id}/installments", json=payload)
-        print(f"📥 Response status: {resp.status_code}")
-        
-        if resp.status_code == 400:
-            print(f"✅ Correctly rejected with 400: {resp.text}")
-            print("✅ TEST 6 PASSED")
-        else:
-            print(f"❌ TEST 6 FAILED: Expected 400, got {resp.status_code}")
-            all_passed = False
-    except Exception as e:
-        print(f"❌ TEST 6 FAILED with exception: {str(e)}")
-        all_passed = False
-    
-    # TEST 7: Validation - PATCH with no=99 should return 400
-    print("\n" + "=" * 80)
-    print("TEST 7: Validation - PATCH with no=99 should return 400 'القسط غير موجود'")
-    print("=" * 80)
-    try:
-        payload = {"no": 99, "paid": True}
-        print(f"📤 Sending: {json.dumps(payload, indent=2)}")
-        resp = test.session.patch(f"{BASE_URL}/admin/tenants/{test.demo_tenant_id}/installments", json=payload)
-        print(f"📥 Response status: {resp.status_code}")
-        
-        if resp.status_code == 400:
-            resp_text = resp.text
-            print(f"✅ Correctly rejected with 400: {resp_text}")
-            if 'القسط غير موجود' in resp_text:
-                print(f"✅ Error message contains 'القسط غير موجود'")
-            else:
-                print(f"⚠️  WARNING: Error message doesn't contain expected Arabic text")
-            print("✅ TEST 7 PASSED")
-        else:
-            print(f"❌ TEST 7 FAILED: Expected 400, got {resp.status_code}")
-            all_passed = False
-    except Exception as e:
-        print(f"❌ TEST 7 FAILED with exception: {str(e)}")
-        all_passed = False
-    
-    # TEST 8: Authorization - Demo owner should get 403 on GET /admin/installments-overview
-    print("\n" + "=" * 80)
-    print("TEST 8: Authorization - Demo owner should get 403 on GET /admin/installments-overview")
-    print("=" * 80)
-    try:
-        # Login as demo owner
-        demo_session = requests.Session()
-        print(f"🔐 Logging in as demo owner ({DEMO_OWNER_EMAIL})...")
-        resp = demo_session.post(f"{BASE_URL}/auth/login", json={"email": DEMO_OWNER_EMAIL, "password": DEMO_OWNER_PASSWORD})
-        if resp.status_code != 200:
-            print(f"❌ TEST 8 FAILED: Cannot login as demo owner")
-            all_passed = False
-        else:
-            print(f"✅ Logged in as demo owner")
-            
-            # Try to access admin endpoint
-            resp = demo_session.get(f"{BASE_URL}/admin/installments-overview")
-            print(f"📥 Response status: {resp.status_code}")
-            
-            if resp.status_code == 403:
-                print(f"✅ Correctly rejected with 403: {resp.text}")
-                print("✅ TEST 8 PASSED")
-            else:
-                print(f"❌ TEST 8 FAILED: Expected 403, got {resp.status_code}")
-                all_passed = False
-    except Exception as e:
-        print(f"❌ TEST 8 FAILED with exception: {str(e)}")
-        all_passed = False
-    
-    # CLEANUP/RESTORE: Restore demo tenant to original state
-    print("\n" + "=" * 80)
-    print("CLEANUP: Restoring demo tenant to original state")
-    print("=" * 80)
-    try:
-        print(f"📊 Original state to restore:")
-        print(f"   - billing_mode: {test.demo_original_state['billing_mode']}")
-        
-        # Restore billing_mode to null (or original value)
-        restore_payload = {"billing_mode": test.demo_original_state['billing_mode']}
-        print(f"📤 Sending PATCH to restore billing_mode: {json.dumps(restore_payload, indent=2)}")
-        resp = test.session.patch(f"{BASE_URL}/admin/tenants/{test.demo_tenant_id}", json=restore_payload)
-        print(f"📥 Response status: {resp.status_code}")
-        
-        if resp.status_code == 200:
-            print(f"✅ billing_mode restored")
-            
-            # Verify demo tenant no longer in overview
-            resp = test.session.get(f"{BASE_URL}/admin/installments-overview")
-            if resp.status_code == 200:
-                rows = resp.json()
-                demo_row = next((r for r in rows if r['id'] == test.demo_tenant_id), None)
-                if demo_row:
-                    print(f"⚠️  WARNING: Demo tenant still appears in overview (billing_mode may not be null)")
-                    print(f"   This is acceptable if billing_mode is not null in original state")
-                    print(f"   Current overview entry: {json.dumps(demo_row, indent=2)}")
-                else:
-                    print(f"✅ Demo tenant no longer in overview (billing_mode != 'installments')")
-            
-            # Get final state
-            resp_tenant = test.session.get(f"{BASE_URL}/admin/tenants")
-            if resp_tenant.status_code == 200:
-                data = resp_tenant.json()
-                tenants = data.get('tenants', []) if isinstance(data, dict) else data
-                demo_final = next((t for t in tenants if t['id'] == test.demo_tenant_id), None)
-                if demo_final:
-                    print(f"📊 Final state:")
-                    print(f"   - billing_mode: {demo_final.get('billing_mode')}")
-                    print(f"   - installments: {demo_final.get('installments')}")
-                    
-                    # Note: installments array may still exist but tenant won't appear in overview
-                    # if billing_mode is not 'installments'
-                    if demo_final.get('installments'):
-                        print(f"ℹ️  NOTE: installments array still exists (contains {len(demo_final.get('installments'))} items)")
-                        print(f"   This is acceptable - tenant won't appear in overview because billing_mode != 'installments'")
-            
-            print("✅ CLEANUP COMPLETED")
-        else:
-            print(f"❌ CLEANUP FAILED: Status {resp.status_code} - {resp.text}")
-            all_passed = False
-    except Exception as e:
-        print(f"❌ CLEANUP FAILED with exception: {str(e)}")
-        all_passed = False
-    
-    # Final summary
-    print("\n" + "=" * 80)
-    print("FINAL SUMMARY")
-    print("=" * 80)
-    if all_passed:
-        print("✅ ALL TESTS PASSED")
-        return True
+            print(f"❌ TEST 4 FAILED - Total sale mismatch: {actual_total_sale} (expected {expected_total_sale})")
     else:
-        print("❌ SOME TESTS FAILED")
+        print(f"❌ TEST 4 FAILED - Status {status}: {body}")
+    
+    return False
+
+async def test_discount_floor():
+    """Test 5: Discount floor - total_sale should not go negative"""
+    print("\n=== TEST 5: DISCOUNT FLOOR (TOTAL_SALE >= 0) ===")
+    
+    booking_data = {
+        "payment_method": "credit",
+        "client_id": test_data['client_id'],
+        "pax_adults": 1,
+        "discount": 99999,
+        "discount_reason": "خصم كبير جداً"
+    }
+    
+    status, body = await api_request('POST', f"/packages/{test_data['package_id']}/bookings", booking_data)
+    
+    if status == 200:
+        test_data['booking3_id'] = body['id']
+        
+        actual_total_sale = body.get('total_sale')
+        
+        print(f"   Component sale (500 * 1): 500 SAR")
+        print(f"   Discount requested: 99999 SAR")
+        print(f"   Total sale: {actual_total_sale} SAR (expected: 0)")
+        
+        if actual_total_sale == 0:
+            print(f"✅ TEST 5 PASSED - Discount floor working correctly (total_sale = 0, not negative)")
+            return True
+        else:
+            print(f"❌ TEST 5 FAILED - Total sale should be 0, got: {actual_total_sale}")
+    else:
+        print(f"❌ TEST 5 FAILED - Status {status}: {body}")
+    
+    return False
+
+async def test_patch_edit_reason_only():
+    """Test 6: PATCH edit - reason only (light update)"""
+    print("\n=== TEST 6: PATCH EDIT - REASON ONLY (LIGHT UPDATE) ===")
+    
+    if not test_data['booking1_id']:
+        print(f"❌ TEST 6 SKIPPED - Booking 1 not created")
         return False
+    
+    patch_data = {
+        "discount_reason": "سبب معدل"
+    }
+    
+    status, body = await api_request('PATCH', f"/packages/{test_data['package_id']}/bookings/{test_data['booking1_id']}", patch_data)
+    
+    if status == 200:
+        has_light_update = body.get('_light_update')
+        actual_discount = body.get('discount')
+        actual_total_sale = body.get('total_sale')
+        actual_discount_reason = body.get('discount_reason')
+        
+        print(f"   _light_update: {has_light_update}")
+        print(f"   Discount: {actual_discount} SAR (should stay 300)")
+        print(f"   Total sale: {actual_total_sale} SAR (should stay 1500)")
+        print(f"   Discount reason: '{actual_discount_reason}' (should be 'سبب معدل')")
+        
+        if (has_light_update == True and 
+            actual_discount == 300 and 
+            actual_total_sale == 1500 and
+            actual_discount_reason == "سبب معدل"):
+            print(f"✅ TEST 6 PASSED - Light update working correctly")
+            print(f"   - _light_update flag present")
+            print(f"   - Discount unchanged (300)")
+            print(f"   - Total sale unchanged (1500)")
+            print(f"   - Discount reason updated to 'سبب معدل'")
+            return True
+        else:
+            print(f"❌ TEST 6 FAILED - Light update not working as expected")
+    else:
+        print(f"❌ TEST 6 FAILED - Status {status}: {body}")
+    
+    return False
+
+async def test_patch_edit_amount_change():
+    """Test 7: PATCH edit - amount change (full recalc)"""
+    print("\n=== TEST 7: PATCH EDIT - AMOUNT CHANGE (FULL RECALC) ===")
+    
+    if not test_data['booking1_id']:
+        print(f"❌ TEST 7 SKIPPED - Booking 1 not created")
+        return False
+    
+    # Get client balance before edit
+    status_pre, client_body_pre = await api_request('GET', '/clients')
+    if status_pre != 200:
+        print(f"❌ TEST 7 FAILED - Could not get client balance before edit")
+        return False
+    
+    clients_list_pre = client_body_pre if isinstance(client_body_pre, list) else client_body_pre.get('data', [])
+    client_pre = next((c for c in clients_list_pre if c['id'] == test_data['client_id']), None)
+    client_balances_pre = client_pre.get('balances', {}) if client_pre else {}
+    balance_before_edit = client_balances_pre.get('SAR') or 0
+    print(f"   Client balance before edit: {balance_before_edit} SAR")
+    
+    patch_data = {
+        "discount": 500
+    }
+    
+    status, body = await api_request('PATCH', f"/packages/{test_data['package_id']}/bookings/{test_data['booking1_id']}", patch_data)
+    
+    if status == 200:
+        has_light_update = body.get('_light_update')
+        actual_discount = body.get('discount')
+        actual_total_sale = body.get('total_sale')
+        
+        # Base room sale: 1800, new discount: 500, expected total_sale: 1300
+        expected_total_sale = 1300
+        
+        print(f"   _light_update: {has_light_update} (should be False or absent)")
+        print(f"   Discount: {actual_discount} SAR (should be 500)")
+        print(f"   Total sale: {actual_total_sale} SAR (expected: {expected_total_sale})")
+        
+        if (not has_light_update and 
+            actual_discount == 500 and 
+            actual_total_sale == expected_total_sale):
+            
+            # Check client balance adjustment
+            status_post, client_body_post = await api_request('GET', '/clients')
+            if status_post == 200:
+                clients_list_post = client_body_post if isinstance(client_body_post, list) else client_body_post.get('data', [])
+                client_post = next((c for c in clients_list_post if c['id'] == test_data['client_id']), None)
+                client_balances_post = client_post.get('balances', {}) if client_post else {}
+                balance_after_edit = client_balances_post.get('SAR') or 0
+                balance_change = balance_after_edit - balance_before_edit
+                
+                # Net change should be -200 (from 1500 to 1300)
+                expected_change = -200
+                
+                print(f"   Client balance after edit: {balance_after_edit} SAR")
+                print(f"   Net balance change: {balance_change} SAR (expected: {expected_change})")
+                
+                if balance_change == expected_change:
+                    print(f"✅ TEST 7 PASSED - Full recalc on amount change working correctly")
+                    print(f"   - No _light_update flag (full recalc)")
+                    print(f"   - Discount changed to 500 SAR")
+                    print(f"   - Total sale recalculated to 1300 SAR (1800 - 500)")
+                    print(f"   - Client balance adjusted by -200 SAR (net effect)")
+                    return True
+                else:
+                    print(f"❌ TEST 7 FAILED - Client balance change incorrect: {balance_change} (expected {expected_change})")
+            else:
+                print(f"❌ TEST 7 FAILED - Could not verify client balance after edit")
+        else:
+            print(f"❌ TEST 7 FAILED - Full recalc not working as expected")
+    else:
+        print(f"❌ TEST 7 FAILED - Status {status}: {body}")
+    
+    return False
+
+async def cleanup():
+    """Cleanup: Delete all bookings and package, verify client balance restored"""
+    print("\n=== CLEANUP: DELETE BOOKINGS AND PACKAGE ===")
+    
+    # Delete all bookings
+    bookings_to_delete = [
+        ('booking1', test_data['booking1_id']),
+        ('booking2', test_data['booking2_id']),
+        ('booking3', test_data['booking3_id'])
+    ]
+    
+    deleted_count = 0
+    for name, booking_id in bookings_to_delete:
+        if booking_id:
+            status, body = await api_request('DELETE', f"/packages/{test_data['package_id']}/bookings/{booking_id}")
+            if status == 200:
+                print(f"✅ Deleted {name} (ID: {booking_id})")
+                deleted_count += 1
+            else:
+                print(f"❌ Failed to delete {name} - Status {status}: {body}")
+    
+    # Delete package
+    if test_data['package_id']:
+        status, body = await api_request('DELETE', f"/packages/{test_data['package_id']}")
+        if status == 200:
+            print(f"✅ Deleted package (ID: {test_data['package_id']})")
+        else:
+            print(f"❌ Failed to delete package - Status {status}: {body}")
+    
+    # Verify client balance returned to original
+    status, client_body = await api_request('GET', '/clients')
+    if status == 200:
+        clients_list = client_body if isinstance(client_body, list) else client_body.get('data', [])
+        client = next((c for c in clients_list if c['id'] == test_data['client_id']), None)
+        if client:
+            client_balances = client.get('balances', {})
+            final_balance = client_balances.get('SAR') or 0
+            print(f"   Client balance AFTER cleanup: {final_balance} SAR")
+            print(f"   Client balance BEFORE tests: {test_data['client_balance_before']} SAR")
+            
+            if final_balance == test_data['client_balance_before']:
+                print(f"✅ CLEANUP VERIFIED - Client balance restored to original value")
+                return True
+            else:
+                print(f"❌ CLEANUP FAILED - Client balance not restored (diff: {final_balance - test_data['client_balance_before']} SAR)")
+    
+    # Verify package deleted
+    status, pkg_body = await api_request('GET', '/packages')
+    if status == 200:
+        pkg_list = pkg_body if isinstance(pkg_body, list) else pkg_body.get('data', [])
+        pkg_exists = any(p['id'] == test_data['package_id'] for p in pkg_list)
+        if not pkg_exists:
+            print(f"✅ CLEANUP VERIFIED - Package removed from GET /api/packages")
+        else:
+            print(f"❌ CLEANUP FAILED - Package still exists in database")
+    
+    return True
+
+async def main():
+    """Main test runner"""
+    print("=" * 80)
+    print("RAHAAL ERP v3.17 - BOOKING MANUAL DISCOUNT TESTS")
+    print("=" * 80)
+    
+    # Login
+    if not await login():
+        print("\n❌ TESTS ABORTED - Login failed")
+        return
+    
+    # Setup
+    if not await setup_test_data():
+        print("\n❌ TESTS ABORTED - Setup failed")
+        return
+    
+    # Run tests
+    results = {
+        'Test 3: Booking with registrants + discount': await test_booking_with_registrants_and_discount(),
+        'Test 4: Booking without registrants + discount': await test_booking_without_registrants_with_discount(),
+        'Test 5: Discount floor (total_sale >= 0)': await test_discount_floor(),
+        'Test 6: PATCH edit - reason only (light)': await test_patch_edit_reason_only(),
+        'Test 7: PATCH edit - amount change (full recalc)': await test_patch_edit_amount_change(),
+    }
+    
+    # Cleanup
+    await cleanup()
+    
+    # Summary
+    print("\n" + "=" * 80)
+    print("TEST SUMMARY")
+    print("=" * 80)
+    
+    passed = sum(1 for v in results.values() if v)
+    total = len(results)
+    
+    for test_name, result in results.items():
+        status = "✅ PASS" if result else "❌ FAIL"
+        print(f"{status} - {test_name}")
+    
+    print(f"\nTotal: {passed}/{total} tests passed")
+    print("=" * 80)
 
 if __name__ == "__main__":
-    success = test_installments_tracker()
-    exit(0 if success else 1)
+    asyncio.run(main())

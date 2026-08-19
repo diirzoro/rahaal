@@ -1980,13 +1980,17 @@ async function handleRoute(request, { params }) {
         (body.client_id === undefined || body.client_id === oldBooking.client_id) &&
         (body.payment_method === undefined || body.payment_method === oldBooking.payment_method) &&
         (body.box_id === undefined || body.box_id === (oldBooking.box_id || '')) &&
-        body.total_cost === undefined && body.total_sale === undefined
+        body.total_cost === undefined && body.total_sale === undefined &&
+        // v3.17 — a discount amount change affects money => full recalc required
+        (body.discount === undefined || Number(body.discount) === Number(oldBooking.discount || 0)) &&
+        (body.registrants === undefined)
       )
       if (lightOnly) {
         const updates = {}
         if (body.pilgrim_name !== undefined) updates.pilgrim_name = String(body.pilgrim_name || '').trim() || oldBooking.pilgrim_name
         if (body.passport_no !== undefined) updates.passport_no = String(body.passport_no || '').trim()
         if (body.notes !== undefined) updates.notes = String(body.notes || '').trim()
+        if (body.discount_reason !== undefined) updates.discount_reason = String(body.discount_reason || '').trim().slice(0, 120)
         if (Object.keys(updates).length > 0) {
           await db.collection('package_bookings').updateOne({ id: bookingId2, tenant_id: T }, { $set: { ...updates, updated_at: new Date(), updated_by: sess.user.email } })
           const newName = updates.pilgrim_name || oldBooking.pilgrim_name
@@ -2056,22 +2060,7 @@ async function handleRoute(request, { params }) {
         cost_total: +((c.cost_per_pax || 0) * newPax).toFixed(2),
         sale_total: +((c.sale_per_pax || 0) * newPax).toFixed(2),
       }))
-      let total_cost = +newSnapshots.reduce((s, c) => s + (c.cost_total || 0), 0).toFixed(2)
-      let total_sale = +newSnapshots.reduce((s, c) => s + (c.sale_total || 0), 0).toFixed(2)
-      if (body.total_cost !== undefined && Number(body.total_cost) >= 0) total_cost = +Number(body.total_cost).toFixed(2)
-      if (body.total_sale !== undefined && Number(body.total_sale) >= 0) total_sale = +Number(body.total_sale).toFixed(2)
-      const commission = +(total_sale - total_cost).toFixed(2)
-      if (newPay === 'cash') {
-        await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
-      } else {
-        await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
-      }
-      for (const c of newSnapshots) {
-        if (c.supplier_id && c.cost_total) {
-          await updateBalance(db, 'suppliers', { id: c.supplier_id, tenant_id: T }, cur, c.cost_total)
-        }
-      }
-      // v3.15 — Registrants list update (edit mode)
+      // v3.15 — Registrants list update (edit mode) — computed BEFORE totals so room pricing applies
       let newRegistrants = oldBooking.registrants || []
       let newRoomsSummary = oldBooking.rooms_summary || null
       if (body.registrants !== undefined) {
@@ -2089,6 +2078,36 @@ async function handleRoute(request, { params }) {
         for (const r of newRegistrants) if (r.room_type) newRoomsSummary[r.room_type] = (newRoomsSummary[r.room_type] || 0) + 1
         if (Object.keys(newRoomsSummary).length === 0) newRoomsSummary = null
       }
+      let total_cost = +newSnapshots.reduce((s, c) => s + (c.cost_total || 0), 0).toFixed(2)
+      let total_sale = +newSnapshots.reduce((s, c) => s + (c.sale_total || 0), 0).toFixed(2)
+      // v3.17b — Preserve room-based sale on full recalc (mirrors POST logic)
+      if (newRegistrants.length > 0 && Array.isArray(pkgDoc.room_pricing) && pkgDoc.room_pricing.length > 0) {
+        const priceMap = {}
+        for (const rp of pkgDoc.room_pricing) priceMap[rp.type] = Number(rp.sale_per_pax) || 0
+        let roomSale = 0
+        for (const r of newRegistrants) {
+          const isInfant = r.age !== null && r.age < 2
+          if (!isInfant && r.room_type && priceMap[r.room_type] !== undefined) roomSale += priceMap[r.room_type]
+        }
+        if (roomSale > 0) total_sale = +roomSale.toFixed(2)
+      }
+      // v3.17 — Manual discount on edit: explicit total_sale override wins; otherwise apply discount on computed sale
+      const newDiscount = body.discount !== undefined ? Math.max(0, Number(body.discount) || 0) : (Number(oldBooking.discount) || 0)
+      const newDiscountReason = body.discount_reason !== undefined ? String(body.discount_reason || '').trim().slice(0, 120) : (oldBooking.discount_reason || '')
+      if (body.total_cost !== undefined && Number(body.total_cost) >= 0) total_cost = +Number(body.total_cost).toFixed(2)
+      if (body.total_sale !== undefined && Number(body.total_sale) >= 0) total_sale = +Number(body.total_sale).toFixed(2)
+      else if (newDiscount > 0) total_sale = +Math.max(0, total_sale - newDiscount).toFixed(2)
+      const commission = +(total_sale - total_cost).toFixed(2)
+      if (newPay === 'cash') {
+        await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
+      } else {
+        await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
+      }
+      for (const c of newSnapshots) {
+        if (c.supplier_id && c.cost_total) {
+          await updateBalance(db, 'suppliers', { id: c.supplier_id, tenant_id: T }, cur, c.cost_total)
+        }
+      }
       const updatedBooking = {
         ...oldBooking,
         client_id: cli?.id || null,
@@ -2099,6 +2118,7 @@ async function handleRoute(request, { params }) {
         rooms_summary: newRoomsSummary,
         pax_count: newPax, currency: cur,
         total_cost, total_sale, commission,
+        discount: newDiscount, discount_reason: newDiscountReason,
         payment_method: newPay,
         box_id: box?.id || null, box_name: box?.name_ar || null,
         transport_id: newTransport?.id || null,
@@ -2234,6 +2254,10 @@ async function handleRoute(request, { params }) {
         }
         if (roomSale > 0) total_sale = +roomSale.toFixed(2)
       }
+      // v3.17 — Manual booking discount (B2B flexibility: child no-bed, infant, partner-office courtesy...)
+      const discount = Math.max(0, Number(b.discount) || 0)
+      const discountReason = String(b.discount_reason || '').trim().slice(0, 120)
+      if (discount > 0) total_sale = +Math.max(0, total_sale - discount).toFixed(2)
       const commission = +(total_sale - total_cost).toFixed(2)
       let box = null
       if (payMethod === 'cash') {
@@ -2259,6 +2283,7 @@ async function handleRoute(request, { params }) {
         birth_date: b.birth_date || null,
         age_category: b.age_category || null,
         total_cost, total_sale, commission,
+        discount, discount_reason: discountReason,
         payment_method: payMethod, box_id: box?.id || null, box_name: box?.name_ar || null,
         transport_id: transport?.id || null,
         transport_name: transport?.name || null,

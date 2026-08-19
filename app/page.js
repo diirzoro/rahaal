@@ -7654,7 +7654,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   const [clients, setClients] = useState([])
   const [boxes, setBoxes] = useState([])
   const [newComp, setNewComp] = useState({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '' })
-  const [newBooking, setNewBooking] = useState({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '', registrants: [] })
+  const [newBooking, setNewBooking] = useState({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '', registrants: [], discount: '', discount_reason: '' })
   const load = () => Promise.all([
     api(`/packages/${pkg.id}/components`).then(setComps),
     api(`/packages/${pkg.id}/bookings`).then(setBookings),
@@ -7681,7 +7681,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
     if (newBooking.payment_method === 'credit' && !newBooking.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
     if (newBooking.payment_method === 'cash' && !newBooking.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     if (comps.length === 0) return toast.error('أضف مكونات الباكج أولاً')
-    try { await api(`/packages/${pkg.id}/bookings`, { method: 'POST', body: newBooking }); toast.success('✅ تم التسجيل + قيد محاسبي'); setNewBooking({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '', registrants: [] }); load(); onChanged && onChanged() }
+    try { await api(`/packages/${pkg.id}/bookings`, { method: 'POST', body: newBooking }); toast.success('✅ تم التسجيل + قيد محاسبي'); setNewBooking({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '', registrants: [], discount: '', discount_reason: '' }); load(); onChanged && onChanged() }
     catch (e) { toast.error(e.message) }
   }
   const totalCost = comps.reduce((s, c) => s + (c.cost_per_pax || 0), 0)
@@ -7931,6 +7931,36 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     </div>
                   )}
                 </div>
+                {/* v3.17 — Manual booking discount (B2B flexibility) */}
+                <div className="bg-white/60 border-2 border-amber-200 rounded-lg p-3">
+                  <div className="text-xs font-bold text-slate-800 mb-2">💸 خصم على الحجز (اختياري)</div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    <Field label={`مبلغ الخصم (${pkg.currency})`}>
+                      <Input type="number" min="0" value={newBooking.discount} onChange={e => setNewBooking({ ...newBooking, discount: e.target.value })} placeholder="0" className="font-bold bg-white" />
+                    </Field>
+                    <Field label="سبب الخصم">
+                      <Input value={newBooking.discount_reason} onChange={e => setNewBooking({ ...newBooking, discount_reason: e.target.value })} placeholder="خصم طفل بدون سرير / رضيع / مجاملة وكيل..." className="bg-white" />
+                    </Field>
+                  </div>
+                  {(() => {
+                    const priceMap = {}; (pkg.room_pricing || []).forEach(rp => { priceMap[rp.type] = Number(rp.sale_per_pax) || 0 })
+                    const roomSale = (newBooking.registrants || []).reduce((s, r) => {
+                      const isInfant = r.age !== '' && Number(r.age) < 2
+                      return s + (!isInfant && r.room_type && priceMap[r.room_type] !== undefined ? priceMap[r.room_type] : 0)
+                    }, 0)
+                    const compSale = comps.reduce((s, c) => s + (c.sale_per_pax || 0), 0) * ((Number(newBooking.pax_adults) || 0) + (Number(newBooking.pax_children) || 0))
+                    const base = roomSale > 0 ? roomSale : compSale
+                    const disc = Number(newBooking.discount) || 0
+                    if (disc <= 0 || base <= 0) return null
+                    return (
+                      <div className="mt-2 p-2 rounded bg-amber-50 border border-amber-300 text-xs flex items-center gap-2 flex-wrap">
+                        🧮 <span>الإجمالي: <b>{fmt(base, pkg.currency)}</b></span>
+                        <span className="text-rose-600 font-bold">− خصم {fmt(disc, pkg.currency)}</span>
+                        <span>= <b className="text-emerald-700 text-sm">السعر النهائي (يُعتمد بالفاتورة والقيد): {fmt(Math.max(0, base - disc), pkg.currency)}</b></span>
+                      </div>
+                    )
+                  })()}
+                </div>
                 {/* v3.9.22 — Unified Payment Selector (Package Booking) */}
                 <div className="bg-white/60 border-2 border-blue-200 rounded-lg p-3">
                   <div className="text-xs font-bold text-slate-800 mb-2 flex items-center gap-2">💳 <span>طريقة الدفع + جهة الاستلام</span></div>
@@ -8014,7 +8044,9 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     <TableCell className="text-xs">{b?.transport_name ? <span className="inline-flex items-center gap-1"><span>{b.transport_type === 'flight' ? '✈️' : '🚌'}</span>{b.transport_name}</span> : <span className="text-slate-400">—</span>}</TableCell>
                     <TableCell>{b?.payment_method === 'cash' ? '💵' : '🕓'}</TableCell>
                     <TableCell className="text-left">{fmt(b?.total_cost, b?.currency)}</TableCell>
-                    <TableCell className="text-left">{fmt(b?.total_sale, b?.currency)}</TableCell>
+                    <TableCell className="text-left">{fmt(b?.total_sale, b?.currency)}
+                      {Number(b?.discount) > 0 && <div className="text-[10px] text-amber-600 font-bold" title={b?.discount_reason || ''}>💸 خصم {fmt(b.discount, b?.currency)}{b?.discount_reason ? ` — ${b.discount_reason}` : ''}</div>}
+                    </TableCell>
                     <TableCell className="text-left text-emerald-600 font-bold">{fmt(b?.commission, b?.currency)}</TableCell>
                     <TableCell className="text-center">
                       <div className="flex items-center justify-center gap-1">
@@ -8072,6 +8104,8 @@ function PackageBookingEditDialog({ pkg, booking, clients, boxes, transports = [
     override_financials: false,
     total_cost: booking?.total_cost || 0,
     total_sale: booking?.total_sale || 0,
+    discount: booking?.discount || 0,
+    discount_reason: booking?.discount_reason || '',
   })
   const [saving, setSaving] = useState(false)
 
@@ -8109,6 +8143,9 @@ function PackageBookingEditDialog({ pkg, booking, clients, boxes, transports = [
       body.total_cost = +(Number(form.total_cost) || 0).toFixed(2)
       body.total_sale = +(Number(form.total_sale) || 0).toFixed(2)
     }
+    // v3.17 — Manual discount (applied server-side unless total_sale explicitly overridden)
+    body.discount = Math.max(0, Number(form.discount) || 0)
+    body.discount_reason = String(form.discount_reason || '').trim()
     try {
       setSaving(true)
       const res = await api(`/packages/${pkg.id}/bookings/${booking.id}`, { method: 'PATCH', body })
@@ -8134,6 +8171,13 @@ function PackageBookingEditDialog({ pkg, booking, clients, boxes, transports = [
           </Field>
           <Field label="رقم الجواز">
             <Input value={form.passport_no} onChange={e => setF('passport_no', e.target.value)} />
+          </Field>
+          {/* v3.17 — Manual discount */}
+          <Field label={`💸 مبلغ الخصم (${pkg.currency})`}>
+            <Input type="number" min="0" value={form.discount} onChange={e => setF('discount', e.target.value)} className="font-bold" />
+          </Field>
+          <Field label="سبب الخصم">
+            <Input value={form.discount_reason} onChange={e => setF('discount_reason', e.target.value)} placeholder="خصم طفل بدون سرير / رضيع / مجاملة وكيل..." />
           </Field>
           <Field label="حساب القبض *">
             <Select value={form.client_id} onValueChange={v => setF('client_id', v)}>
