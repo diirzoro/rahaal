@@ -8719,3 +8719,28 @@ agent_communication:
       comment: "Use demo tenant (owner@demo.com, creds in memory/test_credentials.md). Create a TEST package + supplier component + booking with registrants, verify computations, then DELETE booking and package to leave DB clean. Note: booking creation posts a journal entry; deleting the booking reverses it (existing behavior)."
     - agent: "testing"
       comment: "✅ v3.15 BACKEND TESTING COMPLETED - ALL 11 TESTS PASSED. Comprehensive test suite executed covering: (1) Package creation with room_pricing array, (2) PATCH package to update room pricing, (3) Verification of updated pricing in GET list, (4) Component addition, (5) Booking creation with 4 registrants (mixed ages: adults/child/infant) with full verification of pax counts, passport normalization, rooms_summary, room-based total_sale calculation (infant excluded), (6) PATCH booking to reduce registrants with rooms_summary recomputation, (7) Backward compatibility test (booking without registrants uses component-based pricing), (8-11) Full cleanup with balance verification. All room-based pricing logic, age category auto-derivation (adults>=12, children 2-11, infants<2), passport uppercase normalization, rooms_summary aggregation, and backward compatibility working correctly. No issues found."
+
+## v3.16 Final Enhancements — Installments tracker + rooming list + visa link — Current Session
+backend:
+  - task: "Installments v3.16: GET /admin/installments-overview, PUT /admin/tenants/:id/installments (generate monthly schedule), PATCH same (toggle paid, returns all_paid)"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Rooming-list print and visa-monitor link are frontend-only (reuse /visa-monitor/import). Only installments endpoints are new backend."
+        - working: true
+          agent: "testing"
+          comment: "✅ PASSED (11/11 tests) - Comprehensive installments tracker testing completed. (1) PUT /admin/tenants/:id/installments creates 5 installments with correct amounts (50 each), monthly due dates (2026-08-01 to 2026-12-01), all paid=false, and sets billing_mode='installments'. (2) GET /admin/installments-overview returns demo tenant with paid_count=0, total_count=5, next_due=2026-08-01, next_amount=50, overdue=True (due date in past), all_paid=False. (3) PATCH to mark installment 1 paid returns paid_count=1, all_paid=False. (4) Overview updated: next_due=2026-09-01, overdue=False. (5) Marking installments 2-5 paid, last PATCH returns all_paid=True, paid_count=5. (6) Overview shows all_paid=True. (7) Toggle installment 5 back to unpaid works: all_paid=False, paid_count=4. (8) Validation: total=0 returns 400 'المبلغ الإجمالي مطلوب'. (9) Validation: no=99 returns 400 'القسط غير موجود'. (10) Authorization: Demo owner correctly denied access to /admin/installments-overview with 403 'غير مصرح'. (11) Cleanup: Demo tenant restored to original state (billing_mode=null, no longer appears in overview). NOTE: installments array persists in tenant document after setting billing_mode=null, but tenant correctly excluded from overview (only billing_mode='installments' tenants appear). All installments endpoints working correctly."
+test_plan:
+  current_focus: []
+  test_all: false
+agent_communication:
+    - agent: "main"
+      comment: "Super admin creds in memory/test_credentials.md. IMPORTANT: restore demo tenant original state at the end (record billing_mode/installments/unlimited_journals BEFORE; demo currently billing_mode null, no installments). Unset installments by direct field restore via PATCH /admin/tenants/:id {billing_mode:null} won't remove installments array — acceptable to leave empty schedule removed via PUT? If unable to fully remove installments field, set billing_mode back to null and report."
+    - agent: "testing"
+      comment: "✅ v3.16 INSTALLMENTS TRACKER BACKEND TESTING COMPLETED - ALL 11 TESTS PASSED. Tested all installments endpoints with comprehensive validation: (1) PUT creates monthly installment schedule with correct amounts and due dates, (2) GET overview returns correct aggregated data with overdue detection, (3) PATCH toggles paid status correctly with all_paid flag, (4) Validation errors working (total=0, invalid installment no), (5) Authorization enforced (non-admin denied), (6) Cleanup successful (demo tenant restored, no longer in overview). All installments tracking features working correctly. Ready for production."

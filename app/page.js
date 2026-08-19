@@ -345,13 +345,16 @@ function SuperAdminPanel() {
   const [resetReqs, setResetReqs] = useState([])
   const [resetTarget, setResetTarget] = useState(null)
   const [pricingOpen, setPricingOpen] = useState(false)
+  const [instRows, setInstRows] = useState([])
+  const [instTarget, setInstTarget] = useState(null)
   const load = async () => {
     try {
-      const [d, rr] = await Promise.all([
+      const [d, rr, ins] = await Promise.all([
         api('/admin/tenants'),
         api('/admin/password-reset-requests').catch(() => []),
+        api('/admin/installments-overview').catch(() => []),
       ])
-      setData(d); setResetReqs(rr || [])
+      setData(d); setResetReqs(rr || []); setInstRows(ins || [])
     } catch (e) { toast.error(e.message) }
   }
   useEffect(() => { load() }, [])
@@ -424,6 +427,51 @@ function SuperAdminPanel() {
                           <Button size="sm" variant="outline" onClick={() => rejectReset(r)} className="h-8 text-xs text-rose-600">رفض</Button>
                         </div>
                       </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* v3.16 — Installments tracker */}
+        {instRows.length > 0 && (
+          <Card className="border-blue-300 bg-blue-50/40">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-blue-900">
+                💳 متابعة الأقساط ({instRows.length})
+                {instRows.filter(r => r.overdue).length > 0 && <Badge className="bg-rose-600 text-white">⚠️ متأخر: {instRows.filter(r => r.overdue).length}</Badge>}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader><TableRow>
+                  <TableHead>المكتب</TableHead>
+                  <TableHead>الباقة</TableHead>
+                  <TableHead className="text-center">المسدد</TableHead>
+                  <TableHead>القسط القادم</TableHead>
+                  <TableHead className="text-center">الحالة</TableHead>
+                  <TableHead className="text-center">إدارة</TableHead>
+                </TableRow></TableHeader>
+                <TableBody>
+                  {instRows.map(r => (
+                    <TableRow key={r.id} className={r.overdue ? 'bg-rose-50' : ''}>
+                      <TableCell className="font-semibold text-sm">{r.name}</TableCell>
+                      <TableCell className="text-xs">{r.plan_tier === 'silver' ? '🥈 سيلفر' : r.plan_tier === 'gold' ? '🥇 جولد' : r.plan_tier === 'enterprise' ? '🏢 إنتربرايز' : '—'}</TableCell>
+                      <TableCell className="text-center">
+                        <span className="font-black">{r.paid_count}/{r.total_count || '—'}</span>
+                        {r.total_count > 0 && <div className="w-20 h-1.5 bg-slate-200 rounded-full mx-auto mt-1"><div className="h-1.5 bg-emerald-500 rounded-full" style={{ width: `${(r.paid_count / r.total_count) * 100}%` }} /></div>}
+                      </TableCell>
+                      <TableCell className="text-xs">{r.next_due ? <><b>${r.next_amount}</b> — {r.next_due}</> : (r.total_count === 0 ? 'لم يُجدول بعد' : '—')}</TableCell>
+                      <TableCell className="text-center">
+                        {r.all_paid
+                          ? (r.unlimited_journals ? <Badge className="bg-emerald-600 text-white text-[10px]">✅ مكتمل + قيود مفتوحة</Badge> : <Badge className="bg-amber-500 text-white text-[10px]">💰 مكتمل — افتح القيود!</Badge>)
+                          : r.overdue ? <Badge className="bg-rose-600 text-white text-[10px]">⚠️ قسط متأخر</Badge>
+                          : r.total_count === 0 ? <Badge variant="outline" className="text-[10px]">بلا جدول</Badge>
+                          : <Badge className="bg-blue-500 text-white text-[10px]">⏳ منتظم</Badge>}
+                      </TableCell>
+                      <TableCell className="text-center"><Button size="sm" variant="outline" onClick={() => setInstTarget(r)} className="h-7 text-xs">💳 إدارة الأقساط</Button></TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -549,6 +597,7 @@ function SuperAdminPanel() {
       <EditTenantDialog tenant={editing} onOpenChange={() => setEditing(null)} onSaved={() => { load(); setEditing(null) }} />
       <AdminResetPasswordDialog req={resetTarget} onClose={() => setResetTarget(null)} onDone={load} />
       <PricingConfigDialog open={pricingOpen} onOpenChange={setPricingOpen} />
+      <InstallmentsDialog row={instTarget} onClose={() => setInstTarget(null)} onChanged={load} />
     </div>
   )
 }
@@ -788,6 +837,85 @@ function PricingConfigDialog({ open, onOpenChange }) {
           <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
           <Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? 'جارٍ الحفظ...' : '💾 حفظ ونشر التسعير'}</Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// v3.16 — Installments management dialog (schedule + per-installment toggle + open-quota shortcut)
+function InstallmentsDialog({ row, onClose, onChanged }) {
+  const [list, setList] = useState([])
+  const [init, setInit] = useState({ total: 250, count: 5, start_date: new Date().toISOString().slice(0, 10) })
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { if (row) setList(row.installments || []) }, [row])
+  if (!row) return null
+  const allPaid = list.length > 0 && list.every(i => i.paid)
+  const generate = async () => {
+    if (!Number(init.total)) return toast.error('أدخل المبلغ الإجمالي')
+    if (list.length > 0 && !confirm('سيتم استبدال الجدول الحالي بالكامل. متابعة؟')) return
+    try {
+      setBusy(true)
+      const r = await api(`/admin/tenants/${row.id}/installments`, { method: 'PUT', body: init })
+      setList(r.installments); toast.success('✅ تم إنشاء جدول الأقساط'); onChanged()
+    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+  const togglePaid = async (ins) => {
+    try {
+      const r = await api(`/admin/tenants/${row.id}/installments`, { method: 'PATCH', body: { no: ins.no, paid: !ins.paid } })
+      setList(l => l.map(x => x.no === ins.no ? { ...x, paid: !ins.paid, paid_at: !ins.paid ? new Date().toISOString() : null } : x))
+      onChanged()
+      if (r.all_paid) toast.success('🎉 كل الأقساط مسددة! يمكنك الآن فتح القيود للمكتب', { duration: 6000 })
+    } catch (e) { toast.error(e.message) }
+  }
+  const openQuota = async () => {
+    try {
+      await api(`/admin/tenants/${row.id}`, { method: 'PATCH', body: { unlimited_journals: true } })
+      toast.success('♾️ تم فتح القيود المحاسبية للمكتب'); onChanged(); onClose()
+    } catch (e) { toast.error(e.message) }
+  }
+  return (
+    <Dialog open={!!row} onOpenChange={v => { if (!v) onClose() }}>
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto" dir="rtl">
+        <DialogHeader><DialogTitle>💳 أقساط: {row.name}</DialogTitle>
+          <DialogDescription>جدولة ومتابعة سداد الأقساط — {row.plan_tier ? `الباقة: ${row.plan_tier}` : 'بدون باقة'}</DialogDescription></DialogHeader>
+        {/* Schedule generator */}
+        <div className="p-3 rounded-lg border bg-slate-50 space-y-2">
+          <div className="text-xs font-bold text-slate-600">{list.length > 0 ? '🔄 إعادة جدولة (تستبدل الحالي)' : '➕ إنشاء جدول أقساط'}</div>
+          <div className="grid grid-cols-3 gap-2">
+            <Field label="الإجمالي $"><Input type="number" min="0" value={init.total} onChange={e => setInit({ ...init, total: Number(e.target.value) })} className="font-bold" /></Field>
+            <Field label="عدد الأقساط"><Input type="number" min="1" max="24" value={init.count} onChange={e => setInit({ ...init, count: Number(e.target.value) })} /></Field>
+            <Field label="أول استحقاق"><Input type="date" value={init.start_date} onChange={e => setInit({ ...init, start_date: e.target.value })} /></Field>
+          </div>
+          <Button size="sm" onClick={generate} disabled={busy} variant="outline" className="w-full border-blue-300 text-blue-700">📅 توليد الجدول (شهري)</Button>
+        </div>
+        {/* Installments list */}
+        {list.length === 0 ? (
+          <div className="text-center text-slate-400 text-sm py-3">لا يوجد جدول أقساط بعد</div>
+        ) : (
+          <div className="space-y-1.5">
+            {list.map(ins => {
+              const overdue = !ins.paid && ins.due_date < new Date().toISOString().slice(0, 10)
+              return (
+                <div key={ins.no} className={`flex items-center justify-between p-2 rounded-lg border ${ins.paid ? 'bg-emerald-50 border-emerald-200' : overdue ? 'bg-rose-50 border-rose-300' : 'bg-white'}`}>
+                  <div className="flex items-center gap-2">
+                    <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-black ${ins.paid ? 'bg-emerald-500 text-white' : 'bg-slate-200'}`}>{ins.no}</span>
+                    <div>
+                      <div className="text-sm font-bold">${ins.amount}</div>
+                      <div className="text-[10px] text-slate-500">استحقاق: {ins.due_date}{overdue && <span className="text-rose-600 font-bold"> — متأخر!</span>}{ins.paid && ins.paid_at && <span className="text-emerald-600"> — سُدد {String(ins.paid_at).slice(0, 10)}</span>}</div>
+                    </div>
+                  </div>
+                  <Button size="sm" onClick={() => togglePaid(ins)} variant={ins.paid ? 'outline' : 'default'} className={ins.paid ? 'h-7 text-xs text-rose-600' : 'h-7 text-xs bg-emerald-600 hover:bg-emerald-700 text-white'}>
+                    {ins.paid ? '↩️ تراجع' : '✅ تسجيل السداد'}
+                  </Button>
+                </div>
+              )
+            })}
+          </div>
+        )}
+        {allPaid && !row.unlimited_journals && (
+          <Button onClick={openQuota} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold">🎉 كل الأقساط مسددة — ♾️ فتح القيود المحاسبية الآن</Button>
+        )}
+        <DialogFooter><Button variant="outline" onClick={onClose}>إغلاق</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -7521,6 +7649,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   const [newTransport, setNewTransport] = useState({ name: '', type: 'bus', capacity: 44, driver_name: '', driver_phone: '', vehicle_plate: '', flight_no: '' })
   const [bookingSearch, setBookingSearch] = useState('') // v3.9.20 — Search field
   const [editingBooking, setEditingBooking] = useState(null) // v3.9.21 — Booking edit state
+  const [monitorBooking, setMonitorBooking] = useState(null) // v3.16 — Send registrants to visa monitoring
   const [suppliers, setSuppliers] = useState([])
   const [clients, setClients] = useState([])
   const [boxes, setBoxes] = useState([])
@@ -7558,6 +7687,35 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   const totalCost = comps.reduce((s, c) => s + (c.cost_per_pax || 0), 0)
   const totalSale = comps.reduce((s, c) => s + (c.sale_per_pax || 0), 0)
   const profit = totalSale - totalCost
+  // v3.16 — Rooming List print (hotel-ready, grouped by room type)
+  const printRoomingList = () => {
+    const regs = []
+    bookings.forEach(b => (b.registrants || []).forEach(r => regs.push({ ...r, client: b.client_name || b.pilgrim_name || '—' })))
+    if (regs.length === 0) return toast.error('لا يوجد مسجلون بقوائم تسكين في هذا الباكج بعد')
+    const groups = {}
+    regs.forEach(r => { const k = r.room_type || 'غير محدد'; (groups[k] = groups[k] || []).push(r) })
+    const sections = Object.entries(groups).map(([room, list]) => `
+      <h2>🛏️ ${room} — ${list.length} فرد</h2>
+      <table><thead><tr><th>م</th><th>الاسم</th><th>رقم الجواز</th><th>العمر</th><th>رقم التأشيرة</th><th>صاحب الحجز</th></tr></thead>
+      <tbody>${list.map((r, i) => `<tr><td>${i + 1}</td><td>${r.name || ''}</td><td>${r.passport_no || ''}</td><td>${r.age ?? ''}</td><td>${r.visa_no || ''}</td><td>${r.client || ''}</td></tr>`).join('')}</tbody></table>`).join('')
+    const w = window.open('', '_blank')
+    if (!w) return toast.error('فضلاً اسمح بالنوافذ المنبثقة للطباعة')
+    w.document.write(`<!doctype html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>كشف التسكين — ${pkg.name}</title>
+      <style>
+        body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;padding:18px;color:#0f172a}
+        h1{font-size:18px;margin:0} .sub{font-size:11px;color:#64748b;margin:4px 0 14px}
+        h2{font-size:14px;background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;padding:6px 10px;margin:14px 0 6px}
+        table{width:100%;border-collapse:collapse;font-size:11px;margin-bottom:8px}
+        th,td{border:1px solid #cbd5e1;padding:4px 6px;text-align:right}
+        th{background:#f1f5f9}
+        @media print{@page{size:A4;margin:10mm}}
+      </style></head><body>
+      <h1>🛏️ كشف التسكين — ${pkg.name}</h1>
+      <div class="sub">التاريخ: ${new Date().toLocaleDateString('ar-EG')} • إجمالي المسجلين: ${regs.length} • أنواع الغرف: ${Object.keys(groups).length}${pkg.start_date ? ' • البرنامج: ' + String(pkg.start_date).slice(0, 10) + (pkg.end_date ? ' → ' + String(pkg.end_date).slice(0, 10) : '') : ''}</div>
+      ${sections}
+      </body></html>`)
+    w.document.close(); w.focus(); setTimeout(() => w.print(), 400)
+  }
   return (
     <Dialog open={true} onOpenChange={onClose}>
       <DialogContent dir="rtl" className="max-w-4xl max-h-[90vh] overflow-y-auto">
@@ -7569,6 +7727,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
           <button onClick={() => setTab('components')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'components' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500'}`}>🧩 المكونات ({comps.length})</button>
           <button onClick={() => setTab('transports')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'transports' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500'}`}>🚌 وسائل النقل ({transports.length})</button>
           <button onClick={() => setTab('bookings')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'bookings' ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-slate-500'}`}>👥 المسجلون ({bookings.length})</button>
+          <button onClick={printRoomingList} className="px-4 py-2 text-sm font-bold text-indigo-600 hover:text-indigo-800 ms-auto">🖨️ كشف التسكين</button>
         </div>
         {tab === 'components' && (
           <div className="space-y-3">
@@ -7859,6 +8018,9 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     <TableCell className="text-left text-emerald-600 font-bold">{fmt(b?.commission, b?.currency)}</TableCell>
                     <TableCell className="text-center">
                       <div className="flex items-center justify-center gap-1">
+                        {(b?.registrants || []).length > 0 && (
+                          <Button size="sm" variant="ghost" onClick={() => setMonitorBooking(b)} className="h-7 w-7 p-0 text-indigo-600 hover:bg-indigo-50" title="إرسال المسجلين لمركز مراقبة التأشيرات">🛃</Button>
+                        )}
                         {pkg.status !== 'closed' && (
                           <Button size="sm" variant="ghost" onClick={() => setEditingBooking(b)} className="h-7 w-7 p-0 text-blue-600 hover:bg-blue-50" title="تعديل بيانات المسافر">
                             <Pencil className="w-3.5 h-3.5" />
@@ -7880,6 +8042,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
         )}
         <DialogFooter><Button variant="outline" onClick={onClose}>إغلاق</Button></DialogFooter>
       </DialogContent>
+      {monitorBooking && <SendToMonitorDialog booking={monitorBooking} pkg={pkg} onClose={() => setMonitorBooking(null)} />}
       {editingBooking && (
         <PackageBookingEditDialog
           pkg={pkg}
@@ -8080,6 +8243,73 @@ function PackageBookingEditDialog({ pkg, booking, clients, boxes, transports = [
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
             حفظ التعديلات
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// v3.16 — Send booking registrants to the Visa Monitoring Center (one click, upsert by passport)
+function SendToMonitorDialog({ booking, pkg, onClose }) {
+  const today = new Date().toISOString().slice(0, 10)
+  const [selected, setSelected] = useState(() => (booking.registrants || []).map(r => !!r.passport_no))
+  const [f, setF] = useState({ agent_name: booking.client_name || booking.pilgrim_name || '', agent_phone: '', entry_date: today, visa_issue_date: today, allowed_days: 85 })
+  const [busy, setBusy] = useState(false)
+  const regs = booking.registrants || []
+  const chosen = regs.filter((r, i) => selected[i] && r.passport_no)
+  const submit = async () => {
+    if (chosen.length === 0) return toast.error('اختر فرداً واحداً على الأقل (يجب توفر رقم الجواز)')
+    if (!f.agent_name.trim()) return toast.error('اسم الوكيل مطلوب')
+    if (!f.agent_phone.trim()) return toast.error('رقم واتساب الوكيل مطلوب')
+    if (!f.entry_date) return toast.error('تاريخ الدخول مطلوب')
+    try {
+      setBusy(true)
+      const rows = chosen.map(r => ({
+        traveler_name: r.name,
+        passport_no: r.passport_no,
+        visa_no: r.visa_no || `PKG-${(pkg.name || '').slice(0, 12)}`,
+        visa_issue_date: f.visa_issue_date,
+        agent_name: f.agent_name.trim(),
+        agent_phone: f.agent_phone.trim(),
+        entry_date: f.entry_date,
+        allowed_days: Number(f.allowed_days) || 85,
+        notes: `من باكج: ${pkg.name} — حجز ${booking.pilgrim_name || ''}`,
+      }))
+      const res = await api('/visa-monitor/import', { method: 'POST', body: { rows } })
+      toast.success(`🛃 تم الإرسال للمراقبة: ${res.inserted} جديد، ${res.updated} تحديث${res.skipped ? `، ${res.skipped} متجاهل` : ''}`)
+      onClose()
+    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <Dialog open={true} onOpenChange={v => { if (!v) onClose() }}>
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto" dir="rtl">
+        <DialogHeader>
+          <DialogTitle>🛃 إرسال المسجلين لمركز مراقبة التأشيرات</DialogTitle>
+          <DialogDescription>حجز: {booking.pilgrim_name} — باكج: {pkg.name} (تحديث تلقائي إن كان الجواز موجوداً مسبقاً)</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            {regs.map((r, i) => (
+              <label key={i} className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer ${!r.passport_no ? 'opacity-50 bg-slate-50' : selected[i] ? 'bg-indigo-50 border-indigo-300' : 'bg-white'}`}>
+                <input type="checkbox" disabled={!r.passport_no} checked={!!selected[i]} onChange={e => setSelected(s => s.map((v, idx) => idx === i ? e.target.checked : v))} />
+                <span className="text-sm font-semibold flex-1">{r.name}</span>
+                <span className="text-xs font-mono">{r.passport_no || 'بلا جواز — لا يمكن إرساله'}</span>
+                {r.visa_no && <span className="text-[10px] text-slate-500">تأشيرة: {r.visa_no}</span>}
+              </label>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="اسم الوكيل / المكتب" required><Input value={f.agent_name} onChange={e => setF({ ...f, agent_name: e.target.value })} /></Field>
+            <Field label="واتساب الوكيل" required><Input dir="ltr" value={f.agent_phone} onChange={e => setF({ ...f, agent_phone: e.target.value })} placeholder="9677XXXXXXXX" className="font-mono" /></Field>
+            <Field label="تاريخ الدخول" required><Input type="date" value={f.entry_date} onChange={e => setF({ ...f, entry_date: e.target.value })} /></Field>
+            <Field label="تاريخ إصدار التأشيرة"><Input type="date" value={f.visa_issue_date} onChange={e => setF({ ...f, visa_issue_date: e.target.value })} /></Field>
+            <Field label="مدة الإقامة (يوم)"><Input type="number" min="1" value={f.allowed_days} onChange={e => setF({ ...f, allowed_days: e.target.value })} className="font-bold" /></Field>
+          </div>
+          <div className="text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded p-2">💡 سيبدأ العدّاد الآلي فوراً (🟢/🟡/🔴/⚫) وتظهر أزرار واتساب الوكيل في مركز المراقبة ولوحة التحكم.</div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>إلغاء</Button>
+          <Button onClick={submit} disabled={busy || chosen.length === 0} className="bg-indigo-600 hover:bg-indigo-700 text-white">{busy ? 'جارٍ الإرسال...' : `🛃 إرسال ${chosen.length} للمراقبة`}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

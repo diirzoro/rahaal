@@ -771,6 +771,58 @@ async function handleRoute(request, { params }) {
     if (route.startsWith('/admin/')) {
       if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
 
+      // v3.16 — Installments tracker (SaaS billing follow-up)
+      if (route === '/admin/installments-overview' && method === 'GET') {
+        const tenants = await db.collection('tenants').find({ billing_mode: 'installments' }).toArray()
+        const today = new Date().toISOString().slice(0, 10)
+        const rows = tenants.map(t => {
+          const list = Array.isArray(t.installments) ? t.installments : []
+          const paid = list.filter(i => i.paid).length
+          const next = list.find(i => !i.paid) || null
+          const overdue = !!(next && next.due_date && String(next.due_date).slice(0, 10) < today)
+          return {
+            id: t.id, name: t.name, slug: t.slug, plan_tier: t.plan_tier || null,
+            unlimited_journals: !!t.unlimited_journals,
+            installments: list, paid_count: paid, total_count: list.length,
+            next_due: next?.due_date || null, next_amount: next?.amount || null,
+            overdue, all_paid: list.length > 0 && paid === list.length,
+          }
+        })
+        rows.sort((a, b) => (b.overdue ? 1 : 0) - (a.overdue ? 1 : 0))
+        return ok(rows)
+      }
+      {
+        const mIns = route.match(/^\/admin\/tenants\/([^/]+)\/installments$/)
+        // PUT — create/replace the schedule (total, count, start_date → monthly due dates)
+        if (mIns && method === 'PUT') {
+          const b = await request.json()
+          const total = Math.max(0, Number(b.total) || 0)
+          const count = Math.min(24, Math.max(1, Number(b.count) || 5))
+          if (!total) return bad('المبلغ الإجمالي مطلوب')
+          const start = b.start_date ? new Date(b.start_date) : new Date()
+          const per = Math.round((total / count) * 100) / 100
+          const list = Array.from({ length: count }, (_, i) => {
+            const d = new Date(start); d.setMonth(d.getMonth() + i)
+            return { no: i + 1, amount: per, due_date: d.toISOString().slice(0, 10), paid: false, paid_at: null }
+          })
+          await db.collection('tenants').updateOne({ id: mIns[1] }, { $set: { installments: list, billing_mode: 'installments', updated_at: new Date() } })
+          return ok({ success: true, installments: list })
+        }
+        // PATCH — mark a single installment paid/unpaid
+        if (mIns && method === 'PATCH') {
+          const b = await request.json()
+          const t = await db.collection('tenants').findOne({ id: mIns[1] })
+          if (!t) return bad('المكتب غير موجود', 404)
+          const list = Array.isArray(t.installments) ? t.installments : []
+          const idx = list.findIndex(i => i.no === Number(b.no))
+          if (idx === -1) return bad('القسط غير موجود')
+          list[idx] = { ...list[idx], paid: !!b.paid, paid_at: b.paid ? new Date() : null }
+          await db.collection('tenants').updateOne({ id: mIns[1] }, { $set: { installments: list, updated_at: new Date() } })
+          const allPaid = list.length > 0 && list.every(i => i.paid)
+          return ok({ success: true, all_paid: allPaid, paid_count: list.filter(i => i.paid).length })
+        }
+      }
+
       // v3.14 — Pricing config management (flexible discount + dynamic features)
       if (route === '/admin/pricing-config' && method === 'GET') {
         const cfg = await getPricingConfig(db)
