@@ -1729,11 +1729,17 @@ async function handleRoute(request, { params }) {
     if (route === '/packages' && method === 'POST') {
       const b = await request.json()
       if (!b.name || !b.package_type) return bad('الاسم والنوع مطلوبان')
+      // v3.15 — Room-type pricing: [{type:'ثنائي', sale_per_pax:1500}, ...]
+      const roomPricing = (Array.isArray(b.room_pricing) ? b.room_pricing : [])
+        .filter(r => r && String(r.type || '').trim())
+        .slice(0, 12)
+        .map(r => ({ type: String(r.type).trim().slice(0, 40), sale_per_pax: Math.max(0, Number(r.sale_per_pax) || 0) }))
       const doc = {
         id: uuidv4(), tenant_id: T, name: String(b.name), package_type: b.package_type,
         currency: CURRENCIES.includes(b.currency) ? b.currency : 'SAR',
         start_date: b.start_date ? new Date(b.start_date) : null,
         end_date: b.end_date ? new Date(b.end_date) : null,
+        room_pricing: roomPricing,
         notes: b.notes || '', status: 'open',
         created_at: new Date(),
       }
@@ -1745,6 +1751,13 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       const upd = {}
       for (const k of ['name', 'package_type', 'notes', 'end_date', 'status']) if (b[k] !== undefined) upd[k] = k === 'end_date' && b[k] ? new Date(b[k]) : b[k]
+      // v3.15 — Room-type pricing update
+      if (b.room_pricing !== undefined) {
+        upd.room_pricing = (Array.isArray(b.room_pricing) ? b.room_pricing : [])
+          .filter(r => r && String(r.type || '').trim())
+          .slice(0, 12)
+          .map(r => ({ type: String(r.type).trim().slice(0, 40), sale_per_pax: Math.max(0, Number(r.sale_per_pax) || 0) }))
+      }
       await db.collection('packages').updateOne({ id: pkgIdMatch[1], tenant_id: T }, { $set: upd })
       return ok({ success: true })
     }
@@ -2006,12 +2019,32 @@ async function handleRoute(request, { params }) {
           await updateBalance(db, 'suppliers', { id: c.supplier_id, tenant_id: T }, cur, c.cost_total)
         }
       }
+      // v3.15 — Registrants list update (edit mode)
+      let newRegistrants = oldBooking.registrants || []
+      let newRoomsSummary = oldBooking.rooms_summary || null
+      if (body.registrants !== undefined) {
+        newRegistrants = (Array.isArray(body.registrants) ? body.registrants : [])
+          .filter(r => r && String(r.name || '').trim())
+          .slice(0, 200)
+          .map(r => ({
+            name: String(r.name).trim().slice(0, 80),
+            passport_no: String(r.passport_no || '').trim().toUpperCase().slice(0, 30),
+            age: r.age === '' || r.age === null || r.age === undefined ? null : Math.max(0, Math.min(120, Number(r.age) || 0)),
+            visa_no: String(r.visa_no || '').trim().slice(0, 40),
+            room_type: String(r.room_type || '').trim().slice(0, 40),
+          }))
+        newRoomsSummary = {}
+        for (const r of newRegistrants) if (r.room_type) newRoomsSummary[r.room_type] = (newRoomsSummary[r.room_type] || 0) + 1
+        if (Object.keys(newRoomsSummary).length === 0) newRoomsSummary = null
+      }
       const updatedBooking = {
         ...oldBooking,
         client_id: cli?.id || null,
         client_name: cli?.name || (newPay === 'cash' ? (oldBooking.client_name || 'عميل نقدي') : ''),
         pilgrim_name: (body.pilgrim_name !== undefined ? String(body.pilgrim_name || '').trim() : oldBooking.pilgrim_name) || cli?.name || oldBooking.pilgrim_name || 'مسافر نقدي',
         passport_no: body.passport_no !== undefined ? String(body.passport_no || '').trim() : (oldBooking.passport_no || ''),
+        registrants: newRegistrants,
+        rooms_summary: newRoomsSummary,
         pax_count: newPax, currency: cur,
         total_cost, total_sale, commission,
         payment_method: newPay,
@@ -2090,11 +2123,28 @@ async function handleRoute(request, { params }) {
       // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id
       if (payMethod === 'credit' && !b.client_id) return bad('اختر حساب القبض / العميل (للحجز الآجل)')
       if (payMethod === 'cash' && !b.box_id) return bad('اختر الصندوق / البنك (للنقد)')
+      // v3.15 — Registrants dynamic list: [{name, passport_no, age, visa_no, room_type}]
+      const registrants = (Array.isArray(b.registrants) ? b.registrants : [])
+        .filter(r => r && String(r.name || '').trim())
+        .slice(0, 200)
+        .map(r => ({
+          name: String(r.name).trim().slice(0, 80),
+          passport_no: String(r.passport_no || '').trim().toUpperCase().slice(0, 30),
+          age: r.age === '' || r.age === null || r.age === undefined ? null : Math.max(0, Math.min(120, Number(r.age) || 0)),
+          visa_no: String(r.visa_no || '').trim().slice(0, 40),
+          room_type: String(r.room_type || '').trim().slice(0, 40),
+        }))
       // v3.9.26 — Transport capacity check (uses pax_seats: adults + children, excludes infants)
       // v3.9.28 — Age category breakdown (adults, children, infants)
-      const paxAdults = Math.max(0, Number(b.pax_adults) || 0)
-      const paxChildren = Math.max(0, Number(b.pax_children) || 0)
-      const paxInfants = Math.max(0, Number(b.pax_infants) || 0)
+      let paxAdults = Math.max(0, Number(b.pax_adults) || 0)
+      let paxChildren = Math.max(0, Number(b.pax_children) || 0)
+      let paxInfants = Math.max(0, Number(b.pax_infants) || 0)
+      // v3.15 — When a registrants list is provided, derive categories from ages automatically
+      if (registrants.length > 0) {
+        paxAdults = registrants.filter(r => r.age === null || r.age >= 12).length
+        paxChildren = registrants.filter(r => r.age !== null && r.age >= 2 && r.age < 12).length
+        paxInfants = registrants.filter(r => r.age !== null && r.age < 2).length
+      }
       // Backward compat: if none provided, treat pax_count as all adults
       const legacyPax = Math.max(1, Number(b.pax_count) || 1)
       const totalPax = paxAdults + paxChildren + paxInfants > 0 ? (paxAdults + paxChildren + paxInfants) : legacyPax
@@ -2116,7 +2166,22 @@ async function handleRoute(request, { params }) {
       const pax = totalPax
       const cur = pkg.currency
       const total_cost = +comps.reduce((s, c) => s + (c.cost_per_pax * paxBilled), 0).toFixed(2)
-      const total_sale = +comps.reduce((s, c) => s + (c.sale_per_pax * paxBilled), 0).toFixed(2)
+      let total_sale = +comps.reduce((s, c) => s + (c.sale_per_pax * paxBilled), 0).toFixed(2)
+      // v3.15 — Room-type pricing: when the package defines room prices and registrants chose rooms,
+      // the sale side is computed from room prices (billed persons only: infants excluded).
+      let rooms_summary = null
+      if (registrants.length > 0 && Array.isArray(pkg.room_pricing) && pkg.room_pricing.length > 0) {
+        const priceMap = {}
+        for (const rp of pkg.room_pricing) priceMap[rp.type] = Number(rp.sale_per_pax) || 0
+        let roomSale = 0
+        rooms_summary = {}
+        for (const r of registrants) {
+          const isInfant = r.age !== null && r.age < 2
+          if (r.room_type) rooms_summary[r.room_type] = (rooms_summary[r.room_type] || 0) + 1
+          if (!isInfant && r.room_type && priceMap[r.room_type] !== undefined) roomSale += priceMap[r.room_type]
+        }
+        if (roomSale > 0) total_sale = +roomSale.toFixed(2)
+      }
       const commission = +(total_sale - total_cost).toFixed(2)
       let box = null
       if (payMethod === 'cash') {
@@ -2127,8 +2192,11 @@ async function handleRoute(request, { params }) {
         id: uuidv4(), tenant_id: T, package_id: pkgId,
         client_id: cli?.id || null,
         client_name: cli?.name || (payMethod === 'cash' ? (b.client_name || 'عميل نقدي') : ''),
-        pilgrim_name: b.pilgrim_name || cli?.name || 'مسافر نقدي',
-        passport_no: b.passport_no || '',
+        pilgrim_name: b.pilgrim_name || registrants[0]?.name || cli?.name || 'مسافر نقدي',
+        passport_no: b.passport_no || registrants[0]?.passport_no || '',
+        // v3.15 — Registrants list + rooms breakdown
+        registrants,
+        rooms_summary,
         pax_count: pax, currency: cur,
         // v3.9.28 — Age category breakdown
         pax_adults: paxAdults || (paxAdults + paxChildren + paxInfants === 0 ? legacyPax : 0),

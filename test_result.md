@@ -8694,3 +8694,28 @@ agent_communication:
       ✅ Restoration to original values works correctly
       
       The pricing-config endpoint is now fully functional. The MongoDB _id bug is completely resolved.
+
+## v3.15 Phase 3 — Packages room pricing + registrants — Current Session
+backend:
+  - task: "Packages v3.15: room_pricing on POST/PATCH /packages, registrants list on POST/PATCH bookings (auto age categories, sale computed from room prices, rooms_summary), plan badge fields in sanitizeTenant"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "room_pricing [{type,sale_per_pax}]. Booking registrants [{name,passport_no,age,visa_no,room_type}]: adults>=12/child 2-11/infant<2 derived from ages; total_sale overridden by sum of room prices for non-infants when package has room_pricing; rooms_summary stored."
+        - working: true
+          agent: "testing"
+          comment: "✅ PASSED (11/11 tests) - All v3.15 features working correctly. (1) POST /api/packages with room_pricing creates package with 3 sanitized room types (ثنائي, ثلاثي, رباعي). (2) PATCH /api/packages/:id updates room_pricing (ثنائي changed from 2000 to 2100). (3) GET /api/packages returns updated pricing. (4) POST /api/packages/:id/components adds component (cost_per_pax=500, sale_per_pax=800). (5) POST /api/packages/:id/bookings with 4 registrants (2 adults age 30/25, 1 child age 8, 1 infant age 1) correctly computes: pax_adults=2, pax_children=1, pax_infants=1, pax_count=4, pax_billed=3, passport_no normalized to uppercase (V315A), rooms_summary={'ثنائي':1,'ثلاثي':2}, total_sale=5100 (2100+1500+1500 using UPDATED room prices, infant excluded), total_cost=1500 (500×3), commission=3600, registrants array has 4 entries, pilgrim_name defaults to first registrant 'بالغ 1'. (6) PATCH booking with reduced registrants (2 entries) and total_sale:3600 correctly updates registrants length to 2 and recomputes rooms_summary={'ثنائي':1,'ثلاثي':1}. (7) Backward compatibility: booking WITHOUT registrants (pax_adults:2) uses old behavior: total_sale=1600 (800×2 from components), registrants=[], rooms_summary=null. (8-11) Cleanup: DELETE both bookings, DELETE package, verified package no longer in list, client balance restored to original value (0 SAR). All room-based pricing calculations, age category derivation, passport normalization, and backward compatibility working correctly."
+test_plan:
+  current_focus: []
+  test_all: false
+agent_communication:
+    - agent: "main"
+      comment: "Use demo tenant (owner@demo.com, creds in memory/test_credentials.md). Create a TEST package + supplier component + booking with registrants, verify computations, then DELETE booking and package to leave DB clean. Note: booking creation posts a journal entry; deleting the booking reverses it (existing behavior)."
+    - agent: "testing"
+      comment: "✅ v3.15 BACKEND TESTING COMPLETED - ALL 11 TESTS PASSED. Comprehensive test suite executed covering: (1) Package creation with room_pricing array, (2) PATCH package to update room pricing, (3) Verification of updated pricing in GET list, (4) Component addition, (5) Booking creation with 4 registrants (mixed ages: adults/child/infant) with full verification of pax counts, passport normalization, rooms_summary, room-based total_sale calculation (infant excluded), (6) PATCH booking to reduce registrants with rooms_summary recomputation, (7) Backward compatibility test (booking without registrants uses component-based pricing), (8-11) Full cleanup with balance verification. All room-based pricing logic, age category auto-derivation (adults>=12, children 2-11, infants<2), passport uppercase normalization, rooms_summary aggregation, and backward compatibility working correctly. No issues found."

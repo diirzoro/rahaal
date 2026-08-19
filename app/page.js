@@ -1215,6 +1215,16 @@ function Sidebar({ current, onChange }) {
           <div className="min-w-0 hidden md:block">
             <div className="text-lg font-extrabold tracking-tight truncate">{settings?.agency_name || tenant?.name || 'رحّـــال'}</div>
             <div className="text-[10px] text-orange-300 font-black tracking-widest" style={{ letterSpacing: '0.15em' }}>RAHAL ERP</div>
+            {/* v3.15 — Plan badge (approved suggestion) */}
+            {(['silver', 'gold', 'enterprise'].includes(tenant?.plan_tier) || tenant?.unlimited_journals || tenant?.billing_mode) && (
+              <div className="flex items-center gap-1 mt-1 flex-wrap">
+                {tenant?.plan_tier === 'silver' && <span className="text-[9px] bg-slate-600 text-white px-1.5 py-0.5 rounded-full font-bold">🥈 سيلفر</span>}
+                {tenant?.plan_tier === 'gold' && <span className="text-[9px] bg-amber-500 text-white px-1.5 py-0.5 rounded-full font-bold">🥇 جولد</span>}
+                {tenant?.plan_tier === 'enterprise' && <span className="text-[9px] bg-indigo-500 text-white px-1.5 py-0.5 rounded-full font-bold">🏢 إنتربرايز</span>}
+                {(tenant?.unlimited_journals || tenant?.billing_mode === 'annual') && <span className="text-[9px] bg-emerald-500 text-white px-1.5 py-0.5 rounded-full font-bold">♾️ قيود مفتوحة</span>}
+                {tenant?.billing_mode === 'installments' && !tenant?.unlimited_journals && <span className="text-[9px] bg-blue-500 text-white px-1.5 py-0.5 rounded-full font-bold">💳 أقساط</span>}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -7330,6 +7340,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
   // v3.9.6 — Dynamic Package Builder: items list + live totals + supplier per item
   const [f, setF] = useState({ name: '', package_type: 'umrah', currency: 'SAR', start_date: '', end_date: '', notes: '' })
   const [items, setItems] = useState([]) // [{ component_type, name, supplier_id, cost, sale }]
+  const [rooms, setRooms] = useState([]) // v3.15 — [{type, sale_per_pax}]
   const [suppliers, setSuppliers] = useState([])
   const [saving, setSaving] = useState(false)
   useEffect(() => {
@@ -7338,11 +7349,18 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
     if (record) {
       setF({ name: record.name, package_type: record.package_type, currency: record.currency, start_date: record.start_date ? new Date(record.start_date).toISOString().slice(0,10) : '', end_date: record.end_date ? new Date(record.end_date).toISOString().slice(0,10) : '', notes: record.notes || '' })
       setItems([])
+      setRooms(Array.isArray(record.room_pricing) ? record.room_pricing.map(r => ({ ...r })) : [])
     } else {
       setF({ name: '', package_type: 'umrah', currency: 'SAR', start_date: todayISO(), end_date: '', notes: '' })
       setItems([])
+      setRooms([])
     }
   }, [open, record])
+  // v3.15 — Room pricing helpers
+  const ROOM_PRESETS = ['ثنائي', 'ثلاثي', 'رباعي', 'جماعي']
+  const addRoom = (type = '') => setRooms(r => [...r, { type, sale_per_pax: 0 }])
+  const updRoom = (i, k, v) => { const c = [...rooms]; c[i] = { ...c[i], [k]: v }; setRooms(c) }
+  const rmRoom = (i) => setRooms(rooms.filter((_, idx) => idx !== i))
   const addItem = () => setItems([...items, { component_type: 'hotel', name: '', supplier_id: '', cost: 0, sale: 0 }])
   const updItem = (i, k, v) => { const c = [...items]; c[i] = { ...c[i], [k]: v }; setItems(c) }
   const rmItem = (i) => setItems(items.filter((_, idx) => idx !== i))
@@ -7359,11 +7377,12 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
     }
     try {
       setSaving(true)
+      const roomPricing = rooms.filter(r => String(r.type || '').trim()).map(r => ({ type: r.type, sale_per_pax: Number(r.sale_per_pax) || 0 }))
       if (record) {
-        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, end_date: f.end_date || null, notes: f.notes } })
+        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, end_date: f.end_date || null, notes: f.notes, room_pricing: roomPricing } })
         toast.success('تم التحديث')
       } else {
-        const pkg = await api('/packages', { method: 'POST', body: f })
+        const pkg = await api('/packages', { method: 'POST', body: { ...f, room_pricing: roomPricing } })
         // Create each item as a package component
         for (const it of items) {
           await api(`/packages/${pkg.id}/components`, { method: 'POST', body: {
@@ -7390,6 +7409,32 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
           <Field label="تاريخ البداية"><Input type="date" value={f.start_date} onChange={e => setF({ ...f, start_date: e.target.value })} disabled={!!record} /></Field>
           <Field label="تاريخ النهاية"><Input type="date" value={f.end_date} onChange={e => setF({ ...f, end_date: e.target.value })} /></Field>
           <div className="md:col-span-2"><Field label={`المدة${nights > 0 ? ` (${nights} ليلة تلقائي)` : ''}`}><Input value={nights ? `${nights} ليلة` : ''} disabled className="bg-slate-50" /></Field></div>
+        </div>
+        {/* v3.15 — Room-type pricing (accommodation) — available in create AND edit */}
+        <div className="border-2 border-dashed border-indigo-200 rounded-xl p-3 mb-3 bg-indigo-50/40">
+          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+            <div className="font-bold text-slate-800 text-sm">🛏️ التسعير حسب نوع التسكين (سعر البيع للفرد)</div>
+            <div className="flex gap-1 flex-wrap">
+              {ROOM_PRESETS.filter(p => !rooms.some(r => r.type === p)).map(p => (
+                <Button key={p} size="sm" variant="outline" onClick={() => addRoom(p)} className="h-7 text-xs border-indigo-300 text-indigo-700 hover:bg-indigo-50">+ {p}</Button>
+              ))}
+              <Button size="sm" variant="outline" onClick={() => addRoom('')} className="h-7 text-xs">+ نوع آخر</Button>
+            </div>
+          </div>
+          {rooms.length === 0 ? (
+            <div className="text-xs text-slate-400 text-center py-2">لم تُحدد أنواع تسكين — سيُحسب البيع من بنود الخدمات كالمعتاد. أضف أنواع الغرف ليُحسب سعر كل مسجّل حسب غرفته.</div>
+          ) : (
+            <div className="grid md:grid-cols-2 gap-2">
+              {rooms.map((r, i) => (
+                <div key={i} className="flex items-center gap-2 bg-white rounded-lg border p-2">
+                  <Input value={r.type} onChange={e => updRoom(i, 'type', e.target.value)} placeholder="نوع الغرفة (ثنائي...)" className="h-8 text-xs flex-1" />
+                  <Input type="number" min="0" value={r.sale_per_pax} onChange={e => updRoom(i, 'sale_per_pax', e.target.value)} placeholder="سعر الفرد" className="h-8 text-xs font-bold" />
+                  <span className="text-[10px] text-slate-400">{f.currency}/فرد</span>
+                  <Button size="sm" variant="ghost" onClick={() => rmRoom(i)} className="h-7 w-7 p-0 text-rose-500"><Trash2 className="w-3 h-3" /></Button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         {/* Dynamic items list — only for NEW packages */}
         {!record && (
@@ -7480,7 +7525,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   const [clients, setClients] = useState([])
   const [boxes, setBoxes] = useState([])
   const [newComp, setNewComp] = useState({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '' })
-  const [newBooking, setNewBooking] = useState({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '' })
+  const [newBooking, setNewBooking] = useState({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '', registrants: [] })
   const load = () => Promise.all([
     api(`/packages/${pkg.id}/components`).then(setComps),
     api(`/packages/${pkg.id}/bookings`).then(setBookings),
@@ -7507,7 +7552,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
     if (newBooking.payment_method === 'credit' && !newBooking.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
     if (newBooking.payment_method === 'cash' && !newBooking.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     if (comps.length === 0) return toast.error('أضف مكونات الباكج أولاً')
-    try { await api(`/packages/${pkg.id}/bookings`, { method: 'POST', body: newBooking }); toast.success('✅ تم التسجيل + قيد محاسبي'); setNewBooking({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '' }); load(); onChanged && onChanged() }
+    try { await api(`/packages/${pkg.id}/bookings`, { method: 'POST', body: newBooking }); toast.success('✅ تم التسجيل + قيد محاسبي'); setNewBooking({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '', registrants: [] }); load(); onChanged && onChanged() }
     catch (e) { toast.error(e.message) }
   }
   const totalCost = comps.reduce((s, c) => s + (c.cost_per_pax || 0), 0)
@@ -7661,6 +7706,72 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     💡 التكلفة تُحسب على <b>البالغين + الأطفال فقط</b> ({(newBooking.pax_adults || 0) + (newBooking.pax_children || 0)} مسافر). الرضيع مجاناً محاسبياً <b>ولا يشغل مقعداً في وسيلة النقل</b>.
                   </div>
                 </div>
+                {/* v3.15 — Registrants dynamic list + room-type pricing */}
+                <div className="bg-white/60 border-2 border-indigo-200 rounded-lg p-3">
+                  <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                    <div className="text-xs font-bold text-slate-800 flex items-center gap-2">🛏️ <span>قائمة المسجلين والتسكين ({(newBooking.registrants || []).length})</span></div>
+                    <Button size="sm" variant="outline" onClick={() => setNewBooking({ ...newBooking, registrants: [...(newBooking.registrants || []), { name: '', passport_no: '', age: '', visa_no: '', room_type: (pkg.room_pricing || [])[0]?.type || '' }] })} className="h-7 text-xs border-indigo-300 text-indigo-700 hover:bg-indigo-50"><Plus className="w-3 h-3" /> إضافة فرد</Button>
+                  </div>
+                  {(newBooking.registrants || []).length === 0 ? (
+                    <div className="text-[11px] text-slate-400 text-center py-1">اختياري — أضف بيانات كل فرد (الاسم، الجواز، العمر، التأشيرة، نوع التسكين). الفئات العمرية والسعر سيُحسبان آلياً.</div>
+                  ) : (
+                    <div className="space-y-2">
+                      {(newBooking.registrants || []).map((r, i) => {
+                        const upd = (k, v) => {
+                          const list = [...newBooking.registrants]; list[i] = { ...list[i], [k]: v }
+                          // Auto-derive age categories from the list
+                          const adults = list.filter(x => x.age === '' || Number(x.age) >= 12).length
+                          const children = list.filter(x => x.age !== '' && Number(x.age) >= 2 && Number(x.age) < 12).length
+                          const infants = list.filter(x => x.age !== '' && Number(x.age) < 2).length
+                          setNewBooking({ ...newBooking, registrants: list, pax_adults: adults, pax_children: children, pax_infants: infants, pilgrim_name: newBooking.pilgrim_name || list[0]?.name || '', passport_no: newBooking.passport_no || list[0]?.passport_no || '' })
+                        }
+                        const rm = () => {
+                          const list = newBooking.registrants.filter((_, idx) => idx !== i)
+                          const adults = list.filter(x => x.age === '' || Number(x.age) >= 12).length
+                          const children = list.filter(x => x.age !== '' && Number(x.age) >= 2 && Number(x.age) < 12).length
+                          const infants = list.filter(x => x.age !== '' && Number(x.age) < 2).length
+                          setNewBooking({ ...newBooking, registrants: list, pax_adults: list.length ? adults : 1, pax_children: children, pax_infants: infants })
+                        }
+                        return (
+                          <div key={i} className="grid grid-cols-2 md:grid-cols-6 gap-1.5 items-center bg-white rounded-lg border p-2">
+                            <Input value={r.name} onChange={e => upd('name', e.target.value)} placeholder={`الاسم ${i + 1} *`} className="h-8 text-xs md:col-span-2" />
+                            <Input value={r.passport_no} onChange={e => upd('passport_no', e.target.value.toUpperCase())} placeholder="رقم الجواز" className="h-8 text-xs font-mono" />
+                            <Input type="number" min="0" max="120" value={r.age} onChange={e => upd('age', e.target.value)} placeholder="العمر" className="h-8 text-xs" />
+                            <Input value={r.visa_no} onChange={e => upd('visa_no', e.target.value)} placeholder="رقم التأشيرة" className="h-8 text-xs font-mono" />
+                            <div className="flex items-center gap-1">
+                              {(pkg.room_pricing || []).length > 0 ? (
+                                <Select value={r.room_type || 'none'} onValueChange={v => upd('room_type', v === 'none' ? '' : v)}>
+                                  <SelectTrigger className="h-8 text-xs bg-white"><SelectValue placeholder="التسكين" /></SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="none">— بلا تسكين —</SelectItem>
+                                    {(pkg.room_pricing || []).map(rp => <SelectItem key={rp.type} value={rp.type}>🛏️ {rp.type} — {rp.sale_per_pax} {pkg.currency}</SelectItem>)}
+                                  </SelectContent>
+                                </Select>
+                              ) : (
+                                <Input value={r.room_type} onChange={e => upd('room_type', e.target.value)} placeholder="التسكين" className="h-8 text-xs" />
+                              )}
+                              <Button size="sm" variant="ghost" onClick={rm} className="h-7 w-7 p-0 text-rose-500"><Trash2 className="w-3 h-3" /></Button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                      {(pkg.room_pricing || []).length > 0 && (() => {
+                        const priceMap = {}; (pkg.room_pricing || []).forEach(rp => { priceMap[rp.type] = Number(rp.sale_per_pax) || 0 })
+                        const roomSale = (newBooking.registrants || []).reduce((s, r) => {
+                          const isInfant = r.age !== '' && Number(r.age) < 2
+                          return s + (!isInfant && r.room_type && priceMap[r.room_type] !== undefined ? priceMap[r.room_type] : 0)
+                        }, 0)
+                        return roomSale > 0 ? (
+                          <div className="p-2 rounded bg-indigo-50 border border-indigo-200 text-xs flex items-center gap-2">
+                            💰 <b>إجمالي البيع حسب التسكين (يُعتمد آلياً):</b>
+                            <span className="font-black text-indigo-700 text-sm">{fmt(roomSale, pkg.currency)}</span>
+                            <span className="text-[10px] text-slate-500">(الرضّع لا يُحسبون)</span>
+                          </div>
+                        ) : null
+                      })()}
+                    </div>
+                  )}
+                </div>
                 {/* v3.9.22 — Unified Payment Selector (Package Booking) */}
                 <div className="bg-white/60 border-2 border-blue-200 rounded-lg p-3">
                   <div className="text-xs font-bold text-slate-800 mb-2 flex items-center gap-2">💳 <span>طريقة الدفع + جهة الاستلام</span></div>
@@ -7731,7 +7842,13 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                 }).map(b => (
                   <TableRow key={b?.id}>
                     <TableCell className="text-xs">{fmtDate(b?.created_at)}</TableCell>
-                    <TableCell className="font-semibold">{b?.pilgrim_name || '—'}</TableCell>
+                    <TableCell className="font-semibold">{b?.pilgrim_name || '—'}
+                      {(b?.registrants || []).length > 0 && (
+                        <div className="text-[10px] text-indigo-600 font-normal mt-0.5" title={(b.registrants || []).map(r => `${r.name}${r.room_type ? ` (${r.room_type})` : ''}`).join('، ')}>
+                          👥 {b.registrants.length} مسجّل{b.rooms_summary ? ' • ' + Object.entries(b.rooms_summary).map(([k, v]) => `${k}×${v}`).join(' ') : ''}
+                        </div>
+                      )}
+                    </TableCell>
                     <TableCell className="text-xs">{b?.client_name || '—'}</TableCell>
                     <TableCell className="font-mono text-xs">{b?.passport_no || '—'}</TableCell>
                     <TableCell className="text-center">{b?.pax_count || 1}</TableCell>
