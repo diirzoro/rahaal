@@ -9175,3 +9175,32 @@ agent_communication:
     message: "Test dual pricing end-to-end per the detailed scenarios provided in the testing task. Login owner@demo.com / Demo@2025. Create own test data, verify JE balance in every case, cleanup afterwards. NEVER touch pre-existing tenant data."
   - agent: "testing"
     message: "✅ v3.20 DUAL PRICING BACKEND TESTING COMPLETED - ALL 3 TESTS PASSED. Direct mode (room+age matrix) working correctly with child fallback logic. Components mode (flat/per_age/room_age) working correctly with all pricing types. Age category logic verified (infant<2, child 2-11, adult 12+). PATCH operations correctly recalculate totals. Discount and partner commission integration working. Legacy fallback (no registrants) working. All journal entries balanced. All test data cleaned up. Backend v3.20 is production-ready."
+
+backend:
+  - task: "v3.21 - Duplicate Package + Partner Commission Statement + Installment Alert"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Three new endpoints: (1) POST /api/packages/:id/duplicate - clones package doc (new uuid, name from body or 'name — نسخة', status open, duplicated_from field) + all package_components (new ids) + package_transports (new ids, status open). NO bookings/JEs copied. (2) GET /api/partners/commissions?partner_id=&from=&to= - aggregates commission_share_amount>0 rows from tickets, visas, services (date field) and package_bookings (created_at field), returns rows sorted desc + totals per currency {partner_share, total_commission, office_share, count}. (3) GET /api/my/installment-alert - returns next unpaid installment of logged-in tenant if overdue or due within 10 days, else {alert:null}. Needs backend testing."
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (12/12 tests) - All 3 v3.21 endpoints working correctly. TEST 1 - DUPLICATE PACKAGE (6/6): (1.1) Duplicate with custom name creates new package with correct ID, name='DUP-COPY-v321', status='open', duplicated_from=source_id, pricing_mode='direct', room_pricing preserved (sale_per_pax=200, sale_child=150, sale_infant=25), components_copied=2. (1.2) Components copied with NEW IDs, pricing preserved: flat component (cost_per_pax=80, sale_per_pax=100), per_age component (all 6 age fields: cost_adult=20, cost_child=10, cost_infant=0, sale_adult=40, sale_child=20, sale_infant=0), supplier_id preserved. (1.3) No bookings copied (empty array). (1.4) Duplicate without body creates package with default name 'DUP-SRC-v321 — نسخة'. (1.5) Non-existent package returns 404. (1.6) FUNCTIONAL: Created booking on duplicate with 2 registrants (adult age 30 + child age 8, both double room) → sale=350 (200+150), cost=190 (flat 80×2 + per_age adult 20 + child 10), commission=160, JE balanced. Duplicate is fully operational. TEST 2 - PARTNER COMMISSIONS (4/4): (2.1) GET /api/partners/commissions?partner_id={id} returns 3 rows (visa module_label='🛂 تأشيرة', service='🧾 خدمة', package='📦 باكج') with correct partner_shares (20, 15, 25) and total_commission values. Totals per currency: USD partner_share=60, total_commission=230, office_share=170, count=3. (2.2) Date filters working: from={tomorrow} returns 0 rows, from={yesterday}&to={today} returns all rows. (2.3) Missing partner_id returns 400 error. (2.4) Partner with no commissions returns rows:[], totals:{}. TEST 3 - INSTALLMENT ALERT (2/2): (3.1) GET /api/my/installment-alert returns {alert: null} for demo tenant (billing_mode != 'installments') - EXPECTED behavior. (3.2) Unauthenticated request returns 401. All test data created and cleaned up successfully (2 bookings, 1 visa, 1 service, 4 packages, 3 clients, 2 suppliers deleted). No pre-existing data modified."
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: "Test the 3 new v3.21 endpoints per detailed task. Login owner@demo.com / Demo@2025. Create own test data, cleanup after. NEVER touch pre-existing data. For installment-alert: demo tenant may not have billing_mode=installments - expect {alert:null} in that case (that IS a pass); do NOT modify the real tenant billing fields."
+  - agent: "testing"
+    message: "✅ v3.21 BACKEND TESTING COMPLETED - ALL 12 TESTS PASSED. Comprehensive test suite executed covering all 3 new endpoints: (1) POST /api/packages/:id/duplicate - 6 tests passed (duplicate with custom name, components copied with new IDs and preserved pricing, no bookings copied, default name generation, 404 for non-existent package, functional booking test). (2) GET /api/partners/commissions - 4 tests passed (partner statement with correct module labels and totals, date filtering, missing partner_id validation, empty results for partner with no commissions). (3) GET /api/my/installment-alert - 2 tests passed (null alert for non-installments tenant, auth required). All test data created and cleaned up successfully. No pre-existing data modified. Backend v3.21 is production-ready."
+

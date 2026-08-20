@@ -10,7 +10,7 @@ import {
   Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
   Building, Settings, Upload, Download, FileSpreadsheet, CheckCircle2, XCircle,
   AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key, Pencil,
-  ArrowLeftRight, Briefcase, CalendarClock, LogIn, Package,
+  ArrowLeftRight, Briefcase, CalendarClock, LogIn, Package, Copy,
 } from 'lucide-react'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTip, ResponsiveContainer,
@@ -7217,6 +7217,8 @@ function PackagesScreen() {
   const [reportPkg, setReportPkg] = useState(null)
   const [comparePeriod, setComparePeriod] = useState(null) // null | 'all' | 'month' | 'year'
   const [extendPkg, setExtendPkg] = useState(null)
+  // v3.21 — Partner Commission Statement
+  const [partnerStmtOpen, setPartnerStmtOpen] = useState(false)
   // v3.9.11 — Bulk operations for packages
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [dateRange, setDateRange] = useState({ preset: 'all', from: '', to: '' })
@@ -7238,6 +7240,17 @@ function PackagesScreen() {
     if (!confirm(`حذف الباكج "${p?.name}"؟`)) return
     try { await api(`/packages/${p.id}`, { method: 'DELETE' }); toast.success('تم الحذف'); load() }
     catch (e) { toast.error(e.message) }
+  }
+  // v3.21 — Duplicate package (structure + components + transports, no bookings)
+  const dupPkg = async (p) => {
+    const suggested = `${p?.name} — نسخة`
+    const name = prompt(`نسخ الباكج "${p?.name}" بكل مكوناته وأسعاره كمسودة جديدة.\n\nاسم النسخة الجديدة:`, suggested)
+    if (name === null) return
+    try {
+      const res = await api(`/packages/${p.id}/duplicate`, { method: 'POST', body: { name: String(name).trim() || suggested } })
+      toast.success(`✅ تم النسخ: ${res.name} (${res.components_copied || 0} مكوّن${res.transports_copied ? ` + ${res.transports_copied} وسيلة نقل` : ''})`)
+      load()
+    } catch (e) { toast.error(e.message) }
   }
   const dateBounds = useMemo(() => {
     const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
@@ -7272,6 +7285,7 @@ function PackagesScreen() {
     <div className="space-y-4">
       <TopBar title="الباكجات والبرامج السياحية" subtitle={`${openPackages.length} باكج نشط • ${closedPackages.length} أرشيف`}
         right={<div className="flex gap-2">
+          <Button variant="outline" onClick={() => setPartnerStmtOpen(true)} className="gap-2 border-amber-300 text-amber-700 hover:bg-amber-50">🤝 كشف الشريك</Button>
           <Button variant="outline" onClick={() => setComparePeriod('all')} className="gap-2 border-blue-200 text-blue-700 hover:bg-blue-50"><BarChart3 className="w-4 h-4" /> مقارنة الربحية</Button>
           <Button onClick={() => { setEditing(null); setOpen(true) }} className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> باكج جديد</Button>
         </div>} />
@@ -7336,18 +7350,19 @@ function PackagesScreen() {
       <div>
         <div className="text-sm font-bold text-slate-700 mb-2">🟢 الباكجات المفتوحة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} onExtend={() => setExtendPkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
+          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} onExtend={() => setExtendPkg(p)} onDuplicate={() => dupPkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
           {openPackages.length === 0 && <div className="col-span-full text-center text-slate-400 py-8 text-sm">{dateBounds ? 'لا نتائج ضمن النطاق التاريخي' : 'لا توجد باكجات مفتوحة — أنشئ باكج جديد'}</div>}
         </div>
       </div>
       {closedPackages.length > 0 && <div>
         <div className="text-sm font-bold text-slate-500 mt-6 mb-2">🗄️ أرشيف الباكجات المغلقة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {closedPackages.map(p => <PkgCard key={p?.id} p={p} closed onOpen={() => setDetailsPkg(p)} onReopen={() => reopenPkg(p)} onReport={() => setReportPkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
+          {closedPackages.map(p => <PkgCard key={p?.id} p={p} closed onOpen={() => setDetailsPkg(p)} onReopen={() => reopenPkg(p)} onReport={() => setReportPkg(p)} onDuplicate={() => dupPkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
         </div>
       </div>}
       <PackageDialog open={open} onOpenChange={v => { setOpen(v); if (!v) setEditing(null) }} record={editing} onSaved={load} />
       {detailsPkg && <PackageDetailsDialog pkg={detailsPkg} onClose={() => setDetailsPkg(null)} onChanged={load} />}
+      <PartnerStatementDialog open={partnerStmtOpen} onOpenChange={setPartnerStmtOpen} />
       {reportPkg && <PackageReportDialog pkg={reportPkg} onClose={() => setReportPkg(null)} />}
       {comparePeriod && <PackageCompareDialog initialPeriod={comparePeriod} onClose={() => setComparePeriod(null)} />}
       {extendPkg && <ExtendPackageDateDialog pkg={extendPkg} onClose={() => setExtendPkg(null)} onSaved={load} />}
@@ -7515,7 +7530,156 @@ function PackageCompareDialog({ initialPeriod = 'all', onClose }) {
   )
 }
 
-function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onExtend, closed, selectable, selected, onToggleSelect }) {
+// v3.21 — Partner Commission Statement (كشف حساب الشريك B2B)
+function PartnerStatementDialog({ open, onOpenChange }) {
+  const [clients, setClients] = useState([])
+  const [suppliers, setSuppliers] = useState([])
+  const [partnerKey, setPartnerKey] = useState('') // "client:id" | "supplier:id"
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(false)
+  useEffect(() => {
+    if (!open) return
+    api('/clients').then(setClients).catch(() => {})
+    api('/suppliers').then(setSuppliers).catch(() => {})
+    // default: current month
+    const now = new Date()
+    setFrom(new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10))
+    setTo(now.toISOString().slice(0, 10))
+    setData(null); setPartnerKey('')
+  }, [open])
+  const partnerName = useMemo(() => {
+    if (!partnerKey) return ''
+    const [type, id] = partnerKey.split(':')
+    const items = type === 'supplier' ? suppliers : clients
+    return items.find(x => x.id === id)?.name || ''
+  }, [partnerKey, clients, suppliers])
+  const fetchStmt = async () => {
+    if (!partnerKey) return toast.error('اختر الشريك أولاً')
+    const [, id] = partnerKey.split(':')
+    try {
+      setLoading(true)
+      const qs = new URLSearchParams({ partner_id: id })
+      if (from) qs.set('from', from)
+      if (to) qs.set('to', to)
+      const res = await api(`/partners/commissions?${qs.toString()}`)
+      setData(res)
+      if ((res.rows || []).length === 0) toast.info('لا توجد عمولات مشتركة لهذا الشريك في الفترة المحددة')
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }
+  const printStmt = () => {
+    if (!data || (data.rows || []).length === 0) return toast.error('لا توجد بيانات للطباعة')
+    const w = window.open('', '_blank', 'width=900,height=1100')
+    if (!w) return toast.error('اسمح بالنوافذ المنبثقة للطباعة')
+    const rowsHtml = data.rows.map((r, i) => `
+      <tr>
+        <td>${i + 1}</td>
+        <td>${r.date ? new Date(r.date).toLocaleDateString('en-GB') : '—'}</td>
+        <td>${r.module_label}</td>
+        <td style="text-align:right">${r.description || '—'}</td>
+        <td>${r.total_commission.toLocaleString('en-US')} ${r.currency}</td>
+        <td style="font-weight:bold; color:#b45309">${r.partner_share.toLocaleString('en-US')} ${r.currency}</td>
+      </tr>`).join('')
+    const totalsHtml = Object.entries(data.totals || {}).map(([cur, t]) => `
+      <div style="display:flex; justify-content:space-between; padding:6px 12px; border-bottom:1px dashed #e2e8f0">
+        <b>${cur}</b>
+        <span>عمليات: ${t.count}</span>
+        <span>إجمالي العمولة: <b>${t.total_commission.toLocaleString('en-US')}</b></span>
+        <span style="color:#b45309">مستحق الشريك: <b>${t.partner_share.toLocaleString('en-US')}</b></span>
+        <span style="color:#047857">صافي المكتب: <b>${t.office_share.toLocaleString('en-US')}</b></span>
+      </div>`).join('')
+    w.document.write(`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>كشف حساب الشريك — ${partnerName}</title>
+      <style>
+        body{font-family:'Segoe UI',Tahoma,sans-serif; margin:24px; color:#1e293b}
+        h1{font-size:20px; margin:0} .sub{color:#64748b; font-size:12px; margin-top:4px}
+        table{width:100%; border-collapse:collapse; margin-top:16px; font-size:12px}
+        th,td{border:1px solid #cbd5e1; padding:6px 8px; text-align:center}
+        th{background:#f1f5f9}
+        .totals{margin-top:16px; border:2px solid #f59e0b; border-radius:8px; overflow:hidden}
+        .totals-h{background:#fef3c7; padding:8px 12px; font-weight:bold}
+        .foot{margin-top:24px; font-size:11px; color:#94a3b8; display:flex; justify-content:space-between}
+        @media print{ .noprint{display:none} }
+      </style></head><body>
+      <div style="display:flex; justify-content:space-between; align-items:start">
+        <div>
+          <h1>🤝 كشف حساب عمولات الشريك</h1>
+          <div class="sub">الشريك: <b style="color:#1e293b; font-size:14px">${partnerName}</b></div>
+          <div class="sub">الفترة: ${from ? new Date(from).toLocaleDateString('en-GB') : 'البداية'} ← ${to ? new Date(to).toLocaleDateString('en-GB') : 'اليوم'}</div>
+        </div>
+        <div class="sub" style="text-align:left">تاريخ الإصدار: ${new Date().toLocaleDateString('en-GB')}<br/>عدد العمليات: ${data.count}</div>
+      </div>
+      <table>
+        <thead><tr><th>#</th><th>التاريخ</th><th>الوحدة</th><th>البيان</th><th>إجمالي العمولة</th><th>مستحق الشريك</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+      <div class="totals"><div class="totals-h">الإجماليات حسب العملة</div>${totalsHtml}</div>
+      <div class="foot"><span>توقيع المكتب: ______________</span><span>توقيع الشريك: ______________</span></div>
+      <script>window.onload=()=>window.print()</script>
+      </body></html>`)
+    w.document.close()
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader><DialogTitle className="flex items-center gap-2">🤝 كشف حساب عمولات الشريك (B2B)</DialogTitle></DialogHeader>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
+          <Field label="الشريك">
+            <Select value={partnerKey} onValueChange={setPartnerKey}>
+              <SelectTrigger><SelectValue placeholder="اختر عميل / مورد" /></SelectTrigger>
+              <SelectContent>
+                {clients.length > 0 && <SelectItem value="__hc__" disabled>— العملاء —</SelectItem>}
+                {clients.map(c => <SelectItem key={`c-${c.id}`} value={`client:${c.id}`}>👤 {c.name}</SelectItem>)}
+                {suppliers.length > 0 && <SelectItem value="__hs__" disabled>— الموردون / الوكلاء —</SelectItem>}
+                {suppliers.map(s => <SelectItem key={`s-${s.id}`} value={`supplier:${s.id}`}>🏢 {s.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="من تاريخ"><Input type="date" value={from} onChange={e => setFrom(e.target.value)} /></Field>
+          <Field label="إلى تاريخ"><Input type="date" value={to} onChange={e => setTo(e.target.value)} /></Field>
+          <div className="flex gap-2">
+            <Button onClick={fetchStmt} disabled={loading} className="flex-1 grad-brand text-white">{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : '🔍 عرض'}</Button>
+            {data && (data.rows || []).length > 0 && <Button variant="outline" onClick={printStmt} className="gap-1 border-amber-300 text-amber-700"><Printer className="w-4 h-4" /> طباعة</Button>}
+          </div>
+        </div>
+        {data && (
+          (data.rows || []).length === 0 ? (
+            <div className="text-center text-slate-400 py-8 text-sm">لا توجد عمولات مشتركة لهذا الشريك في الفترة المحددة</div>
+          ) : (
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                {Object.entries(data.totals || {}).map(([cur, t]) => (
+                  <div key={cur} className="rounded-xl border-2 border-amber-200 bg-amber-50/50 p-3">
+                    <div className="text-xs font-bold text-slate-500 mb-1">{cur} — {t.count} عملية</div>
+                    <div className="flex justify-between text-xs"><span>إجمالي العمولة:</span><b>{fmt(t.total_commission, cur)}</b></div>
+                    <div className="flex justify-between text-xs text-amber-700"><span>مستحق الشريك:</span><b>{fmt(t.partner_share, cur)}</b></div>
+                    <div className="flex justify-between text-xs text-emerald-700 border-t mt-1 pt-1"><span>صافي المكتب:</span><b>{fmt(t.office_share, cur)}</b></div>
+                  </div>
+                ))}
+              </div>
+              <Table>
+                <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>الوحدة</TableHead><TableHead>البيان</TableHead><TableHead className="text-left">إجمالي العمولة</TableHead><TableHead className="text-left">مستحق الشريك</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {data.rows.map(r => (
+                    <TableRow key={`${r.module}-${r.id}`}>
+                      <TableCell className="text-xs whitespace-nowrap">{r.date ? new Date(r.date).toLocaleDateString('en-GB') : '—'}</TableCell>
+                      <TableCell className="text-xs">{r.module_label}</TableCell>
+                      <TableCell className="text-xs font-semibold">{r.description}</TableCell>
+                      <TableCell className="text-left text-xs">{fmt(r.total_commission, r.currency)}</TableCell>
+                      <TableCell className="text-left text-xs font-bold text-amber-700">{fmt(r.partner_share, r.currency)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onExtend, onDuplicate, closed, selectable, selected, onToggleSelect }) {
   const typeL = PACKAGE_TYPES.find(t => t.v === p?.package_type)?.l || p?.package_type || '—'
   return (
     <Card className={`overflow-hidden hover:shadow-md transition ${closed ? 'opacity-70' : ''} ${selected ? 'ring-2 ring-rose-400' : ''}`}>
@@ -7541,6 +7705,7 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
           <Button size="sm" variant="outline" onClick={onOpen} className="h-7 px-2 text-xs gap-1"><FileBadge2 className="w-3 h-3" /> المكونات والتسجيل</Button>
           <Button size="sm" variant="outline" onClick={onReport} className="h-7 px-2 text-xs gap-1 text-blue-600"><ReceiptText className="w-3 h-3" /> التقرير</Button>
           {!closed && onExtend && <Button size="sm" variant="outline" onClick={onExtend} className="h-7 px-2 text-xs gap-1 text-teal-600 border-teal-200 hover:bg-teal-50"><Calendar className="w-3 h-3" /> تمديد التاريخ</Button>}
+          {onDuplicate && <Button size="sm" variant="outline" onClick={onDuplicate} className="h-7 px-2 text-xs gap-1 text-purple-600 border-purple-200 hover:bg-purple-50" title="نسخ الباكج بكل مكوناته وأسعاره كمسودة جديدة"><Copy className="w-3 h-3" /> نسخ</Button>}
           {!closed && onEdit && <Button size="sm" variant="ghost" onClick={onEdit} className="h-7 px-2 text-xs"><Pencil className="w-3 h-3" /></Button>}
           {!closed && onClose && <Button size="sm" variant="ghost" onClick={onClose} className="h-7 px-2 text-xs text-orange-600">إغلاق</Button>}
           {closed && onReopen && <Button size="sm" variant="ghost" onClick={onReopen} className="h-7 px-2 text-xs text-emerald-600">فتح</Button>}
@@ -9064,6 +9229,9 @@ function TenantApp() {
   const [popupAnn, setPopupAnn] = useState(null)
   const [isImpersonating, setIsImpersonating] = useState(false)
   const [quotaModalOpen, setQuotaModalOpen] = useState(false)
+  // v3.21 — Installment alert (proactive cash-flow reminder)
+  const [instAlert, setInstAlert] = useState(null)
+  const [instAlertDismissed, setInstAlertDismissed] = useState(false)
 
   useEffect(() => {
     // Load announcements
@@ -9073,6 +9241,10 @@ function TenantApp() {
       if (popup && !sessionStorage.getItem(`rahaal_popup_${popup.id}_seen`)) {
         setPopupAnn(popup); setPopupShown(true)
       }
+    }).catch(() => {})
+    // v3.21 — Installment alert (once per session dismissal)
+    api('/my/installment-alert').then(res => {
+      if (res?.alert && !sessionStorage.getItem(`rahaal_inst_alert_${res.alert.no}_${res.alert.due_date}`)) setInstAlert(res.alert)
     }).catch(() => {})
     // Detect impersonation via /auth/me flag
     api('/auth/me').then(me => { if (me?.impersonation) setIsImpersonating(true) }).catch(() => {})
@@ -9105,6 +9277,23 @@ function TenantApp() {
           <Button variant="ghost" onClick={logout} className="gap-2 text-slate-500 hover:text-rose-600"><LogOut className="w-4 h-4" /> خروج</Button>
         </div>
         <QuotaBanner quota={tenant?.journal_quota} />
+        {/* v3.21 — Installment due/overdue alert */}
+        {instAlert && !instAlertDismissed && (
+          <div className={`mb-3 px-4 py-2.5 rounded-lg flex items-center gap-3 shadow-md text-white ${instAlert.overdue ? 'bg-gradient-to-l from-rose-600 to-red-600' : 'bg-gradient-to-l from-amber-500 to-yellow-500'}`}>
+            <span className="text-xl">{instAlert.overdue ? '🚨' : '⏰'}</span>
+            <div className="flex-1 text-sm">
+              <b>{instAlert.overdue ? 'قسط متأخر!' : 'تذكير بقسط قادم:'}</b>{' '}
+              القسط رقم {instAlert.no} من {instAlert.total_count} بمبلغ <b>{Number(instAlert.amount).toLocaleString('en-US')}</b> —{' '}
+              {instAlert.overdue
+                ? <>تأخر السداد منذ <b>{Math.abs(instAlert.days_left)}</b> يوم (الاستحقاق: {instAlert.due_date})</>
+                : instAlert.days_left === 0
+                  ? <>يستحق <b>اليوم</b> ({instAlert.due_date})</>
+                  : <>يستحق خلال <b>{instAlert.days_left}</b> يوم ({instAlert.due_date})</>}
+              {' '}— يرجى التواصل مع الإدارة للسداد.
+            </div>
+            <button onClick={() => { setInstAlertDismissed(true); sessionStorage.setItem(`rahaal_inst_alert_${instAlert.no}_${instAlert.due_date}`, '1') }} className="text-white/80 hover:text-white text-lg leading-none px-1" title="إخفاء (لهذه الجلسة)">✕</button>
+          </div>
+        )}
         {tab === 'dashboard' && <ErrorBoundary tabName="لوحة التحكم"><Dashboard setTab={setTab} /></ErrorBoundary>}
         {tab === 'tickets' && <ErrorBoundary tabName="حجز التذاكر"><TicketsScreen /></ErrorBoundary>}
         {tab === 'visas' && <ErrorBoundary tabName="التأشيرات والخدمات"><VisasScreen /></ErrorBoundary>}

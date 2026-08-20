@@ -1932,6 +1932,49 @@ async function handleRoute(request, { params }) {
     }
 
 
+    // v3.21 — Duplicate package (structure + components + transports; NO bookings/JEs)
+    const pkgDupMatch = route.match(/^\/packages\/([^/]+)\/duplicate$/)
+    if (pkgDupMatch && method === 'POST') {
+      const srcId = pkgDupMatch[1]
+      const src = await db.collection('packages').findOne({ id: srcId, tenant_id: T })
+      if (!src) return bad('الباكج غير موجود', 404)
+      let bodyDup = {}
+      try { bodyDup = await request.json() } catch { bodyDup = {} }
+      const newId = uuidv4()
+      const baseName = String(bodyDup.name || '').trim().slice(0, 120) || `${src.name} — نسخة`
+      const { _id, ...srcRest } = src
+      const newPkg = {
+        ...srcRest,
+        id: newId,
+        name: baseName,
+        status: 'open',
+        start_date: bodyDup.start_date ? new Date(bodyDup.start_date) : (src.start_date || null),
+        end_date: bodyDup.end_date ? new Date(bodyDup.end_date) : (src.end_date || null),
+        duplicated_from: src.id,
+        created_at: new Date(),
+      }
+      delete newPkg.updated_at
+      await db.collection('packages').insertOne(newPkg)
+      // Clone components (all pricing types + rates preserved)
+      const srcComps = await db.collection('package_components').find({ package_id: srcId, tenant_id: T }).toArray()
+      let compCount = 0
+      for (const c of srcComps) {
+        const { _id: cid, ...cRest } = c
+        await db.collection('package_components').insertOne({ ...cRest, id: uuidv4(), package_id: newId, created_at: new Date() })
+        compCount++
+      }
+      // Clone transports (structure only — no passengers)
+      const srcTrans = await db.collection('package_transports').find({ package_id: srcId, tenant_id: T }).toArray()
+      let transCount = 0
+      for (const t of srcTrans) {
+        const { _id: tid2, ...tRest } = t
+        await db.collection('package_transports').insertOne({ ...tRest, id: uuidv4(), package_id: newId, status: 'open', created_at: new Date() })
+        transCount++
+      }
+      const { _id: nid, ...pkgOut } = newPkg
+      return ok({ ...pkgOut, components_copied: compCount, transports_copied: transCount })
+    }
+
     // Package bookings — register a client with auto-JE
     const pkgBookMatch = route.match(/^\/packages\/([^/]+)\/bookings$/)
     if (pkgBookMatch && method === 'GET') {
@@ -3126,6 +3169,85 @@ async function handleRoute(request, { params }) {
     }
 
     // Tickets
+    // v3.21 — Installment alert for the logged-in tenant (proactive cash-flow reminder)
+    if (route === '/my/installment-alert' && method === 'GET') {
+      const t = await db.collection('tenants').findOne({ id: T })
+      if (!t || t.billing_mode !== 'installments') return ok({ alert: null })
+      const list = Array.isArray(t.installments) ? t.installments : []
+      const next = list.find(i => !i.paid) || null
+      if (!next || !next.due_date) return ok({ alert: null })
+      const today = new Date(new Date().toISOString().slice(0, 10))
+      const due = new Date(String(next.due_date).slice(0, 10))
+      const daysLeft = Math.round((due - today) / 86400000)
+      // Alert window: overdue OR due within 10 days
+      if (daysLeft > 10) return ok({ alert: null })
+      return ok({
+        alert: {
+          no: next.no, amount: next.amount, due_date: next.due_date,
+          days_left: daysLeft, overdue: daysLeft < 0,
+          paid_count: list.filter(i => i.paid).length, total_count: list.length,
+        },
+      })
+    }
+
+    // v3.21 — Partner Commission Statement (كشف حساب الشريك B2B)
+    // Aggregates commission_share_amount across tickets, visas, services and package bookings
+    if (route === '/partners/commissions' && method === 'GET') {
+      const url = new URL(request.url)
+      const partnerId = url.searchParams.get('partner_id')
+      if (!partnerId) return bad('partner_id مطلوب')
+      const from = url.searchParams.get('from')
+      const to = url.searchParams.get('to')
+      const dateFilter = {}
+      if (from) dateFilter.$gte = new Date(from)
+      if (to) dateFilter.$lte = new Date(to + 'T23:59:59')
+      const hasDate = Object.keys(dateFilter).length > 0
+      const baseQ = { tenant_id: T, commission_partner_id: partnerId, commission_share_amount: { $gt: 0 } }
+      const tq = hasDate ? { ...baseQ, date: dateFilter } : baseQ
+      const bq = hasDate ? { ...baseQ, created_at: dateFilter } : baseQ
+      const [tickets, visas, services, bookings] = await Promise.all([
+        db.collection('tickets').find(tq).toArray(),
+        db.collection('visas').find(tq).toArray(),
+        db.collection('services').find(tq).toArray(),
+        db.collection('package_bookings').find(bq).toArray(),
+      ])
+      const pkgIds = [...new Set(bookings.map(x => x.package_id).filter(Boolean))]
+      const pkgs = pkgIds.length ? await db.collection('packages').find({ tenant_id: T, id: { $in: pkgIds } }).toArray() : []
+      const pkgMap = {}
+      for (const p of pkgs) pkgMap[p.id] = p.name
+      const rows = []
+      const push = (list, module, moduleLabel, descFn, dateFn) => {
+        for (const d of list) rows.push({
+          id: d.id, module, module_label: moduleLabel,
+          date: dateFn(d) || d.created_at || null,
+          description: descFn(d),
+          currency: d.currency || 'USD',
+          total_commission: +(Number(d.commission) || 0).toFixed(2),
+          partner_share: +(Number(d.commission_share_amount) || 0).toFixed(2),
+          share_mode: d.commission_share_mode || 'amount',
+          share_value: Number(d.commission_share_value) || 0,
+        })
+      }
+      push(tickets, 'ticket', '✈️ تذكرة', d => `${d.passenger_name || d.client_name || ''}${d.trip_route ? ` — ${d.trip_route}` : ''}`.trim() || 'تذكرة طيران', d => d.date)
+      push(visas, 'visa', '🛂 تأشيرة', d => `${d.service_type || 'تأشيرة'} — ${d.passenger_name || ''}`.trim(), d => d.date)
+      push(services, 'service', '🧾 خدمة', d => `${d.service_type || 'خدمة'} — ${d.beneficiary_name || ''}`.trim(), d => d.date)
+      push(bookings, 'package', '📦 باكج', d => `${pkgMap[d.package_id] || 'باكج'} — ${d.pilgrim_name || ''} (${d.pax_count || 1} فرد)`.trim(), d => d.created_at)
+      rows.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
+      const totals = {}
+      for (const r of rows) {
+        totals[r.currency] = totals[r.currency] || { partner_share: 0, total_commission: 0, count: 0 }
+        totals[r.currency].partner_share += r.partner_share
+        totals[r.currency].total_commission += r.total_commission
+        totals[r.currency].count++
+      }
+      for (const c of Object.keys(totals)) {
+        totals[c].partner_share = +totals[c].partner_share.toFixed(2)
+        totals[c].total_commission = +totals[c].total_commission.toFixed(2)
+        totals[c].office_share = +(totals[c].total_commission - totals[c].partner_share).toFixed(2)
+      }
+      return ok({ rows, totals, count: rows.length })
+    }
+
     if (route === '/tickets' && method === 'GET') return ok(clean(await db.collection('tickets').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
     if (route === '/tickets' && method === 'POST') {
       const b = await request.json()
