@@ -1781,17 +1781,17 @@ async function handleRoute(request, { params }) {
     if (route === '/packages' && method === 'POST') {
       const b = await request.json()
       if (!b.name || !b.package_type) return bad('الاسم والنوع مطلوبان')
-      // v3.15 — Room-type pricing: [{type:'ثنائي', sale_per_pax:1500}, ...]
-      const roomPricing = (Array.isArray(b.room_pricing) ? b.room_pricing : [])
-        .filter(r => r && String(r.type || '').trim())
-        .slice(0, 12)
-        .map(r => ({ type: String(r.type).trim().slice(0, 40), sale_per_pax: Math.max(0, Number(r.sale_per_pax) || 0) }))
+      // v3.15 — Room-type pricing / v3.20 — extended with age tiers (sale_child, sale_infant)
+      const roomPricing = sanitizeRoomPricing(b.room_pricing)
+      // v3.20 — Dual pricing mode: 'direct' (room+age matrix, B2B) | 'components' (assembled from components)
+      const pricingMode = ['direct', 'components'].includes(b.pricing_mode) ? b.pricing_mode : (roomPricing.length > 0 ? 'direct' : 'components')
       const doc = {
         id: uuidv4(), tenant_id: T, name: String(b.name), package_type: b.package_type,
         currency: CURRENCIES.includes(b.currency) ? b.currency : 'SAR',
         start_date: b.start_date ? new Date(b.start_date) : null,
         end_date: b.end_date ? new Date(b.end_date) : null,
         room_pricing: roomPricing,
+        pricing_mode: pricingMode,
         notes: b.notes || '', status: 'open',
         created_at: new Date(),
       }
@@ -1803,12 +1803,13 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       const upd = {}
       for (const k of ['name', 'package_type', 'notes', 'end_date', 'status']) if (b[k] !== undefined) upd[k] = k === 'end_date' && b[k] ? new Date(b[k]) : b[k]
-      // v3.15 — Room-type pricing update
+      // v3.15 — Room-type pricing update / v3.20 — age tiers
       if (b.room_pricing !== undefined) {
-        upd.room_pricing = (Array.isArray(b.room_pricing) ? b.room_pricing : [])
-          .filter(r => r && String(r.type || '').trim())
-          .slice(0, 12)
-          .map(r => ({ type: String(r.type).trim().slice(0, 40), sale_per_pax: Math.max(0, Number(r.sale_per_pax) || 0) }))
+        upd.room_pricing = sanitizeRoomPricing(b.room_pricing)
+      }
+      // v3.20 — Dual pricing mode update
+      if (b.pricing_mode !== undefined && ['direct', 'components'].includes(b.pricing_mode)) {
+        upd.pricing_mode = b.pricing_mode
       }
       await db.collection('packages').updateOne({ id: pkgIdMatch[1], tenant_id: T }, { $set: upd })
       return ok({ success: true })
@@ -1833,13 +1834,29 @@ async function handleRoute(request, { params }) {
       if (!b.name || !b.supplier_id) return bad('اسم المكوّن والمورد مطلوبان')
       const sup = await db.collection('suppliers').findOne({ id: b.supplier_id, tenant_id: T })
       if (!sup) return bad('المورد غير موجود')
+      // v3.20 — Dual pricing types: 'flat' (visa: fixed regardless of age), 'per_age' (transport), 'room_age' (hotel)
+      const pricingType = ['flat', 'per_age', 'room_age'].includes(b.pricing_type) ? b.pricing_type : 'flat'
       const doc = {
         id: uuidv4(), tenant_id: T, package_id: pkgCompMatch[1],
         name: b.name, component_type: b.component_type || 'other',  // visa/ticket/hotel/transport/other
         supplier_id: sup.id, supplier_name: sup.name,
         cost_per_pax: Number(b.cost_per_pax) || 0,
         sale_per_pax: Number(b.sale_per_pax) || 0,
+        pricing_type: pricingType,
+        include_infants: !!b.include_infants,
         notes: b.notes || '', created_at: new Date(),
+      }
+      if (pricingType === 'per_age') {
+        for (const f of ['cost_adult', 'cost_child', 'cost_infant', 'sale_adult', 'sale_child', 'sale_infant']) doc[f] = Math.max(0, Number(b[f]) || 0)
+        // keep legacy display fields aligned with adult tier
+        doc.cost_per_pax = doc.cost_adult
+        doc.sale_per_pax = doc.sale_adult
+      }
+      if (pricingType === 'room_age') {
+        doc.room_rates = sanitizeRoomRates(b.room_rates)
+        if (doc.room_rates.length === 0) return bad('أضف سعر غرفة واحدة على الأقل لمكوّن الفندق (غرفة + عمر)')
+        doc.cost_per_pax = doc.room_rates[0]?.cost_adult || 0
+        doc.sale_per_pax = doc.room_rates[0]?.sale_adult || 0
       }
       await db.collection('package_components').insertOne(doc)
       const { _id, ...rest } = doc; return ok(rest)
@@ -2065,12 +2082,7 @@ async function handleRoute(request, { params }) {
       if (oldBooking.transport_id) {
         oldTransport = await db.collection('package_transports').findOne({ id: oldBooking.transport_id, tenant_id: T })
       }
-      const newSnapshots = (oldBooking.component_snapshots || []).map(c => ({
-        ...c,
-        cost_total: +((c.cost_per_pax || 0) * newPax).toFixed(2),
-        sale_total: +((c.sale_per_pax || 0) * newPax).toFixed(2),
-      }))
-      // v3.15 — Registrants list update (edit mode) — computed BEFORE totals so room pricing applies
+      // v3.15/v3.20 — Registrants list update (edit mode) — computed BEFORE snapshots so dual pricing applies
       let newRegistrants = oldBooking.registrants || []
       let newRoomsSummary = oldBooking.rooms_summary || null
       if (body.registrants !== undefined) {
@@ -2088,18 +2100,27 @@ async function handleRoute(request, { params }) {
         for (const r of newRegistrants) if (r.room_type) newRoomsSummary[r.room_type] = (newRoomsSummary[r.room_type] || 0) + 1
         if (Object.keys(newRoomsSummary).length === 0) newRoomsSummary = null
       }
+      // v3.20 — Derive pax categories for dual pricing (registrants override; fallback = legacy pax count)
+      let npAdults = newPax, npChildren = 0, npInfants = 0
+      if (newRegistrants.length > 0) {
+        npAdults = newRegistrants.filter(r => ageCategoryOf(r.age) === 'adult').length
+        npChildren = newRegistrants.filter(r => ageCategoryOf(r.age) === 'child').length
+        npInfants = newRegistrants.filter(r => ageCategoryOf(r.age) === 'infant').length
+      }
+      const npBilled = newRegistrants.length > 0 ? (npAdults + npChildren) : newPax
+      const npTotal = newRegistrants.length > 0 ? newRegistrants.length : newPax
+      // v3.20 — Recompute component totals honoring frozen pricing_type in snapshots (flat / per_age / room_age)
+      const newSnapshots = (oldBooking.component_snapshots || []).map(c => {
+        const t = computeComponentTotals(c, newRegistrants, npBilled, npTotal)
+        return { ...c, cost_total: t.cost_total, sale_total: t.sale_total }
+      })
       let total_cost = +newSnapshots.reduce((s, c) => s + (c.cost_total || 0), 0).toFixed(2)
       let total_sale = +newSnapshots.reduce((s, c) => s + (c.sale_total || 0), 0).toFixed(2)
-      // v3.17b — Preserve room-based sale on full recalc (mirrors POST logic)
-      if (newRegistrants.length > 0 && Array.isArray(pkgDoc.room_pricing) && pkgDoc.room_pricing.length > 0) {
-        const priceMap = {}
-        for (const rp of pkgDoc.room_pricing) priceMap[rp.type] = Number(rp.sale_per_pax) || 0
-        let roomSale = 0
-        for (const r of newRegistrants) {
-          const isInfant = r.age !== null && r.age < 2
-          if (!isInfant && r.room_type && priceMap[r.room_type] !== undefined) roomSale += priceMap[r.room_type]
-        }
-        if (roomSale > 0) total_sale = +roomSale.toFixed(2)
+      // v3.17b/v3.20 — Direct room+age sale on full recalc (mirrors POST logic)
+      const effModeP = pkgDoc.pricing_mode || ((Array.isArray(pkgDoc.room_pricing) && pkgDoc.room_pricing.length > 0) ? 'direct' : 'components')
+      if (effModeP === 'direct' && newRegistrants.length > 0 && Array.isArray(pkgDoc.room_pricing) && pkgDoc.room_pricing.length > 0) {
+        const roomSale = computeDirectRoomSale(pkgDoc.room_pricing, newRegistrants)
+        if (roomSale > 0) total_sale = roomSale
       }
       // v3.17 — Manual discount on edit: explicit total_sale override wins; otherwise apply discount on computed sale
       const newDiscount = body.discount !== undefined ? Math.max(0, Number(body.discount) || 0) : (Number(oldBooking.discount) || 0)
@@ -2152,6 +2173,9 @@ async function handleRoute(request, { params }) {
         registrants: newRegistrants,
         rooms_summary: newRoomsSummary,
         pax_count: newPax, currency: cur,
+        // v3.20 — keep age-category breakdown in sync on edit
+        pax_adults: npAdults, pax_children: npChildren, pax_infants: npInfants,
+        pax_billed: npBilled, pax_seats: npBilled,
         total_cost, total_sale, commission,
         discount: newDiscount, discount_reason: newDiscountReason, discount_apply_cost: newDiscountApplyCost,
         commission_partner_type: pcType,
@@ -2283,22 +2307,23 @@ async function handleRoute(request, { params }) {
       if (comps.length === 0) return bad('لا توجد مكونات في الباكج — أضف المكونات قبل التسجيل')
       const pax = totalPax
       const cur = pkg.currency
-      let total_cost = +comps.reduce((s, c) => s + (c.cost_per_pax * paxBilled), 0).toFixed(2)
-      let total_sale = +comps.reduce((s, c) => s + (c.sale_per_pax * paxBilled), 0).toFixed(2)
-      // v3.15 — Room-type pricing: when the package defines room prices and registrants chose rooms,
-      // the sale side is computed from room prices (billed persons only: infants excluded).
+      // v3.20 — DUAL PRICING: per-component totals honoring pricing_type (flat / per_age / room_age)
+      const compTotals = comps.map(c => computeComponentTotals(c, registrants, paxBilled, totalPax))
+      let total_cost = +compTotals.reduce((s, t) => s + t.cost_total, 0).toFixed(2)
+      let total_sale = +compTotals.reduce((s, t) => s + t.sale_total, 0).toFixed(2)
+      // Rooms breakdown summary (always derived from registrants)
       let rooms_summary = null
-      if (registrants.length > 0 && Array.isArray(pkg.room_pricing) && pkg.room_pricing.length > 0) {
-        const priceMap = {}
-        for (const rp of pkg.room_pricing) priceMap[rp.type] = Number(rp.sale_per_pax) || 0
-        let roomSale = 0
+      if (registrants.length > 0) {
         rooms_summary = {}
-        for (const r of registrants) {
-          const isInfant = r.age !== null && r.age < 2
-          if (r.room_type) rooms_summary[r.room_type] = (rooms_summary[r.room_type] || 0) + 1
-          if (!isInfant && r.room_type && priceMap[r.room_type] !== undefined) roomSale += priceMap[r.room_type]
-        }
-        if (roomSale > 0) total_sale = +roomSale.toFixed(2)
+        for (const r of registrants) if (r.room_type) rooms_summary[r.room_type] = (rooms_summary[r.room_type] || 0) + 1
+        if (Object.keys(rooms_summary).length === 0) rooms_summary = null
+      }
+      // v3.20 — Effective pricing mode: explicit pkg.pricing_mode wins; legacy fallback = 'direct' when room prices exist
+      const effMode = pkg.pricing_mode || ((Array.isArray(pkg.room_pricing) && pkg.room_pricing.length > 0) ? 'direct' : 'components')
+      if (effMode === 'direct' && registrants.length > 0 && Array.isArray(pkg.room_pricing) && pkg.room_pricing.length > 0) {
+        // Direct B2B pricing: sale from room+age matrix (adult=sale_per_pax, child falls back to adult, infant defaults 0)
+        const roomSale = computeDirectRoomSale(pkg.room_pricing, registrants)
+        if (roomSale > 0) total_sale = roomSale
       }
       // v3.17 — Manual booking discount (B2B flexibility: child no-bed, infant, partner-office courtesy...)
       // v3.19 — Smart discount: optional checkbox also reduces COST (keeps margin when a service like a bed is excluded)
@@ -2341,7 +2366,16 @@ async function handleRoute(request, { params }) {
         transport_id: transport?.id || null,
         transport_name: transport?.name || null,
         transport_type: transport?.type || null,
-        component_snapshots: comps.map(c => ({ id: c.id, name: c.name, supplier_id: c.supplier_id, supplier_name: c.supplier_name, cost_per_pax: c.cost_per_pax, sale_per_pax: c.sale_per_pax, cost_total: +(c.cost_per_pax * paxBilled * costFactor).toFixed(2), sale_total: c.sale_per_pax * paxBilled })),
+        component_snapshots: comps.map((c, i) => ({
+          id: c.id, name: c.name, supplier_id: c.supplier_id, supplier_name: c.supplier_name,
+          cost_per_pax: c.cost_per_pax, sale_per_pax: c.sale_per_pax,
+          // v3.20 — freeze dual-pricing details so edits recompute correctly
+          pricing_type: c.pricing_type || 'flat', include_infants: !!c.include_infants,
+          ...(c.pricing_type === 'per_age' ? { cost_adult: c.cost_adult, cost_child: c.cost_child, cost_infant: c.cost_infant, sale_adult: c.sale_adult, sale_child: c.sale_child, sale_infant: c.sale_infant } : {}),
+          ...(c.pricing_type === 'room_age' ? { room_rates: c.room_rates || [] } : {}),
+          cost_total: +(compTotals[i].cost_total * costFactor).toFixed(2),
+          sale_total: compTotals[i].sale_total,
+        })),
         notes: b.notes || '', created_at: new Date(), created_by: sess.user.email,
       }
       await db.collection('package_bookings').insertOne(bookingDoc)
@@ -2382,7 +2416,7 @@ async function handleRoute(request, { params }) {
       // Balances (v3.19: costFactor distributes any cost-discount proportionally over suppliers)
       if (payMethod === 'cash') await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
       else await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
-      for (const c of comps) await updateBalance(db, 'suppliers', { id: c.supplier_id, tenant_id: T }, cur, +(c.cost_per_pax * paxBilled * costFactor).toFixed(2))
+      for (let i = 0; i < comps.length; i++) await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, +(compTotals[i].cost_total * costFactor).toFixed(2))
       if (partnerShare > 0 && bookingDoc.commission_partner_id) {
         const col = bookingDoc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
         await updateBalance(db, col, { id: bookingDoc.commission_partner_id, tenant_id: T }, cur, -partnerShare)
@@ -2392,7 +2426,7 @@ async function handleRoute(request, { params }) {
       if (payMethod === 'cash') lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
       else lines.push({ account_code: '1301', account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
       const supGrouped = {}
-      for (const c of comps) { supGrouped[c.supplier_id] = (supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }); supGrouped[c.supplier_id].amount += c.cost_per_pax * paxBilled * costFactor }
+      for (let i = 0; i < comps.length; i++) { const c = comps[i]; supGrouped[c.supplier_id] = (supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }); supGrouped[c.supplier_id].amount += compTotals[i].cost_total * costFactor }
       let supSum = 0
       for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
       const commissionJE = +(total_sale - supSum).toFixed(2)
@@ -3797,6 +3831,93 @@ async function handleRoute(request, { params }) {
     console.error('API Error:', e)
     return bad('Internal server error: ' + e.message, 500)
   }
+}
+
+// ============ v3.20 — DUAL PRICING (Phase B) ============
+// Age category from a registrant's age: infant <2, child 2-11, adult 12+ (null age = adult)
+function ageCategoryOf(age) {
+  if (age === null || age === undefined || age === '') return 'adult'
+  const a = Number(age)
+  if (a < 2) return 'infant'
+  if (a < 12) return 'child'
+  return 'adult'
+}
+// Sanitize room_pricing array: [{type, sale_per_pax(adult), sale_child|null, sale_infant|null}]
+function sanitizeRoomPricing(arr) {
+  return (Array.isArray(arr) ? arr : [])
+    .filter(r => r && String(r.type || '').trim())
+    .slice(0, 12)
+    .map(r => ({
+      type: String(r.type).trim().slice(0, 40),
+      sale_per_pax: Math.max(0, Number(r.sale_per_pax) || 0),
+      sale_child: (r.sale_child === undefined || r.sale_child === null || r.sale_child === '') ? null : Math.max(0, Number(r.sale_child) || 0),
+      sale_infant: (r.sale_infant === undefined || r.sale_infant === null || r.sale_infant === '') ? null : Math.max(0, Number(r.sale_infant) || 0),
+    }))
+}
+// Sanitize per-room-type rates for 'room_age' components
+function sanitizeRoomRates(arr) {
+  return (Array.isArray(arr) ? arr : [])
+    .filter(r => r && String(r.room_type || '').trim())
+    .slice(0, 12)
+    .map(r => ({
+      room_type: String(r.room_type).trim().slice(0, 40),
+      cost_adult: Math.max(0, Number(r.cost_adult) || 0),
+      cost_child: Math.max(0, Number(r.cost_child) || 0),
+      cost_infant: Math.max(0, Number(r.cost_infant) || 0),
+      sale_adult: Math.max(0, Number(r.sale_adult) || 0),
+      sale_child: Math.max(0, Number(r.sale_child) || 0),
+      sale_infant: Math.max(0, Number(r.sale_infant) || 0),
+    }))
+}
+// Compute one component's cost/sale totals for a booking.
+// pricing_type: 'flat' (visa: same price per person) | 'per_age' (transport) | 'room_age' (hotel)
+// Legacy components (no pricing_type) behave exactly as before: flat × billed pax (infants excluded).
+function computeComponentTotals(comp, registrants, paxBilled, totalPax) {
+  const pt = comp.pricing_type || 'flat'
+  const regs = Array.isArray(registrants) ? registrants : []
+  if (regs.length > 0 && pt === 'per_age') {
+    let cost = 0, sale = 0
+    for (const r of regs) {
+      const cat = ageCategoryOf(r.age)
+      cost += Number(comp[`cost_${cat}`]) || 0
+      sale += Number(comp[`sale_${cat}`]) || 0
+    }
+    return { cost_total: +cost.toFixed(2), sale_total: +sale.toFixed(2) }
+  }
+  if (regs.length > 0 && pt === 'room_age') {
+    const map = {}
+    for (const rr of (comp.room_rates || [])) map[rr.room_type] = rr
+    let cost = 0, sale = 0
+    for (const r of regs) {
+      const rr = map[r.room_type]
+      if (!rr) continue
+      const cat = ageCategoryOf(r.age)
+      cost += Number(rr[`cost_${cat}`]) || 0
+      sale += Number(rr[`sale_${cat}`]) || 0
+    }
+    return { cost_total: +cost.toFixed(2), sale_total: +sale.toFixed(2) }
+  }
+  // flat: visa-style — same price per person; include_infants charges infants too
+  const n = (regs.length > 0 && comp.include_infants) ? totalPax : paxBilled
+  return {
+    cost_total: +((Number(comp.cost_per_pax) || 0) * n).toFixed(2),
+    sale_total: +((Number(comp.sale_per_pax) || 0) * n).toFixed(2),
+  }
+}
+// Direct room+age sale (B2B ready-made): adult price = sale_per_pax, child falls back to adult, infant defaults 0
+function computeDirectRoomSale(roomPricing, registrants) {
+  const map = {}
+  for (const rp of (roomPricing || [])) map[rp.type] = rp
+  let sale = 0
+  for (const r of (registrants || [])) {
+    const rp = map[r.room_type]
+    if (!rp) continue
+    const cat = ageCategoryOf(r.age)
+    if (cat === 'infant') sale += Number(rp.sale_infant) || 0
+    else if (cat === 'child') sale += (rp.sale_child === null || rp.sale_child === undefined) ? (Number(rp.sale_per_pax) || 0) : (Number(rp.sale_child) || 0)
+    else sale += Number(rp.sale_per_pax) || 0
+  }
+  return +sale.toFixed(2)
 }
 
 // ================= Business logic =================

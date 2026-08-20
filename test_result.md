@@ -9147,3 +9147,31 @@ agent_communication:
     message: "Please test PATCH /api/packages/:pkgId/bookings/:bookingId end-to-end. Setup: login as owner@demo.com / Demo@2025 (see /app/memory/test_credentials.md). Create supplier, client, partner client, box, package with components, then POST a booking WITH discount+discount_apply_cost+partner commission. Then PATCH with changed discount/commission values and verify: booking doc fields, balanced journal entry (sum debits == sum credits), supplier/client/partner balances correctly reversed and re-applied (net effect = only new values), and lightOnly path still works for name-only edits. CRITICAL: verify no double-application of balances after multiple PATCHes. Cleanup all test data afterwards (delete created bookings/packages/clients/suppliers) - NEVER touch existing tenant data."
   - agent: "testing"
     message: "✅ COMPREHENSIVE TESTING COMPLETED - ALL 8 TESTS PASSED. Found and FIXED critical bug: total_cost was declared as const but code tried to reassign it when discount_apply_cost=true (line 2286→2311). Changed to let. All PATCH scenarios verified: light update, discount changes, partner commission (amount/percent modes), partner removal, cost discount toggle, pax count changes, edge cases. Journal entries always balanced. Balances correctly reversed and reapplied (no double-application). Smart Discount and Partner Commission features working perfectly. Backend v3.20 is production-ready."
+
+backend:
+  - task: "v3.20 - Dual Pricing (Phase B): direct room+age matrix + component pricing types (flat/per_age/room_age)"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Added dual pricing engine. Packages: pricing_mode ('direct'|'components'), room_pricing extended with sale_child (null=falls back to adult) and sale_infant (null=0). Components: pricing_type 'flat' (with include_infants flag), 'per_age' (cost/sale_adult/child/infant), 'room_age' (room_rates array per room type with 6 price fields). Helpers: ageCategoryOf (infant<2, child 2-11, adult 12+, null=adult), computeComponentTotals, computeDirectRoomSale, sanitizeRoomPricing, sanitizeRoomRates. Booking POST and PATCH both use the same engine; snapshots freeze pricing_type + rates. Legacy packages (no pricing_mode) keep exact old behavior via effective-mode inference. Discount (incl. discount_apply_cost) and partner commission apply on top - unchanged. Needs full backend testing including JE balance verification."
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (ALL 3 TESTS) - Comprehensive dual pricing engine testing completed. TEST 1 (Direct Mode): Created package with pricing_mode='direct' and room_pricing with sale_child/sale_infant. Booking with 4 registrants (adult/child/infant in double, adult in quad) calculated correctly: total_cost=240 (80×3 billed pax), total_sale=495 (200+150+25+120), commission=255. JE balanced (debit=credit=495). Child fallback test: Changed child from double to quad (no sale_child defined) → correctly charged adult price 120. New totals: cost=240, sale=465, commission=225. JE rebuilt and balanced. TEST 2 (Components Mode): Created package with pricing_mode='components' and 3 components: (a) flat visa with include_infants=true (cost=30, sale=50), (b) per_age bus (adult 20/40, child 10/20, infant 0/0), (c) room_age hotel with triple rates (adult 100/150, child 50/75, infant 0/10). Booking with 3 registrants (adult, child age 9, infant) calculated correctly: visa 90/150 (all 3), bus 30/60, hotel 150/235, totals 270/445, commission 175. JE balanced. PATCH child age 9→13 (child→adult): visa unchanged 90/150, bus 40/80, hotel 200/310, totals 330/540, commission 210. JE balanced. Regression stack PATCH (discount=40, discount_apply_cost=true, partner commission amount=30): sale=500 (540-40), cost=290 (330-40), commission=210, partner_share=30. JE balanced with 4 lines including partner credit line 30. TEST 3 (Legacy Regression): Booking WITHOUT registrants on components package (pax_count=2) correctly fell back to legacy behavior: flat visa 60/100, per_age bus 40/80 (used cost_adult/sale_adult), room_age hotel 200/300 (used first room cost_adult/sale_adult), totals 300/480, commission 180. JE balanced. All age rules verified: infant<2, child 2-11, adult 12+, null/empty=adult. All JE entries balanced. All test data cleaned up (3 bookings, 2 packages, 3 clients, 2 suppliers deleted). Dual pricing engine working perfectly."
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: "Test dual pricing end-to-end per the detailed scenarios provided in the testing task. Login owner@demo.com / Demo@2025. Create own test data, verify JE balance in every case, cleanup afterwards. NEVER touch pre-existing tenant data."
+  - agent: "testing"
+    message: "✅ v3.20 DUAL PRICING BACKEND TESTING COMPLETED - ALL 3 TESTS PASSED. Direct mode (room+age matrix) working correctly with child fallback logic. Components mode (flat/per_age/room_age) working correctly with all pricing types. Age category logic verified (infant<2, child 2-11, adult 12+). PATCH operations correctly recalculate totals. Discount and partner commission integration working. Legacy fallback (no registrants) working. All journal entries balanced. All test data cleaned up. Backend v3.20 is production-ready."

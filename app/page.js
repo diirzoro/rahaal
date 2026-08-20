@@ -1924,6 +1924,70 @@ function TicketsScreen() {
   )
 }
 
+// v3.20 — Reusable Partner Commission Sharing block (Tickets / Visas / Services / Packages)
+function CommissionShareBlock({ form, setForm, clients, suppliers, commission, entityLabel = 'العملية' }) {
+  if (!(commission > 0)) return null
+  return (
+    <div className="bg-gradient-to-l from-amber-50 to-yellow-50 border-2 border-amber-200 rounded-xl p-4 mt-2">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm font-bold text-slate-800 flex items-center gap-2">🤝 <span>مشاركة العمولة (اختياري)</span></div>
+        {form.commission_partner_id && (
+          <Button size="sm" variant="ghost" onClick={() => setForm({ ...form, commission_partner_type: '', commission_partner_id: '', commission_partner_name: '', commission_share_value: '' })} className="text-rose-600 h-7 text-xs">إلغاء المشاركة</Button>
+        )}
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+        <Field label="الشريك (المستفيد)">
+          <Select value={form.commission_partner_id ? `${form.commission_partner_type}:${form.commission_partner_id}` : ''} onValueChange={v => {
+            if (!v) return
+            const [type, id] = v.split(':')
+            const items = type === 'supplier' ? suppliers : clients
+            const found = items.find(x => x.id === id)
+            setForm({ ...form, commission_partner_type: type, commission_partner_id: id, commission_partner_name: found?.name || '' })
+          }}>
+            <SelectTrigger className="bg-white"><SelectValue placeholder="اختر عميل / مورد" /></SelectTrigger>
+            <SelectContent>
+              {clients.length > 0 && <SelectItem value="__hdr_c__" disabled>— العملاء —</SelectItem>}
+              {clients.map(c => <SelectItem key={`c-${c.id}`} value={`client:${c.id}`}>👤 {c.name}</SelectItem>)}
+              {suppliers.length > 0 && <SelectItem value="__hdr_s__" disabled>— الموردون / الوكلاء —</SelectItem>}
+              {suppliers.map(s => <SelectItem key={`s-${s.id}`} value={`supplier:${s.id}`}>🏢 {s.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="الصيغة">
+          <Select value={form.commission_share_mode} onValueChange={v => setForm({ ...form, commission_share_mode: v })} disabled={!form.commission_partner_id}>
+            <SelectTrigger className="bg-white"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="amount">💰 مبلغ ثابت</SelectItem>
+              <SelectItem value="percent">📊 نسبة من العمولة</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label={form.commission_share_mode === 'percent' ? 'النسبة %' : `المبلغ (${form.currency})`}>
+          <Input type="number" min="0" step="0.01" value={form.commission_share_value} onChange={e => setForm({ ...form, commission_share_value: e.target.value })} disabled={!form.commission_partner_id} placeholder={form.commission_share_mode === 'percent' ? '50' : '5'} className="bg-white" />
+        </Field>
+        <Field label="حصة المكتب">
+          {(() => {
+            const share = form.commission_share_mode === 'percent'
+              ? +(commission * (Number(form.commission_share_value) || 0) / 100).toFixed(2)
+              : +(Number(form.commission_share_value) || 0).toFixed(2)
+            const cappedShare = Math.min(Math.max(0, share), commission)
+            const netOffice = +(commission - cappedShare).toFixed(2)
+            return (
+              <div className="text-sm space-y-0.5">
+                <div className="flex justify-between"><span className="text-slate-500">حصة الشريك:</span><b className="text-amber-700">{fmt(cappedShare, form.currency)}</b></div>
+                <div className="flex justify-between border-t pt-0.5"><span className="text-slate-500">حصة المكتب:</span><b className="text-emerald-700">{fmt(netOffice, form.currency)}</b></div>
+              </div>
+            )
+          })()}
+        </Field>
+      </div>
+      <div className="text-[11px] text-slate-500 mt-2 leading-relaxed">
+        💡 عند حفظ {entityLabel}، سيُنشأ سطر إضافي في قيد اليومية يخصم حصة الشريك من إيرادات المكتب ويقيدها لحسابه — مما يُسهّل المقاصة المالية لاحقاً بدون كشوفات يدوية.
+      </div>
+    </div>
+  )
+}
+
 function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
   const { user } = useAuth() // v3.9.9 — for default_box_id & lock_box
   const isEdit = !!record
@@ -3718,7 +3782,11 @@ function VisasScreen() {
 function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
   const { user } = useAuth() // v3.9.9
   const isEdit = !!record
-  const emptyForm = { date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', entry_date: '', expected_exit_date: '', passenger_phone: '', passenger_whatsapp: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '' }
+  const emptyForm = { date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', entry_date: '', expected_exit_date: '', passenger_phone: '', passenger_whatsapp: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '',
+    // v3.20 — Commission Sharing (partner split)
+    commission_partner_type: '', commission_partner_id: '', commission_partner_name: '',
+    commission_share_mode: 'amount', commission_share_value: '',
+  }
   const [form, setForm] = useState(emptyForm)
   const [boxes, setBoxes] = useState([])
   const [saving, setSaving] = useState(false)
@@ -3739,6 +3807,12 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
         passenger_whatsapp: record.passenger_whatsapp || record.passenger_phone || '',
         cost: record.cost ?? '', sale_price: record.sale_price ?? '',
         payment_method: record.payment_method || 'credit', box_id: record.box_id || '',
+        // v3.20 — Commission Sharing
+        commission_partner_type: record.commission_partner_type || '',
+        commission_partner_id: record.commission_partner_id || '',
+        commission_partner_name: record.commission_partner_name || '',
+        commission_share_mode: record.commission_share_mode || 'amount',
+        commission_share_value: record.commission_share_value ?? '',
       })
     } else { setForm(emptyForm) }
   }, [open, record])
@@ -3836,6 +3910,8 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
               <Field label={`العمولة (${form.currency})`}><div className={`px-3 py-2 rounded-md border text-lg font-extrabold ${commission >= 0 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>{fmt(commission, form.currency)}</div></Field>
             </div>
           </div>
+          {/* v3.20 — Partner Commission Sharing (Visa) */}
+          <CommissionShareBlock form={form} setForm={setForm} clients={clients} suppliers={suppliers} commission={commission} entityLabel="التأشيرة" />
           <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} disabled={saving} className="grad-green text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (isEdit ? '💾 حفظ التعديل + عكس القيد' : 'حفظ + قيد')}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
@@ -4039,6 +4115,9 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
     client_id: '', supplier_id: '', beneficiary_name: '', reference_no: '', description: '',
     beneficiary_phone: '', beneficiary_whatsapp: '',
     cost: '', sale_price: '', payment_method: 'credit', box_id: '', notes: '',
+    // v3.20 — Commission Sharing (partner split)
+    commission_partner_type: '', commission_partner_id: '', commission_partner_name: '',
+    commission_share_mode: 'amount', commission_share_value: '',
   }
   const [form, setForm] = useState(emptyForm)
   const [boxes, setBoxes] = useState([])
@@ -4057,6 +4136,12 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
         beneficiary_whatsapp: record.beneficiary_whatsapp || record.beneficiary_phone || '',
         cost: record.cost ?? '', sale_price: record.sale_price ?? '',
         payment_method: record.payment_method || 'credit', box_id: record.box_id || '',
+        // v3.20 — Commission Sharing
+        commission_partner_type: record.commission_partner_type || '',
+        commission_partner_id: record.commission_partner_id || '',
+        commission_partner_name: record.commission_partner_name || '',
+        commission_share_mode: record.commission_share_mode || 'amount',
+        commission_share_value: record.commission_share_value ?? '',
       })
     } else { setForm({ ...emptyForm, service_type: activeTypes[0]?.name || 'خدمات متنوعة' }) }
   }, [open, record])
@@ -4153,6 +4238,8 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
             <Field label={`العمولة (${form.currency})`}><div className={`px-3 py-2 rounded-md border text-lg font-extrabold ${commission >= 0 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>{fmt(commission, form.currency)}</div></Field>
           </div>
         </div>
+        {/* v3.20 — Partner Commission Sharing (Service) */}
+        <CommissionShareBlock form={form} setForm={setForm} clients={clients} suppliers={suppliers} commission={commission} entityLabel="الخدمة" />
         <Field label="ملاحظات (اختياري)">
           <Textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
         </Field>
@@ -7464,37 +7551,85 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
   )
 }
 
+// v3.20 — Dual pricing frontend helpers (live preview only; backend is authoritative)
+const regAgeCat = (age) => { if (age === '' || age === null || age === undefined) return 'adult'; const a = Number(age); if (a < 2) return 'infant'; if (a < 12) return 'child'; return 'adult' }
+function directRoomSaleFE(roomPricing, registrants) {
+  const map = {}; (roomPricing || []).forEach(rp => { map[rp.type] = rp })
+  let s = 0
+  for (const r of (registrants || [])) {
+    const rp = map[r.room_type]; if (!rp) continue
+    const cat = regAgeCat(r.age)
+    if (cat === 'infant') s += Number(rp.sale_infant) || 0
+    else if (cat === 'child') s += (rp.sale_child === null || rp.sale_child === undefined || rp.sale_child === '') ? (Number(rp.sale_per_pax) || 0) : (Number(rp.sale_child) || 0)
+    else s += Number(rp.sale_per_pax) || 0
+  }
+  return +s.toFixed(2)
+}
+function compSaleFE(comps, registrants, billed) {
+  let s = 0
+  const regs = registrants || []
+  for (const c of (comps || [])) {
+    const pt = c.pricing_type || 'flat'
+    if (regs.length > 0 && pt === 'per_age') {
+      for (const r of regs) s += Number(c[`sale_${regAgeCat(r.age)}`]) || 0
+    } else if (regs.length > 0 && pt === 'room_age') {
+      const map = {}; (c.room_rates || []).forEach(rr => { map[rr.room_type] = rr })
+      for (const r of regs) { const rr = map[r.room_type]; if (rr) s += Number(rr[`sale_${regAgeCat(r.age)}`]) || 0 }
+    } else {
+      const n = (regs.length > 0 && c.include_infants) ? regs.length : billed
+      s += (Number(c.sale_per_pax) || 0) * n
+    }
+  }
+  return +s.toFixed(2)
+}
+const COMP_PRICING_TYPES = [
+  { v: 'flat', l: '⚖️ سعر ثابت للفرد (تأشيرة...)' },
+  { v: 'per_age', l: '👨‍👩‍👧 حسب العمر (نقل...)' },
+  { v: 'room_age', l: '🛏️ غرفة + عمر (فندق...)' },
+]
+
 function PackageDialog({ open, onOpenChange, record, onSaved }) {
   // v3.9.6 — Dynamic Package Builder: items list + live totals + supplier per item
-  const [f, setF] = useState({ name: '', package_type: 'umrah', currency: 'SAR', start_date: '', end_date: '', notes: '' })
-  const [items, setItems] = useState([]) // [{ component_type, name, supplier_id, cost, sale }]
-  const [rooms, setRooms] = useState([]) // v3.15 — [{type, sale_per_pax}]
+  // v3.20 — Dual pricing: 'direct' (room+age matrix, B2B) | 'components' (assembled)
+  const [f, setF] = useState({ name: '', package_type: 'umrah', currency: 'SAR', start_date: '', end_date: '', notes: '', pricing_mode: 'direct' })
+  const [items, setItems] = useState([]) // [{ component_type, name, supplier_id, cost, sale, pricing_type, ... }]
+  const [rooms, setRooms] = useState([]) // v3.15/v3.20 — [{type, sale_per_pax, sale_child, sale_infant}]
   const [suppliers, setSuppliers] = useState([])
   const [saving, setSaving] = useState(false)
   useEffect(() => {
     if (!open) return
     api('/suppliers').then(setSuppliers).catch(() => {})
     if (record) {
-      setF({ name: record.name, package_type: record.package_type, currency: record.currency, start_date: record.start_date ? new Date(record.start_date).toISOString().slice(0,10) : '', end_date: record.end_date ? new Date(record.end_date).toISOString().slice(0,10) : '', notes: record.notes || '' })
+      setF({ name: record.name, package_type: record.package_type, currency: record.currency, start_date: record.start_date ? new Date(record.start_date).toISOString().slice(0,10) : '', end_date: record.end_date ? new Date(record.end_date).toISOString().slice(0,10) : '', notes: record.notes || '', pricing_mode: record.pricing_mode || ((record.room_pricing || []).length > 0 ? 'direct' : 'components') })
       setItems([])
       setRooms(Array.isArray(record.room_pricing) ? record.room_pricing.map(r => ({ ...r })) : [])
     } else {
-      setF({ name: '', package_type: 'umrah', currency: 'SAR', start_date: todayISO(), end_date: '', notes: '' })
+      setF({ name: '', package_type: 'umrah', currency: 'SAR', start_date: todayISO(), end_date: '', notes: '', pricing_mode: 'direct' })
       setItems([])
       setRooms([])
     }
   }, [open, record])
   // v3.15 — Room pricing helpers
   const ROOM_PRESETS = ['ثنائي', 'ثلاثي', 'رباعي', 'جماعي']
-  const addRoom = (type = '') => setRooms(r => [...r, { type, sale_per_pax: 0 }])
+  const addRoom = (type = '') => setRooms(r => [...r, { type, sale_per_pax: 0, sale_child: '', sale_infant: '' }])
   const updRoom = (i, k, v) => { const c = [...rooms]; c[i] = { ...c[i], [k]: v }; setRooms(c) }
   const rmRoom = (i) => setRooms(rooms.filter((_, idx) => idx !== i))
-  const addItem = () => setItems([...items, { component_type: 'hotel', name: '', supplier_id: '', cost: 0, sale: 0 }])
+  const addItem = () => setItems([...items, { component_type: 'hotel', name: '', supplier_id: '', cost: 0, sale: 0, pricing_type: 'flat', include_infants: false, cost_adult: '', cost_child: '', cost_infant: '', sale_adult: '', sale_child: '', sale_infant: '', room_rates: {} }])
   const updItem = (i, k, v) => { const c = [...items]; c[i] = { ...c[i], [k]: v }; setItems(c) }
+  const updItemRoomRate = (i, roomType, k, v) => {
+    const c = [...items]
+    const rr = { ...(c[i].room_rates || {}) }
+    rr[roomType] = { ...(rr[roomType] || {}), [k]: v }
+    c[i] = { ...c[i], room_rates: rr }
+    setItems(c)
+  }
   const rmItem = (i) => setItems(items.filter((_, idx) => idx !== i))
   const nights = f.start_date && f.end_date ? Math.max(0, Math.ceil((new Date(f.end_date) - new Date(f.start_date)) / 86400000)) : 0
-  const totalCost = items.reduce((s, it) => s + (Number(it.cost) || 0), 0)
-  const totalSale = items.reduce((s, it) => s + (Number(it.sale) || 0), 0)
+  // v3.20 — Estimated per-adult totals for the live summary
+  const estCost = (it) => it.pricing_type === 'per_age' ? (Number(it.cost_adult) || 0) : it.pricing_type === 'room_age' ? (Number(Object.values(it.room_rates || {})[0]?.cost_adult) || 0) : (Number(it.cost) || 0)
+  const estSale = (it) => it.pricing_type === 'per_age' ? (Number(it.sale_adult) || 0) : it.pricing_type === 'room_age' ? (Number(Object.values(it.room_rates || {})[0]?.sale_adult) || 0) : (Number(it.sale) || 0)
+  const totalCost = items.reduce((s, it) => s + estCost(it), 0)
+  const totalSale = items.reduce((s, it) => s + estSale(it), 0)
   const profit = totalSale - totalCost
   const marginPct = totalSale > 0 ? +((profit / totalSale) * 100).toFixed(2) : 0
   const save = async () => {
@@ -7502,21 +7637,34 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
     if (!record && items.length > 0) {
       const bad = items.find(it => !it.name || !it.supplier_id)
       if (bad) return toast.error('كل بند يحتاج اسم ومورد')
+      const badRoomAge = items.find(it => it.pricing_type === 'room_age' && rooms.filter(r => String(r.type || '').trim()).length === 0)
+      if (badRoomAge) return toast.error('بند (غرفة + عمر) يحتاج تعريف أنواع الغرف أولاً في قسم التسكين')
     }
     try {
       setSaving(true)
-      const roomPricing = rooms.filter(r => String(r.type || '').trim()).map(r => ({ type: r.type, sale_per_pax: Number(r.sale_per_pax) || 0 }))
+      const roomPricing = rooms.filter(r => String(r.type || '').trim()).map(r => ({ type: r.type, sale_per_pax: Number(r.sale_per_pax) || 0, sale_child: r.sale_child === '' || r.sale_child === null || r.sale_child === undefined ? null : Number(r.sale_child) || 0, sale_infant: r.sale_infant === '' || r.sale_infant === null || r.sale_infant === undefined ? null : Number(r.sale_infant) || 0 }))
       if (record) {
-        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, end_date: f.end_date || null, notes: f.notes, room_pricing: roomPricing } })
+        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, end_date: f.end_date || null, notes: f.notes, room_pricing: roomPricing, pricing_mode: f.pricing_mode } })
         toast.success('تم التحديث')
       } else {
         const pkg = await api('/packages', { method: 'POST', body: { ...f, room_pricing: roomPricing } })
         // Create each item as a package component
         for (const it of items) {
-          await api(`/packages/${pkg.id}/components`, { method: 'POST', body: {
+          const body = {
             component_type: it.component_type, name: it.name, supplier_id: it.supplier_id,
             cost_per_pax: Number(it.cost) || 0, sale_per_pax: Number(it.sale) || 0,
-          } })
+            pricing_type: it.pricing_type || 'flat', include_infants: !!it.include_infants,
+          }
+          if (it.pricing_type === 'per_age') {
+            for (const k of ['cost_adult', 'cost_child', 'cost_infant', 'sale_adult', 'sale_child', 'sale_infant']) body[k] = Number(it[k]) || 0
+          }
+          if (it.pricing_type === 'room_age') {
+            body.room_rates = rooms.filter(r => String(r.type || '').trim()).map(r => {
+              const rr = (it.room_rates || {})[r.type] || {}
+              return { room_type: r.type, cost_adult: Number(rr.cost_adult) || 0, cost_child: Number(rr.cost_child) || 0, cost_infant: Number(rr.cost_infant) || 0, sale_adult: Number(rr.sale_adult) || 0, sale_child: Number(rr.sale_child) || 0, sale_infant: Number(rr.sale_infant) || 0 }
+            })
+          }
+          await api(`/packages/${pkg.id}/components`, { method: 'POST', body })
         }
         toast.success(`✅ تم إنشاء الباكج${items.length ? ` مع ${items.length} بند` : ''}`)
       }
@@ -7538,10 +7686,24 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
           <Field label="تاريخ النهاية"><Input type="date" value={f.end_date} onChange={e => setF({ ...f, end_date: e.target.value })} /></Field>
           <div className="md:col-span-2"><Field label={`المدة${nights > 0 ? ` (${nights} ليلة تلقائي)` : ''}`}><Input value={nights ? `${nights} ليلة` : ''} disabled className="bg-slate-50" /></Field></div>
         </div>
-        {/* v3.15 — Room-type pricing (accommodation) — available in create AND edit */}
+        {/* v3.20 — Dual Pricing Mode selector */}
+        <div className="border-2 border-teal-200 rounded-xl p-3 mb-3 bg-teal-50/40">
+          <div className="font-bold text-slate-800 text-sm mb-2">⚙️ نظام التسعير</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            <button type="button" onClick={() => setF({ ...f, pricing_mode: 'direct' })} className={`text-right rounded-lg border-2 p-3 transition ${f.pricing_mode === 'direct' ? 'border-teal-500 bg-teal-50 shadow-sm' : 'border-slate-200 bg-white hover:border-teal-300'}`}>
+              <div className="text-sm font-bold text-slate-800">🏨 تسعير مباشر (غرفة + عمر)</div>
+              <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">للباقات الجاهزة B2B — سعر البيع يُحدد لكل فئة عمرية (بالغ / طفل / رضيع) داخل كل نوع غرفة. التكلفة تُحسب من البنود.</div>
+            </button>
+            <button type="button" onClick={() => setF({ ...f, pricing_mode: 'components' })} className={`text-right rounded-lg border-2 p-3 transition ${f.pricing_mode === 'components' ? 'border-teal-500 bg-teal-50 shadow-sm' : 'border-slate-200 bg-white hover:border-teal-300'}`}>
+              <div className="text-sm font-bold text-slate-800">🧩 تسعير المكوّنات</div>
+              <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">للمكاتب المُجمِّعة — البيع والتكلفة يُحسبان من كل بند حسب نوعه: تأشيرة (ثابت)، نقل (حسب العمر)، فندق (غرفة + عمر).</div>
+            </button>
+          </div>
+        </div>
+        {/* v3.15/v3.20 — Room-type pricing (accommodation) — available in create AND edit */}
         <div className="border-2 border-dashed border-indigo-200 rounded-xl p-3 mb-3 bg-indigo-50/40">
           <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
-            <div className="font-bold text-slate-800 text-sm">🛏️ التسعير حسب نوع التسكين (سعر البيع للفرد)</div>
+            <div className="font-bold text-slate-800 text-sm">🛏️ {f.pricing_mode === 'direct' ? 'التسعير المباشر حسب الغرفة والعمر (سعر البيع للفرد)' : 'أنواع التسكين (لتوزيع الغرف في الحجوزات)'}</div>
             <div className="flex gap-1 flex-wrap">
               {ROOM_PRESETS.filter(p => !rooms.some(r => r.type === p)).map(p => (
                 <Button key={p} size="sm" variant="outline" onClick={() => addRoom(p)} className="h-7 text-xs border-indigo-300 text-indigo-700 hover:bg-indigo-50">+ {p}</Button>
@@ -7550,14 +7712,33 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
             </div>
           </div>
           {rooms.length === 0 ? (
-            <div className="text-xs text-slate-400 text-center py-2">لم تُحدد أنواع تسكين — سيُحسب البيع من بنود الخدمات كالمعتاد. أضف أنواع الغرف ليُحسب سعر كل مسجّل حسب غرفته.</div>
+            <div className="text-xs text-slate-400 text-center py-2">{f.pricing_mode === 'direct' ? 'أضف أنواع الغرف وحدد سعر كل فئة عمرية — سيُحسب سعر كل مسجّل حسب غرفته وعمره.' : 'لم تُحدد أنواع تسكين — أضفها لتظهر كخيارات توزيع الغرف عند تسجيل الأفراد.'}</div>
+          ) : f.pricing_mode === 'direct' ? (
+            <div className="space-y-2">
+              <div className="hidden md:grid md:grid-cols-12 gap-2 px-2 text-[10px] text-slate-500 font-semibold">
+                <div className="col-span-3">نوع الغرفة</div>
+                <div className="col-span-3">👨 بالغ (12+)</div>
+                <div className="col-span-3">🧒 طفل (2-11) — فارغ = كالبالغ</div>
+                <div className="col-span-2">👶 رضيع (&lt;2) — فارغ = 0</div>
+              </div>
+              {rooms.map((r, i) => (
+                <div key={i} className="grid grid-cols-2 md:grid-cols-12 gap-2 items-center bg-white rounded-lg border p-2">
+                  <Input value={r.type} onChange={e => updRoom(i, 'type', e.target.value)} placeholder="نوع الغرفة (ثنائي...)" className="h-8 text-xs md:col-span-3" />
+                  <Input type="number" min="0" value={r.sale_per_pax} onChange={e => updRoom(i, 'sale_per_pax', e.target.value)} placeholder="سعر البالغ" className="h-8 text-xs font-bold md:col-span-3" />
+                  <Input type="number" min="0" value={r.sale_child ?? ''} onChange={e => updRoom(i, 'sale_child', e.target.value)} placeholder="سعر الطفل" className="h-8 text-xs md:col-span-3" />
+                  <div className="flex items-center gap-1 md:col-span-3">
+                    <Input type="number" min="0" value={r.sale_infant ?? ''} onChange={e => updRoom(i, 'sale_infant', e.target.value)} placeholder="سعر الرضيع" className="h-8 text-xs flex-1" />
+                    <span className="text-[10px] text-slate-400 whitespace-nowrap">{f.currency}</span>
+                    <Button size="sm" variant="ghost" onClick={() => rmRoom(i)} className="h-7 w-7 p-0 text-rose-500"><Trash2 className="w-3 h-3" /></Button>
+                  </div>
+                </div>
+              ))}
+            </div>
           ) : (
-            <div className="grid md:grid-cols-2 gap-2">
+            <div className="grid md:grid-cols-3 gap-2">
               {rooms.map((r, i) => (
                 <div key={i} className="flex items-center gap-2 bg-white rounded-lg border p-2">
                   <Input value={r.type} onChange={e => updRoom(i, 'type', e.target.value)} placeholder="نوع الغرفة (ثنائي...)" className="h-8 text-xs flex-1" />
-                  <Input type="number" min="0" value={r.sale_per_pax} onChange={e => updRoom(i, 'sale_per_pax', e.target.value)} placeholder="سعر الفرد" className="h-8 text-xs font-bold" />
-                  <span className="text-[10px] text-slate-400">{f.currency}/فرد</span>
                   <Button size="sm" variant="ghost" onClick={() => rmRoom(i)} className="h-7 w-7 p-0 text-rose-500"><Trash2 className="w-3 h-3" /></Button>
                 </div>
               ))}
@@ -7576,32 +7757,88 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
             ) : (
               <div className="space-y-2">
                 {items.map((it, i) => (
-                  <div key={i} className="grid grid-cols-12 gap-2 items-end bg-white p-2 rounded-lg border">
-                    <div className="col-span-3">
-                      <div className="text-[10px] text-slate-500 mb-1">نوع الخدمة</div>
-                      <Select value={it.component_type} onValueChange={v => updItem(i, 'component_type', v)}>
-                        <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                        <SelectContent>{COMPONENT_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent>
-                      </Select>
+                  <div key={i} className="bg-white p-2 rounded-lg border space-y-2">
+                    <div className="grid grid-cols-12 gap-2 items-end">
+                      <div className="col-span-2">
+                        <div className="text-[10px] text-slate-500 mb-1">نوع الخدمة</div>
+                        <Select value={it.component_type} onValueChange={v => updItem(i, 'component_type', v)}>
+                          <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                          <SelectContent>{COMPONENT_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent>
+                        </Select>
+                      </div>
+                      <div className="col-span-3">
+                        <div className="text-[10px] text-slate-500 mb-1">الاسم / التفاصيل</div>
+                        <Input value={it.name} onChange={e => updItem(i, 'name', e.target.value)} className="h-8 text-xs" placeholder="فندق مكة رتاج الحرم" />
+                      </div>
+                      <div className="col-span-3">
+                        <div className="text-[10px] text-slate-500 mb-1">المورد (شجرة الحسابات) *</div>
+                        <Select value={it.supplier_id} onValueChange={v => updItem(i, 'supplier_id', v)}>
+                          <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="اختر" /></SelectTrigger>
+                          <SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
+                        </Select>
+                      </div>
+                      <div className="col-span-3">
+                        <div className="text-[10px] text-slate-500 mb-1">طريقة تسعير البند</div>
+                        <Select value={it.pricing_type || 'flat'} onValueChange={v => updItem(i, 'pricing_type', v)}>
+                          <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                          <SelectContent>{COMP_PRICING_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent>
+                        </Select>
+                      </div>
+                      <div className="col-span-1"><Button size="sm" variant="ghost" onClick={() => rmItem(i)} className="h-8 w-8 p-0 text-rose-600 hover:bg-rose-50"><Trash2 className="w-3 h-3" /></Button></div>
                     </div>
-                    <div className="col-span-3">
-                      <div className="text-[10px] text-slate-500 mb-1">الاسم / التفاصيل</div>
-                      <Input value={it.name} onChange={e => updItem(i, 'name', e.target.value)} className="h-8 text-xs" placeholder="فندق مكة رتاج الحرم" />
-                    </div>
-                    <div className="col-span-3">
-                      <div className="text-[10px] text-slate-500 mb-1">المورد (شجرة الحسابات) *</div>
-                      <Select value={it.supplier_id} onValueChange={v => updItem(i, 'supplier_id', v)}>
-                        <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="اختر" /></SelectTrigger>
-                        <SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
-                      </Select>
-                    </div>
-                    <div className="col-span-1"><div className="text-[10px] text-slate-500 mb-1">تكلفة</div><Input type="number" min="0" value={it.cost} onChange={e => updItem(i, 'cost', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
-                    <div className="col-span-1"><div className="text-[10px] text-slate-500 mb-1">بيع</div><Input type="number" min="0" value={it.sale} onChange={e => updItem(i, 'sale', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
-                    <div className="col-span-1 text-center">
-                      <div className="text-[10px] text-slate-500 mb-1">ربح</div>
-                      <div className={`text-xs font-bold ${(Number(it.sale) - Number(it.cost)) >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{((Number(it.sale) || 0) - (Number(it.cost) || 0)).toFixed(2)}</div>
-                    </div>
-                    <div className="col-span-1"><Button size="sm" variant="ghost" onClick={() => rmItem(i)} className="h-8 w-8 p-0 text-rose-600 hover:bg-rose-50"><Trash2 className="w-3 h-3" /></Button></div>
+                    {(it.pricing_type || 'flat') === 'flat' && (
+                      <div className="grid grid-cols-12 gap-2 items-end">
+                        <div className="col-span-3"><div className="text-[10px] text-slate-500 mb-1">تكلفة / فرد</div><Input type="number" min="0" value={it.cost} onChange={e => updItem(i, 'cost', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
+                        <div className="col-span-3"><div className="text-[10px] text-slate-500 mb-1">بيع / فرد</div><Input type="number" min="0" value={it.sale} onChange={e => updItem(i, 'sale', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
+                        <div className="col-span-2 text-center">
+                          <div className="text-[10px] text-slate-500 mb-1">ربح / فرد</div>
+                          <div className={`text-xs font-bold ${(Number(it.sale) - Number(it.cost)) >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{((Number(it.sale) || 0) - (Number(it.cost) || 0)).toFixed(2)}</div>
+                        </div>
+                        <div className="col-span-4 flex items-center gap-2 pb-1">
+                          <input type="checkbox" id={`inf-${i}`} checked={!!it.include_infants} onChange={e => updItem(i, 'include_infants', e.target.checked)} className="w-4 h-4 accent-teal-600" />
+                          <label htmlFor={`inf-${i}`} className="text-[11px] text-slate-600 cursor-pointer">يُحتسب للرضّع أيضاً (مثل رسوم التأشيرة)</label>
+                        </div>
+                      </div>
+                    )}
+                    {it.pricing_type === 'per_age' && (
+                      <div className="grid grid-cols-3 gap-2">
+                        {[{ k: 'adult', l: '👨 بالغ (12+)' }, { k: 'child', l: '🧒 طفل (2-11)' }, { k: 'infant', l: '👶 رضيع (<2)' }].map(cat => (
+                          <div key={cat.k} className="rounded-lg border bg-slate-50/60 p-2 space-y-1">
+                            <div className="text-[10px] font-bold text-slate-600">{cat.l}</div>
+                            <Input type="number" min="0" value={it[`cost_${cat.k}`]} onChange={e => updItem(i, `cost_${cat.k}`, e.target.value)} placeholder="تكلفة" className="h-7 text-xs" step="0.01" />
+                            <Input type="number" min="0" value={it[`sale_${cat.k}`]} onChange={e => updItem(i, `sale_${cat.k}`, e.target.value)} placeholder="بيع" className="h-7 text-xs font-bold" step="0.01" />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {it.pricing_type === 'room_age' && (
+                      rooms.filter(r => String(r.type || '').trim()).length === 0 ? (
+                        <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ أضف أنواع الغرف في قسم التسكين أعلاه أولاً — ثم حدّد أسعار هذا البند لكل غرفة.</div>
+                      ) : (
+                        <div className="space-y-1.5">
+                          <div className="hidden md:grid md:grid-cols-13 gap-1 px-1 text-[9px] text-slate-500 font-semibold" style={{ gridTemplateColumns: 'repeat(13, minmax(0, 1fr))' }}>
+                            <div>الغرفة</div>
+                            <div className="col-span-2">تكلفة بالغ</div><div className="col-span-2">بيع بالغ</div>
+                            <div className="col-span-2">تكلفة طفل</div><div className="col-span-2">بيع طفل</div>
+                            <div className="col-span-2">تكلفة رضيع</div><div className="col-span-2">بيع رضيع</div>
+                          </div>
+                          {rooms.filter(r => String(r.type || '').trim()).map(r => {
+                            const rr = (it.room_rates || {})[r.type] || {}
+                            return (
+                              <div key={r.type} className="grid gap-1 items-center" style={{ gridTemplateColumns: 'repeat(13, minmax(0, 1fr))' }}>
+                                <div className="text-[10px] font-bold text-slate-700 truncate">🛏️ {r.type}</div>
+                                <Input type="number" min="0" value={rr.cost_adult ?? ''} onChange={e => updItemRoomRate(i, r.type, 'cost_adult', e.target.value)} className="h-7 text-[10px] col-span-2" placeholder="0" />
+                                <Input type="number" min="0" value={rr.sale_adult ?? ''} onChange={e => updItemRoomRate(i, r.type, 'sale_adult', e.target.value)} className="h-7 text-[10px] col-span-2 font-bold" placeholder="0" />
+                                <Input type="number" min="0" value={rr.cost_child ?? ''} onChange={e => updItemRoomRate(i, r.type, 'cost_child', e.target.value)} className="h-7 text-[10px] col-span-2" placeholder="0" />
+                                <Input type="number" min="0" value={rr.sale_child ?? ''} onChange={e => updItemRoomRate(i, r.type, 'sale_child', e.target.value)} className="h-7 text-[10px] col-span-2 font-bold" placeholder="0" />
+                                <Input type="number" min="0" value={rr.cost_infant ?? ''} onChange={e => updItemRoomRate(i, r.type, 'cost_infant', e.target.value)} className="h-7 text-[10px] col-span-2" placeholder="0" />
+                                <Input type="number" min="0" value={rr.sale_infant ?? ''} onChange={e => updItemRoomRate(i, r.type, 'sale_infant', e.target.value)} className="h-7 text-[10px] col-span-2 font-bold" placeholder="0" />
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )
+                    )}
                   </div>
                 ))}
               </div>
@@ -7610,11 +7847,11 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
             {items.length > 0 && (
               <div className="grid grid-cols-4 gap-2 mt-3 pt-3 border-t border-slate-200">
                 <div className="rounded-lg bg-orange-50 border border-orange-200 p-2 text-center">
-                  <div className="text-[10px] text-orange-700 font-semibold">إجمالي التكلفة</div>
+                  <div className="text-[10px] text-orange-700 font-semibold">التكلفة التقديرية / بالغ</div>
                   <div className="text-sm font-black text-orange-800">{totalCost.toLocaleString('en-US', { maximumFractionDigits: 2 })} {f.currency}</div>
                 </div>
                 <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-2 text-center">
-                  <div className="text-[10px] text-emerald-700 font-semibold">إجمالي البيع</div>
+                  <div className="text-[10px] text-emerald-700 font-semibold">البيع التقديري / بالغ</div>
                   <div className="text-sm font-black text-emerald-800">{totalSale.toLocaleString('en-US', { maximumFractionDigits: 2 })} {f.currency}</div>
                 </div>
                 <div className={`rounded-lg border p-2 text-center ${profit >= 0 ? 'bg-blue-50 border-blue-200' : 'bg-rose-50 border-rose-200'}`}>
@@ -7653,7 +7890,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   const [suppliers, setSuppliers] = useState([])
   const [clients, setClients] = useState([])
   const [boxes, setBoxes] = useState([])
-  const [newComp, setNewComp] = useState({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '' })
+  const [newComp, setNewComp] = useState({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '', pricing_type: 'flat', include_infants: false, cost_adult: '', cost_child: '', cost_infant: '', sale_adult: '', sale_child: '', sale_infant: '', room_rates: {} })
   const [newBooking, setNewBooking] = useState({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '', registrants: [], discount: '', discount_reason: '' })
   const load = () => Promise.all([
     api(`/packages/${pkg.id}/components`).then(setComps),
@@ -7664,7 +7901,16 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   useEffect(() => { load() }, [pkg.id])
   const addComp = async () => {
     if (!newComp.name || !newComp.supplier_id) return toast.error('اسم المكوّن والمورد مطلوبان')
-    try { await api(`/packages/${pkg.id}/components`, { method: 'POST', body: newComp }); toast.success('تمت الإضافة'); setNewComp({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '' }); load(); onChanged && onChanged() }
+    if (newComp.pricing_type === 'room_age' && (pkg.room_pricing || []).length === 0) return toast.error('حدّد أنواع الغرف في إعدادات الباكج أولاً (تعديل الباكج → التسكين)')
+    try {
+      const body = { ...newComp }
+      if (newComp.pricing_type === 'room_age') {
+        body.room_rates = (pkg.room_pricing || []).map(rp => {
+          const rr = (newComp.room_rates || {})[rp.type] || {}
+          return { room_type: rp.type, cost_adult: Number(rr.cost_adult) || 0, cost_child: Number(rr.cost_child) || 0, cost_infant: Number(rr.cost_infant) || 0, sale_adult: Number(rr.sale_adult) || 0, sale_child: Number(rr.sale_child) || 0, sale_infant: Number(rr.sale_infant) || 0 }
+        })
+      } else { delete body.room_rates }
+      await api(`/packages/${pkg.id}/components`, { method: 'POST', body }); toast.success('تمت الإضافة'); setNewComp({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '', pricing_type: 'flat', include_infants: false, cost_adult: '', cost_child: '', cost_infant: '', sale_adult: '', sale_child: '', sale_infant: '', room_rates: {} }); load(); onChanged && onChanged() }
     catch (e) { toast.error(e.message) }
   }
   const delComp = async (id) => { if (!confirm('حذف المكوّن؟')) return; try { await api(`/packages/${pkg.id}/components/${id}`, { method: 'DELETE' }); load(); onChanged && onChanged() } catch (e) { toast.error(e.message) } }
@@ -7732,13 +7978,58 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
         {tab === 'components' && (
           <div className="space-y-3">
             {pkg.status !== 'closed' && (
-              <div className="grid grid-cols-1 md:grid-cols-6 gap-2 p-3 bg-slate-50 rounded-lg">
-                <Field label="نوع"><Select value={newComp.component_type} onValueChange={v => setNewComp({ ...newComp, component_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{COMPONENT_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
-                <Field label="الاسم"><Input value={newComp.name} onChange={e => setNewComp({ ...newComp, name: e.target.value })} placeholder="فندق البلد" /></Field>
-                <Field label="المورد"><Select value={newComp.supplier_id} onValueChange={v => setNewComp({ ...newComp, supplier_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent></Select></Field>
-                <Field label={`تكلفة/فرد (${pkg.currency})`}><Input type="number" min="0" value={newComp.cost_per_pax} onChange={e => setNewComp({ ...newComp, cost_per_pax: e.target.value })} /></Field>
-                <Field label={`بيع/فرد (${pkg.currency})`}><Input type="number" min="0" value={newComp.sale_per_pax} onChange={e => setNewComp({ ...newComp, sale_per_pax: e.target.value })} /></Field>
-                <div className="flex items-end"><Button onClick={addComp} className="w-full grad-brand text-white gap-1"><Plus className="w-4 h-4" /> إضافة</Button></div>
+              <div className="p-3 bg-slate-50 rounded-lg space-y-2">
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
+                  <Field label="نوع"><Select value={newComp.component_type} onValueChange={v => setNewComp({ ...newComp, component_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{COMPONENT_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
+                  <Field label="الاسم"><Input value={newComp.name} onChange={e => setNewComp({ ...newComp, name: e.target.value })} placeholder="فندق البلد" /></Field>
+                  <Field label="المورد"><Select value={newComp.supplier_id} onValueChange={v => setNewComp({ ...newComp, supplier_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent></Select></Field>
+                  <Field label="طريقة التسعير"><Select value={newComp.pricing_type} onValueChange={v => setNewComp({ ...newComp, pricing_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{COMP_PRICING_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
+                  <div className="flex items-end"><Button onClick={addComp} className="w-full grad-brand text-white gap-1"><Plus className="w-4 h-4" /> إضافة</Button></div>
+                </div>
+                {newComp.pricing_type === 'flat' && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                    <Field label={`تكلفة/فرد (${pkg.currency})`}><Input type="number" min="0" value={newComp.cost_per_pax} onChange={e => setNewComp({ ...newComp, cost_per_pax: e.target.value })} className="bg-white" /></Field>
+                    <Field label={`بيع/فرد (${pkg.currency})`}><Input type="number" min="0" value={newComp.sale_per_pax} onChange={e => setNewComp({ ...newComp, sale_per_pax: e.target.value })} className="bg-white" /></Field>
+                    <div className="flex items-end gap-2 pb-2">
+                      <input type="checkbox" id="nc-inf" checked={!!newComp.include_infants} onChange={e => setNewComp({ ...newComp, include_infants: e.target.checked })} className="w-4 h-4 accent-teal-600" />
+                      <label htmlFor="nc-inf" className="text-[11px] text-slate-600 cursor-pointer">يُحتسب للرضّع أيضاً (كرسوم التأشيرة)</label>
+                    </div>
+                  </div>
+                )}
+                {newComp.pricing_type === 'per_age' && (
+                  <div className="grid grid-cols-3 gap-2">
+                    {[{ k: 'adult', l: '👨 بالغ (12+)' }, { k: 'child', l: '🧒 طفل (2-11)' }, { k: 'infant', l: '👶 رضيع (<2)' }].map(cat => (
+                      <div key={cat.k} className="rounded-lg border bg-white p-2 space-y-1">
+                        <div className="text-[10px] font-bold text-slate-600">{cat.l}</div>
+                        <Input type="number" min="0" value={newComp[`cost_${cat.k}`]} onChange={e => setNewComp({ ...newComp, [`cost_${cat.k}`]: e.target.value })} placeholder="تكلفة" className="h-8 text-xs" />
+                        <Input type="number" min="0" value={newComp[`sale_${cat.k}`]} onChange={e => setNewComp({ ...newComp, [`sale_${cat.k}`]: e.target.value })} placeholder="بيع" className="h-8 text-xs font-bold" />
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {newComp.pricing_type === 'room_age' && (
+                  (pkg.room_pricing || []).length === 0 ? (
+                    <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ لا توجد أنواع غرف معرّفة في الباكج — عدّل الباكج وأضف أنواع التسكين أولاً.</div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {(pkg.room_pricing || []).map(rp => {
+                        const rr = (newComp.room_rates || {})[rp.type] || {}
+                        const setRR = (k, v) => setNewComp({ ...newComp, room_rates: { ...(newComp.room_rates || {}), [rp.type]: { ...rr, [k]: v } } })
+                        return (
+                          <div key={rp.type} className="grid gap-1 items-center bg-white rounded border p-1.5" style={{ gridTemplateColumns: 'repeat(13, minmax(0, 1fr))' }}>
+                            <div className="text-[10px] font-bold text-slate-700 truncate">🛏️ {rp.type}</div>
+                            <Input type="number" min="0" value={rr.cost_adult ?? ''} onChange={e => setRR('cost_adult', e.target.value)} className="h-7 text-[10px] col-span-2" placeholder="تكلفة بالغ" />
+                            <Input type="number" min="0" value={rr.sale_adult ?? ''} onChange={e => setRR('sale_adult', e.target.value)} className="h-7 text-[10px] col-span-2 font-bold" placeholder="بيع بالغ" />
+                            <Input type="number" min="0" value={rr.cost_child ?? ''} onChange={e => setRR('cost_child', e.target.value)} className="h-7 text-[10px] col-span-2" placeholder="تكلفة طفل" />
+                            <Input type="number" min="0" value={rr.sale_child ?? ''} onChange={e => setRR('sale_child', e.target.value)} className="h-7 text-[10px] col-span-2 font-bold" placeholder="بيع طفل" />
+                            <Input type="number" min="0" value={rr.cost_infant ?? ''} onChange={e => setRR('cost_infant', e.target.value)} className="h-7 text-[10px] col-span-2" placeholder="تكلفة رضيع" />
+                            <Input type="number" min="0" value={rr.sale_infant ?? ''} onChange={e => setRR('sale_infant', e.target.value)} className="h-7 text-[10px] col-span-2 font-bold" placeholder="بيع رضيع" />
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )
+                )}
               </div>
             )}
             <Table>
@@ -7749,8 +8040,8 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     <TableCell><Badge variant="outline">{COMPONENT_TYPES.find(t => t.v === c.component_type)?.l || c.component_type}</Badge></TableCell>
                     <TableCell className="font-semibold">{c.name}</TableCell>
                     <TableCell className="text-xs">{c.supplier_name}</TableCell>
-                    <TableCell className="text-left">{fmt(c.cost_per_pax, pkg.currency)}</TableCell>
-                    <TableCell className="text-left">{fmt(c.sale_per_pax, pkg.currency)}</TableCell>
+                    <TableCell className="text-left">{c.pricing_type === 'per_age' ? <span className="text-[10px] whitespace-nowrap">👨{c.cost_adult ?? 0} 🧒{c.cost_child ?? 0} 👶{c.cost_infant ?? 0}</span> : c.pricing_type === 'room_age' ? <span className="text-[10px] text-indigo-600 font-bold">🛏️ غرفة+عمر</span> : fmt(c.cost_per_pax, pkg.currency)}</TableCell>
+                    <TableCell className="text-left">{c.pricing_type === 'per_age' ? <span className="text-[10px] whitespace-nowrap">👨{c.sale_adult ?? 0} 🧒{c.sale_child ?? 0} 👶{c.sale_infant ?? 0}</span> : c.pricing_type === 'room_age' ? <span className="text-[10px] text-indigo-600 font-bold">🛏️ غرفة+عمر</span> : fmt(c.sale_per_pax, pkg.currency)}</TableCell>
                     <TableCell className="text-left text-emerald-600 font-bold">{fmt(c.sale_per_pax - c.cost_per_pax, pkg.currency)}</TableCell>
                     <TableCell>{pkg.status !== 'closed' && <Button size="sm" variant="ghost" onClick={() => delComp(c.id)} className="text-rose-600 h-6 w-6 p-0"><Trash2 className="w-3 h-3" /></Button>}</TableCell>
                   </TableRow>
@@ -7903,7 +8194,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                                   <SelectTrigger className="h-8 text-xs bg-white"><SelectValue placeholder="التسكين" /></SelectTrigger>
                                   <SelectContent>
                                     <SelectItem value="none">— بلا تسكين —</SelectItem>
-                                    {(pkg.room_pricing || []).map(rp => <SelectItem key={rp.type} value={rp.type}>🛏️ {rp.type} — {rp.sale_per_pax} {pkg.currency}</SelectItem>)}
+                                    {(pkg.room_pricing || []).map(rp => <SelectItem key={rp.type} value={rp.type}>🛏️ {rp.type}{(pkg.pricing_mode || 'direct') === 'direct' ? ` — 👨${rp.sale_per_pax}${rp.sale_child !== null && rp.sale_child !== undefined ? ` 🧒${rp.sale_child}` : ''}${rp.sale_infant ? ` 👶${rp.sale_infant}` : ''} ${pkg.currency}` : ''}</SelectItem>)}
                                   </SelectContent>
                                 </Select>
                               ) : (
@@ -7914,19 +8205,22 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                           </div>
                         )
                       })}
-                      {(pkg.room_pricing || []).length > 0 && (() => {
-                        const priceMap = {}; (pkg.room_pricing || []).forEach(rp => { priceMap[rp.type] = Number(rp.sale_per_pax) || 0 })
-                        const roomSale = (newBooking.registrants || []).reduce((s, r) => {
-                          const isInfant = r.age !== '' && Number(r.age) < 2
-                          return s + (!isInfant && r.room_type && priceMap[r.room_type] !== undefined ? priceMap[r.room_type] : 0)
-                        }, 0)
-                        return roomSale > 0 ? (
-                          <div className="p-2 rounded bg-indigo-50 border border-indigo-200 text-xs flex items-center gap-2">
-                            💰 <b>إجمالي البيع حسب التسكين (يُعتمد آلياً):</b>
-                            <span className="font-black text-indigo-700 text-sm">{fmt(roomSale, pkg.currency)}</span>
-                            <span className="text-[10px] text-slate-500">(الرضّع لا يُحسبون)</span>
+                      {(() => {
+                        // v3.20 — Dual pricing live preview
+                        const effMode = pkg.pricing_mode || ((pkg.room_pricing || []).length > 0 ? 'direct' : 'components')
+                        const regs = (newBooking.registrants || []).filter(r => String(r.name || '').trim())
+                        if (regs.length === 0) return null
+                        const billed = regs.filter(r => regAgeCat(r.age) !== 'infant').length
+                        const roomSale = effMode === 'direct' && (pkg.room_pricing || []).length > 0 ? directRoomSaleFE(pkg.room_pricing, regs) : 0
+                        const saleTotal = roomSale > 0 ? roomSale : compSaleFE(comps, regs, billed)
+                        if (saleTotal <= 0) return null
+                        return (
+                          <div className="p-2 rounded bg-indigo-50 border border-indigo-200 text-xs flex items-center gap-2 flex-wrap">
+                            💰 <b>{roomSale > 0 ? 'إجمالي البيع حسب الغرفة والعمر (يُعتمد آلياً):' : 'إجمالي البيع من المكوّنات حسب التسعير (يُعتمد آلياً):'}</b>
+                            <span className="font-black text-indigo-700 text-sm">{fmt(saleTotal, pkg.currency)}</span>
+                            <span className="text-[10px] text-slate-500">({regs.filter(r => regAgeCat(r.age) === 'adult').length} بالغ، {regs.filter(r => regAgeCat(r.age) === 'child').length} طفل، {regs.filter(r => regAgeCat(r.age) === 'infant').length} رضيع)</span>
                           </div>
-                        ) : null
+                        )
                       })()}
                     </div>
                   )}
@@ -7943,13 +8237,12 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     </Field>
                   </div>
                   {(() => {
-                    const priceMap = {}; (pkg.room_pricing || []).forEach(rp => { priceMap[rp.type] = Number(rp.sale_per_pax) || 0 })
-                    const roomSale = (newBooking.registrants || []).reduce((s, r) => {
-                      const isInfant = r.age !== '' && Number(r.age) < 2
-                      return s + (!isInfant && r.room_type && priceMap[r.room_type] !== undefined ? priceMap[r.room_type] : 0)
-                    }, 0)
-                    const compSale = comps.reduce((s, c) => s + (c.sale_per_pax || 0), 0) * ((Number(newBooking.pax_adults) || 0) + (Number(newBooking.pax_children) || 0))
-                    const base = roomSale > 0 ? roomSale : compSale
+                    // v3.20 — Dual pricing discount preview
+                    const effMode = pkg.pricing_mode || ((pkg.room_pricing || []).length > 0 ? 'direct' : 'components')
+                    const regs = (newBooking.registrants || []).filter(r => String(r.name || '').trim())
+                    const billed = regs.length > 0 ? regs.filter(r => regAgeCat(r.age) !== 'infant').length : ((Number(newBooking.pax_adults) || 0) + (Number(newBooking.pax_children) || 0))
+                    const roomSale = effMode === 'direct' && regs.length > 0 && (pkg.room_pricing || []).length > 0 ? directRoomSaleFE(pkg.room_pricing, regs) : 0
+                    const base = roomSale > 0 ? roomSale : compSaleFE(comps, regs, billed)
                     const disc = Number(newBooking.discount) || 0
                     if (disc <= 0 || base <= 0) return null
                     return (
