@@ -1308,6 +1308,7 @@ const NAV = [
   { id: 'visas',     label: 'التأشيرات', icon: FileBadge2, color: 'from-emerald-600 to-teal-500' },
   { id: 'services',  label: 'الخدمات', icon: Briefcase, color: 'from-orange-600 to-amber-500' },
   { id: 'packages',  label: 'الباكجات والبرامج', icon: FileBadge2, color: 'from-teal-600 to-emerald-500' },
+  { id: 'meraaj',    label: '🕋 متجر معراج', icon: Package, color: 'from-purple-700 to-fuchsia-500' },
   { id: 'visa-monitor', label: 'مراقبة التأشيرات', icon: CalendarClock, color: 'from-red-600 to-orange-500' },
   { id: 'query',     label: 'مركز الاستعلامات', icon: BarChart3, color: 'from-violet-600 to-indigo-500' },
   { id: 'fx',        label: 'صرافة العملات', icon: ArrowLeftRight, color: 'from-fuchsia-600 to-purple-500' },
@@ -7219,6 +7220,8 @@ function PackagesScreen() {
   const [extendPkg, setExtendPkg] = useState(null)
   // v3.21 — Partner Commission Statement
   const [partnerStmtOpen, setPartnerStmtOpen] = useState(false)
+  // v3.24 — Meraaj share dialog
+  const [meraajPkg, setMeraajPkg] = useState(null)
   // v3.9.11 — Bulk operations for packages
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [dateRange, setDateRange] = useState({ preset: 'all', from: '', to: '' })
@@ -7350,7 +7353,7 @@ function PackagesScreen() {
       <div>
         <div className="text-sm font-bold text-slate-700 mb-2">🟢 الباكجات المفتوحة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} onExtend={() => setExtendPkg(p)} onDuplicate={() => dupPkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
+          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} onExtend={() => setExtendPkg(p)} onDuplicate={() => dupPkg(p)} onMeraaj={() => setMeraajPkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
           {openPackages.length === 0 && <div className="col-span-full text-center text-slate-400 py-8 text-sm">{dateBounds ? 'لا نتائج ضمن النطاق التاريخي' : 'لا توجد باكجات مفتوحة — أنشئ باكج جديد'}</div>}
         </div>
       </div>
@@ -7363,6 +7366,7 @@ function PackagesScreen() {
       <PackageDialog open={open} onOpenChange={v => { setOpen(v); if (!v) setEditing(null) }} record={editing} onSaved={load} />
       {detailsPkg && <PackageDetailsDialog pkg={detailsPkg} onClose={() => setDetailsPkg(null)} onChanged={load} />}
       <PartnerStatementDialog open={partnerStmtOpen} onOpenChange={setPartnerStmtOpen} />
+      {meraajPkg && <MeraajShareDialog pkg={meraajPkg} onClose={() => setMeraajPkg(null)} onSaved={load} />}
       {reportPkg && <PackageReportDialog pkg={reportPkg} onClose={() => setReportPkg(null)} />}
       {comparePeriod && <PackageCompareDialog initialPeriod={comparePeriod} onClose={() => setComparePeriod(null)} />}
       {extendPkg && <ExtendPackageDateDialog pkg={extendPkg} onClose={() => setExtendPkg(null)} onSaved={load} />}
@@ -7800,7 +7804,184 @@ function PartnerStatementDialog({ open, onOpenChange }) {
   )
 }
 
-function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onExtend, onDuplicate, closed, selectable, selected, onToggleSelect }) {
+// v3.24 — Meraaj Network: Share dialog (سعر نهائي + عمولة المكتب المشتري + مقاعد السوق)
+function MeraajShareDialog({ pkg, onClose, onSaved }) {
+  const shared = pkg?.meraaj?.shared
+  const [form, setForm] = useState({
+    final_price: pkg?.meraaj?.final_price ?? '',
+    buyer_commission_mode: pkg?.meraaj?.buyer_commission_mode || 'amount',
+    buyer_commission_value: pkg?.meraaj?.buyer_commission_value ?? '',
+    seats_allocated: pkg?.meraaj?.seats_allocated ?? '',
+  })
+  const [saving, setSaving] = useState(false)
+  const price = Number(form.final_price) || 0
+  const commission = form.buyer_commission_mode === 'percent'
+    ? +(price * (Number(form.buyer_commission_value) || 0) / 100).toFixed(2)
+    : +(Number(form.buyer_commission_value) || 0).toFixed(2)
+  const net = +(price - commission).toFixed(2)
+  const submit = async (enabled) => {
+    try {
+      setSaving(true)
+      if (enabled === false) {
+        await api(`/packages/${pkg.id}/meraaj-share`, { method: 'POST', body: { enabled: false } })
+        toast.success('تم إيقاف المشاركة — سيُزال الباكج من سوق معراج')
+      } else {
+        await api(`/packages/${pkg.id}/meraaj-share`, { method: 'POST', body: { enabled: true, ...form } })
+        toast.success(shared ? '✅ تم تحديث بيانات المشاركة' : '🕋 تمت المشاركة في معراج نتورك')
+      }
+      onSaved(); onClose()
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  return (
+    <Dialog open={!!pkg} onOpenChange={v => { if (!v) onClose() }}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader><DialogTitle className="flex items-center gap-2">🕋 مشاركة في معراج نتورك — {pkg?.name}</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <Field label={`سعر البيع النهائي للزبون (${pkg?.currency}) / للفرد`} required>
+            <Input type="number" min="0" step="0.01" value={form.final_price} onChange={e => setForm({ ...form, final_price: e.target.value })} className="text-lg font-bold" />
+          </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="عمولة المكتب المشتري">
+              <Select value={form.buyer_commission_mode} onValueChange={v => setForm({ ...form, buyer_commission_mode: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="amount">💰 مبلغ ثابت / للفرد</SelectItem>
+                  <SelectItem value="percent">📊 نسبة من السعر</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label={form.buyer_commission_mode === 'percent' ? 'النسبة %' : `المبلغ (${pkg?.currency})`}>
+              <Input type="number" min="0" step="0.01" value={form.buyer_commission_value} onChange={e => setForm({ ...form, buyer_commission_value: e.target.value })} />
+            </Field>
+          </div>
+          <Field label="المقاعد المتاحة لسوق معراج" required>
+            <Input type="number" min="1" value={form.seats_allocated} onChange={e => setForm({ ...form, seats_allocated: e.target.value })} />
+            {shared && <div className="text-[10px] text-slate-500 mt-1">مباع حالياً عبر معراج: {pkg?.meraaj?.seats_sold || 0} مقعد — لا يمكن التخصيص أقل من ذلك</div>}
+          </Field>
+          <div className="rounded-xl border-2 border-purple-200 bg-purple-50/50 p-3 text-sm space-y-1">
+            <div className="flex justify-between"><span className="text-slate-500">سعر الزبون النهائي:</span><b>{fmt(price, pkg?.currency)}</b></div>
+            <div className="flex justify-between text-amber-700"><span>عمولة المكتب المشتري:</span><b>{fmt(commission, pkg?.currency)}</b></div>
+            <div className="flex justify-between text-emerald-700 border-t pt-1"><span>صافي التكلفة المستحق لمكتبك:</span><b className="text-base">{fmt(net, pkg?.currency)}</b></div>
+          </div>
+          <div className="text-[11px] text-slate-500 leading-relaxed">💡 عند المشاركة، سيظهر البرنامج بمميزاته وصورته في سوق معراج، وأي حجز هناك يخصم المقاعد تلقائياً هنا (مزامنة لحظية لمنع البيع المزدوج).</div>
+        </div>
+        <DialogFooter className="gap-2">
+          {shared && <Button variant="outline" onClick={() => submit(false)} disabled={saving} className="border-rose-300 text-rose-600 hover:bg-rose-50">⛔ إيقاف المشاركة</Button>}
+          <Button variant="outline" onClick={onClose}>إلغاء</Button>
+          <Button onClick={() => submit(true)} disabled={saving} className="bg-gradient-to-l from-purple-700 to-fuchsia-500 text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (shared ? '💾 تحديث المشاركة' : '🕋 مشاركة الآن')}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// v3.24 — Meraaj Network Store screen (iframe عند توفر الرابط + مركز مزامنة)
+function MeraajStoreScreen() {
+  const [config, setConfig] = useState(null)
+  const [iframeUrl, setIframeUrl] = useState(null)
+  const [inbound, setInbound] = useState([])
+  const [events, setEvents] = useState([])
+  const [sharedPkgs, setSharedPkgs] = useState([])
+  const [view, setView] = useState('shared') // shared | bookings | events
+  useEffect(() => { load() }, [])
+  const load = async () => {
+    try {
+      const cfg = await api('/meraaj/config')
+      setConfig(cfg)
+      if (cfg.store_url) {
+        try {
+          const { token } = await api('/meraaj/sso-token', { method: 'POST' })
+          setIframeUrl(`${cfg.store_url}${cfg.store_url.includes('?') ? '&' : '?'}sso=${encodeURIComponent(token)}`)
+        } catch { setIframeUrl(cfg.store_url) }
+      }
+    } catch { }
+    api('/meraaj/inbound-bookings').then(setInbound).catch(() => {})
+    api('/meraaj/events').then(setEvents).catch(() => {})
+    api('/packages').then(list => setSharedPkgs((list || []).filter(p => p?.meraaj?.shared))).catch(() => {})
+  }
+  const newBookings = inbound.filter(b => b.status === 'new')
+  const totalSeatsSold = sharedPkgs.reduce((s, p) => s + (Number(p.meraaj?.seats_sold) || 0), 0)
+  const EVT_LABELS = { 'inventory.updated': '📊 تحديث مخزون', 'package.shared': '🕋 مشاركة باكج', 'package.updated': '✏️ تحديث باكج', 'package.deactivated': '⛔ إيقاف باكج' }
+  return (
+    <div>
+      <TopBar title="🕋 متجر معراج نتورك" subtitle="سوق B2B لبيع وشراء برامج العمرة والسياحة بين المكاتب" right={<Button variant="outline" onClick={load} className="gap-1 text-xs h-8">🔄 تحديث</Button>} />
+      {iframeUrl ? (
+        <div className="rounded-xl overflow-hidden border-2 border-purple-200 shadow-lg bg-white" style={{ height: 'calc(100vh - 160px)' }}>
+          <iframe src={iframeUrl} title="متجر معراج نتورك" className="w-full h-full border-0" allow="clipboard-write" />
+        </div>
+      ) : (
+        <div className="rounded-xl border-2 border-dashed border-purple-300 bg-gradient-to-b from-purple-50/60 to-fuchsia-50/40 p-8 text-center mb-4">
+          <div className="text-5xl mb-2">🕋</div>
+          <div className="text-xl font-black text-purple-800">متجر معراج نتورك — قريباً</div>
+          <div className="text-sm text-slate-500 mt-2 max-w-xl mx-auto leading-relaxed">
+            نظامك <b>جاهز ومربوط تقنياً</b> {config?.configured ? '✅' : '⚠️ (بانتظار تهيئة المفتاح السري)'} — فور تفعيل المنصة سيظهر السوق هنا مباشرة داخل رحّال بدون أي تحديث برمجي.
+            <br />يمكنك من الآن مشاركة باقاتك عبر زر <b>"🕋 معراج"</b> في قسم الباكجات وستكون جاهزة للعرض فور الإطلاق.
+          </div>
+        </div>
+      )}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 my-4">
+        <Card><CardContent className="p-3 text-center"><div className="text-2xl font-black text-purple-700">{sharedPkgs.length}</div><div className="text-[11px] text-slate-500">باكجات مُشارَكة</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-2xl font-black text-fuchsia-700">{totalSeatsSold}</div><div className="text-[11px] text-slate-500">مقاعد مباعة عبر معراج</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-2xl font-black text-emerald-700">{newBookings.length}</div><div className="text-[11px] text-slate-500">حجوزات جديدة واردة</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-2xl font-black text-slate-700">{events.length}</div><div className="text-[11px] text-slate-500">أحداث مزامنة</div></CardContent></Card>
+      </div>
+      <div className="flex gap-2 mb-3">
+        <Button size="sm" variant={view === 'shared' ? 'default' : 'outline'} onClick={() => setView('shared')} className="h-8 text-xs">🕋 الباكجات المُشارَكة ({sharedPkgs.length})</Button>
+        <Button size="sm" variant={view === 'bookings' ? 'default' : 'outline'} onClick={() => setView('bookings')} className="h-8 text-xs">📥 حجوزات معراج ({inbound.length})</Button>
+        <Button size="sm" variant={view === 'events' ? 'default' : 'outline'} onClick={() => setView('events')} className="h-8 text-xs">🔄 سجل المزامنة</Button>
+      </div>
+      {view === 'shared' && (
+        sharedPkgs.length === 0 ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">لا توجد باقات مُشارَكة — من قسم الباكجات اضغط زر "🕋 معراج" على أي باقة</CardContent></Card> : (
+          <Card><CardContent className="p-0"><Table>
+            <TableHeader><TableRow><TableHead>الباكج</TableHead><TableHead>السعر النهائي</TableHead><TableHead>عمولة المشتري</TableHead><TableHead>صافي مكتبك</TableHead><TableHead>المقاعد (مباع/مخصص)</TableHead><TableHead>متاح</TableHead></TableRow></TableHeader>
+            <TableBody>{sharedPkgs.map(p => {
+              const m = p.meraaj || {}
+              const avail = Math.max(0, (Number(m.seats_allocated) || 0) - (Number(m.seats_sold) || 0))
+              return (<TableRow key={p.id}>
+                <TableCell className="font-bold text-xs">{p.name}</TableCell>
+                <TableCell className="text-xs">{fmt(m.final_price || 0, p.currency)}</TableCell>
+                <TableCell className="text-xs text-amber-700">{m.buyer_commission_mode === 'percent' ? `${m.buyer_commission_value}%` : fmt(m.buyer_commission_value || 0, p.currency)}</TableCell>
+                <TableCell className="text-xs text-emerald-700 font-bold">{fmt(m.net_to_seller || 0, p.currency)}</TableCell>
+                <TableCell className="text-xs">{m.seats_sold || 0} / {m.seats_allocated || 0}</TableCell>
+                <TableCell><Badge className={avail > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}>{avail > 0 ? `${avail} متاح` : 'نفدت'}</Badge></TableCell>
+              </TableRow>)
+            })}</TableBody>
+          </Table></CardContent></Card>
+        )
+      )}
+      {view === 'bookings' && (
+        inbound.length === 0 ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">لا توجد حجوزات واردة من معراج بعد — ستظهر هنا تلقائياً فور حدوثها مع بيانات المسافرين وجوازاتهم</CardContent></Card> : (
+          <Card><CardContent className="p-0"><Table>
+            <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>الباكج</TableHead><TableHead>المكتب المشتري</TableHead><TableHead>مسافرون</TableHead><TableHead>الإجمالي</TableHead><TableHead>مرجع معراج</TableHead><TableHead>الحالة</TableHead></TableRow></TableHeader>
+            <TableBody>{inbound.map(b => (<TableRow key={b.id}>
+              <TableCell className="text-xs whitespace-nowrap">{new Date(b.created_at).toLocaleDateString('en-GB')}</TableCell>
+              <TableCell className="text-xs font-bold">{b.package_name}</TableCell>
+              <TableCell className="text-xs">{b.buyer_office_name}</TableCell>
+              <TableCell className="text-xs">{b.seats} ({(b.registrants || []).map(r => r.name).slice(0, 2).join('، ')}{(b.registrants || []).length > 2 ? '...' : ''})</TableCell>
+              <TableCell className="text-xs">{fmt(b.total_price || 0, b.currency)}</TableCell>
+              <TableCell className="text-[10px] text-slate-400">{b.meraaj_booking_ref || '—'}</TableCell>
+              <TableCell><Badge className={b.status === 'cancelled' ? 'bg-rose-100 text-rose-700' : 'bg-blue-100 text-blue-700'}>{b.status === 'cancelled' ? '⛔ ملغى' : '🔵 جديد'}</Badge></TableCell>
+            </TableRow>))}</TableBody>
+          </Table></CardContent></Card>
+        )
+      )}
+      {view === 'events' && (
+        events.length === 0 ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">لا توجد أحداث مزامنة بعد — تُسجل هنا كل التحديثات الصادرة لمعراج (Outbox)</CardContent></Card> : (
+          <Card><CardContent className="p-0"><Table>
+            <TableHeader><TableRow><TableHead>الوقت</TableHead><TableHead>الحدث</TableHead><TableHead>الحالة</TableHead></TableRow></TableHeader>
+            <TableBody>{events.map(ev => (<TableRow key={ev.id}>
+              <TableCell className="text-xs whitespace-nowrap">{new Date(ev.created_at).toLocaleString('en-GB')}</TableCell>
+              <TableCell className="text-xs">{EVT_LABELS[ev.type] || ev.type}</TableCell>
+              <TableCell><Badge className={ev.status === 'sent' ? 'bg-emerald-100 text-emerald-700' : ev.status === 'failed' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}>{ev.status === 'sent' ? '✅ أُرسل' : ev.status === 'failed' ? '⚠️ فشل' : '⏳ بانتظار ربط معراج'}</Badge></TableCell>
+            </TableRow>))}</TableBody>
+          </Table></CardContent></Card>
+        )
+      )}
+    </div>
+  )
+}
+
+function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onExtend, onDuplicate, onMeraaj, closed, selectable, selected, onToggleSelect }) {
   const typeL = PACKAGE_TYPES.find(t => t.v === p?.package_type)?.l || p?.package_type || '—'
   return (
     <Card className={`overflow-hidden hover:shadow-md transition ${closed ? 'opacity-70' : ''} ${selected ? 'ring-2 ring-rose-400' : ''}`}>
@@ -7818,6 +7999,12 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
           </div>
           <Badge className={closed ? 'bg-slate-200 text-slate-600 hover:bg-slate-200' : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100'}>{closed ? 'مغلق' : 'مفتوح'}</Badge>
         </div>
+        {p?.meraaj?.shared && (
+          <div className="text-[10px] px-2 py-1 rounded-lg bg-gradient-to-l from-purple-50 to-fuchsia-50 border border-purple-200 text-purple-700 font-bold flex items-center justify-between">
+            <span>🕋 مُشارَك في معراج نتورك</span>
+            <span>{Math.max(0, (Number(p.meraaj.seats_allocated) || 0) - (Number(p.meraaj.seats_sold) || 0))} مقعد متاح</span>
+          </div>
+        )}
         <div className="text-xs text-slate-500 space-y-0.5">
           {p?.start_date && <div>📅 من {fmtDate(p.start_date)} {p?.end_date && `→ ${fmtDate(p.end_date)}`}</div>}
           <div>🧩 {p?.components_count || 0} مكوّن • 👥 {p?.bookings_count || 0} مسجل {p?.has_image ? '• 📷' : ''}</div>
@@ -7834,6 +8021,7 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
           <Button size="sm" variant="outline" onClick={onReport} className="h-7 px-2 text-xs gap-1 text-blue-600"><ReceiptText className="w-3 h-3" /> التقرير</Button>
           {!closed && onExtend && <Button size="sm" variant="outline" onClick={onExtend} className="h-7 px-2 text-xs gap-1 text-teal-600 border-teal-200 hover:bg-teal-50"><Calendar className="w-3 h-3" /> تمديد التاريخ</Button>}
           {onDuplicate && <Button size="sm" variant="outline" onClick={onDuplicate} className="h-7 px-2 text-xs gap-1 text-purple-600 border-purple-200 hover:bg-purple-50" title="نسخ الباكج بكل مكوناته وأسعاره كمسودة جديدة"><Copy className="w-3 h-3" /> نسخ</Button>}
+          {!closed && onMeraaj && <Button size="sm" variant="outline" onClick={onMeraaj} className={`h-7 px-2 text-xs gap-1 ${p?.meraaj?.shared ? 'text-fuchsia-700 border-fuchsia-300 bg-fuchsia-50' : 'text-fuchsia-600 border-fuchsia-200 hover:bg-fuchsia-50'}`} title="مشاركة الباكج في سوق معراج نتورك B2B">🕋 معراج</Button>}
           {!closed && onEdit && <Button size="sm" variant="ghost" onClick={onEdit} className="h-7 px-2 text-xs"><Pencil className="w-3 h-3" /></Button>}
           {!closed && onClose && <Button size="sm" variant="ghost" onClick={onClose} className="h-7 px-2 text-xs text-orange-600">إغلاق</Button>}
           {closed && onReopen && <Button size="sm" variant="ghost" onClick={onReopen} className="h-7 px-2 text-xs text-emerald-600">فتح</Button>}
@@ -9532,6 +9720,7 @@ function TenantApp() {
         {tab === 'visas' && <ErrorBoundary tabName="التأشيرات والخدمات"><VisasScreen /></ErrorBoundary>}
         {tab === 'services' && <ErrorBoundary tabName="الخدمات"><ServicesScreen /></ErrorBoundary>}
         {tab === 'packages' && <ErrorBoundary tabName="الباكجات والبرامج"><PackagesScreen /></ErrorBoundary>}
+        {tab === 'meraaj' && <ErrorBoundary tabName="متجر معراج"><MeraajStoreScreen /></ErrorBoundary>}
         {tab === 'fx' && <ErrorBoundary tabName="صرافة العملات"><FxScreen /></ErrorBoundary>}
         {tab === 'receipt' && <ErrorBoundary tabName="سند القبض"><VoucherScreen mode="receipt" /></ErrorBoundary>}
         {tab === 'payment' && <ErrorBoundary tabName="سند الصرف"><VoucherScreen mode="payment" /></ErrorBoundary>}
