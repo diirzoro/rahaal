@@ -9233,3 +9233,31 @@ agent_communication:
   - agent: "testing"
     message: "✅ v3.22 BACKEND TESTING COMPLETED - ALL 11 TESTS PASSED (3 test suites). Comprehensive test suite executed covering all 3 new endpoints: (1) POST /api/partners/statements - 4 tests passed (archive with 2 commission rows, GET list includes saved statement, empty statement rejected with 400, invalid partner_type rejected). (2) POST /api/partners/statements/:id/settle - 6 tests passed (full settlement creates voucher and updates balances correctly, partner balance moved from -35 to 0, box balance decreased by 35, journal entry balanced with correct lines, statement stamped with settlement fields, double-settle blocked, amount exceeds validation, invalid currency validation, invalid box_id validation, partial settlement working). (3) GET /api/partners/commissions - 1 test passed (live statement still returns correct data unchanged by settlement). All test data created and cleaned up successfully (2 statement docs left - no DELETE endpoint). Partner balance movements accurate: -35 (after commissions) → 0 (after full settlement) → +10 (after partial settlement). Journal entries balanced: debit client 1301 = credit box 1101. Backend v3.22 is production-ready."
 
+
+backend:
+  - task: "v3.23 - Package features (amenities) + package image upload/view/delete (Miraj readiness)"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Packages POST/PATCH now accept features (array of strings, sanitized: trim, max 60 chars each, dedup, max 30). New image endpoints: POST /api/packages/:id/image {data: dataURL jpeg/png/webp, max ~3MB base64} upserts into package_images collection + sets has_image=true on package. GET /api/packages/:id/image returns BINARY image with Content-Type. DELETE removes + has_image=false. Duplicate endpoint now also clones the package image. Needs backend testing."
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (23/23 tests) - Comprehensive test suite executed covering all v3.23 features. TEST 1 - FEATURES (7/7 passed): POST /packages with features array correctly deduplicates ('🧳 شنطة سفر' duplicate removed), trims whitespace ('  custom feature  ' → 'custom feature'), preserves emojis, returns 3 items as expected, has_image=false. PATCH /packages/:id replaces features array correctly (['only one']). PATCH with empty array clears features. POST with 40 features capped at 30 (max limit enforced). POST with 80-char feature truncated to 60 chars (max length enforced). GET /packages includes features array in list. TEST 2 - IMAGE UPLOAD/VIEW/DELETE (13/13 passed): POST /packages/:id/image with PNG dataURL saves correctly, returns {saved:true}, sets has_image=true on package. GET /packages/:id/image returns binary PNG with Content-Type: image/png, 70 bytes, content matches uploaded data. POST image again (JPEG) replaces existing (upsert working), GET returns Content-Type: image/jpeg. Invalid format (GIF) returns 400 'صيغة الصورة غير صالحة — يُقبل JPG / PNG / WebP فقط'. Invalid dataURL format returns 400. Oversize image (4.1M chars) returns 400 'حجم الصورة كبير جداً (الحد الأقصى ~3MB)'. DELETE /packages/:id/image returns {deleted:true}, sets has_image=false, GET image returns 404. TEST 3 - DUPLICATE (3/3 passed): POST /packages/:id/duplicate copies features array ['A','B'] correctly. Duplicate has has_image=true flag. GET /packages/<copyId>/image returns binary PNG (image cloned successfully). All test data created and cleaned up (5 packages deleted). All sanitization rules working: trim, dedup, max 60 chars per item, max 30 items. Image validation working: jpeg/png/webp only, max ~3MB, dataURL format required. Upsert mechanism working (only 1 image doc per package). Backend v3.23 is production-ready."
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: "Test v3.23 features+image endpoints. Login owner@demo.com / Demo@2025. Own test data, full cleanup, never touch existing data."
+  - agent: "testing"
+    message: "✅ v3.23 BACKEND TESTING COMPLETED - ALL 23 TESTS PASSED. Comprehensive test suite executed covering package features (amenities) and image upload/view/delete endpoints. All sanitization rules verified (trim, dedup, max 60 chars, max 30 items). All image operations verified (upload PNG/JPEG, view binary, replace/upsert, delete, validation for format/size). Duplicate endpoint correctly clones both features and image. All test data cleaned up. Backend v3.23 is production-ready."

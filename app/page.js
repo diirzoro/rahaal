@@ -7820,8 +7820,15 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
         </div>
         <div className="text-xs text-slate-500 space-y-0.5">
           {p?.start_date && <div>📅 من {fmtDate(p.start_date)} {p?.end_date && `→ ${fmtDate(p.end_date)}`}</div>}
-          <div>🧩 {p?.components_count || 0} مكوّن • 👥 {p?.bookings_count || 0} مسجل</div>
+          <div>🧩 {p?.components_count || 0} مكوّن • 👥 {p?.bookings_count || 0} مسجل {p?.has_image ? '• 📷' : ''}</div>
         </div>
+        {/* v3.23 — Feature chips preview */}
+        {Array.isArray(p?.features) && p.features.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {p.features.slice(0, 4).map(feat => <span key={feat} className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200">{feat}</span>)}
+            {p.features.length > 4 && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500">+{p.features.length - 4}</span>}
+          </div>
+        )}
         <div className="flex flex-wrap gap-1 pt-2 border-t">
           <Button size="sm" variant="outline" onClick={onOpen} className="h-7 px-2 text-xs gap-1"><FileBadge2 className="w-3 h-3" /> المكونات والتسجيل</Button>
           <Button size="sm" variant="outline" onClick={onReport} className="h-7 px-2 text-xs gap-1 text-blue-600"><ReceiptText className="w-3 h-3" /> التقرير</Button>
@@ -7874,6 +7881,26 @@ const COMP_PRICING_TYPES = [
   { v: 'room_age', l: '🛏️ غرفة + عمر (فندق...)' },
 ]
 
+// v3.23 — Package features presets (Miraj Network marketplace readiness)
+const FEATURE_PRESETS = ['🧳 شنطة سفر', '🕋 قريب من الحرم', '🤍 إحرام', '🕌 مصلى خاص', '🍽️ وجبات يومية', '☕ إفطار مجاني', '🚌 مواصلات VIP', '🧭 مرشد ديني', '🕍 زيارات المعالم', '💧 ماء زمزم', '📶 واي فاي مجاني', '🛎️ خدمة 24 ساعة']
+// v3.23 — Client-side image compression before upload (max 1200px, JPEG)
+const compressImage = (file, maxDim = 1200, quality = 0.78) => new Promise((resolve, reject) => {
+  const img = new Image()
+  const url = URL.createObjectURL(file)
+  img.onload = () => {
+    let { width, height } = img
+    const scale = Math.min(1, maxDim / Math.max(width, height))
+    width = Math.round(width * scale); height = Math.round(height * scale)
+    const canvas = document.createElement('canvas')
+    canvas.width = width; canvas.height = height
+    canvas.getContext('2d').drawImage(img, 0, 0, width, height)
+    URL.revokeObjectURL(url)
+    resolve(canvas.toDataURL('image/jpeg', quality))
+  }
+  img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('تعذر قراءة الصورة')) }
+  img.src = url
+})
+
 function PackageDialog({ open, onOpenChange, record, onSaved }) {
   // v3.9.6 — Dynamic Package Builder: items list + live totals + supplier per item
   // v3.20 — Dual pricing: 'direct' (room+age matrix, B2B) | 'components' (assembled)
@@ -7882,6 +7909,12 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
   const [rooms, setRooms] = useState([]) // v3.15/v3.20 — [{type, sale_per_pax, sale_child, sale_infant}]
   const [suppliers, setSuppliers] = useState([])
   const [saving, setSaving] = useState(false)
+  // v3.23 — Features + package image (Miraj Network readiness)
+  const [features, setFeatures] = useState([])
+  const [featureInput, setFeatureInput] = useState('')
+  const [imgPreview, setImgPreview] = useState(null) // dataURL (new) or server URL (existing)
+  const [imgChanged, setImgChanged] = useState(false)
+  const [imgRemoved, setImgRemoved] = useState(false)
   useEffect(() => {
     if (!open) return
     api('/suppliers').then(setSuppliers).catch(() => {})
@@ -7889,12 +7922,34 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
       setF({ name: record.name, package_type: record.package_type, currency: record.currency, start_date: record.start_date ? new Date(record.start_date).toISOString().slice(0,10) : '', end_date: record.end_date ? new Date(record.end_date).toISOString().slice(0,10) : '', notes: record.notes || '', pricing_mode: record.pricing_mode || ((record.room_pricing || []).length > 0 ? 'direct' : 'components') })
       setItems([])
       setRooms(Array.isArray(record.room_pricing) ? record.room_pricing.map(r => ({ ...r })) : [])
+      setFeatures(Array.isArray(record.features) ? [...record.features] : [])
+      setImgPreview(record.has_image ? `/api/packages/${record.id}/image?t=${Date.now()}` : null)
+      setImgChanged(false); setImgRemoved(false); setFeatureInput('')
     } else {
       setF({ name: '', package_type: 'umrah', currency: 'SAR', start_date: todayISO(), end_date: '', notes: '', pricing_mode: 'direct' })
       setItems([])
       setRooms([])
+      setFeatures([]); setImgPreview(null); setImgChanged(false); setImgRemoved(false); setFeatureInput('')
     }
   }, [open, record])
+  // v3.23 — feature helpers
+  const toggleFeature = (feat) => setFeatures(fs => fs.includes(feat) ? fs.filter(x => x !== feat) : [...fs, feat])
+  const addCustomFeature = () => {
+    const v = featureInput.trim().slice(0, 60)
+    if (!v) return
+    if (!features.includes(v)) setFeatures([...features, v])
+    setFeatureInput('')
+  }
+  const onPickImage = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!file.type.startsWith('image/')) return toast.error('اختر ملف صورة (JPG / PNG / WebP)')
+    try {
+      const dataUrl = await compressImage(file)
+      setImgPreview(dataUrl); setImgChanged(true); setImgRemoved(false)
+    } catch (err) { toast.error(err.message) }
+    e.target.value = ''
+  }
   // v3.15 — Room pricing helpers
   const ROOM_PRESETS = ['ثنائي', 'ثلاثي', 'رباعي', 'جماعي']
   const addRoom = (type = '') => setRooms(r => [...r, { type, sale_per_pax: 0, sale_child: '', sale_infant: '' }])
@@ -7929,11 +7984,13 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
     try {
       setSaving(true)
       const roomPricing = rooms.filter(r => String(r.type || '').trim()).map(r => ({ type: r.type, sale_per_pax: Number(r.sale_per_pax) || 0, sale_child: r.sale_child === '' || r.sale_child === null || r.sale_child === undefined ? null : Number(r.sale_child) || 0, sale_infant: r.sale_infant === '' || r.sale_infant === null || r.sale_infant === undefined ? null : Number(r.sale_infant) || 0 }))
+      let savedId = record?.id
       if (record) {
-        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, end_date: f.end_date || null, notes: f.notes, room_pricing: roomPricing, pricing_mode: f.pricing_mode } })
+        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, end_date: f.end_date || null, notes: f.notes, room_pricing: roomPricing, pricing_mode: f.pricing_mode, features } })
         toast.success('تم التحديث')
       } else {
-        const pkg = await api('/packages', { method: 'POST', body: { ...f, room_pricing: roomPricing } })
+        const pkg = await api('/packages', { method: 'POST', body: { ...f, room_pricing: roomPricing, features } })
+        savedId = pkg.id
         // Create each item as a package component
         for (const it of items) {
           const body = {
@@ -7954,6 +8011,14 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
         }
         toast.success(`✅ تم إنشاء الباكج${items.length ? ` مع ${items.length} بند` : ''}`)
       }
+      // v3.23 — package image upload / removal (after the package doc exists)
+      if (savedId) {
+        if (imgRemoved && record?.has_image) { try { await api(`/packages/${savedId}/image`, { method: 'DELETE' }) } catch {} }
+        if (imgChanged && imgPreview && imgPreview.startsWith('data:')) {
+          try { await api(`/packages/${savedId}/image`, { method: 'POST', body: { data: imgPreview } }) }
+          catch (e2) { toast.error(`حُفظ الباكج لكن الصورة لم تُرفع: ${e2.message}`) }
+        }
+      }
       onSaved(); onOpenChange(false)
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
@@ -7971,6 +8036,53 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
           <Field label="تاريخ البداية"><Input type="date" value={f.start_date} onChange={e => setF({ ...f, start_date: e.target.value })} disabled={!!record} /></Field>
           <Field label="تاريخ النهاية"><Input type="date" value={f.end_date} onChange={e => setF({ ...f, end_date: e.target.value })} /></Field>
           <div className="md:col-span-2"><Field label={`المدة${nights > 0 ? ` (${nights} ليلة تلقائي)` : ''}`}><Input value={nights ? `${nights} ليلة` : ''} disabled className="bg-slate-50" /></Field></div>
+        </div>
+        {/* v3.23 — Features + Image (Miraj Network marketplace readiness) */}
+        <div className="border-2 border-purple-200 rounded-xl p-3 mb-3 bg-purple-50/30">
+          <div className="font-bold text-slate-800 text-sm mb-2">✨ مميزات البرنامج وصورته <span className="text-[10px] font-normal text-purple-500">(ستظهر للموزعين في سوق معراج نتورك)</span></div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="md:col-span-2 space-y-2">
+              <div className="flex flex-wrap gap-1.5">
+                {FEATURE_PRESETS.map(feat => (
+                  <button key={feat} type="button" onClick={() => toggleFeature(feat)} className={`text-[11px] px-2 py-1 rounded-full border transition ${features.includes(feat) ? 'bg-purple-600 text-white border-purple-600 shadow-sm' : 'bg-white text-slate-600 border-slate-200 hover:border-purple-300'}`}>{feat}</button>
+                ))}
+              </div>
+              {features.filter(x => !FEATURE_PRESETS.includes(x)).length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {features.filter(x => !FEATURE_PRESETS.includes(x)).map(feat => (
+                    <span key={feat} className="text-[11px] px-2 py-1 rounded-full bg-purple-100 text-purple-700 border border-purple-300 flex items-center gap-1">
+                      {feat}
+                      <button type="button" onClick={() => toggleFeature(feat)} className="text-purple-400 hover:text-rose-500">✕</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <Input value={featureInput} onChange={e => setFeatureInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomFeature() } }} placeholder="ميزة مخصصة (مثال: إطلالة على الحرم)..." className="h-8 text-xs flex-1 bg-white" />
+                <Button type="button" size="sm" variant="outline" onClick={addCustomFeature} className="h-8 text-xs border-purple-300 text-purple-700">+ إضافة</Button>
+              </div>
+            </div>
+            <div>
+              {imgPreview && !imgRemoved ? (
+                <div className="relative rounded-lg overflow-hidden border-2 border-purple-200 bg-white">
+                  <img src={imgPreview} alt="صورة الباكج" className="w-full h-28 object-cover" />
+                  <div className="absolute top-1 left-1 flex gap-1">
+                    <label className="cursor-pointer bg-white/90 rounded px-1.5 py-0.5 text-[10px] font-bold text-purple-700 shadow">
+                      استبدال<input type="file" accept="image/jpeg,image/png,image/webp" onChange={onPickImage} className="hidden" />
+                    </label>
+                    <button type="button" onClick={() => { setImgRemoved(true); setImgChanged(false); setImgPreview(null) }} className="bg-white/90 rounded px-1.5 py-0.5 text-[10px] font-bold text-rose-600 shadow">حذف</button>
+                  </div>
+                </div>
+              ) : (
+                <label className="flex flex-col items-center justify-center h-28 rounded-lg border-2 border-dashed border-purple-300 bg-white cursor-pointer hover:bg-purple-50 transition">
+                  <span className="text-2xl">📷</span>
+                  <span className="text-[11px] text-slate-500 font-semibold">صورة الباكج (اختياري)</span>
+                  <span className="text-[9px] text-slate-400">JPG / PNG — تُضغط تلقائياً</span>
+                  <input type="file" accept="image/jpeg,image/png,image/webp" onChange={onPickImage} className="hidden" />
+                </label>
+              )}
+            </div>
+          </div>
         </div>
         {/* v3.20 — Dual Pricing Mode selector */}
         <div className="border-2 border-teal-200 rounded-xl p-3 mb-3 bg-teal-50/40">

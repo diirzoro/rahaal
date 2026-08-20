@@ -1792,6 +1792,8 @@ async function handleRoute(request, { params }) {
         end_date: b.end_date ? new Date(b.end_date) : null,
         room_pricing: roomPricing,
         pricing_mode: pricingMode,
+        features: sanitizeFeatures(b.features),
+        has_image: false,
         notes: b.notes || '', status: 'open',
         created_at: new Date(),
       }
@@ -1810,6 +1812,10 @@ async function handleRoute(request, { params }) {
       // v3.20 — Dual pricing mode update
       if (b.pricing_mode !== undefined && ['direct', 'components'].includes(b.pricing_mode)) {
         upd.pricing_mode = b.pricing_mode
+      }
+      // v3.23 — Features/amenities update (Miraj Network readiness)
+      if (b.features !== undefined) {
+        upd.features = sanitizeFeatures(b.features)
       }
       await db.collection('packages').updateOne({ id: pkgIdMatch[1], tenant_id: T }, { $set: upd })
       return ok({ success: true })
@@ -1932,6 +1938,36 @@ async function handleRoute(request, { params }) {
     }
 
 
+    // v3.23 — Package image (upload / view / delete) — stored in separate collection to keep package docs light
+    const pkgImgMatch = route.match(/^\/packages\/([^/]+)\/image$/)
+    if (pkgImgMatch && method === 'POST') {
+      const b = await request.json()
+      const pkg = await db.collection('packages').findOne({ id: pkgImgMatch[1], tenant_id: T })
+      if (!pkg) return bad('الباكج غير موجود', 404)
+      const raw = String(b.data || '')
+      const m = raw.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/)
+      if (!m) return bad('صيغة الصورة غير صالحة — يُقبل JPG / PNG / WebP فقط')
+      if (m[2].length > 4_000_000) return bad('حجم الصورة كبير جداً (الحد الأقصى ~3MB)')
+      await db.collection('package_images').updateOne(
+        { package_id: pkg.id, tenant_id: T },
+        { $set: { package_id: pkg.id, tenant_id: T, content_type: m[1], data: m[2], updated_at: new Date() }, $setOnInsert: { id: uuidv4(), created_at: new Date() } },
+        { upsert: true }
+      )
+      await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { has_image: true } })
+      return ok({ saved: true })
+    }
+    if (pkgImgMatch && method === 'GET') {
+      const img = await db.collection('package_images').findOne({ package_id: pkgImgMatch[1], tenant_id: T })
+      if (!img) return bad('لا توجد صورة', 404)
+      const buf = Buffer.from(img.data, 'base64')
+      return new Response(buf, { status: 200, headers: { 'Content-Type': img.content_type || 'image/jpeg', 'Cache-Control': 'private, max-age=120' } })
+    }
+    if (pkgImgMatch && method === 'DELETE') {
+      await db.collection('package_images').deleteOne({ package_id: pkgImgMatch[1], tenant_id: T })
+      await db.collection('packages').updateOne({ id: pkgImgMatch[1], tenant_id: T }, { $set: { has_image: false } })
+      return ok({ deleted: true })
+    }
+
     // v3.21 — Duplicate package (structure + components + transports; NO bookings/JEs)
     const pkgDupMatch = route.match(/^\/packages\/([^/]+)\/duplicate$/)
     if (pkgDupMatch && method === 'POST') {
@@ -1970,6 +2006,12 @@ async function handleRoute(request, { params }) {
         const { _id: tid2, ...tRest } = t
         await db.collection('package_transports').insertOne({ ...tRest, id: uuidv4(), package_id: newId, status: 'open', created_at: new Date() })
         transCount++
+      }
+      // v3.23 — Clone package image too
+      const srcImg = await db.collection('package_images').findOne({ package_id: srcId, tenant_id: T })
+      if (srcImg) {
+        const { _id: iid, ...imgRest } = srcImg
+        await db.collection('package_images').insertOne({ ...imgRest, id: uuidv4(), package_id: newId, created_at: new Date() })
       }
       const { _id: nid, ...pkgOut } = newPkg
       return ok({ ...pkgOut, components_copied: compCount, transports_copied: transCount })
@@ -3973,9 +4015,16 @@ function ageCategoryOf(age) {
   if (a < 12) return 'child'
   return 'adult'
 }
-// Sanitize room_pricing array: [{type, sale_per_pax(adult), sale_child|null, sale_infant|null}]
-function sanitizeRoomPricing(arr) {
+// v3.23 — Package features/amenities list (Miraj Network readiness)
+function sanitizeFeatures(arr) {
   return (Array.isArray(arr) ? arr : [])
+    .map(x => String(x || '').trim().slice(0, 60))
+    .filter(Boolean)
+    .filter((x, i, a) => a.indexOf(x) === i)
+    .slice(0, 30)
+}
+// Sanitize room_pricing array: [{type, sale_per_pax(adult), sale_child|null, sale_infant|null}]
+function sanitizeRoomPricing(arr) {  return (Array.isArray(arr) ? arr : [])
     .filter(r => r && String(r.type || '').trim())
     .slice(0, 12)
     .map(r => ({
