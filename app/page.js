@@ -7539,16 +7539,27 @@ function PartnerStatementDialog({ open, onOpenChange }) {
   const [to, setTo] = useState('')
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
+  // v3.22 — Archive & Settlement
+  const [boxes, setBoxes] = useState([])
+  const [archivedStmt, setArchivedStmt] = useState(null) // saved snapshot for the current view
+  const [archiveList, setArchiveList] = useState([])
+  const [showArchive, setShowArchive] = useState(false)
+  const [settleFor, setSettleFor] = useState(null) // { stmt, currency, due }
+  const [settleForm, setSettleForm] = useState({ box_id: '', amount: '', notes: '' })
+  const [settling, setSettling] = useState(false)
   useEffect(() => {
     if (!open) return
     api('/clients').then(setClients).catch(() => {})
     api('/suppliers').then(setSuppliers).catch(() => {})
+    api('/boxes').then(setBoxes).catch(() => {})
+    loadArchive()
     // default: current month
     const now = new Date()
     setFrom(new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10))
     setTo(now.toISOString().slice(0, 10))
-    setData(null); setPartnerKey('')
+    setData(null); setPartnerKey(''); setArchivedStmt(null); setSettleFor(null); setShowArchive(false)
   }, [open])
+  const loadArchive = () => api('/partners/statements').then(setArchiveList).catch(() => {})
   const partnerName = useMemo(() => {
     if (!partnerKey) return ''
     const [type, id] = partnerKey.split(':')
@@ -7560,6 +7571,7 @@ function PartnerStatementDialog({ open, onOpenChange }) {
     const [, id] = partnerKey.split(':')
     try {
       setLoading(true)
+      setArchivedStmt(null); setSettleFor(null)
       const qs = new URLSearchParams({ partner_id: id })
       if (from) qs.set('from', from)
       if (to) qs.set('to', to)
@@ -7568,11 +7580,53 @@ function PartnerStatementDialog({ open, onOpenChange }) {
       if ((res.rows || []).length === 0) toast.info('لا توجد عمولات مشتركة لهذا الشريك في الفترة المحددة')
     } catch (e) { toast.error(e.message) } finally { setLoading(false) }
   }
-  const printStmt = () => {
-    if (!data || (data.rows || []).length === 0) return toast.error('لا توجد بيانات للطباعة')
+  // v3.22 — Save immutable snapshot (server recomputes for integrity)
+  const archiveStmt = async (silent = false) => {
+    if (!partnerKey) return null
+    const [type, id] = partnerKey.split(':')
+    try {
+      const doc = await api('/partners/statements', { method: 'POST', body: { partner_type: type, partner_id: id, from: from || null, to: to || null } })
+      setArchivedStmt(doc)
+      loadArchive()
+      if (!silent) toast.success('📁 تم حفظ الكشف في الأرشيف')
+      return doc
+    } catch (e) { if (!silent) toast.error(e.message); else throw e; return null }
+  }
+  // v3.22 — Open settlement panel (from live view or from archive)
+  const openSettle = (stmt, currency, due) => {
+    setSettleFor({ stmt, currency, due })
+    setSettleForm({ box_id: '', amount: String(due), notes: '' })
+  }
+  const doSettle = async () => {
+    if (!settleFor) return
+    if (!settleForm.box_id) return toast.error('اختر الصندوق / البنك للصرف منه')
+    const amt = Number(settleForm.amount)
+    if (!(amt > 0)) return toast.error('أدخل مبلغاً صحيحاً')
+    try {
+      setSettling(true)
+      let stmtDoc = settleFor.stmt?.id ? settleFor.stmt : archivedStmt
+      // Live view not archived yet → archive first (audit chain)
+      if (!stmtDoc?.id) {
+        stmtDoc = await archiveStmt(true)
+        if (!stmtDoc) throw new Error('تعذر أرشفة الكشف قبل التسوية')
+      }
+      const res = await api(`/partners/statements/${stmtDoc.id}/settle`, { method: 'POST', body: { box_id: settleForm.box_id, currency: settleFor.currency, amount: amt, notes: settleForm.notes } })
+      toast.success(`✅ تمت التسوية — سند صرف ${fmt(res.settled_amount, res.settled_currency)} وقيد محاسبي متوازن`)
+      setSettleFor(null)
+      loadArchive()
+      setArchivedStmt({ ...stmtDoc, settlement_voucher_id: res.voucher?.id, settled_amount: res.settled_amount, settled_currency: res.settled_currency })
+    } catch (e) { toast.error(e.message) } finally { setSettling(false) }
+  }
+  const printStmt = (src = null) => {
+    // src: archived statement doc OR null (uses live data)
+    const d = src ? { rows: src.rows, totals: src.totals, count: src.count } : data
+    const pName = src ? src.partner_name : partnerName
+    const pFrom = src ? src.from : from
+    const pTo = src ? src.to : to
+    if (!d || (d.rows || []).length === 0) return toast.error('لا توجد بيانات للطباعة')
     const w = window.open('', '_blank', 'width=900,height=1100')
     if (!w) return toast.error('اسمح بالنوافذ المنبثقة للطباعة')
-    const rowsHtml = data.rows.map((r, i) => `
+    const rowsHtml = d.rows.map((r, i) => `
       <tr>
         <td>${i + 1}</td>
         <td>${r.date ? new Date(r.date).toLocaleDateString('en-GB') : '—'}</td>
@@ -7581,7 +7635,7 @@ function PartnerStatementDialog({ open, onOpenChange }) {
         <td>${r.total_commission.toLocaleString('en-US')} ${r.currency}</td>
         <td style="font-weight:bold; color:#b45309">${r.partner_share.toLocaleString('en-US')} ${r.currency}</td>
       </tr>`).join('')
-    const totalsHtml = Object.entries(data.totals || {}).map(([cur, t]) => `
+    const totalsHtml = Object.entries(d.totals || {}).map(([cur, t]) => `
       <div style="display:flex; justify-content:space-between; padding:6px 12px; border-bottom:1px dashed #e2e8f0">
         <b>${cur}</b>
         <span>عمليات: ${t.count}</span>
@@ -7589,7 +7643,7 @@ function PartnerStatementDialog({ open, onOpenChange }) {
         <span style="color:#b45309">مستحق الشريك: <b>${t.partner_share.toLocaleString('en-US')}</b></span>
         <span style="color:#047857">صافي المكتب: <b>${t.office_share.toLocaleString('en-US')}</b></span>
       </div>`).join('')
-    w.document.write(`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>كشف حساب الشريك — ${partnerName}</title>
+    w.document.write(`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>كشف حساب الشريك — ${pName}</title>
       <style>
         body{font-family:'Segoe UI',Tahoma,sans-serif; margin:24px; color:#1e293b}
         h1{font-size:20px; margin:0} .sub{color:#64748b; font-size:12px; margin-top:4px}
@@ -7604,10 +7658,11 @@ function PartnerStatementDialog({ open, onOpenChange }) {
       <div style="display:flex; justify-content:space-between; align-items:start">
         <div>
           <h1>🤝 كشف حساب عمولات الشريك</h1>
-          <div class="sub">الشريك: <b style="color:#1e293b; font-size:14px">${partnerName}</b></div>
-          <div class="sub">الفترة: ${from ? new Date(from).toLocaleDateString('en-GB') : 'البداية'} ← ${to ? new Date(to).toLocaleDateString('en-GB') : 'اليوم'}</div>
+          <div class="sub">الشريك: <b style="color:#1e293b; font-size:14px">${pName}</b></div>
+          <div class="sub">الفترة: ${pFrom ? new Date(pFrom).toLocaleDateString('en-GB') : 'البداية'} ← ${pTo ? new Date(pTo).toLocaleDateString('en-GB') : 'اليوم'}</div>
+          ${src?.settlement_voucher_id ? '<div class="sub" style="color:#047857; font-weight:bold">✅ كشف مُسوّى — تم السداد بسند صرف</div>' : ''}
         </div>
-        <div class="sub" style="text-align:left">تاريخ الإصدار: ${new Date().toLocaleDateString('en-GB')}<br/>عدد العمليات: ${data.count}</div>
+        <div class="sub" style="text-align:left">تاريخ الإصدار: ${src ? new Date(src.created_at).toLocaleDateString('en-GB') : new Date().toLocaleDateString('en-GB')}<br/>عدد العمليات: ${d.count}</div>
       </div>
       <table>
         <thead><tr><th>#</th><th>التاريخ</th><th>الوحدة</th><th>البيان</th><th>إجمالي العمولة</th><th>مستحق الشريك</th></tr></thead>
@@ -7639,10 +7694,73 @@ function PartnerStatementDialog({ open, onOpenChange }) {
           <Field label="إلى تاريخ"><Input type="date" value={to} onChange={e => setTo(e.target.value)} /></Field>
           <div className="flex gap-2">
             <Button onClick={fetchStmt} disabled={loading} className="flex-1 grad-brand text-white">{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : '🔍 عرض'}</Button>
-            {data && (data.rows || []).length > 0 && <Button variant="outline" onClick={printStmt} className="gap-1 border-amber-300 text-amber-700"><Printer className="w-4 h-4" /> طباعة</Button>}
+            {data && (data.rows || []).length > 0 && <Button variant="outline" onClick={() => printStmt(null)} className="gap-1 border-amber-300 text-amber-700"><Printer className="w-4 h-4" /> طباعة</Button>}
           </div>
         </div>
-        {data && (
+        {/* v3.22 — Archive toggle + save snapshot */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button size="sm" variant={showArchive ? 'default' : 'outline'} onClick={() => setShowArchive(!showArchive)} className={`h-8 text-xs gap-1 ${showArchive ? 'bg-slate-700 text-white' : ''}`}>📁 الأرشيف ({archiveList.length})</Button>
+          {data && (data.rows || []).length > 0 && !archivedStmt && (
+            <Button size="sm" variant="outline" onClick={() => archiveStmt(false)} className="h-8 text-xs gap-1 border-indigo-300 text-indigo-700 hover:bg-indigo-50">💾 حفظ الكشف في الأرشيف</Button>
+          )}
+          {archivedStmt && <Badge className="bg-indigo-100 text-indigo-700 border border-indigo-300">📁 محفوظ في الأرشيف {archivedStmt.settlement_voucher_id ? '• ✅ مُسوّى' : ''}</Badge>}
+        </div>
+        {/* v3.22 — Settlement panel */}
+        {settleFor && (
+          <div className="rounded-xl border-2 border-emerald-300 bg-emerald-50/60 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-bold text-slate-800">💸 تسوية وسداد مستحقات الشريك — {settleFor.stmt?.partner_name || partnerName}</div>
+              <Button size="sm" variant="ghost" onClick={() => setSettleFor(null)} className="h-7 text-rose-600 text-xs">إلغاء</Button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+              <Field label="الصندوق / البنك (الصرف منه)">
+                <Select value={settleForm.box_id} onValueChange={v => setSettleForm({ ...settleForm, box_id: v })}>
+                  <SelectTrigger className="bg-white"><SelectValue placeholder="اختر" /></SelectTrigger>
+                  <SelectContent>{boxes.map(bx => <SelectItem key={bx.id} value={bx.id}>{bx.type === 'cash' ? '💵' : '🏦'} {bx.name_ar}</SelectItem>)}</SelectContent>
+                </Select>
+              </Field>
+              <Field label={`المبلغ (${settleFor.currency}) — المستحق: ${settleFor.due}`}>
+                <Input type="number" min="0" step="0.01" value={settleForm.amount} onChange={e => setSettleForm({ ...settleForm, amount: e.target.value })} className="bg-white font-bold" />
+              </Field>
+              <Field label="ملاحظة (اختياري)">
+                <Input value={settleForm.notes} onChange={e => setSettleForm({ ...settleForm, notes: e.target.value })} className="bg-white" placeholder="تسوية شهر ..." />
+              </Field>
+              <div className="flex items-end">
+                <Button onClick={doSettle} disabled={settling} className="w-full grad-green text-white gap-1">{settling ? <Loader2 className="w-4 h-4 animate-spin" /> : '✅ تأكيد التسوية + سند صرف'}</Button>
+              </div>
+            </div>
+            <div className="text-[11px] text-slate-500">💡 سيُنشأ سند صرف باسم الشريك يخفّض رصيد العمولة المستحقة له، مع قيد محاسبي متوازن آلياً. {!settleFor.stmt?.id && 'وسيُحفظ الكشف في الأرشيف تلقائياً قبل التسوية (Audit Trail).'}</div>
+          </div>
+        )}
+        {/* v3.22 — Archive list */}
+        {showArchive && (
+          archiveList.length === 0 ? (
+            <div className="text-center text-slate-400 py-6 text-sm">لا توجد كشوفات محفوظة بعد — اعرض كشفاً واضغط "حفظ في الأرشيف"</div>
+          ) : (
+            <div className="space-y-2">
+              {archiveList.map(s => (
+                <div key={s.id} className="rounded-lg border bg-white p-3 flex items-center gap-3 flex-wrap">
+                  <div className="flex-1 min-w-[200px]">
+                    <div className="text-sm font-bold text-slate-800">{s.partner_type === 'supplier' ? '🏢' : '👤'} {s.partner_name}</div>
+                    <div className="text-[11px] text-slate-500">
+                      {s.from ? new Date(s.from).toLocaleDateString('en-GB') : 'البداية'} ← {s.to ? new Date(s.to).toLocaleDateString('en-GB') : '—'} • {s.count} عملية • حُفظ {new Date(s.created_at).toLocaleDateString('en-GB')}
+                    </div>
+                    <div className="text-[11px] mt-0.5">
+                      {Object.entries(s.totals || {}).map(([cur, t]) => <span key={cur} className="me-3 text-amber-700 font-bold">{cur}: {t.partner_share.toLocaleString('en-US')}</span>)}
+                    </div>
+                  </div>
+                  {s.settlement_voucher_id
+                    ? <Badge className="bg-emerald-100 text-emerald-700 border border-emerald-300">✅ مُسوّى {s.settled_amount ? `— ${s.settled_amount.toLocaleString('en-US')} ${s.settled_currency}` : ''}</Badge>
+                    : <div className="flex gap-1">{Object.entries(s.totals || {}).filter(([, t]) => t.partner_share > 0).map(([cur, t]) => (
+                        <Button key={cur} size="sm" onClick={() => openSettle(s, cur, t.partner_share)} className="h-7 text-xs grad-green text-white">💸 تسوية {cur}</Button>
+                      ))}</div>}
+                  <Button size="sm" variant="outline" onClick={() => printStmt(s)} className="h-7 text-xs gap-1"><Printer className="w-3 h-3" /> طباعة</Button>
+                </div>
+              ))}
+            </div>
+          )
+        )}
+        {!showArchive && data && (
           (data.rows || []).length === 0 ? (
             <div className="text-center text-slate-400 py-8 text-sm">لا توجد عمولات مشتركة لهذا الشريك في الفترة المحددة</div>
           ) : (
@@ -7654,6 +7772,9 @@ function PartnerStatementDialog({ open, onOpenChange }) {
                     <div className="flex justify-between text-xs"><span>إجمالي العمولة:</span><b>{fmt(t.total_commission, cur)}</b></div>
                     <div className="flex justify-between text-xs text-amber-700"><span>مستحق الشريك:</span><b>{fmt(t.partner_share, cur)}</b></div>
                     <div className="flex justify-between text-xs text-emerald-700 border-t mt-1 pt-1"><span>صافي المكتب:</span><b>{fmt(t.office_share, cur)}</b></div>
+                    {t.partner_share > 0 && !(archivedStmt?.settlement_voucher_id) && (
+                      <Button size="sm" onClick={() => openSettle(archivedStmt || {}, cur, t.partner_share)} className="w-full mt-2 h-7 text-xs grad-green text-white">💸 تسوية وسداد {cur}</Button>
+                    )}
                   </div>
                 ))}
               </div>

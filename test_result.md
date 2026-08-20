@@ -9204,3 +9204,32 @@ agent_communication:
   - agent: "testing"
     message: "✅ v3.21 BACKEND TESTING COMPLETED - ALL 12 TESTS PASSED. Comprehensive test suite executed covering all 3 new endpoints: (1) POST /api/packages/:id/duplicate - 6 tests passed (duplicate with custom name, components copied with new IDs and preserved pricing, no bookings copied, default name generation, 404 for non-existent package, functional booking test). (2) GET /api/partners/commissions - 4 tests passed (partner statement with correct module labels and totals, date filtering, missing partner_id validation, empty results for partner with no commissions). (3) GET /api/my/installment-alert - 2 tests passed (null alert for non-installments tenant, auth required). All test data created and cleaned up successfully. No pre-existing data modified. Backend v3.21 is production-ready."
 
+
+backend:
+  - task: "v3.22 - Partner Statement Archive (snapshot) + Settlement via payment voucher"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Refactored statement computation into shared computePartnerStatement(db,T,partnerId,from,to). New endpoints: (1) POST /api/partners/statements {partner_type, partner_id, from, to} - server RECOMPUTES snapshot (integrity) and stores immutable doc in partner_statements collection (rows, totals, count, settlement fields null). Rejects empty statements. (2) GET /api/partners/statements?partner_id= - list archive desc limit 100. (3) POST /api/partners/statements/:id/settle {box_id, currency, amount?, notes?} - validates: statement exists, not already settled, currency valid, dueForCur>0, amount<=due. Calls existing createVoucher(type=payment, party=partner) which reduces box balance, increases partner balance toward zero, creates balanced JE. Then stamps statement with settlement_voucher_id/settled_at/settled_amount/settled_currency. Double-settle blocked. Needs backend testing."
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (ALL 3 TEST SUITES) - Comprehensive testing completed for v3.22 Partner Statement Archive + Settlement. SETUP: Created partner client, regular client, supplier, cash box. Created 2 commission-sharing operations (visa: cost=50, sale=100, partner_share=20 SAR; service: cost=30, sale=80, partner_share=15 SAR). Partner balance correctly shows -35 SAR (we owe partner 35). TEST 1 - ARCHIVE (4/4 passed): (1.1) POST /api/partners/statements creates statement with id, partner_name, 2 rows, count=2, totals.SAR {partner_share:35, total_commission:100, office_share:65}, settlement_voucher_id=null ✅. (1.2) GET /api/partners/statements?partner_id returns saved statement ✅. (1.3) POST with partner having no commissions returns 400 'لا توجد عمولات في الفترة المحددة — لا يمكن أرشفة كشف فارغ' ✅. (1.4) POST with invalid partner_type returns 400 ✅. TEST 2 - SETTLEMENT (6/6 passed): (2.1) POST /api/partners/statements/:id/settle {box_id, currency:SAR, amount:35} creates payment voucher (type=payment, amount=35, party=partner), partner balance moved from -35 to 0 ✅, box balance decreased by 35 ✅, journal entry exists with 2 balanced lines (debit client 1301: 35, credit box 1101: 35) ✅, statement stamped with settlement_voucher_id, settled_at, settled_amount=35, settled_currency=SAR ✅. (2.2) Double-settle blocked with 400 'هذا الكشف مُسوّى مسبقاً' ✅. (2.3) Created 2nd statement, settle with amount 999 (> due 35) returns 400 'المبلغ يتجاوز مستحقات الكشف' ✅. (2.4) Settle with invalid currency 'XXX' returns 400 ✅. (2.5) Settle with invalid box_id returns error 'الصندوق/البنك غير موجود' ✅. (2.6) Partial settlement with amount 10 succeeds, partner balance increased by 10 correctly, voucher created ✅. TEST 3 - REGRESSION (1/1 passed): GET /api/partners/commissions still returns 2 rows, totals SAR partner_share 35 (unchanged by settlement - statement reflects earned commissions, not payments) ✅. CLEANUP: Deleted 2 vouchers (balances reversed), visa, service, clients, supplier. Box deletion returned 404 (already deleted by cascade). Note: 2 test statement docs left (no DELETE endpoint for statements). All balance movements accurate, journal entries balanced, validation working correctly. Backend v3.22 is production-ready."
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: "Test v3.22 archive+settlement per detailed task. Login owner@demo.com / Demo@2025. Own test data only, full cleanup. Verify partner balance movement and JE balance on settlement voucher."
+  - agent: "testing"
+    message: "✅ v3.22 BACKEND TESTING COMPLETED - ALL 11 TESTS PASSED (3 test suites). Comprehensive test suite executed covering all 3 new endpoints: (1) POST /api/partners/statements - 4 tests passed (archive with 2 commission rows, GET list includes saved statement, empty statement rejected with 400, invalid partner_type rejected). (2) POST /api/partners/statements/:id/settle - 6 tests passed (full settlement creates voucher and updates balances correctly, partner balance moved from -35 to 0, box balance decreased by 35, journal entry balanced with correct lines, statement stamped with settlement fields, double-settle blocked, amount exceeds validation, invalid currency validation, invalid box_id validation, partial settlement working). (3) GET /api/partners/commissions - 1 test passed (live statement still returns correct data unchanged by settlement). All test data created and cleaned up successfully (2 statement docs left - no DELETE endpoint). Partner balance movements accurate: -35 (after commissions) → 0 (after full settlement) → +10 (after partial settlement). Journal entries balanced: debit client 1301 = credit box 1101. Backend v3.22 is production-ready."
+

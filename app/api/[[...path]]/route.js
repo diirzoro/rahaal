@@ -3196,56 +3196,65 @@ async function handleRoute(request, { params }) {
       const url = new URL(request.url)
       const partnerId = url.searchParams.get('partner_id')
       if (!partnerId) return bad('partner_id مطلوب')
-      const from = url.searchParams.get('from')
-      const to = url.searchParams.get('to')
-      const dateFilter = {}
-      if (from) dateFilter.$gte = new Date(from)
-      if (to) dateFilter.$lte = new Date(to + 'T23:59:59')
-      const hasDate = Object.keys(dateFilter).length > 0
-      const baseQ = { tenant_id: T, commission_partner_id: partnerId, commission_share_amount: { $gt: 0 } }
-      const tq = hasDate ? { ...baseQ, date: dateFilter } : baseQ
-      const bq = hasDate ? { ...baseQ, created_at: dateFilter } : baseQ
-      const [tickets, visas, services, bookings] = await Promise.all([
-        db.collection('tickets').find(tq).toArray(),
-        db.collection('visas').find(tq).toArray(),
-        db.collection('services').find(tq).toArray(),
-        db.collection('package_bookings').find(bq).toArray(),
-      ])
-      const pkgIds = [...new Set(bookings.map(x => x.package_id).filter(Boolean))]
-      const pkgs = pkgIds.length ? await db.collection('packages').find({ tenant_id: T, id: { $in: pkgIds } }).toArray() : []
-      const pkgMap = {}
-      for (const p of pkgs) pkgMap[p.id] = p.name
-      const rows = []
-      const push = (list, module, moduleLabel, descFn, dateFn) => {
-        for (const d of list) rows.push({
-          id: d.id, module, module_label: moduleLabel,
-          date: dateFn(d) || d.created_at || null,
-          description: descFn(d),
-          currency: d.currency || 'USD',
-          total_commission: +(Number(d.commission) || 0).toFixed(2),
-          partner_share: +(Number(d.commission_share_amount) || 0).toFixed(2),
-          share_mode: d.commission_share_mode || 'amount',
-          share_value: Number(d.commission_share_value) || 0,
-        })
+      const result = await computePartnerStatement(db, T, partnerId, url.searchParams.get('from'), url.searchParams.get('to'))
+      return ok(result)
+    }
+
+    // v3.22 — Statement Archive (Audit Trail): save an immutable snapshot recomputed server-side
+    if (route === '/partners/statements' && method === 'POST') {
+      const b = await request.json()
+      if (!b.partner_id || !['client', 'supplier'].includes(b.partner_type)) return bad('بيانات الشريك مطلوبة')
+      const pcol = b.partner_type === 'supplier' ? 'suppliers' : 'clients'
+      const partner = await db.collection(pcol).findOne({ id: b.partner_id, tenant_id: T })
+      if (!partner) return bad('الشريك غير موجود')
+      const snap = await computePartnerStatement(db, T, b.partner_id, b.from || null, b.to || null)
+      if ((snap.rows || []).length === 0) return bad('لا توجد عمولات في الفترة المحددة — لا يمكن أرشفة كشف فارغ')
+      const doc = {
+        id: uuidv4(), tenant_id: T,
+        partner_type: b.partner_type, partner_id: b.partner_id, partner_name: partner.name,
+        from: b.from || null, to: b.to || null,
+        rows: snap.rows, totals: snap.totals, count: snap.count,
+        settlement_voucher_id: null, settled_at: null, settled_amount: null, settled_currency: null,
+        created_at: new Date(),
       }
-      push(tickets, 'ticket', '✈️ تذكرة', d => `${d.passenger_name || d.client_name || ''}${d.trip_route ? ` — ${d.trip_route}` : ''}`.trim() || 'تذكرة طيران', d => d.date)
-      push(visas, 'visa', '🛂 تأشيرة', d => `${d.service_type || 'تأشيرة'} — ${d.passenger_name || ''}`.trim(), d => d.date)
-      push(services, 'service', '🧾 خدمة', d => `${d.service_type || 'خدمة'} — ${d.beneficiary_name || ''}`.trim(), d => d.date)
-      push(bookings, 'package', '📦 باكج', d => `${pkgMap[d.package_id] || 'باكج'} — ${d.pilgrim_name || ''} (${d.pax_count || 1} فرد)`.trim(), d => d.created_at)
-      rows.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
-      const totals = {}
-      for (const r of rows) {
-        totals[r.currency] = totals[r.currency] || { partner_share: 0, total_commission: 0, count: 0 }
-        totals[r.currency].partner_share += r.partner_share
-        totals[r.currency].total_commission += r.total_commission
-        totals[r.currency].count++
-      }
-      for (const c of Object.keys(totals)) {
-        totals[c].partner_share = +totals[c].partner_share.toFixed(2)
-        totals[c].total_commission = +totals[c].total_commission.toFixed(2)
-        totals[c].office_share = +(totals[c].total_commission - totals[c].partner_share).toFixed(2)
-      }
-      return ok({ rows, totals, count: rows.length })
+      await db.collection('partner_statements').insertOne(doc)
+      const { _id, ...rest } = doc
+      return ok(rest)
+    }
+    if (route === '/partners/statements' && method === 'GET') {
+      const url = new URL(request.url)
+      const q = { tenant_id: T }
+      const pid = url.searchParams.get('partner_id')
+      if (pid) q.partner_id = pid
+      return ok(clean(await db.collection('partner_statements').find(q).sort({ created_at: -1 }).limit(100).toArray()))
+    }
+    // v3.22 — Settle a statement: creates a payment voucher (balanced JE) reducing the partner's due balance
+    const stmtSettleMatch = route.match(/^\/partners\/statements\/([^/]+)\/settle$/)
+    if (stmtSettleMatch && method === 'POST') {
+      const b = await request.json()
+      const stmt = await db.collection('partner_statements').findOne({ id: stmtSettleMatch[1], tenant_id: T })
+      if (!stmt) return bad('الكشف غير موجود', 404)
+      if (stmt.settlement_voucher_id) return bad('هذا الكشف مُسوّى مسبقاً — أنشئ كشفاً جديداً لأي مستحقات لاحقة')
+      const currency = b.currency
+      if (!CURRENCIES.includes(currency)) return bad('عملة غير صالحة')
+      const dueForCur = Number(stmt.totals?.[currency]?.partner_share) || 0
+      if (dueForCur <= 0) return bad(`لا توجد مستحقات بعملة ${currency} في هذا الكشف`)
+      const amount = b.amount !== undefined ? Number(b.amount) : dueForCur
+      if (!(amount > 0)) return bad('المبلغ يجب أن يكون أكبر من صفر')
+      if (amount > dueForCur + 0.01) return bad(`المبلغ يتجاوز مستحقات الكشف (${dueForCur} ${currency})`)
+      const result = await createVoucher(db, T, {
+        type: 'payment',
+        party_type: stmt.partner_type, party_id: stmt.partner_id,
+        box_id: b.box_id, currency, amount,
+        date: b.date || undefined,
+        description: `تسوية عمولات شريك — ${stmt.partner_name} (كشف ${stmt.from ? new Date(stmt.from).toLocaleDateString('en-GB') : 'البداية'} ← ${stmt.to ? new Date(stmt.to).toLocaleDateString('en-GB') : 'اليوم'})${b.notes ? ` — ${String(b.notes).slice(0, 120)}` : ''}`,
+      })
+      if (result.error) return bad(result.error)
+      await db.collection('partner_statements').updateOne(
+        { id: stmt.id, tenant_id: T },
+        { $set: { settlement_voucher_id: result.doc.id, settled_at: new Date(), settled_amount: amount, settled_currency: currency } }
+      )
+      return ok({ voucher: result.doc, statement_id: stmt.id, settled_amount: amount, settled_currency: currency })
     }
 
     if (route === '/tickets' && method === 'GET') return ok(clean(await db.collection('tickets').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
@@ -4040,6 +4049,58 @@ function computeDirectRoomSale(roomPricing, registrants) {
     else sale += Number(rp.sale_per_pax) || 0
   }
   return +sale.toFixed(2)
+}
+
+// v3.21/v3.22 — Shared partner-commission statement computation (used by live view + archive snapshot)
+async function computePartnerStatement(db, T, partnerId, from, to) {
+  const dateFilter = {}
+  if (from) dateFilter.$gte = new Date(from)
+  if (to) dateFilter.$lte = new Date(to + 'T23:59:59')
+  const hasDate = Object.keys(dateFilter).length > 0
+  const baseQ = { tenant_id: T, commission_partner_id: partnerId, commission_share_amount: { $gt: 0 } }
+  const tq = hasDate ? { ...baseQ, date: dateFilter } : baseQ
+  const bq = hasDate ? { ...baseQ, created_at: dateFilter } : baseQ
+  const [tickets, visas, services, bookings] = await Promise.all([
+    db.collection('tickets').find(tq).toArray(),
+    db.collection('visas').find(tq).toArray(),
+    db.collection('services').find(tq).toArray(),
+    db.collection('package_bookings').find(bq).toArray(),
+  ])
+  const pkgIds = [...new Set(bookings.map(x => x.package_id).filter(Boolean))]
+  const pkgs = pkgIds.length ? await db.collection('packages').find({ tenant_id: T, id: { $in: pkgIds } }).toArray() : []
+  const pkgMap = {}
+  for (const p of pkgs) pkgMap[p.id] = p.name
+  const rows = []
+  const push = (list, module, moduleLabel, descFn, dateFn) => {
+    for (const d of list) rows.push({
+      id: d.id, module, module_label: moduleLabel,
+      date: dateFn(d) || d.created_at || null,
+      description: descFn(d),
+      currency: d.currency || 'USD',
+      total_commission: +(Number(d.commission) || 0).toFixed(2),
+      partner_share: +(Number(d.commission_share_amount) || 0).toFixed(2),
+      share_mode: d.commission_share_mode || 'amount',
+      share_value: Number(d.commission_share_value) || 0,
+    })
+  }
+  push(tickets, 'ticket', '✈️ تذكرة', d => `${d.passenger_name || d.client_name || ''}${d.trip_route ? ` — ${d.trip_route}` : ''}`.trim() || 'تذكرة طيران', d => d.date)
+  push(visas, 'visa', '🛂 تأشيرة', d => `${d.service_type || 'تأشيرة'} — ${d.passenger_name || ''}`.trim(), d => d.date)
+  push(services, 'service', '🧾 خدمة', d => `${d.service_type || 'خدمة'} — ${d.beneficiary_name || ''}`.trim(), d => d.date)
+  push(bookings, 'package', '📦 باكج', d => `${pkgMap[d.package_id] || 'باكج'} — ${d.pilgrim_name || ''} (${d.pax_count || 1} فرد)`.trim(), d => d.created_at)
+  rows.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
+  const totals = {}
+  for (const r of rows) {
+    totals[r.currency] = totals[r.currency] || { partner_share: 0, total_commission: 0, count: 0 }
+    totals[r.currency].partner_share += r.partner_share
+    totals[r.currency].total_commission += r.total_commission
+    totals[r.currency].count++
+  }
+  for (const c of Object.keys(totals)) {
+    totals[c].partner_share = +totals[c].partner_share.toFixed(2)
+    totals[c].total_commission = +totals[c].total_commission.toFixed(2)
+    totals[c].office_share = +(totals[c].total_commission - totals[c].partner_share).toFixed(2)
+  }
+  return { rows, totals, count: rows.length }
 }
 
 // ================= Business logic =================
