@@ -7269,15 +7269,16 @@ function PackagesScreen() {
     try { await api(`/packages/${p.id}`, { method: 'DELETE' }); toast.success('تم الحذف'); load() }
     catch (e) { toast.error(e.message) }
   }
-  // v3.21 — Duplicate package (structure + components + transports, no bookings)
+  // v3.21/v3.31 — Duplicate package: full independent copy (components + transports + image, fresh Meraaj identity)
+  // then immediately open the FULL edit form so the user can modify anything before using it.
   const dupPkg = async (p) => {
-    const suggested = `${p?.name} — نسخة`
-    const name = prompt(`نسخ الباكج "${p?.name}" بكل مكوناته وأسعاره كمسودة جديدة.\n\nاسم النسخة الجديدة:`, suggested)
-    if (name === null) return
+    if (!confirm(`نسخ الباكج "${p?.name}" بكامل بياناته (الأسعار، المكونات، الفنادق، النقل، المميزات، الصورة) كباكج مستقل جديد؟\n\nسيُفتح نموذج التعديل الكامل للنسخة فور إنشائها.`)) return
     try {
-      const res = await api(`/packages/${p.id}/duplicate`, { method: 'POST', body: { name: String(name).trim() || suggested } })
-      toast.success(`✅ تم النسخ: ${res.name} (${res.components_copied || 0} مكوّن${res.transports_copied ? ` + ${res.transports_copied} وسيلة نقل` : ''})`)
-      load()
+      const res = await api(`/packages/${p.id}/duplicate`, { method: 'POST', body: {} })
+      toast.success(`✅ تم النسخ: ${res.name} (${res.components_copied || 0} مكوّن${res.transports_copied ? ` + ${res.transports_copied} وسيلة نقل` : ''}) — عدّل ما تشاء ثم احفظ`)
+      await load()
+      setEditing(res)
+      setOpen(true)
     } catch (e) { toast.error(e.message) }
   }
   const dateBounds = useMemo(() => {
@@ -8633,7 +8634,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
       const roomPricing = rooms.filter(r => String(r.type || '').trim()).map(r => ({ type: r.type, sale_per_pax: Number(r.sale_per_pax) || 0, sale_child: r.sale_child === '' || r.sale_child === null || r.sale_child === undefined ? null : Number(r.sale_child) || 0, sale_infant: r.sale_infant === '' || r.sale_infant === null || r.sale_infant === undefined ? null : Number(r.sale_infant) || 0 }))
       let savedId = record?.id
       if (record) {
-        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, end_date: f.end_date || null, notes: f.notes, room_pricing: roomPricing, pricing_mode: f.pricing_mode, features } })
+        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, currency: f.currency, start_date: f.start_date || null, end_date: f.end_date || null, notes: f.notes, room_pricing: roomPricing, pricing_mode: f.pricing_mode, features } })
         toast.success('تم التحديث')
       } else {
         const pkg = await api('/packages', { method: 'POST', body: { ...f, room_pricing: roomPricing, features } })
@@ -8680,7 +8681,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
           <div className="md:col-span-2"><Field label="اسم الباكج" required><Input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="عمرة رجب 2026" /></Field></div>
           <Field label="النوع"><Select value={f.package_type} onValueChange={v => setF({ ...f, package_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{PACKAGE_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="العملة"><Select value={f.currency} onValueChange={v => setF({ ...f, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
-          <Field label="تاريخ البداية"><Input type="date" value={f.start_date} onChange={e => setF({ ...f, start_date: e.target.value })} disabled={!!record} /></Field>
+          <Field label="تاريخ البداية"><Input type="date" value={f.start_date} onChange={e => setF({ ...f, start_date: e.target.value })} /></Field>
           <Field label="تاريخ النهاية"><Input type="date" value={f.end_date} onChange={e => setF({ ...f, end_date: e.target.value })} /></Field>
           <div className="md:col-span-2"><Field label={`المدة${nights > 0 ? ` (${nights} ليلة تلقائي)` : ''}`}><Input value={nights ? `${nights} ليلة` : ''} disabled className="bg-slate-50" /></Field></div>
         </div>

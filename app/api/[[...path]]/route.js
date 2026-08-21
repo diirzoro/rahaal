@@ -1403,9 +1403,9 @@ async function handleRoute(request, { params }) {
         await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: regSet })
         return ok({ shared: true, meraaj: { ...meraajSet, registered_at: regSet['meraaj.registered_at'], remote_id: reg.remote_id || null }, registered_via: 'rest_api' })
       }
-      // Already registered at Meraaj before → keep registration reference + notify via webhook
+      // Already registered at Meraaj before → keep registration reference + notify via webhook (contract payload)
       await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { 'meraaj.registered_at': pkg.meraaj.registered_at, ...(pkg.meraaj.remote_id ? { 'meraaj.remote_id': pkg.meraaj.remote_id } : {}) } })
-      await emitMeraajEvent(db, T, 'package.updated', meraajPackagePayload({ ...updated, meraaj: { ...meraajSet, registered_at: pkg.meraaj.registered_at } }, comps))
+      await emitMeraajEvent(db, T, 'package.updated', await meraajContractPayload(db, T, updated, comps, meraajSet))
       return ok({ shared: true, meraaj: meraajSet })
     }
     // Marketplace bookings received from Meraaj (inbound)
@@ -2300,7 +2300,17 @@ async function handleRoute(request, { params }) {
     if (pkgIdMatch && method === 'PATCH') {
       const b = await request.json()
       const upd = {}
-      for (const k of ['name', 'package_type', 'notes', 'end_date', 'status']) if (b[k] !== undefined) upd[k] = k === 'end_date' && b[k] ? new Date(b[k]) : b[k]
+      // v3.31 — start_date now editable too (needed for full editing after duplication)
+      for (const k of ['name', 'package_type', 'notes', 'start_date', 'end_date', 'status']) if (b[k] !== undefined) upd[k] = (k === 'end_date' || k === 'start_date') && b[k] ? new Date(b[k]) : b[k]
+      // v3.31 — currency editable ONLY while the package has no bookings (accounting safety)
+      if (b.currency !== undefined) {
+        const curPkg = await db.collection('packages').findOne({ id: pkgIdMatch[1], tenant_id: T }, { projection: { currency: 1 } })
+        if (curPkg && String(b.currency) !== String(curPkg.currency)) {
+          const bkCount = await db.collection('package_bookings').countDocuments({ tenant_id: T, package_id: pkgIdMatch[1] })
+          if (bkCount > 0) return bad('لا يمكن تغيير عملة باكج به حجوزات — العملة مرتبطة بالقيود المحاسبية')
+          upd.currency = String(b.currency).slice(0, 8)
+        }
+      }
       // v3.15 — Room-type pricing update / v3.20 — age tiers
       if (b.room_pricing !== undefined) {
         upd.room_pricing = sanitizeRoomPricing(b.room_pricing)
@@ -2328,7 +2338,8 @@ async function handleRoute(request, { params }) {
               pkgAfter.meraaj.market_pricing = newMarket
             }
             const compsM = await db.collection('package_components').find({ package_id: pkgAfter.id, tenant_id: T }).toArray()
-            await emitMeraajEvent(db, T, 'package.updated', meraajPackagePayload(pkgAfter, compsM))
+            // v3.30 — package.updated must carry the Meraaj CONTRACT payload (title/description/departure_date/return_date)
+            await emitMeraajEvent(db, T, 'package.updated', await meraajContractPayload(db, T, pkgAfter, compsM))
           }
         }
       } catch { }
@@ -2338,6 +2349,14 @@ async function handleRoute(request, { params }) {
       // Only allow delete if no bookings
       const bk = await db.collection('package_bookings').countDocuments({ tenant_id: T, package_id: pkgIdMatch[1] })
       if (bk > 0) return bad('لا يمكن حذف باكج به تسجيلات — أغلقه بدلاً من الحذف')
+      // v3.30/v3.32 — If the package is listed/registered on Meraaj: FIRST deliver package.deactivated.
+      // v3.32 STRICT GUARD: if delivery to Meraaj FAILS, the package is NOT deleted locally
+      // (a Meraaj copy must never remain listed while the Rahaal original is gone).
+      const pkgDel = await db.collection('packages').findOne({ id: pkgIdMatch[1], tenant_id: T })
+      if (pkgDel && (pkgDel.meraaj?.shared || pkgDel.meraaj?.registered_at)) {
+        const dlv = await emitMeraajEvent(db, T, 'package.deactivated', { package_ref: pkgDel.id, reason: 'deleted_by_office' })
+        if (dlv === 'failed') return bad('لم يتم الحذف — تعذر إبلاغ سوق معراج بإيقاف الباكج. حاول لاحقاً أو أوقف المشاركة أولاً', 502)
+      }
       await db.collection('package_components').deleteMany({ tenant_id: T, package_id: pkgIdMatch[1] })
       await db.collection('packages').deleteOne({ id: pkgIdMatch[1], tenant_id: T })
       return ok({ success: true })
@@ -2379,11 +2398,13 @@ async function handleRoute(request, { params }) {
         doc.sale_per_pax = doc.room_rates[0]?.sale_adult || 0
       }
       await db.collection('package_components').insertOne(doc)
+      await maybeEmitMeraajPackageUpdate(db, T, pkgCompMatch[1]) // v3.32 — sync marketplace (hotels/transport list)
       const { _id, ...rest } = doc; return ok(rest)
     }
     const pkgCompDelMatch = route.match(/^\/packages\/([^/]+)\/components\/([^/]+)$/)
     if (pkgCompDelMatch && method === 'DELETE') {
       await db.collection('package_components').deleteOne({ id: pkgCompDelMatch[2], tenant_id: T, package_id: pkgCompDelMatch[1] })
+      await maybeEmitMeraajPackageUpdate(db, T, pkgCompDelMatch[1]) // v3.32 — sync marketplace
       return ok({ success: true })
     }
 
@@ -2414,6 +2435,7 @@ async function handleRoute(request, { params }) {
         created_at: new Date(), created_by: sess.user.email,
       }
       await db.collection('package_transports').insertOne(doc)
+      await maybeEmitMeraajPackageUpdate(db, T, pkgId) // v3.32 — sync marketplace (transport)
       const { _id, ...rest } = doc; return ok(rest)
     }
     const pkgTransItemMatch = route.match(/^\/packages\/([^/]+)\/transports\/([^/]+)$/)
@@ -2490,6 +2512,7 @@ async function handleRoute(request, { params }) {
         { upsert: true }
       )
       await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { has_image: true } })
+      await maybeEmitMeraajPackageUpdate(db, T, pkg.id) // v3.32 — sync marketplace images
       return ok({ saved: true })
     }
     if (pkgImgMatch && method === 'GET') {
@@ -2501,6 +2524,7 @@ async function handleRoute(request, { params }) {
     if (pkgImgMatch && method === 'DELETE') {
       await db.collection('package_images').deleteOne({ package_id: pkgImgMatch[1], tenant_id: T })
       await db.collection('packages').updateOne({ id: pkgImgMatch[1], tenant_id: T }, { $set: { has_image: false } })
+      await maybeEmitMeraajPackageUpdate(db, T, pkgImgMatch[1]) // v3.32 — sync marketplace images
       return ok({ deleted: true })
     }
 
@@ -2526,6 +2550,15 @@ async function handleRoute(request, { params }) {
         created_at: new Date(),
       }
       delete newPkg.updated_at
+      // v3.31 — The duplicate is a fully INDEPENDENT package:
+      // NEVER inherit Meraaj marketplace identity/state (shared, registered_at, remote_id, seats_sold,
+      // market_pricing...) nor archive flags from the source. First share of the copy will register it
+      // as a brand-new package at Meraaj via POST /api/integrations/rahal/packages/share (package_ref = new id).
+      delete newPkg.meraaj
+      delete newPkg.archived
+      delete newPkg.archived_at
+      delete newPkg.archived_by
+      delete newPkg.restored_at
       await db.collection('packages').insertOne(newPkg)
       // Clone components (all pricing types + rates preserved)
       const srcComps = await db.collection('package_components').find({ package_id: srcId, tenant_id: T }).toArray()
@@ -4141,6 +4174,11 @@ async function handleRoute(request, { params }) {
           // Prevent delete if bookings exist
           const bookingsCount = await db.collection('package_bookings').countDocuments({ package_id: id, tenant_id: T })
           if (bookingsCount > 0) { failed++; errors.push({ id, error: `يوجد ${bookingsCount} حجز مرتبط — أزلها أولاً` }); continue }
+          // v3.30/v3.32 — Meraaj-listed packages: deliver package.deactivated FIRST; if delivery FAILS, skip local delete
+          if (pkg.meraaj?.shared || pkg.meraaj?.registered_at) {
+            const dlv = await emitMeraajEvent(db, T, 'package.deactivated', { package_ref: pkg.id, reason: 'deleted_by_office' })
+            if (dlv === 'failed') { failed++; errors.push({ id, error: 'تعذر إبلاغ معراج بإيقاف الباكج — لم يُحذف' }); continue }
+          }
           await db.collection('packages').deleteOne({ id, tenant_id: T })
           deleted++
         } catch (e) { failed++; errors.push({ id, error: e.message }) }
@@ -4152,7 +4190,20 @@ async function handleRoute(request, { params }) {
       const ids = Array.isArray(body.ids) ? body.ids : []
       if (ids.length === 0) return bad('لم يتم اختيار أي باكج')
       const status = body.status === 'open' ? 'open' : 'closed'
+      // v3.30 — capture Meraaj-shared packages BEFORE the bulk status change for marketplace sync
+      const affectedShared = await db.collection('packages').find({ id: { $in: ids }, tenant_id: T, 'meraaj.shared': true }).toArray()
       const r = await db.collection('packages').updateMany({ id: { $in: ids }, tenant_id: T }, { $set: { status, updated_at: new Date() } })
+      try {
+        for (const p of affectedShared) {
+          if (status === 'closed') {
+            await emitMeraajEvent(db, T, 'package.deactivated', { package_ref: p.id, reason: 'closed_by_office' })
+          } else {
+            const fresh = await db.collection('packages').findOne({ id: p.id, tenant_id: T })
+            const compsB = await db.collection('package_components').find({ package_id: p.id, tenant_id: T }).toArray()
+            await emitMeraajEvent(db, T, 'package.updated', await meraajContractPayload(db, T, fresh, compsB))
+          }
+        }
+      } catch { /* marketplace sync must never break bulk ops */ }
       return ok({ ok: true, updated: r.modifiedCount, status })
     }
 
@@ -4741,7 +4792,8 @@ function meraajAvailability(pkg) {
   const sold = Number(m.seats_sold) || 0
   return Math.max(0, allocated - sold)
 }
-// Outbox pattern: persist the event, then best-effort deliver (signed) if MERAAJ_WEBHOOK_URL is configured
+// Outbox pattern: persist the event, then best-effort deliver (signed) if Meraaj endpoint is configured.
+// v3.32 — returns delivery status: 'sent' | 'failed' | 'pending' (pending = no endpoint configured yet)
 async function emitMeraajEvent(db, tenantId, type, payload) {
   const doc = {
     id: uuidv4(), tenant_id: tenantId, type, payload,
@@ -4749,8 +4801,10 @@ async function emitMeraajEvent(db, tenantId, type, payload) {
     created_at: new Date(), sent_at: null,
   }
   await db.collection('meraaj_events').insertOne(doc)
-  const url = process.env.MERAAJ_WEBHOOK_URL
-  if (!url || !meraajSecret()) return // stays pending in outbox until Meraaj endpoint is configured
+  // v3.30 — Webhook destination per Meraaj contract: {MERAAJ_API_BASE_URL}/api/integrations/rahal/webhooks
+  // (MERAAJ_WEBHOOK_URL can still override explicitly)
+  const url = process.env.MERAAJ_WEBHOOK_URL || (meraajApiBase() ? `${meraajApiBase()}/api/integrations/rahal/webhooks` : '')
+  if (!url || !meraajSecret()) return 'pending' // stays pending in outbox until Meraaj endpoint is configured
   try {
     const ts = Math.floor(Date.now() / 1000)
     const body = JSON.stringify({ id: doc.id, type, timestamp: ts, data: payload })
@@ -4758,21 +4812,33 @@ async function emitMeraajEvent(db, tenantId, type, payload) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-rahaal-timestamp': String(ts),
-        'x-rahaal-signature': meraajSign(body),
+        // v3.30 — Meraaj contract auth: X-Rahal-Signature = HMAC-SHA256(exact raw JSON body).
+        // The old x-rahaal-timestamp / x-rahaal-signature headers are NOT part of the contract — removed.
+        'X-Rahal-Signature': meraajSign(body),
       },
       body,
       signal: AbortSignal.timeout(8000),
     })
-    if (res.ok) await db.collection('meraaj_events').updateOne({ id: doc.id }, { $set: { status: 'sent', sent_at: new Date(), attempts: 1 } })
-    else await db.collection('meraaj_events').updateOne({ id: doc.id }, { $set: { status: 'failed', attempts: 1, last_error: `HTTP ${res.status}` } })
+    if (res.ok) { await db.collection('meraaj_events').updateOne({ id: doc.id }, { $set: { status: 'sent', sent_at: new Date(), attempts: 1 } }); return 'sent' }
+    await db.collection('meraaj_events').updateOne({ id: doc.id }, { $set: { status: 'failed', attempts: 1, last_error: `HTTP ${res.status}` } })
+    return 'failed'
   } catch (e) {
     await db.collection('meraaj_events').updateOne({ id: doc.id }, { $set: { status: 'failed', attempts: 1, last_error: String(e.message || e).slice(0, 200) } })
+    return 'failed'
   }
 }
-// Emit inventory.updated for a shared package (called after any booking/seat change) — never throws
-async function maybeEmitMeraajInventory(db, tenantId, packageId) {
+// v3.32 — Any edit to marketplace-visible data (components/hotels/transport/images) on a LISTED package
+// must sync Meraaj via the existing package.updated webhook (contract payload) — never throws
+async function maybeEmitMeraajPackageUpdate(db, tenantId, packageId) {
   try {
+    const pkg = await db.collection('packages').findOne({ id: packageId, tenant_id: tenantId })
+    if (!pkg || !pkg.meraaj?.shared) return
+    const comps = await db.collection('package_components').find({ package_id: packageId, tenant_id: tenantId }).toArray()
+    await emitMeraajEvent(db, tenantId, 'package.updated', await meraajContractPayload(db, tenantId, pkg, comps))
+  } catch { /* marketplace sync must never break core operations */ }
+}
+// Emit inventory.updated for a shared package (called after any booking/seat change) — never throws
+async function maybeEmitMeraajInventory(db, tenantId, packageId) {  try {
     const pkg = await db.collection('packages').findOne({ id: packageId, tenant_id: tenantId })
     if (!pkg || !pkg.meraaj?.shared) return
     const bookingsCount = await db.collection('package_bookings').countDocuments({ tenant_id: tenantId, package_id: packageId })
@@ -4825,18 +4891,19 @@ function meraajPackagePayload(pkg, comps = []) {
 // POST {MERAAJ_API_BASE_URL}/api/integrations/rahal/packages/share with X-Rahal-Api-Key.
 // Share succeeds ONLY on a 2xx response from Meraaj — any failure blocks the share.
 function meraajApiBase() { return (process.env.MERAAJ_API_BASE_URL || '').trim().replace(/\/+$/, '') }
-async function meraajRegisterPackageAPI(db, T, pkg, comps, meraajSet) {
-  const base = meraajApiBase()
-  if (!base) return { ok: false, error: 'MERAAJ_API_BASE_URL غير مُهيأ في إعدادات الخادم' }
-  if (!meraajSecret()) return { ok: false, error: 'MERAAJ_SHARED_SECRET غير مُهيأ' }
+// v3.30 — UNIFIED Meraaj CONTRACT payload — single source of truth for field names:
+// Rahaal name → Meraaj title | notes → description | start_date → departure_date | end_date → return_date
+// Used by BOTH the first-share REST call AND the package.updated webhook (never send non-contract shapes).
+async function meraajContractPayload(db, T, pkg, comps, meraajOverride = null) {
+  const m = meraajOverride || pkg.meraaj || {}
   const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { name: 1 } })
   const owner = await db.collection('users').findOne({ tenant_id: T, role: 'owner' }, { projection: { name: 1 } })
   // Representative per-seat pricing = cheapest adult row of the market pricing table
-  const rows = (meraajSet.market_pricing || []).filter(r => (Number(r.customer?.adult) || 0) > 0)
+  const rows = (m.market_pricing || []).filter(r => (Number(r.customer?.adult) || 0) > 0)
   const cheapest = rows.slice().sort((a, b) => a.customer.adult - b.customer.adult)[0] || null
-  const hotels = comps.filter(c => c.component_type === 'hotel').map(c => String(c.name || '').trim()).filter(Boolean)
+  const hotels = (comps || []).filter(c => c.component_type === 'hotel').map(c => String(c.name || '').trim()).filter(Boolean)
   const appBase = (process.env.NEXT_PUBLIC_BASE_URL || '').replace(/\/+$/, '')
-  const payload = {
+  return {
     package_ref: pkg.id,
     title: pkg.name,
     description: pkg.notes || '',
@@ -4846,7 +4913,7 @@ async function meraajRegisterPackageAPI(db, T, pkg, comps, meraajSet) {
     transport: pkg.transport || null,
     hotels,
     images: pkg.has_image && appBase ? [`${appBase}/api/meraaj/packages/${pkg.id}/image`] : [],
-    available_seats: Math.max(0, (Number(meraajSet.seats_allocated) || 0) - (Number(meraajSet.seats_sold) || 0)),
+    available_seats: Math.max(0, (Number(m.seats_allocated) || 0) - (Number(m.seats_sold) || 0)),
     office_ref: T,
     office_name: tenant?.name || '',
     owner_name: owner?.name || '',
@@ -4857,6 +4924,12 @@ async function meraajRegisterPackageAPI(db, T, pkg, comps, meraajSet) {
       currency: pkg.currency,
     },
   }
+}
+async function meraajRegisterPackageAPI(db, T, pkg, comps, meraajSet) {
+  const base = meraajApiBase()
+  if (!base) return { ok: false, error: 'MERAAJ_API_BASE_URL غير مُهيأ في إعدادات الخادم' }
+  if (!meraajSecret()) return { ok: false, error: 'MERAAJ_SHARED_SECRET غير مُهيأ' }
+  const payload = await meraajContractPayload(db, T, pkg, comps, meraajSet)
   const endpoint = `${base}/api/integrations/rahal/packages/share`
   const logDoc = {
     id: uuidv4(), tenant_id: T, type: 'package.share_api', channel: 'rest_api',

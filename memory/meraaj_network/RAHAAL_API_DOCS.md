@@ -92,11 +92,34 @@ Headers مطلوبة:
 
 ---
 
-## 3) Webhooks صادرة من رحّال → معراج
+## 3) المشاركة الأولى (v3.29/v3.30) — REST مباشر وليس Webhook
 
-- **الوجهة:** `MERAAJ_WEBHOOK_URL` (زوّدونا به).
+- **عند أول مشاركة لباكج**، يستدعي رحّال مباشرة:
+  `POST {MERAAJ_API_BASE_URL}/api/integrations/rahal/packages/share`
+- **التوثيق:** Header `X-Rahal-Api-Key = SHARED_SECRET`.
+- **شرط النجاح:** استجابة 2xx فقط — أي فشل يُلغي المشاركة محلياً (rollback) ويُعرض للموظف.
+- **منع التكرار:** بعد النجاح تُحفظ `meraaj.registered_at` و `meraaj.remote_id` — لا يتكرر الاستدعاء أبداً.
+- **Body (عقد موحّد):**
+```json
+{
+  "package_ref": "uuid", "title": "...", "description": "...",
+  "departure_date": "...", "return_date": "...",
+  "departure_city": null, "transport": null, "hotels": ["..."], "images": ["..."],
+  "available_seats": 10, "office_ref": "tenant-uuid", "office_name": "...", "owner_name": "...",
+  "pricing": { "net_cost_per_seat": 0, "final_sale_price": 0, "buyer_office_commission": 0, "currency": "SAR" }
+}
+```
+- **تطابق الأسماء:** رحّال `name→title`, `notes→description`, `start_date→departure_date`, `end_date→return_date`.
+- ⛔ **حدث `package.shared` أُلغي نهائياً** — لا يُرسل ولا يُسجّل كـ Webhook بعد الآن.
+
+---
+
+## 3.1) Webhooks صادرة من رحّال → معراج (الأحداث اللاحقة فقط)
+
+- **الوجهة:** `{MERAAJ_API_BASE_URL}/api/integrations/rahal/webhooks` (أو `MERAAJ_WEBHOOK_URL` إن ضُبط صراحة).
 - **النمط:** Outbox — كل حدث يُحفظ محلياً ثم يُرسل؛ إن تعطل خادمكم يبقى بحالة `pending/failed` ولا يضيع.
-- **التوقيع:** Headers: `x-rahaal-timestamp` و `x-rahaal-signature = HMAC_SHA256(raw_body, SHARED_SECRET)`.
+- **التوقيع (v3.30):** Header وحيد: `X-Rahal-Signature = HMAC_SHA256(raw_JSON_body, SHARED_SECRET)`.
+  ⛔ الهيدرات القديمة `x-rahaal-signature` و `x-rahaal-timestamp` أُلغيت — لم تعد جزءاً من العقد.
 - **الغلاف الموحد:**
 ```json
 { "id": "uuid-الحدث", "type": "inventory.updated", "timestamp": 1766222000, "data": { } }
@@ -107,9 +130,8 @@ Headers مطلوبة:
 | Type | متى يُرسل | data |
 |---|---|---|
 | `inventory.updated` | أي حجز/تعديل/حذف يمس باكج مُشارَكاً | `{ package_ref, status, seats_allocated, seats_sold, seats_available, internal_bookings, final_price, currency }` |
-| `package.shared` | أول مشاركة | Payload الباكج كاملاً (بنية 2.2) |
-| `package.updated` | تعديل بيانات/أسعار باكج مُشارَك | Payload الباكج كاملاً |
-| `package.deactivated` | إيقاف المشاركة أو إغلاق الباكج | `{ package_ref, reason: "unshared_by_office" \| "closed_by_office" }` |
+| `package.updated` | تعديل بيانات/أسعار/إعدادات مشاركة باكج مسجّل | **عقد المشاركة الموحّد** نفسه (بنية القسم 3: title/description/departure_date/return_date/pricing...) |
+| `package.deactivated` | إيقاف المشاركة أو إغلاق الباكج أو **حذفه/أرشفته محلياً** (يُرسل قبل الحذف المحلي) | `{ package_ref, reason: "unshared_by_office" \| "closed_by_office" \| "deleted_by_office" \| "archived_by_office" }` |
 | `booking.approved` (v3.27) | اعتماد المكتب للحجز الوارد وتحويله لحجز محاسبي | `{ booking_ref, package_ref, inbound_id, buyer_office_name, seats, pax:{adults,children,infants}, net_to_seller_total, currency, approved_at }` |
 | `booking.rejected` (v3.27) | رفض المكتب للحجز الوارد (مع إعادة المقاعد للسوق) | `{ booking_ref, package_ref, inbound_id, buyer_office_name, reason, released_seats, rejected_at }` — اعرضوا `reason` للمشتري |
 
