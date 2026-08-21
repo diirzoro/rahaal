@@ -1394,6 +1394,152 @@ async function handleRoute(request, { params }) {
     if (route === '/meraaj/inbound-bookings' && method === 'GET') {
       return ok(clean(await db.collection('meraaj_inbound_bookings').find(tf).sort({ created_at: -1 }).limit(200).toArray()))
     }
+    // v3.26 — APPROVE inbound Meraaj booking → real package_booking + balanced Journal Entry
+    const meraajApproveMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/approve$/)
+    if (meraajApproveMatch && method === 'POST') {
+      const inbound = await db.collection('meraaj_inbound_bookings').findOne({ id: meraajApproveMatch[1], tenant_id: T })
+      if (!inbound) return bad('الحجز الوارد غير موجود', 404)
+      if (inbound.status === 'approved') return bad('هذا الحجز معتمد مسبقاً')
+      if (inbound.status === 'cancelled') return bad('لا يمكن اعتماد حجز ملغى')
+      const pkg = await db.collection('packages').findOne({ id: inbound.package_id, tenant_id: T })
+      if (!pkg) return bad('الباكج غير موجود', 404)
+      // 1) Buyer office as a credit client (auto-create once, reused afterwards)
+      const clientName = `معراج — ${inbound.buyer_office_name}`.slice(0, 120)
+      let cli = await db.collection('clients').findOne({ tenant_id: T, name: clientName })
+      if (!cli) {
+        let accountInfo = {}
+        try { accountInfo = await generateSubAccountCode(db, T, '1301') } catch (e) { return bad(e.message) }
+        cli = {
+          id: uuidv4(), tenant_id: T, name: clientName, phone: '', whatsapp: '',
+          address: '', email: '', notes: `عميل آلي — مكتب مشترٍ عبر معراج نتورك`, parent_code: '1301', ...accountInfo,
+          credit_limit: 0, credit_currency: inbound.currency, is_frozen: false,
+          balances: emptyBalances(), created_at: new Date(),
+        }
+        await db.collection('clients').insertOne(cli)
+      }
+      const cur = inbound.currency
+      const registrants = inbound.registrants || []
+      const adults = Number(inbound.pax_adults) || 0
+      const children = Number(inbound.pax_children) || 0
+      const infants = Number(inbound.pax_infants) || 0
+      const paxBilled = adults + children
+      const totalPax = registrants.length || (paxBilled + infants)
+      // 2) Cost side from package components (dual pricing engine — same as internal bookings)
+      const comps = await db.collection('package_components').find({ package_id: pkg.id, tenant_id: T }).toArray()
+      const compTotals = comps.map(c => computeComponentTotals(c, registrants, paxBilled, totalPax))
+      const total_cost = +compTotals.reduce((s, t) => s + t.cost_total, 0).toFixed(2)
+      // 3) Sale side = what the buyer office owes us (net of the agent commission — valid for both directions)
+      const total_sale = +(Number(inbound.net_to_seller_total) || 0).toFixed(2)
+      const commission = +(total_sale - total_cost).toFixed(2)
+      let rooms_summary = null
+      if (registrants.length > 0) {
+        rooms_summary = {}
+        for (const r of registrants) if (r.room_type) rooms_summary[r.room_type] = (rooms_summary[r.room_type] || 0) + 1
+        if (Object.keys(rooms_summary).length === 0) rooms_summary = null
+      }
+      const bookingDoc = {
+        id: uuidv4(), tenant_id: T, package_id: pkg.id,
+        client_id: cli.id, pilgrim_name: clientName,
+        pax_count: totalPax, pax_adults: adults, pax_children: children, pax_infants: infants,
+        pax_billed: paxBilled, pax_seats: paxBilled,
+        registrants, rooms_summary,
+        currency: cur, total_cost, total_sale, commission,
+        discount: 0, discount_reason: '', discount_apply_cost: false,
+        commission_partner_type: null, commission_partner_id: null, commission_partner_name: '',
+        commission_share_mode: 'amount', commission_share_value: 0, commission_share_amount: 0,
+        payment_method: 'credit', box_id: null,
+        source: 'meraaj', meraaj_inbound_id: inbound.id, meraaj_booking_ref: inbound.meraaj_booking_ref,
+        meraaj_customer_total: Number(inbound.total_price) || 0,
+        meraaj_agent_commission: Number(inbound.agent_commission_total) || 0,
+        component_snapshots: comps.map((c, i) => ({
+          id: c.id, name: c.name, supplier_id: c.supplier_id, supplier_name: c.supplier_name,
+          cost_per_pax: c.cost_per_pax, sale_per_pax: c.sale_per_pax,
+          pricing_type: c.pricing_type || 'flat', include_infants: !!c.include_infants,
+          ...(c.pricing_type === 'per_age' ? { cost_adult: c.cost_adult, cost_child: c.cost_child, cost_infant: c.cost_infant, sale_adult: c.sale_adult, sale_child: c.sale_child, sale_infant: c.sale_infant } : {}),
+          ...(c.pricing_type === 'room_age' ? { room_rates: c.room_rates || [] } : {}),
+          cost_total: compTotals[i].cost_total,
+          sale_total: compTotals[i].sale_total,
+        })),
+        created_at: new Date(),
+      }
+      // 4) Balances: client owes total_sale; suppliers are owed their costs
+      await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
+      for (let i = 0; i < comps.length; i++) {
+        if (compTotals[i].cost_total > 0) await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, compTotals[i].cost_total)
+      }
+      // 5) Balanced Journal Entry: debit client = credit suppliers + revenue
+      const lines = [{ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 }]
+      const supGrouped = {}
+      for (let i = 0; i < comps.length; i++) {
+        const c = comps[i]
+        if (!compTotals[i].cost_total) continue
+        supGrouped[c.supplier_id] = supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }
+        supGrouped[c.supplier_id].amount += compTotals[i].cost_total
+      }
+      let supSum = 0
+      for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
+      const revenueNet = +(total_sale - supSum).toFixed(2)
+      if (revenueNet !== 0) lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name} — معراج`, debit: 0, credit: revenueNet })
+      let je = null
+      try {
+        je = await createJournalEntry(db, T, {
+          date: new Date(),
+          description: `اعتماد حجز معراج ${inbound.meraaj_booking_ref || ''} — ${inbound.buyer_office_name} في ${pkg.name} (${totalPax} فرد، صافي ${total_sale} ${cur})`,
+          ref_type: 'package_booking', ref_id: bookingDoc.id, currency: cur, lines,
+        })
+      } catch (jeErr) {
+        // roll back balances if the JE was blocked (e.g. quota exceeded)
+        await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, -total_sale)
+        for (let i = 0; i < comps.length; i++) {
+          if (compTotals[i].cost_total > 0) await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, -compTotals[i].cost_total)
+        }
+        return bad(jeErr.message || 'تعذر إنشاء القيد المحاسبي')
+      }
+      await db.collection('package_bookings').insertOne(bookingDoc)
+      await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, { $set: { status: 'approved', approved_at: new Date(), booking_id: bookingDoc.id, client_id: cli.id, client_name: cli.name } })
+      await maybeEmitMeraajInventory(db, T, pkg.id)
+      const { _id, ...rest } = bookingDoc
+      return ok({ approved: true, booking: rest, client: { id: cli.id, name: cli.name }, journal_balanced: true })
+    }
+    // v3.26 — Partners monthly summary: earned vs settled vs outstanding per partner per currency
+    if (route === '/partners/summary' && method === 'GET') {
+      const q = { tenant_id: T, commission_share_amount: { $gt: 0 }, commission_partner_id: { $ne: null } }
+      const [tickets, visas, services, bookings] = await Promise.all([
+        db.collection('tickets').find(q).toArray(),
+        db.collection('visas').find(q).toArray(),
+        db.collection('services').find(q).toArray(),
+        db.collection('package_bookings').find(q).toArray(),
+      ])
+      const partners = {}
+      for (const d of [...tickets, ...visas, ...services, ...bookings]) {
+        const pid = d.commission_partner_id
+        const cur = d.currency || 'USD'
+        partners[pid] = partners[pid] || { partner_id: pid, partner_name: d.commission_partner_name || '', partner_type: d.commission_partner_type || 'client', currencies: {}, ops_count: 0 }
+        partners[pid].currencies[cur] = partners[pid].currencies[cur] || { earned: 0, settled: 0, outstanding: 0 }
+        partners[pid].currencies[cur].earned += Number(d.commission_share_amount) || 0
+        partners[pid].ops_count++
+        if (!partners[pid].partner_name && d.commission_partner_name) partners[pid].partner_name = d.commission_partner_name
+      }
+      const settledStmts = await db.collection('partner_statements').find({ tenant_id: T, settlement_voucher_id: { $ne: null } }).toArray()
+      for (const s of settledStmts) {
+        if (!partners[s.partner_id]) continue
+        const cur = s.settled_currency
+        if (!cur) continue
+        partners[s.partner_id].currencies[cur] = partners[s.partner_id].currencies[cur] || { earned: 0, settled: 0, outstanding: 0 }
+        partners[s.partner_id].currencies[cur].settled += Number(s.settled_amount) || 0
+      }
+      const out = Object.values(partners).map(p => {
+        for (const cur of Object.keys(p.currencies)) {
+          const c = p.currencies[cur]
+          c.earned = +c.earned.toFixed(2)
+          c.settled = +c.settled.toFixed(2)
+          c.outstanding = +(c.earned - c.settled).toFixed(2)
+        }
+        p.has_outstanding = Object.values(p.currencies).some(c => c.outstanding > 0.009)
+        return p
+      }).sort((a, b) => (b.has_outstanding ? 1 : 0) - (a.has_outstanding ? 1 : 0))
+      return ok({ partners: out, count: out.length })
+    }
     // Outbox / sync log
     if (route === '/meraaj/events' && method === 'GET') {
       return ok(clean(await db.collection('meraaj_events').find(tf).sort({ created_at: -1 }).limit(100).toArray()))

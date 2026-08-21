@@ -9318,3 +9318,31 @@ agent_communication:
   - agent: "testing"
     message: "✅ v3.25 BACKEND TESTING COMPLETED - ALL 14 TESTS PASSED (100%). Comprehensive test suite executed covering Smart Meraaj Share (7 tests) + Age-Aware Inbound Booking (6 tests) + S2S Regression (1 test). All features working correctly: (1) Smart share requires room_pricing, computes market_pricing automatically with correct age-aware pricing (child fallback, infant 0 default, commission 0 on zero-price). (2) Commission modes (amount/percent) and directions (added/deducted) working correctly. (3) Overflow validation prevents commission consuming full price in deducted mode. (4) Auto-resync on package update recomputes market_pricing and emits events. (5) Inbound bookings price registrants by room+age, compute seats (adults+children only), track pax counts, calculate commission and net amounts. (6) Price check (match/mismatch) working. (7) Validation errors (unknown room, no registrants, infants-only) working. (8) Booking cancellation releases seats. (9) S2S HMAC authentication working (ts.path signature). Test artifacts cleaned up: package/component/supplier deleted. Leftover docs (no delete endpoints): 2 meraaj_inbound_bookings, 9 meraaj_events. Backend v3.25 is production-ready."
 
+
+backend:
+  - task: "v3.26 - Approve Meraaj inbound booking (real booking + balanced JE) + Partners summary endpoint"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "POST /api/meraaj/inbound-bookings/:id/approve - validates status (not approved/cancelled), auto-creates credit client 'معراج — {buyer_office_name}' (1301 sub-account, reused by name), computes cost from package components via computeComponentTotals with registrants, total_sale = inbound.net_to_seller_total (correct for both commission directions), creates package_booking doc (source:'meraaj', snapshots frozen), applies balances (client +sale, suppliers +costs), creates balanced JE (debit client = credit suppliers + revenue), rolls back balances if JE throws (quota), marks inbound approved with booking_id/client_id, emits inventory event. GET /api/partners/summary - aggregates commission_share_amount>0 across 4 collections grouped by partner per currency (earned), minus settled partner_statements amounts (settled), outstanding = earned - settled, sorted outstanding-first. Needs backend testing."
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (ALL TESTS) - Comprehensive test suite executed covering both Meraaj inbound booking approval and Partners summary. TEST 1 - Approve Inbound Booking: (1) Setup: Created supplier, package with room pricing (SAR, pricing_mode direct, room_pricing double 2000/1500/100), flat component (cost 800, sale 1200), shared package with buyer_commission_mode amount, buyer_commission_value 100, commission_direction deducted, seats_allocated 10. (2) Webhook injection: Injected meraaj.booking.created with 3 registrants (adult 30, child 8, infant 1) → inbound booking created with total_price 3600, net_to_seller_total 3300, seats 2 (adult+child, infant excluded). (3) Approval: POST /api/meraaj/inbound-bookings/:id/approve → approved true, client auto-created 'معراج — مكتب الرحلات الذهبية', booking created with total_sale 3300, total_cost 1600 (800×2 billed pax), commission 1700, source meraaj, pax_adults 1, pax_children 1, pax_infants 1. (4) Client balance: SAR 3300 (owes us). (5) Supplier balance: SAR 1600. (6) Journal entry: BALANCED (debit 3300 = credit 1600 supplier + 1700 revenue), ref_type package_booking, account codes 1301/2101/4103. (7) Inbound status: approved with booking_id and client_id. (8) Double-approve: Correctly rejected with 400 'معتمد مسبقاً'. (9) Cancelled booking approval: Injected booking → cancelled it → approve attempt → 400 rejected. (10) Client reuse: Injected 3rd booking with same buyer_office_name → approved → same client_id reused (no duplicate), balance updated to 5200 (3300+1900). TEST 2 - Partners Summary: (1) Created partner client, regular client, visa (cost 50, sale 100, commission_share 20), service (cost 30, sale 80, share 15). (2) GET /api/partners/summary → partner appears with ops_count 2, currencies.SAR {earned 35, settled 0, outstanding 35}, has_outstanding true. (3) Partial settlement: Created statement, settled 20 SAR → summary updated: settled 20, outstanding 15, has_outstanding true. (4) Partner sorting: Outstanding partners appear first. Cleanup: All created data deleted (bookings via DELETE /api/packages/:id/bookings/:id reverses balances, then visas, services, components, packages, suppliers, clients). All balances restored correctly. No leftover meraaj_* docs reported."
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: "Test v3.26 per detailed task. Login owner@demo.com / Demo@2025. HMAC secret in /app/.env. Own test data, cleanup: delete created booking via DELETE /api/packages/:id/bookings/:bid (reverses balances), then package/component/supplier/client. Report leftover meraaj_* doc ids."
+  - agent: "testing"
+    message: "✅ v3.26 BACKEND TESTING COMPLETED - ALL TESTS PASSED. Executed comprehensive test suite covering Meraaj inbound booking approval flow and Partners summary endpoint. All critical verifications passed: (1) Inbound booking calculations correct (total_price 3600, net_to_seller_total 3300, seats 2), (2) Approval creates real booking with correct balances and balanced JE, (3) Client auto-creation and reuse working correctly, (4) Double-approve and cancelled booking approval correctly rejected, (5) Partners summary aggregates earned/settled/outstanding per partner per currency, (6) Partial settlement updates summary correctly, (7) All cleanup successful with balance reversals. Backend is production-ready for v3.26 features."

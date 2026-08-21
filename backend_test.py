@@ -1,1047 +1,976 @@
 #!/usr/bin/env python3
 """
-v3.25 Backend Test Suite - Smart Meraaj Share + Age-Aware Inbound Booking
-Tests the catch-all API at /app/app/api/[[...path]]/route.js
+v3.26 Backend Test — Approve Meraaj inbound booking + Partners summary
+Tests:
+1. Setup: Create supplier, package with room pricing, flat component, share it
+2. Inject inbound booking via webhook
+3. Approve inbound booking (creates real booking + balanced JE)
+4. Verify client auto-creation, balances, JE, double-approve rejection, cancelled booking rejection, client reuse
+5. Partners summary endpoint
+6. Cleanup: Delete all created data
 """
 
 import requests
 import json
 import hmac
 import hashlib
-import time
 import os
-import random
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# Configuration from .env
-BASE_URL = "https://visa-booking-5.preview.emergentagent.com/api"
+# Configuration
+BASE_URL = "https://visa-booking-5.preview.emergentagent.com"
+API_URL = f"{BASE_URL}/api"
 MERAAJ_SECRET = "fadaef8475135533dc526493bf3b87f4bad43682a95f5c2c136d7976cd126531"
-LOGIN_EMAIL = "owner@demo.com"
-LOGIN_PASSWORD = "Demo@2025"
 
-# Test state
-session = requests.Session()
-test_ids = {
-    'supplier': None,
-    'package_smart': None,
-    'package_noprice': None,
-    'component': None,
-    'inbound_bookings': [],
-    'meraaj_events': [],
-    'meraaj_inbound_events': []
+# Auth credentials
+EMAIL = "owner@demo.com"
+PASSWORD = "Demo@2025"
+
+# Test data tracking
+created_ids = {
+    "suppliers": [],
+    "packages": [],
+    "components": [],
+    "clients": [],
+    "bookings": [],
+    "visas": [],
+    "services": [],
+    "boxes": [],
+    "meraaj_inbound": [],
+    "partner_statements": []
 }
+
+session = requests.Session()
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-def hmac_sign(data):
-    """Generate HMAC-SHA256 signature for webhook"""
+def meraaj_sign(payload):
+    """Generate HMAC-SHA256 signature for Meraaj webhook"""
     return hmac.new(
-        MERAAJ_SECRET.encode('utf-8'),
-        data.encode('utf-8'),
+        MERAAJ_SECRET.encode(),
+        payload.encode(),
         hashlib.sha256
     ).hexdigest()
 
-def s2s_headers(path):
-    """Generate S2S HMAC headers for Meraaj API calls"""
-    ts = str(int(time.time()))
-    message = f"{ts}.{path}"  # Note: period separator, not concatenation
-    sig = hmac.new(
-        MERAAJ_SECRET.encode('utf-8'),
-        message.encode('utf-8'),
-        hashlib.sha256
-    ).hexdigest()
-    return {
-        'x-meraaj-timestamp': ts,
-        'x-meraaj-signature': sig
-    }
-
-def test_login():
-    """Login and establish session"""
-    log("=== SETUP: Login ===")
-    try:
-        resp = session.post(f"{BASE_URL}/auth/login", json={
-            'email': LOGIN_EMAIL,
-            'password': LOGIN_PASSWORD
-        })
-        if resp.status_code != 200:
-            log(f"❌ Login failed: {resp.status_code} - {resp.text}")
-            return False
-        data = resp.json()
-        log(f"✅ Login successful: {data.get('user', {}).get('email')}")
-        return True
-    except Exception as e:
-        log(f"❌ Login error: {e}")
+def login():
+    """Login and get session cookie"""
+    log("🔐 Logging in as owner@demo.com...")
+    resp = session.post(f"{API_URL}/auth/login", json={"email": EMAIL, "password": PASSWORD})
+    if resp.status_code != 200:
+        log(f"❌ Login failed: {resp.status_code} {resp.text}")
         return False
-
-def test_setup_data():
-    """Create supplier, packages, and component"""
-    log("\n=== SETUP: Create Test Data ===")
-    
-    # Create supplier
-    try:
-        resp = session.post(f"{BASE_URL}/suppliers", json={
-            'name': 'مورد اختبار v325',
-            'currency': 'SAR'
-        })
-        if resp.status_code != 200:
-            log(f"❌ Supplier creation failed: {resp.status_code} - {resp.text}")
-            return False
-        supplier = resp.json()
-        test_ids['supplier'] = supplier['id']
-        log(f"✅ Supplier created: {supplier['id']}")
-    except Exception as e:
-        log(f"❌ Supplier creation error: {e}")
-        return False
-    
-    # Create package SMART-v325 with room pricing
-    try:
-        resp = session.post(f"{BASE_URL}/packages", json={
-            'name': 'SMART-v325',
-            'package_type': 'umrah',
-            'currency': 'SAR',
-            'pricing_mode': 'direct',
-            'start_date': '2025-06-01',
-            'end_date': '2025-06-15',
-            'room_pricing': [
-                {
-                    'type': 'double',
-                    'sale_per_pax': 1500,
-                    'sale_child': 1100,
-                    'sale_infant': 100
-                },
-                {
-                    'type': 'quad',
-                    'sale_per_pax': 1000
-                    # child and infant not specified - should fallback
-                }
-            ]
-        })
-        if resp.status_code != 200:
-            log(f"❌ Package SMART-v325 creation failed: {resp.status_code} - {resp.text}")
-            return False
-        pkg = resp.json()
-        test_ids['package_smart'] = pkg['id']
-        log(f"✅ Package SMART-v325 created: {pkg['id']}")
-        log(f"   Room pricing: {len(pkg.get('room_pricing', []))} types")
-    except Exception as e:
-        log(f"❌ Package creation error: {e}")
-        return False
-    
-    # Create component for SMART-v325
-    try:
-        resp = session.post(f"{BASE_URL}/packages/{test_ids['package_smart']}/components", json={
-            'name': 'تأشيرة عمرة',
-            'component_type': 'visa',
-            'supplier_id': test_ids['supplier'],
-            'cost_per_pax': 500,
-            'sale_per_pax': 800,
-            'pricing_type': 'flat'
-        })
-        if resp.status_code != 200:
-            log(f"❌ Component creation failed: {resp.status_code} - {resp.text}")
-            return False
-        comp = resp.json()
-        test_ids['component'] = comp['id']
-        log(f"✅ Component created: {comp['id']}")
-    except Exception as e:
-        log(f"❌ Component creation error: {e}")
-        return False
-    
+    data = resp.json()
+    log(f"✅ Logged in as {data['user']['email']}")
     return True
 
-def test_1_share_without_room_prices():
-    """TEST 1.1: Package without room prices should fail"""
-    log("\n=== TEST 1.1: Share Package WITHOUT Room Prices ===")
-    
-    # Create package without room pricing
-    try:
-        resp = session.post(f"{BASE_URL}/packages", json={
-            'name': 'NOPRICE-v325',
-            'package_type': 'umrah',
-            'currency': 'SAR',
-            'pricing_mode': 'component',
-            'start_date': '2025-06-01',
-            'end_date': '2025-06-15',
-            'room_pricing': []
-        })
-        if resp.status_code != 200:
-            log(f"❌ Package NOPRICE creation failed: {resp.status_code}")
-            return False
-        pkg = resp.json()
-        test_ids['package_noprice'] = pkg['id']
-        log(f"✅ Package NOPRICE-v325 created: {pkg['id']}")
-    except Exception as e:
-        log(f"❌ Package creation error: {e}")
-        return False
-    
-    # Try to share it - should fail
-    try:
-        resp = session.post(f"{BASE_URL}/packages/{test_ids['package_noprice']}/meraaj-share", json={
-            'enabled': True,
-            'buyer_commission_value': 50,
-            'seats_allocated': 10
-        })
-        if resp.status_code == 400:
-            log(f"✅ Correctly rejected: {resp.json().get('error', '')}")
-            # Delete the package
-            session.delete(f"{BASE_URL}/packages/{test_ids['package_noprice']}")
-            log(f"✅ Package NOPRICE-v325 deleted")
-            return True
-        else:
-            log(f"❌ Expected 400, got {resp.status_code}: {resp.text}")
-            return False
-    except Exception as e:
-        log(f"❌ Share test error: {e}")
-        return False
+def create_supplier(name):
+    """Create a supplier"""
+    log(f"📦 Creating supplier: {name}")
+    resp = session.post(f"{API_URL}/suppliers", json={"name": name, "phone": "", "notes": "Test supplier for v3.26"})
+    if resp.status_code != 200:
+        log(f"❌ Failed to create supplier: {resp.status_code} {resp.text}")
+        return None
+    data = resp.json()
+    created_ids["suppliers"].append(data["id"])
+    log(f"✅ Supplier created: {data['id']}")
+    return data
 
-def test_1_share_smart_deducted():
-    """TEST 1.2: Share SMART-v325 with deducted commission"""
-    log("\n=== TEST 1.2: Share SMART-v325 (deducted, amount 100) ===")
-    
-    try:
-        resp = session.post(f"{BASE_URL}/packages/{test_ids['package_smart']}/meraaj-share", json={
-            'enabled': True,
-            'buyer_commission_mode': 'amount',
-            'buyer_commission_value': 100,
-            'commission_direction': 'deducted',
-            'seats_allocated': 20
-        })
-        if resp.status_code != 200:
-            log(f"❌ Share failed: {resp.status_code} - {resp.text}")
-            return False
-        
-        data = resp.json()
-        market = data.get('meraaj', {}).get('market_pricing', [])
-        log(f"✅ Share successful, market_pricing has {len(market)} rows")
-        
-        # Verify double room pricing
-        double = next((r for r in market if r['room_type'] == 'double'), None)
-        if not double:
-            log(f"❌ Double room not found in market_pricing")
-            return False
-        
-        log(f"   Double room:")
-        log(f"     Base: adult={double['base']['adult']}, child={double['base']['child']}, infant={double['base']['infant']}")
-        log(f"     Commission: adult={double['commission']['adult']}, child={double['commission']['child']}, infant={double['commission']['infant']}")
-        log(f"     Customer: adult={double['customer']['adult']}, child={double['customer']['child']}, infant={double['customer']['infant']}")
-        log(f"     Net: adult={double['net']['adult']}, child={double['net']['child']}, infant={double['net']['infant']}")
-        
-        # Verify values
-        if double['base']['adult'] != 1500 or double['base']['child'] != 1100 or double['base']['infant'] != 100:
-            log(f"❌ Double base prices incorrect")
-            return False
-        if double['commission']['adult'] != 100 or double['commission']['child'] != 100 or double['commission']['infant'] != 100:
-            log(f"❌ Double commission incorrect")
-            return False
-        if double['customer']['adult'] != 1500 or double['customer']['child'] != 1100 or double['customer']['infant'] != 100:
-            log(f"❌ Double customer prices incorrect (deducted mode: customer = base)")
-            return False
-        if double['net']['adult'] != 1400 or double['net']['child'] != 1000 or double['net']['infant'] != 0:
-            log(f"❌ Double net prices incorrect")
-            return False
-        
-        # Verify quad room pricing
-        quad = next((r for r in market if r['room_type'] == 'quad'), None)
-        if not quad:
-            log(f"❌ Quad room not found in market_pricing")
-            return False
-        
-        log(f"   Quad room:")
-        log(f"     Base: adult={quad['base']['adult']}, child={quad['base']['child']}, infant={quad['base']['infant']}")
-        log(f"     Commission: adult={quad['commission']['adult']}, child={quad['commission']['child']}, infant={quad['commission']['infant']}")
-        log(f"     Customer: adult={quad['customer']['adult']}, child={quad['customer']['child']}, infant={quad['customer']['infant']}")
-        log(f"     Net: adult={quad['net']['adult']}, child={quad['net']['child']}, infant={quad['net']['infant']}")
-        
-        # Verify quad values (child fallback to adult, infant 0)
-        if quad['base']['adult'] != 1000 or quad['base']['child'] != 1000 or quad['base']['infant'] != 0:
-            log(f"❌ Quad base prices incorrect (child should fallback to adult 1000, infant should be 0)")
-            return False
-        # CRITICAL: infant commission must be 0 when base is 0
-        if quad['commission']['adult'] != 100 or quad['commission']['child'] != 100 or quad['commission']['infant'] != 0:
-            log(f"❌ Quad commission incorrect (infant commission should be 0 when base is 0)")
-            return False
-        if quad['customer']['adult'] != 1000 or quad['customer']['child'] != 1000 or quad['customer']['infant'] != 0:
-            log(f"❌ Quad customer prices incorrect")
-            return False
-        if quad['net']['adult'] != 900 or quad['net']['child'] != 900 or quad['net']['infant'] != 0:
-            log(f"❌ Quad net prices incorrect")
-            return False
-        
-        log(f"✅ All pricing calculations correct")
-        return True
-        
-    except Exception as e:
-        log(f"❌ Share test error: {e}")
-        return False
+def create_package(name, currency="SAR", room_pricing=None):
+    """Create a package with room pricing"""
+    log(f"📦 Creating package: {name}")
+    payload = {
+        "name": name,
+        "package_type": "عمرة",
+        "currency": currency,
+        "pricing_mode": "direct",
+        "room_pricing": room_pricing or [],
+        "features": [],
+        "notes": "Test package for v3.26"
+    }
+    resp = session.post(f"{API_URL}/packages", json=payload)
+    if resp.status_code != 200:
+        log(f"❌ Failed to create package: {resp.status_code} {resp.text}")
+        return None
+    data = resp.json()
+    created_ids["packages"].append(data["id"])
+    log(f"✅ Package created: {data['id']}")
+    return data
 
-def test_1_share_added():
-    """TEST 1.3: Share with 'added' direction"""
-    log("\n=== TEST 1.3: Share with commission_direction='added' ===")
-    
-    try:
-        resp = session.post(f"{BASE_URL}/packages/{test_ids['package_smart']}/meraaj-share", json={
-            'enabled': True,
-            'buyer_commission_mode': 'amount',
-            'buyer_commission_value': 100,
-            'commission_direction': 'added',
-            'seats_allocated': 20
-        })
-        if resp.status_code != 200:
-            log(f"❌ Share failed: {resp.status_code} - {resp.text}")
-            return False
-        
-        data = resp.json()
-        market = data.get('meraaj', {}).get('market_pricing', [])
-        double = next((r for r in market if r['room_type'] == 'double'), None)
-        
-        log(f"   Double room (added mode):")
-        log(f"     Customer: adult={double['customer']['adult']}, child={double['customer']['child']}, infant={double['customer']['infant']}")
-        log(f"     Net: adult={double['net']['adult']}, child={double['net']['child']}, infant={double['net']['infant']}")
-        
-        # In 'added' mode: customer = base + commission, net = base
-        if double['customer']['adult'] != 1600 or double['customer']['child'] != 1200 or double['customer']['infant'] != 200:
-            log(f"❌ Customer prices incorrect (should be base + commission)")
-            return False
-        if double['net']['adult'] != 1500 or double['net']['child'] != 1100 or double['net']['infant'] != 100:
-            log(f"❌ Net prices incorrect (should equal base)")
-            return False
-        
-        log(f"✅ Added direction working correctly")
-        return True
-        
-    except Exception as e:
-        log(f"❌ Share test error: {e}")
-        return False
+def create_component(package_id, supplier_id, name, cost_per_pax, sale_per_pax):
+    """Create a flat component"""
+    log(f"📦 Creating component: {name}")
+    payload = {
+        "name": name,
+        "supplier_id": supplier_id,
+        "cost_per_pax": cost_per_pax,
+        "sale_per_pax": sale_per_pax,
+        "pricing_type": "flat",
+        "include_infants": False,
+        "component_type": "other",
+        "notes": "Test component for v3.26"
+    }
+    resp = session.post(f"{API_URL}/packages/{package_id}/components", json=payload)
+    if resp.status_code != 200:
+        log(f"❌ Failed to create component: {resp.status_code} {resp.text}")
+        return None
+    data = resp.json()
+    created_ids["components"].append(data["id"])
+    log(f"✅ Component created: {data['id']}")
+    return data
 
-def test_1_share_percent():
-    """TEST 1.4: Share with percent mode"""
-    log("\n=== TEST 1.4: Share with percent mode (10%, deducted) ===")
-    
-    try:
-        resp = session.post(f"{BASE_URL}/packages/{test_ids['package_smart']}/meraaj-share", json={
-            'enabled': True,
-            'buyer_commission_mode': 'percent',
-            'buyer_commission_value': 10,
-            'commission_direction': 'deducted',
-            'seats_allocated': 20
-        })
-        if resp.status_code != 200:
-            log(f"❌ Share failed: {resp.status_code} - {resp.text}")
-            return False
-        
-        data = resp.json()
-        market = data.get('meraaj', {}).get('market_pricing', [])
-        double = next((r for r in market if r['room_type'] == 'double'), None)
-        
-        log(f"   Double room (percent mode):")
-        log(f"     Commission: adult={double['commission']['adult']}, child={double['commission']['child']}, infant={double['commission']['infant']}")
-        log(f"     Net: adult={double['net']['adult']}, child={double['net']['child']}, infant={double['net']['infant']}")
-        
-        # 10% of 1500 = 150, 10% of 1100 = 110, 10% of 100 = 10
-        if double['commission']['adult'] != 150 or double['commission']['child'] != 110 or double['commission']['infant'] != 10:
-            log(f"❌ Commission incorrect (should be 10% of base)")
-            return False
-        if double['net']['adult'] != 1350 or double['net']['child'] != 990 or double['net']['infant'] != 90:
-            log(f"❌ Net prices incorrect")
-            return False
-        
-        log(f"✅ Percent mode working correctly")
-        return True
-        
-    except Exception as e:
-        log(f"❌ Share test error: {e}")
-        return False
+def share_package(package_id, buyer_commission_mode="amount", buyer_commission_value=100, commission_direction="deducted", seats_allocated=10):
+    """Share package on Meraaj network"""
+    log(f"🌐 Sharing package {package_id} on Meraaj network...")
+    payload = {
+        "enabled": True,
+        "buyer_commission_mode": buyer_commission_mode,
+        "buyer_commission_value": buyer_commission_value,
+        "commission_direction": commission_direction,
+        "seats_allocated": seats_allocated
+    }
+    resp = session.post(f"{API_URL}/packages/{package_id}/meraaj-share", json=payload)
+    if resp.status_code != 200:
+        log(f"❌ Failed to share package: {resp.status_code} {resp.text}")
+        return None
+    data = resp.json()
+    log(f"✅ Package shared: {data}")
+    return data
 
-def test_1_share_overflow():
-    """TEST 1.5: Deducted overflow validation"""
-    log("\n=== TEST 1.5: Deducted overflow (commission > price) ===")
+def inject_webhook(event_id, event_type, event_data):
+    """Inject a Meraaj webhook event"""
+    log(f"📨 Injecting webhook: {event_type} (id: {event_id})")
+    payload = {
+        "id": event_id,
+        "type": event_type,
+        "data": event_data
+    }
+    payload_str = json.dumps(payload)
+    signature = meraaj_sign(payload_str)
     
-    try:
-        resp = session.post(f"{BASE_URL}/packages/{test_ids['package_smart']}/meraaj-share", json={
-            'enabled': True,
-            'buyer_commission_mode': 'amount',
-            'buyer_commission_value': 1200,
-            'commission_direction': 'deducted',
-            'seats_allocated': 20
-        })
-        if resp.status_code == 400:
-            log(f"✅ Correctly rejected overflow: {resp.json().get('error', '')}")
-        else:
-            log(f"❌ Expected 400, got {resp.status_code}")
-            return False
-        
-        # Try with 'added' - should succeed
-        resp = session.post(f"{BASE_URL}/packages/{test_ids['package_smart']}/meraaj-share", json={
-            'enabled': True,
-            'buyer_commission_mode': 'amount',
-            'buyer_commission_value': 1200,
-            'commission_direction': 'added',
-            'seats_allocated': 20
-        })
-        if resp.status_code == 200:
-            log(f"✅ Same value with 'added' direction accepted")
-        else:
-            log(f"❌ Added direction should accept high commission: {resp.status_code}")
-            return False
-        
-        return True
-        
-    except Exception as e:
-        log(f"❌ Overflow test error: {e}")
-        return False
+    headers = {
+        "Content-Type": "application/json",
+        "x-meraaj-signature": signature
+    }
+    
+    resp = session.post(f"{API_URL}/meraaj/webhooks", data=payload_str, headers=headers)
+    if resp.status_code != 200:
+        log(f"❌ Webhook failed: {resp.status_code} {resp.text}")
+        return None
+    data = resp.json()
+    log(f"✅ Webhook received: {data}")
+    return data
 
-def test_1_restore_config():
-    """TEST 1.6: Restore config for subsequent tests"""
-    log("\n=== TEST 1.6: Restore config (amount 100, deducted) ===")
-    
-    try:
-        resp = session.post(f"{BASE_URL}/packages/{test_ids['package_smart']}/meraaj-share", json={
-            'enabled': True,
-            'buyer_commission_mode': 'amount',
-            'buyer_commission_value': 100,
-            'commission_direction': 'deducted',
-            'seats_allocated': 20
-        })
-        if resp.status_code != 200:
-            log(f"❌ Restore failed: {resp.status_code}")
-            return False
-        log(f"✅ Config restored")
-        return True
-    except Exception as e:
-        log(f"❌ Restore error: {e}")
-        return False
+def get_inbound_bookings():
+    """Get all inbound bookings"""
+    resp = session.get(f"{API_URL}/meraaj/inbound-bookings")
+    if resp.status_code != 200:
+        log(f"❌ Failed to get inbound bookings: {resp.status_code} {resp.text}")
+        return []
+    return resp.json()
 
-def test_1_auto_resync():
-    """TEST 1.7: Auto-resync on package update"""
-    log("\n=== TEST 1.7: Auto-resync on room_pricing change ===")
-    
-    try:
-        # Update room pricing
-        resp = session.patch(f"{BASE_URL}/packages/{test_ids['package_smart']}", json={
-            'room_pricing': [
-                {
-                    'type': 'double',
-                    'sale_per_pax': 2000,  # Changed from 1500
-                    'sale_child': 1500,     # Changed from 1100
-                    'sale_infant': 100
-                },
-                {
-                    'type': 'quad',
-                    'sale_per_pax': 1000
-                }
-            ]
-        })
-        if resp.status_code != 200:
-            log(f"❌ Package update failed: {resp.status_code} - {resp.text}")
-            return False
-        log(f"✅ Package updated with new room pricing")
-        
-        # Get package and verify market_pricing was auto-recomputed
-        resp = session.get(f"{BASE_URL}/packages")
-        if resp.status_code != 200:
-            log(f"❌ Package fetch failed: {resp.status_code}")
-            return False
-        
-        packages = resp.json()
-        pkg = next((p for p in packages if p['id'] == test_ids['package_smart']), None)
-        if not pkg:
-            log(f"❌ Package not found in list")
-            return False
-        market = pkg.get('meraaj', {}).get('market_pricing', [])
-        double = next((r for r in market if r['room_type'] == 'double'), None)
-        
-        if not double:
-            log(f"❌ Double room not found after update")
-            return False
-        
-        log(f"   Updated double room:")
-        log(f"     Base adult: {double['base']['adult']} (expected 2000)")
-        log(f"     Net adult: {double['net']['adult']} (expected 1900)")
-        
-        if double['base']['adult'] != 2000:
-            log(f"❌ Base price not updated")
-            return False
-        if double['net']['adult'] != 1900:
-            log(f"❌ Net price not recomputed (should be 2000 - 100 = 1900)")
-            return False
-        
-        log(f"✅ Auto-resync working correctly")
-        
-        # Check if package.updated event was emitted
-        resp = session.get(f"{BASE_URL}/meraaj/events")
-        if resp.status_code == 200:
-            events = resp.json()
-            updated_events = [e for e in events if e.get('type') == 'package.updated']
-            if updated_events:
-                log(f"✅ package.updated event emitted ({len(updated_events)} events)")
-                test_ids['meraaj_events'].extend([e['id'] for e in events])
-            else:
-                log(f"⚠️  No package.updated event found")
-        
-        return True
-        
-    except Exception as e:
-        log(f"❌ Auto-resync test error: {e}")
-        return False
+def approve_inbound_booking(inbound_id):
+    """Approve an inbound booking"""
+    log(f"✅ Approving inbound booking: {inbound_id}")
+    resp = session.post(f"{API_URL}/meraaj/inbound-bookings/{inbound_id}/approve")
+    if resp.status_code != 200:
+        log(f"❌ Failed to approve: {resp.status_code} {resp.text}")
+        return None
+    data = resp.json()
+    log(f"✅ Approved: {data}")
+    return data
 
-def test_2_inbound_booking_match():
-    """TEST 2.1: Inbound booking with matching price"""
-    log("\n=== TEST 2.1: Inbound booking with age-aware pricing (price match) ===")
+def get_client(client_id):
+    """Get client details"""
+    resp = session.get(f"{API_URL}/clients")
+    if resp.status_code != 200:
+        return None
+    clients = resp.json()
+    for c in clients:
+        if c["id"] == client_id:
+            return c
+    return None
+
+def get_supplier(supplier_id):
+    """Get supplier details"""
+    resp = session.get(f"{API_URL}/suppliers")
+    if resp.status_code != 200:
+        return None
+    suppliers = resp.json()
+    for s in suppliers:
+        if s["id"] == supplier_id:
+            return s
+    return None
+
+def get_journal_entries(ref_type=None, ref_id=None):
+    """Get journal entries"""
+    resp = session.get(f"{API_URL}/journal-entries")
+    if resp.status_code != 200:
+        return []
+    entries = resp.json()
+    if ref_type and ref_id:
+        return [e for e in entries if e.get("ref_type") == ref_type and e.get("ref_id") == ref_id]
+    return entries
+
+def get_package_bookings():
+    """Get all package bookings"""
+    resp = session.get(f"{API_URL}/packages/bookings")
+    if resp.status_code != 200:
+        log(f"❌ Failed to get bookings: {resp.status_code} {resp.text}")
+        return []
+    return resp.json()
+
+def create_partner_client(name):
+    """Create a client to use as partner"""
+    log(f"👥 Creating partner client: {name}")
+    resp = session.post(f"{API_URL}/clients", json={"name": name, "phone": "", "notes": "Partner for v3.26 test"})
+    if resp.status_code != 200:
+        log(f"❌ Failed to create client: {resp.status_code} {resp.text}")
+        return None
+    data = resp.json()
+    created_ids["clients"].append(data["id"])
+    log(f"✅ Partner client created: {data['id']}")
+    return data
+
+def create_visa_with_partner(client_id, supplier_id, partner_id, cost, sale, commission_share):
+    """Create a visa with partner commission"""
+    log(f"📄 Creating visa with partner commission...")
+    payload = {
+        "client_id": client_id,
+        "supplier_id": supplier_id,
+        "beneficiary_name": "Test Pilgrim v326",
+        "beneficiary_phone": "+966501234567",
+        "service_type": "تأشيرة عمرة",
+        "passport_no": f"V326-{datetime.now().timestamp()}",
+        "cost": cost,
+        "sale_price": sale,
+        "currency": "SAR",
+        "payment_method": "credit",
+        "commission_partner_type": "client",
+        "commission_partner_id": partner_id,
+        "commission_share_mode": "amount",
+        "commission_share_value": commission_share
+    }
+    resp = session.post(f"{API_URL}/visas", json=payload)
+    if resp.status_code != 200:
+        log(f"❌ Failed to create visa: {resp.status_code} {resp.text}")
+        return None
+    data = resp.json()
+    created_ids["visas"].append(data["id"])
+    log(f"✅ Visa created: {data['id']}")
+    return data
+
+def create_service_with_partner(client_id, supplier_id, partner_id, cost, sale, commission_share):
+    """Create a service with partner commission"""
+    log(f"🔧 Creating service with partner commission...")
+    payload = {
+        "client_id": client_id,
+        "supplier_id": supplier_id,
+        "service_type": "خدمة نقل / ترحيل",
+        "cost": cost,
+        "sale_price": sale,
+        "currency": "SAR",
+        "payment_method": "credit",
+        "commission_partner_type": "client",
+        "commission_partner_id": partner_id,
+        "commission_share_mode": "amount",
+        "commission_share_value": commission_share
+    }
+    resp = session.post(f"{API_URL}/services", json=payload)
+    if resp.status_code != 200:
+        log(f"❌ Failed to create service: {resp.status_code} {resp.text}")
+        return None
+    data = resp.json()
+    created_ids["services"].append(data["id"])
+    log(f"✅ Service created: {data['id']}")
+    return data
+
+def get_partners_summary():
+    """Get partners summary"""
+    log(f"📊 Getting partners summary...")
+    resp = session.get(f"{API_URL}/partners/summary")
+    if resp.status_code != 200:
+        log(f"❌ Failed to get partners summary: {resp.status_code} {resp.text}")
+        return None
+    data = resp.json()
+    log(f"✅ Partners summary: {json.dumps(data, indent=2, ensure_ascii=False)}")
+    return data
+
+def create_partner_statement(partner_type, partner_id, from_date, to_date):
+    """Create a partner statement"""
+    log(f"📋 Creating partner statement...")
+    payload = {
+        "partner_type": partner_type,
+        "partner_id": partner_id,
+        "from_date": from_date,
+        "to_date": to_date
+    }
+    resp = session.post(f"{API_URL}/partners/statements", json=payload)
+    if resp.status_code != 200:
+        log(f"❌ Failed to create statement: {resp.status_code} {resp.text}")
+        return None
+    data = resp.json()
+    created_ids["partner_statements"].append(data["id"])
+    log(f"✅ Statement created: {data['id']}")
+    return data
+
+def settle_partner_statement(statement_id, box_id, currency, amount):
+    """Settle a partner statement"""
+    log(f"💰 Settling partner statement {statement_id}...")
+    payload = {
+        "box_id": box_id,
+        "currency": currency,
+        "amount": amount
+    }
+    resp = session.post(f"{API_URL}/partners/statements/{statement_id}/settle", json=payload)
+    if resp.status_code != 200:
+        log(f"❌ Failed to settle: {resp.status_code} {resp.text}")
+        return None
+    data = resp.json()
+    log(f"✅ Statement settled: {data}")
+    return data
+
+def get_boxes():
+    """Get all boxes"""
+    resp = session.get(f"{API_URL}/boxes")
+    if resp.status_code != 200:
+        return []
+    return resp.json()
+
+def delete_booking(package_id, booking_id):
+    """Delete a package booking"""
+    log(f"🗑️ Deleting booking {booking_id}...")
+    resp = session.delete(f"{API_URL}/packages/{package_id}/bookings/{booking_id}")
+    if resp.status_code != 200:
+        log(f"❌ Failed to delete booking: {resp.status_code} {resp.text}")
+        return False
+    log(f"✅ Booking deleted")
+    return True
+
+def delete_visa(visa_id):
+    """Delete a visa"""
+    log(f"🗑️ Deleting visa {visa_id}...")
+    resp = session.delete(f"{API_URL}/visas/{visa_id}")
+    if resp.status_code != 200:
+        log(f"❌ Failed to delete visa: {resp.status_code} {resp.text}")
+        return False
+    log(f"✅ Visa deleted")
+    return True
+
+def delete_service(service_id):
+    """Delete a service"""
+    log(f"🗑️ Deleting service {service_id}...")
+    resp = session.delete(f"{API_URL}/services/{service_id}")
+    if resp.status_code != 200:
+        log(f"❌ Failed to delete service: {resp.status_code} {resp.text}")
+        return False
+    log(f"✅ Service deleted")
+    return True
+
+def delete_component(package_id, component_id):
+    """Delete a component"""
+    log(f"🗑️ Deleting component {component_id}...")
+    resp = session.delete(f"{API_URL}/packages/{package_id}/components/{component_id}")
+    if resp.status_code != 200:
+        log(f"❌ Failed to delete component: {resp.status_code} {resp.text}")
+        return False
+    log(f"✅ Component deleted")
+    return True
+
+def unshare_package(package_id):
+    """Unshare a package"""
+    log(f"🌐 Unsharing package {package_id}...")
+    resp = session.post(f"{API_URL}/packages/{package_id}/meraaj-share", json={"enabled": False})
+    if resp.status_code != 200:
+        log(f"❌ Failed to unshare: {resp.status_code} {resp.text}")
+        return False
+    log(f"✅ Package unshared")
+    return True
+
+def delete_package(package_id):
+    """Delete a package"""
+    log(f"🗑️ Deleting package {package_id}...")
+    resp = session.delete(f"{API_URL}/packages/{package_id}")
+    if resp.status_code != 200:
+        log(f"❌ Failed to delete package: {resp.status_code} {resp.text}")
+        return False
+    log(f"✅ Package deleted")
+    return True
+
+def delete_supplier(supplier_id):
+    """Delete a supplier"""
+    log(f"🗑️ Deleting supplier {supplier_id}...")
+    resp = session.delete(f"{API_URL}/suppliers/{supplier_id}")
+    if resp.status_code != 200:
+        log(f"❌ Failed to delete supplier: {resp.status_code} {resp.text}")
+        return False
+    log(f"✅ Supplier deleted")
+    return True
+
+def delete_client(client_id):
+    """Delete a client"""
+    log(f"🗑️ Deleting client {client_id}...")
+    resp = session.delete(f"{API_URL}/clients/{client_id}")
+    if resp.status_code != 200:
+        log(f"❌ Failed to delete client: {resp.status_code} {resp.text}")
+        return False
+    log(f"✅ Client deleted")
+    return True
+
+def cleanup():
+    """Clean up all created test data"""
+    log("\n🧹 CLEANUP: Deleting all created test data...")
     
-    # Current market after step 1.7: double customer {2000,1500,100}, quad customer {1000,1000,0}
-    # Expected total: 2000 (adult 30y) + 1500 (child 8y) + 100 (infant 1y) + 1000 (adult 25y) = 4600
+    # Delete bookings first (reverses balances)
+    # We know the package_id from our created_ids
+    if created_ids["packages"] and created_ids["bookings"]:
+        package_id = created_ids["packages"][0]
+        for booking_id in created_ids["bookings"]:
+            delete_booking(package_id, booking_id)
     
+    # Delete visas
+    for visa_id in created_ids["visas"]:
+        delete_visa(visa_id)
+    
+    # Delete services
+    for service_id in created_ids["services"]:
+        delete_service(service_id)
+    
+    # Delete components
+    for component_id in created_ids["components"]:
+        # Find package_id for this component
+        for package_id in created_ids["packages"]:
+            delete_component(package_id, component_id)
+    
+    # Unshare and delete packages
+    for package_id in created_ids["packages"]:
+        unshare_package(package_id)
+        delete_package(package_id)
+    
+    # Delete suppliers
+    for supplier_id in created_ids["suppliers"]:
+        delete_supplier(supplier_id)
+    
+    # Delete clients (after all transactions are deleted)
+    for client_id in created_ids["clients"]:
+        delete_client(client_id)
+    
+    log("✅ Cleanup complete")
+
+def run_test():
+    """Run the complete test suite"""
     try:
-        event_id = f"v325-e1-{int(time.time())}-{random.randint(1000, 9999)}"
-        booking_ref = f"MRJ-V325-1-{int(time.time())}"
+        log("=" * 80)
+        log("🚀 Starting v3.26 Backend Test — Approve Meraaj inbound booking + Partners summary")
+        log("=" * 80)
         
+        # Login
+        if not login():
+            return False
+        
+        # ===== SETUP =====
+        log("\n" + "=" * 80)
+        log("📦 SETUP: Creating test data")
+        log("=" * 80)
+        
+        # Create supplier
+        supplier = create_supplier("APPR-v326-Supplier")
+        if not supplier:
+            return False
+        
+        # Create package with room pricing
+        room_pricing = [
+            {"type": "double", "sale_per_pax": 2000, "sale_child": 1500, "sale_infant": 100}
+        ]
+        package = create_package("APPR-v326", "SAR", room_pricing)
+        if not package:
+            return False
+        
+        # Create flat component
+        component = create_component(package["id"], supplier["id"], "Transport", 800, 1200)
+        if not component:
+            return False
+        
+        # Share package
+        share_result = share_package(package["id"], "amount", 100, "deducted", 10)
+        if not share_result:
+            return False
+        
+        # ===== TEST 1: APPROVE INBOUND BOOKING =====
+        log("\n" + "=" * 80)
+        log("🧪 TEST 1: APPROVE INBOUND BOOKING")
+        log("=" * 80)
+        
+        # Inject inbound booking via webhook
+        event_id_suffix = str(int(datetime.now().timestamp() * 1000))
         webhook_data = {
-            'id': event_id,
-            'type': 'meraaj.booking.created',
-            'data': {
-                'package_ref': test_ids['package_smart'],
-                'booking_ref': booking_ref,
-                'buyer_office_name': 'مكتب الاختبار',
-                'registrants': [
-                    {'name': 'A1', 'age': 30, 'room_type': 'double'},
-                    {'name': 'C1', 'age': 8, 'room_type': 'double'},
-                    {'name': 'I1', 'age': 1, 'room_type': 'double'},
-                    {'name': 'A2', 'age': 25, 'room_type': 'quad'}
-                ],
-                'total_price': 4600,
-                'currency': 'SAR'
-            }
+            "package_ref": package["id"],
+            "booking_ref": f"MRJ-V326-1-{event_id_suffix}",
+            "buyer_office_name": "مكتب الرحلات الذهبية",
+            "registrants": [
+                {"name": "A1", "age": 30, "room_type": "double"},
+                {"name": "C1", "age": 8, "room_type": "double"},
+                {"name": "I1", "age": 1, "room_type": "double"}
+            ],
+            "currency": "SAR"
         }
-        
-        body = json.dumps(webhook_data)
-        signature = hmac_sign(body)
-        
-        resp = requests.post(f"{BASE_URL}/meraaj/webhooks", 
-            data=body,
-            headers={
-                'Content-Type': 'application/json',
-                'x-meraaj-signature': signature
-            }
-        )
-        
-        if resp.status_code != 200:
-            log(f"❌ Webhook failed: {resp.status_code} - {resp.text}")
+        webhook_result = inject_webhook(f"v326-e1-{event_id_suffix}", "meraaj.booking.created", webhook_data)
+        if not webhook_result:
             return False
         
-        data = resp.json()
-        booking = data.get('inbound_booking', {})
-        
-        log(f"✅ Booking created: {booking.get('id')}")
-        log(f"   Seats: {booking.get('seats')} (expected 3: 2 adults + 1 child, infant excluded)")
-        log(f"   Pax: adults={booking.get('pax_adults')}, children={booking.get('pax_children')}, infants={booking.get('pax_infants')}")
-        log(f"   Total price: {booking.get('total_price')} (computed)")
-        log(f"   Sent total: {booking.get('sent_total')}")
-        log(f"   Price check: {booking.get('price_check')}")
-        log(f"   Agent commission: {booking.get('agent_commission_total')}")
-        log(f"   Net to seller: {booking.get('net_to_seller_total')}")
-        log(f"   Seats remaining: {data.get('seats_remaining')}")
-        
-        # Verify calculations
-        if booking.get('seats') != 3:
-            log(f"❌ Seats incorrect (should be 3: 2 adults + 1 child)")
-            return False
-        if booking.get('pax_adults') != 2 or booking.get('pax_children') != 1 or booking.get('pax_infants') != 1:
-            log(f"❌ Pax counts incorrect")
-            return False
-        if booking.get('total_price') != 4600:
-            log(f"❌ Total price incorrect (expected 4600)")
-            return False
-        if booking.get('price_check') != 'match':
-            log(f"❌ Price check should be 'match'")
+        # Get inbound bookings
+        inbound_bookings = get_inbound_bookings()
+        if not inbound_bookings:
+            log("❌ No inbound bookings found")
             return False
         
-        # Commission: adult 100 + child 100 + infant 100 + quad adult 100 = 400
-        if booking.get('agent_commission_total') != 400:
-            log(f"❌ Agent commission incorrect (expected 400)")
+        inbound = inbound_bookings[0]
+        created_ids["meraaj_inbound"].append(inbound["id"])
+        log(f"📋 Inbound booking: {json.dumps(inbound, indent=2, ensure_ascii=False)}")
+        
+        # Verify inbound booking calculations
+        expected_total = 2000 + 1500 + 100  # 3600
+        expected_net = 1900 + 1400 + 0  # 3300 (after commission deduction)
+        expected_seats = 2  # adult + child (infant doesn't count)
+        
+        log(f"\n📊 Verifying inbound booking calculations:")
+        log(f"   Total price: {inbound.get('total_price')} (expected: {expected_total})")
+        log(f"   Net to seller: {inbound.get('net_to_seller_total')} (expected: {expected_net})")
+        log(f"   Seats: {inbound.get('seats')} (expected: {expected_seats})")
+        
+        if abs(inbound.get("total_price", 0) - expected_total) > 0.01:
+            log(f"❌ Total price mismatch: {inbound.get('total_price')} != {expected_total}")
             return False
         
-        # Net: (2000-100) + (1500-100) + (100-100) + (1000-100) = 1900 + 1400 + 0 + 900 = 4200
-        if booking.get('net_to_seller_total') != 4200:
-            log(f"❌ Net to seller incorrect (expected 4200)")
+        if abs(inbound.get("net_to_seller_total", 0) - expected_net) > 0.01:
+            log(f"❌ Net to seller mismatch: {inbound.get('net_to_seller_total')} != {expected_net}")
             return False
         
-        if data.get('seats_remaining') != 17:
-            log(f"❌ Seats remaining incorrect (expected 17 = 20 - 3)")
+        if inbound.get("seats") != expected_seats:
+            log(f"❌ Seats mismatch: {inbound.get('seats')} != {expected_seats}")
             return False
         
-        # Verify registrants have age_category and price
-        registrants = booking.get('registrants', [])
-        if len(registrants) != 4:
-            log(f"❌ Registrants count incorrect")
+        log("✅ Inbound booking calculations correct")
+        
+        # Approve the inbound booking
+        approval_result = approve_inbound_booking(inbound["id"])
+        if not approval_result:
             return False
         
-        for r in registrants:
-            if 'age_category' not in r or 'price' not in r:
-                log(f"❌ Registrant missing age_category or price: {r}")
-                return False
+        created_ids["bookings"].append(approval_result["booking"]["id"])
         
-        test_ids['inbound_bookings'].append(booking.get('id'))
-        test_ids['booking_ref_for_cancel'] = booking_ref  # Store for cancel test
-        log(f"✅ All calculations correct")
+        # Verify approval result
+        log(f"\n📊 Verifying approval result:")
+        log(f"   Approved: {approval_result.get('approved')}")
+        log(f"   Client name: {approval_result.get('client', {}).get('name')}")
+        log(f"   Booking total_sale: {approval_result.get('booking', {}).get('total_sale')}")
+        log(f"   Booking total_cost: {approval_result.get('booking', {}).get('total_cost')}")
+        log(f"   Booking commission: {approval_result.get('booking', {}).get('commission')}")
+        log(f"   Booking source: {approval_result.get('booking', {}).get('source')}")
+        log(f"   Booking pax_adults: {approval_result.get('booking', {}).get('pax_adults')}")
+        log(f"   Booking pax_children: {approval_result.get('booking', {}).get('pax_children')}")
+        log(f"   Booking pax_infants: {approval_result.get('booking', {}).get('pax_infants')}")
         
-        # Verify booking appears in GET /meraaj/inbound-bookings
-        resp = session.get(f"{BASE_URL}/meraaj/inbound-bookings")
-        if resp.status_code == 200:
-            bookings = resp.json()
-            if any(b.get('id') == booking.get('id') for b in bookings):
-                log(f"✅ Booking appears in GET /meraaj/inbound-bookings")
-            else:
-                log(f"⚠️  Booking not found in listing")
-        
-        return True
-        
-    except Exception as e:
-        log(f"❌ Inbound booking test error: {e}")
-        return False
-
-def test_2_inbound_booking_mismatch():
-    """TEST 2.2: Inbound booking with price mismatch"""
-    log("\n=== TEST 2.2: Inbound booking with price mismatch ===")
-    
-    try:
-        event_id = f"v325-e2-{int(time.time())}-{random.randint(1000, 9999)}"
-        
-        webhook_data = {
-            'id': event_id,
-            'type': 'meraaj.booking.created',
-            'data': {
-                'package_ref': test_ids['package_smart'],
-                'booking_ref': f"MRJ-V325-2-{int(time.time())}",
-                'buyer_office_name': 'مكتب الاختبار 2',
-                'registrants': [
-                    {'name': 'A3', 'age': 35, 'room_type': 'double'}
-                ],
-                'total_price': 9999,  # Wrong price
-                'currency': 'SAR'
-            }
-        }
-        
-        body = json.dumps(webhook_data)
-        signature = hmac_sign(body)
-        
-        resp = requests.post(f"{BASE_URL}/meraaj/webhooks", 
-            data=body,
-            headers={
-                'Content-Type': 'application/json',
-                'x-meraaj-signature': signature
-            }
-        )
-        
-        if resp.status_code != 200:
-            log(f"❌ Webhook failed: {resp.status_code} - {resp.text}")
+        if not approval_result.get("approved"):
+            log("❌ Booking not approved")
             return False
         
-        data = resp.json()
-        booking = data.get('inbound_booking', {})
-        
-        log(f"✅ Booking accepted despite mismatch")
-        log(f"   Price check: {booking.get('price_check')}")
-        log(f"   Total price (computed): {booking.get('total_price')}")
-        log(f"   Sent total: {booking.get('sent_total')}")
-        
-        if booking.get('price_check') != 'mismatch':
-            log(f"❌ Price check should be 'mismatch'")
-            return False
-        if booking.get('total_price') != 2000:
-            log(f"❌ Total price should be computed (2000), not sent value")
-            return False
-        if booking.get('sent_total') != 9999:
-            log(f"❌ Sent total should be preserved (9999)")
+        expected_client_name = "معراج — مكتب الرحلات الذهبية"
+        if approval_result.get("client", {}).get("name") != expected_client_name:
+            log(f"❌ Client name mismatch: {approval_result.get('client', {}).get('name')} != {expected_client_name}")
             return False
         
-        test_ids['inbound_bookings'].append(booking.get('id'))
-        log(f"✅ Price mismatch handled correctly")
-        return True
+        booking = approval_result["booking"]
+        expected_cost = 800 * 2  # 1600 (flat component cost × 2 billed pax)
+        expected_commission = 3300 - 1600  # 1700
         
-    except Exception as e:
-        log(f"❌ Mismatch test error: {e}")
-        return False
-
-def test_2_inbound_unknown_room():
-    """TEST 2.3: Inbound booking with unknown room type"""
-    log("\n=== TEST 2.3: Inbound booking with unknown room type ===")
-    
-    try:
-        event_id = f"v325-e3-{int(time.time())}-{random.randint(1000, 9999)}"
+        if abs(booking.get("total_sale", 0) - 3300) > 0.01:
+            log(f"❌ Booking total_sale mismatch: {booking.get('total_sale')} != 3300")
+            return False
         
-        webhook_data = {
-            'id': event_id,
-            'type': 'meraaj.booking.created',
-            'data': {
-                'package_ref': test_ids['package_smart'],
-                'booking_ref': f"MRJ-V325-3-{int(time.time())}",
-                'buyer_office_name': 'مكتب الاختبار 3',
-                'registrants': [
-                    {'name': 'A4', 'age': 40, 'room_type': 'penthouse'}
-                ],
-                'total_price': 5000,
-                'currency': 'SAR'
-            }
-        }
+        if abs(booking.get("total_cost", 0) - expected_cost) > 0.01:
+            log(f"❌ Booking total_cost mismatch: {booking.get('total_cost')} != {expected_cost}")
+            return False
         
-        body = json.dumps(webhook_data)
-        signature = hmac_sign(body)
+        if abs(booking.get("commission", 0) - expected_commission) > 0.01:
+            log(f"❌ Booking commission mismatch: {booking.get('commission')} != {expected_commission}")
+            return False
         
-        resp = requests.post(f"{BASE_URL}/meraaj/webhooks", 
-            data=body,
-            headers={
-                'Content-Type': 'application/json',
-                'x-meraaj-signature': signature
-            }
-        )
+        if booking.get("source") != "meraaj":
+            log(f"❌ Booking source mismatch: {booking.get('source')} != meraaj")
+            return False
         
-        if resp.status_code == 400:
-            error = resp.json().get('error', '')
-            log(f"✅ Correctly rejected: {error}")
-            if 'penthouse' in error and ('double' in error or 'quad' in error):
-                log(f"✅ Error lists available room types")
-                return True
-            else:
-                log(f"⚠️  Error message doesn't list available types")
-                return True
+        if booking.get("pax_adults") != 1:
+            log(f"❌ Booking pax_adults mismatch: {booking.get('pax_adults')} != 1")
+            return False
+        
+        if booking.get("pax_children") != 1:
+            log(f"❌ Booking pax_children mismatch: {booking.get('pax_children')} != 1")
+            return False
+        
+        if booking.get("pax_infants") != 1:
+            log(f"❌ Booking pax_infants mismatch: {booking.get('pax_infants')} != 1")
+            return False
+        
+        log("✅ Approval result correct")
+        
+        # Verify client auto-creation and balance
+        client_id = approval_result["client"]["id"]
+        # Check if this client already exists (from previous test runs)
+        client_already_existed = client_id in [c["id"] for c in session.get(f"{API_URL}/clients").json() if c.get("created_at", "") < booking.get("created_at", "")]
+        if not client_already_existed:
+            created_ids["clients"].append(client_id)
+        
+        client = get_client(client_id)
+        if not client:
+            log("❌ Client not found")
+            return False
+        
+        log(f"\n📊 Verifying client:")
+        log(f"   Client name: {client.get('name')}")
+        log(f"   Client SAR balance: {client.get('balances', {}).get('SAR')}")
+        
+        # The balance should be at least 3300 (could be higher if client existed from previous runs)
+        if client.get("balances", {}).get("SAR", 0) < 3300:
+            log(f"❌ Client SAR balance too low: {client.get('balances', {}).get('SAR')} < 3300")
+            return False
+        
+        initial_client_balance = client.get("balances", {}).get("SAR", 0)
+        log(f"✅ Client auto-created/reused with balance: {initial_client_balance}")
+        
+        # Verify supplier balance
+        supplier_data = get_supplier(supplier["id"])
+        if not supplier_data:
+            log("❌ Supplier not found")
+            return False
+        
+        log(f"\n📊 Verifying supplier:")
+        log(f"   Supplier SAR balance: {supplier_data.get('balances', {}).get('SAR')}")
+        
+        if abs(supplier_data.get("balances", {}).get("SAR", 0) - 1600) > 0.01:
+            log(f"❌ Supplier SAR balance mismatch: {supplier_data.get('balances', {}).get('SAR')} != 1600")
+            return False
+        
+        log("✅ Supplier balance correct")
+        
+        # Verify journal entry
+        journal_entries = get_journal_entries("package_booking", booking["id"])
+        if not journal_entries:
+            log("❌ Journal entry not found")
+            return False
+        
+        je = journal_entries[0]
+        log(f"\n📊 Verifying journal entry:")
+        log(f"   JE ref_type: {je.get('ref_type')}")
+        log(f"   JE ref_id: {je.get('ref_id')}")
+        log(f"   JE lines: {json.dumps(je.get('lines', []), indent=2, ensure_ascii=False)}")
+        
+        # Verify JE is balanced
+        total_debit = sum(line.get("debit", 0) for line in je.get("lines", []))
+        total_credit = sum(line.get("credit", 0) for line in je.get("lines", []))
+        
+        log(f"   Total debit: {total_debit}")
+        log(f"   Total credit: {total_credit}")
+        
+        if abs(total_debit - total_credit) > 0.01:
+            log(f"❌ Journal entry not balanced: debit={total_debit}, credit={total_credit}")
+            return False
+        
+        # Verify JE lines
+        client_line = next((l for l in je.get("lines", []) if l.get("account_code") == "1301"), None)
+        supplier_line = next((l for l in je.get("lines", []) if l.get("account_code") == "2101"), None)
+        revenue_line = next((l for l in je.get("lines", []) if l.get("account_code") == "4103"), None)
+        
+        if not client_line or abs(client_line.get("debit", 0) - 3300) > 0.01:
+            log(f"❌ Client line incorrect: {client_line}")
+            return False
+        
+        if not supplier_line or abs(supplier_line.get("credit", 0) - 1600) > 0.01:
+            log(f"❌ Supplier line incorrect: {supplier_line}")
+            return False
+        
+        if not revenue_line or abs(revenue_line.get("credit", 0) - 1700) > 0.01:
+            log(f"❌ Revenue line incorrect: {revenue_line}")
+            return False
+        
+        log("✅ Journal entry balanced and correct")
+        
+        # Verify inbound status updated
+        inbound_bookings = get_inbound_bookings()
+        inbound_updated = next((ib for ib in inbound_bookings if ib["id"] == inbound["id"]), None)
+        if not inbound_updated:
+            log("❌ Inbound booking not found after approval")
+            return False
+        
+        log(f"\n📊 Verifying inbound status:")
+        log(f"   Status: {inbound_updated.get('status')}")
+        log(f"   Booking ID: {inbound_updated.get('booking_id')}")
+        log(f"   Client ID: {inbound_updated.get('client_id')}")
+        
+        if inbound_updated.get("status") != "approved":
+            log(f"❌ Inbound status not updated: {inbound_updated.get('status')} != approved")
+            return False
+        
+        if inbound_updated.get("booking_id") != booking["id"]:
+            log(f"❌ Inbound booking_id mismatch: {inbound_updated.get('booking_id')} != {booking['id']}")
+            return False
+        
+        if inbound_updated.get("client_id") != client_id:
+            log(f"❌ Inbound client_id mismatch: {inbound_updated.get('client_id')} != {client_id}")
+            return False
+        
+        log("✅ Inbound status updated correctly")
+        
+        # Note: Skipping package bookings list check as there's no general bookings endpoint
+        # The booking was verified through the approval result
+        log("✅ Booking created successfully (verified through approval result)")
+        
+        # Test double-approve (should return 400)
+        log(f"\n🧪 Testing double-approve (should fail)...")
+        resp = session.post(f"{API_URL}/meraaj/inbound-bookings/{inbound['id']}/approve")
+        if resp.status_code == 400 and "معتمد مسبقاً" in resp.text:
+            log("✅ Double-approve correctly rejected")
         else:
-            log(f"❌ Expected 400, got {resp.status_code}")
+            log(f"❌ Double-approve should return 400 with 'معتمد مسبقاً', got {resp.status_code}: {resp.text}")
             return False
         
-    except Exception as e:
-        log(f"❌ Unknown room test error: {e}")
-        return False
-
-def test_2_inbound_no_registrants():
-    """TEST 2.4: Inbound booking without registrants"""
-    log("\n=== TEST 2.4: Inbound booking without registrants ===")
-    
-    try:
-        event_id = f"v325-e4-{int(time.time())}-{random.randint(1000, 9999)}"
+        # Test approve cancelled booking
+        log(f"\n🧪 Testing approve cancelled booking (should fail)...")
         
-        webhook_data = {
-            'id': event_id,
-            'type': 'meraaj.booking.created',
-            'data': {
-                'package_ref': test_ids['package_smart'],
-                'booking_ref': f"MRJ-V325-4-{int(time.time())}",
-                'buyer_office_name': 'مكتب الاختبار 4',
-                'total_price': 1000,
-                'currency': 'SAR'
-            }
+        # Inject another booking
+        event_id_suffix2 = str(int(datetime.now().timestamp() * 1000))
+        webhook_data2 = {
+            "package_ref": package["id"],
+            "booking_ref": f"MRJ-V326-2-{event_id_suffix2}",
+            "buyer_office_name": "مكتب الرحلات الذهبية",
+            "registrants": [
+                {"name": "A2", "age": 30, "room_type": "double"}
+            ],
+            "currency": "SAR"
         }
+        webhook_result2 = inject_webhook(f"v326-e2-{event_id_suffix2}", "meraaj.booking.created", webhook_data2)
+        if not webhook_result2:
+            return False
         
-        body = json.dumps(webhook_data)
-        signature = hmac_sign(body)
+        inbound_bookings = get_inbound_bookings()
+        inbound2 = next((ib for ib in inbound_bookings if ib["meraaj_booking_ref"] == f"MRJ-V326-2-{event_id_suffix2}"), None)
+        if not inbound2:
+            log("❌ Second inbound booking not found")
+            return False
         
-        resp = requests.post(f"{BASE_URL}/meraaj/webhooks", 
-            data=body,
-            headers={
-                'Content-Type': 'application/json',
-                'x-meraaj-signature': signature
-            }
-        )
+        created_ids["meraaj_inbound"].append(inbound2["id"])
         
-        if resp.status_code == 400:
-            log(f"✅ Correctly rejected: {resp.json().get('error', '')}")
-            return True
+        # Cancel it
+        cancel_data = {
+            "booking_ref": f"MRJ-V326-2-{event_id_suffix2}",
+            "reason": "Test cancellation"
+        }
+        cancel_result = inject_webhook(f"v326-e3-{event_id_suffix2}", "meraaj.booking.cancelled", cancel_data)
+        if not cancel_result:
+            return False
+        
+        # Try to approve
+        resp = session.post(f"{API_URL}/meraaj/inbound-bookings/{inbound2['id']}/approve")
+        if resp.status_code == 400 and "ملغى" in resp.text:
+            log("✅ Approve cancelled booking correctly rejected")
         else:
-            log(f"❌ Expected 400, got {resp.status_code}")
+            log(f"❌ Approve cancelled should return 400 with 'ملغى', got {resp.status_code}: {resp.text}")
             return False
         
-    except Exception as e:
-        log(f"❌ No registrants test error: {e}")
-        return False
-
-def test_2_inbound_infants_only():
-    """TEST 2.5: Inbound booking with infants only"""
-    log("\n=== TEST 2.5: Inbound booking with infants only ===")
-    
-    try:
-        event_id = f"v325-e5-{int(time.time())}-{random.randint(1000, 9999)}"
+        # Test client reuse
+        log(f"\n🧪 Testing client reuse...")
         
-        webhook_data = {
-            'id': event_id,
-            'type': 'meraaj.booking.created',
-            'data': {
-                'package_ref': test_ids['package_smart'],
-                'booking_ref': f"MRJ-V325-5-{int(time.time())}",
-                'buyer_office_name': 'مكتب الاختبار 5',
-                'registrants': [
-                    {'name': 'I2', 'age': 1, 'room_type': 'double'}
-                ],
-                'total_price': 100,
-                'currency': 'SAR'
-            }
+        # Inject third booking
+        event_id_suffix3 = str(int(datetime.now().timestamp() * 1000))
+        webhook_data3 = {
+            "package_ref": package["id"],
+            "booking_ref": f"MRJ-V326-3-{event_id_suffix3}",
+            "buyer_office_name": "مكتب الرحلات الذهبية",
+            "registrants": [
+                {"name": "A3", "age": 30, "room_type": "double"}
+            ],
+            "currency": "SAR"
         }
-        
-        body = json.dumps(webhook_data)
-        signature = hmac_sign(body)
-        
-        resp = requests.post(f"{BASE_URL}/meraaj/webhooks", 
-            data=body,
-            headers={
-                'Content-Type': 'application/json',
-                'x-meraaj-signature': signature
-            }
-        )
-        
-        if resp.status_code == 400:
-            error = resp.json().get('error', '')
-            log(f"✅ Correctly rejected: {error}")
-            if 'بالغ' in error or 'طفل' in error:
-                log(f"✅ Error mentions need for adult/child")
-            return True
-        else:
-            log(f"❌ Expected 400, got {resp.status_code}")
+        webhook_result3 = inject_webhook(f"v326-e4-{event_id_suffix3}", "meraaj.booking.created", webhook_data3)
+        if not webhook_result3:
             return False
         
-    except Exception as e:
-        log(f"❌ Infants only test error: {e}")
-        return False
-
-def test_2_cancel_booking():
-    """TEST 2.6: Cancel booking"""
-    log("\n=== TEST 2.6: Cancel booking ===")
-    
-    try:
-        event_id = f"v325-e6-{int(time.time())}-{random.randint(1000, 9999)}"
-        booking_ref = test_ids.get('booking_ref_for_cancel', 'MRJ-V325-1')
-        
-        webhook_data = {
-            'id': event_id,
-            'type': 'meraaj.booking.cancelled',
-            'data': {
-                'booking_ref': booking_ref,
-                'reason': 'اختبار الإلغاء'
-            }
-        }
-        
-        body = json.dumps(webhook_data)
-        signature = hmac_sign(body)
-        
-        resp = requests.post(f"{BASE_URL}/meraaj/webhooks", 
-            data=body,
-            headers={
-                'Content-Type': 'application/json',
-                'x-meraaj-signature': signature
-            }
-        )
-        
-        if resp.status_code != 200:
-            log(f"❌ Cancel failed: {resp.status_code} - {resp.text}")
+        inbound_bookings = get_inbound_bookings()
+        inbound3 = next((ib for ib in inbound_bookings if ib["meraaj_booking_ref"] == f"MRJ-V326-3-{event_id_suffix3}"), None)
+        if not inbound3:
+            log("❌ Third inbound booking not found")
             return False
         
-        data = resp.json()
-        log(f"✅ Booking cancelled")
-        log(f"   Released seats: {data.get('released_seats')}")
+        created_ids["meraaj_inbound"].append(inbound3["id"])
         
-        if data.get('released_seats') != 3:
-            log(f"❌ Released seats incorrect (expected 3)")
+        # Approve it
+        approval_result3 = approve_inbound_booking(inbound3["id"])
+        if not approval_result3:
             return False
         
-        # Verify seats_sold decreased
-        resp = session.get(f"{BASE_URL}/packages")
-        if resp.status_code == 200:
-            packages = resp.json()
-            pkg = next((p for p in packages if p['id'] == test_ids['package_smart']), None)
-            if pkg:
-                seats_sold = pkg.get('meraaj', {}).get('seats_sold', 0)
-                log(f"   Current seats_sold: {seats_sold}")
-                # Should be back to 1 (only MRJ-V325-2 remains)
+        created_ids["bookings"].append(approval_result3["booking"]["id"])
         
-        log(f"✅ Cancellation working correctly")
+        # Verify same client ID reused
+        if approval_result3.get("client", {}).get("id") != client_id:
+            log(f"❌ Client not reused: {approval_result3.get('client', {}).get('id')} != {client_id}")
+            return False
+        
+        log("✅ Client reused correctly (no duplicate client)")
+        
+        # Verify client balance updated
+        client = get_client(client_id)
+        expected_balance = initial_client_balance + 1900  # Previous balance + new booking
+        if abs(client.get("balances", {}).get("SAR", 0) - expected_balance) > 0.01:
+            log(f"❌ Client balance after reuse mismatch: {client.get('balances', {}).get('SAR')} != {expected_balance}")
+            return False
+        
+        log(f"✅ Client balance updated correctly: {client.get('balances', {}).get('SAR')}")
+        
+        log("\n✅ TEST 1 PASSED: Approve inbound booking")
+        
+        # ===== TEST 2: PARTNERS SUMMARY =====
+        log("\n" + "=" * 80)
+        log("🧪 TEST 2: PARTNERS SUMMARY")
+        log("=" * 80)
+        
+        # Create partner client
+        partner = create_partner_client("SUMM-PARTNER-v326")
+        if not partner:
+            return False
+        
+        # Create regular client for transactions
+        regular_client = create_partner_client("REGULAR-CLIENT-v326")
+        if not regular_client:
+            return False
+        
+        # Create visa with partner commission
+        visa = create_visa_with_partner(regular_client["id"], supplier["id"], partner["id"], 50, 100, 20)
+        if not visa:
+            return False
+        
+        # Create service with partner commission
+        service = create_service_with_partner(regular_client["id"], supplier["id"], partner["id"], 30, 80, 15)
+        if not service:
+            return False
+        
+        # Get partners summary
+        summary = get_partners_summary()
+        if not summary:
+            return False
+        
+        # Verify partner appears in summary
+        partner_data = next((p for p in summary.get("partners", []) if p["partner_id"] == partner["id"]), None)
+        if not partner_data:
+            log("❌ Partner not found in summary")
+            return False
+        
+        log(f"\n📊 Verifying partner summary:")
+        log(f"   Partner: {json.dumps(partner_data, indent=2, ensure_ascii=False)}")
+        
+        if partner_data.get("ops_count") != 2:
+            log(f"❌ ops_count mismatch: {partner_data.get('ops_count')} != 2")
+            return False
+        
+        sar_data = partner_data.get("currencies", {}).get("SAR")
+        if not sar_data:
+            log("❌ SAR currency data not found")
+            return False
+        
+        expected_earned = 20 + 15  # 35
+        if abs(sar_data.get("earned", 0) - expected_earned) > 0.01:
+            log(f"❌ Earned mismatch: {sar_data.get('earned')} != {expected_earned}")
+            return False
+        
+        if abs(sar_data.get("settled", 0) - 0) > 0.01:
+            log(f"❌ Settled should be 0: {sar_data.get('settled')}")
+            return False
+        
+        if abs(sar_data.get("outstanding", 0) - expected_earned) > 0.01:
+            log(f"❌ Outstanding mismatch: {sar_data.get('outstanding')} != {expected_earned}")
+            return False
+        
+        if not partner_data.get("has_outstanding"):
+            log("❌ has_outstanding should be true")
+            return False
+        
+        log("✅ Partner summary correct")
+        
+        # Test partial settlement
+        log(f"\n🧪 Testing partial settlement...")
+        
+        # Create statement
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
+        statement = create_partner_statement("client", partner["id"], yesterday, today)
+        if not statement:
+            return False
+        
+        # Get a box for settlement
+        boxes = get_boxes()
+        if not boxes:
+            log("❌ No boxes found")
+            return False
+        
+        box = boxes[0]
+        
+        # Settle partially
+        settle_result = settle_partner_statement(statement["id"], box["id"], "SAR", 20)
+        if not settle_result:
+            return False
+        
+        # Get updated summary
+        summary = get_partners_summary()
+        if not summary:
+            return False
+        
+        partner_data = next((p for p in summary.get("partners", []) if p["partner_id"] == partner["id"]), None)
+        if not partner_data:
+            log("❌ Partner not found in summary after settlement")
+            return False
+        
+        log(f"\n📊 Verifying partner summary after settlement:")
+        log(f"   Partner: {json.dumps(partner_data, indent=2, ensure_ascii=False)}")
+        
+        sar_data = partner_data.get("currencies", {}).get("SAR")
+        if not sar_data:
+            log("❌ SAR currency data not found after settlement")
+            return False
+        
+        if abs(sar_data.get("earned", 0) - 35) > 0.01:
+            log(f"❌ Earned should remain 35: {sar_data.get('earned')}")
+            return False
+        
+        if abs(sar_data.get("settled", 0) - 20) > 0.01:
+            log(f"❌ Settled mismatch: {sar_data.get('settled')} != 20")
+            return False
+        
+        if abs(sar_data.get("outstanding", 0) - 15) > 0.01:
+            log(f"❌ Outstanding mismatch: {sar_data.get('outstanding')} != 15")
+            return False
+        
+        if not partner_data.get("has_outstanding"):
+            log("❌ has_outstanding should still be true")
+            return False
+        
+        log("✅ Partial settlement correct")
+        
+        log("\n✅ TEST 2 PASSED: Partners summary")
+        
+        # ===== CLEANUP =====
+        cleanup()
+        
+        log("\n" + "=" * 80)
+        log("✅ ALL TESTS PASSED")
+        log("=" * 80)
+        
         return True
         
     except Exception as e:
-        log(f"❌ Cancel test error: {e}")
+        log(f"\n❌ TEST FAILED WITH EXCEPTION: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
 
-def test_3_s2s_get_package():
-    """TEST 3: S2S GET /api/meraaj/packages/:id"""
-    log("\n=== TEST 3: S2S GET /api/meraaj/packages/:id ===")
-    
-    try:
-        path = f"/meraaj/packages/{test_ids['package_smart']}"
-        headers = s2s_headers(path)
-        
-        resp = requests.get(f"{BASE_URL}{path}", headers=headers)
-        
-        if resp.status_code != 200:
-            log(f"❌ S2S GET failed: {resp.status_code} - {resp.text}")
-            return False
-        
-        data = resp.json()
-        log(f"✅ S2S GET successful")
-        log(f"   Package: {data.get('name')}")
-        log(f"   Market pricing rows: {len(data.get('meraaj', {}).get('market_pricing', []))}")
-        log(f"   Commission direction: {data.get('meraaj', {}).get('commission_direction')}")
-        log(f"   Features: {data.get('features', [])}")
-        log(f"   Image URL: {data.get('image_url')}")
-        
-        # Verify required fields
-        meraaj = data.get('meraaj', {})
-        if 'market_pricing' not in meraaj:
-            log(f"❌ market_pricing missing")
-            return False
-        if 'commission_direction' not in meraaj:
-            log(f"❌ commission_direction missing")
-            return False
-        if 'features' not in data:
-            log(f"❌ features missing")
-            return False
-        if 'image_url' not in data:
-            log(f"❌ image_url missing")
-            return False
-        
-        if len(meraaj.get('market_pricing', [])) != 2:
-            log(f"❌ market_pricing should have 2 rows")
-            return False
-        
-        log(f"✅ All required fields present")
-        return True
-        
-    except Exception as e:
-        log(f"❌ S2S GET test error: {e}")
-        return False
-
-def test_cleanup():
-    """Cleanup all test data"""
-    log("\n=== CLEANUP ===")
-    
-    success = True
-    
-    # List inbound bookings (no delete endpoint)
-    try:
-        resp = session.get(f"{BASE_URL}/meraaj/inbound-bookings")
-        if resp.status_code == 200:
-            bookings = resp.json()
-            test_bookings = [b for b in bookings if b.get('id') in test_ids['inbound_bookings']]
-            if test_bookings:
-                log(f"⚠️  Leftover inbound bookings (no delete endpoint): {[b['id'] for b in test_bookings]}")
-    except Exception as e:
-        log(f"⚠️  Error listing inbound bookings: {e}")
-    
-    # List meraaj events (no delete endpoint)
-    try:
-        resp = session.get(f"{BASE_URL}/meraaj/events")
-        if resp.status_code == 200:
-            events = resp.json()
-            test_events = [e for e in events if e.get('payload', {}).get('package_ref') == test_ids['package_smart']]
-            if test_events:
-                log(f"⚠️  Leftover meraaj_events (no delete endpoint): {[e['id'] for e in test_events]}")
-    except Exception as e:
-        log(f"⚠️  Error listing meraaj events: {e}")
-    
-    # Unshare package
-    if test_ids['package_smart']:
-        try:
-            resp = session.post(f"{BASE_URL}/packages/{test_ids['package_smart']}/meraaj-share", json={
-                'enabled': False
-            })
-            if resp.status_code == 200:
-                log(f"✅ Package unshared")
-            else:
-                log(f"⚠️  Unshare failed: {resp.status_code}")
-        except Exception as e:
-            log(f"⚠️  Unshare error: {e}")
-    
-    # Delete component
-    if test_ids['component'] and test_ids['package_smart']:
-        try:
-            resp = session.delete(f"{BASE_URL}/packages/{test_ids['package_smart']}/components/{test_ids['component']}")
-            if resp.status_code == 200:
-                log(f"✅ Component deleted")
-            else:
-                log(f"⚠️  Component delete failed: {resp.status_code}")
-        except Exception as e:
-            log(f"⚠️  Component delete error: {e}")
-    
-    # Delete package SMART-v325
-    if test_ids['package_smart']:
-        try:
-            resp = session.delete(f"{BASE_URL}/packages/{test_ids['package_smart']}")
-            if resp.status_code == 200:
-                log(f"✅ Package SMART-v325 deleted")
-            else:
-                log(f"⚠️  Package delete failed: {resp.status_code} - {resp.text}")
-                success = False
-        except Exception as e:
-            log(f"⚠️  Package delete error: {e}")
-            success = False
-    
-    # Delete supplier
-    if test_ids['supplier']:
-        try:
-            resp = session.delete(f"{BASE_URL}/suppliers/{test_ids['supplier']}")
-            if resp.status_code == 200:
-                log(f"✅ Supplier deleted")
-            else:
-                log(f"⚠️  Supplier delete failed: {resp.status_code}")
-        except Exception as e:
-            log(f"⚠️  Supplier delete error: {e}")
-    
-    return success
-
-def main():
-    """Run all tests"""
-    log("=" * 80)
-    log("v3.25 Backend Test Suite - Smart Meraaj Share + Age-Aware Inbound Booking")
-    log("=" * 80)
-    
-    results = {}
-    
-    # Setup
-    if not test_login():
-        log("\n❌ FATAL: Login failed, cannot continue")
-        return
-    
-    if not test_setup_data():
-        log("\n❌ FATAL: Setup failed, cannot continue")
-        return
-    
-    # Test 1: Smart Share
-    results['1.1_no_room_prices'] = test_1_share_without_room_prices()
-    results['1.2_share_deducted'] = test_1_share_smart_deducted()
-    results['1.3_share_added'] = test_1_share_added()
-    results['1.4_share_percent'] = test_1_share_percent()
-    results['1.5_share_overflow'] = test_1_share_overflow()
-    results['1.6_restore_config'] = test_1_restore_config()
-    results['1.7_auto_resync'] = test_1_auto_resync()
-    
-    # Test 2: Age-aware inbound bookings
-    results['2.1_inbound_match'] = test_2_inbound_booking_match()
-    results['2.2_inbound_mismatch'] = test_2_inbound_booking_mismatch()
-    results['2.3_inbound_unknown_room'] = test_2_inbound_unknown_room()
-    results['2.4_inbound_no_registrants'] = test_2_inbound_no_registrants()
-    results['2.5_inbound_infants_only'] = test_2_inbound_infants_only()
-    results['2.6_cancel_booking'] = test_2_cancel_booking()
-    
-    # Test 3: S2S regression
-    results['3_s2s_get_package'] = test_3_s2s_get_package()
-    
-    # Cleanup
-    test_cleanup()
-    
-    # Summary
-    log("\n" + "=" * 80)
-    log("TEST SUMMARY")
-    log("=" * 80)
-    
-    passed = sum(1 for v in results.values() if v)
-    total = len(results)
-    
-    for test, result in results.items():
-        status = "✅ PASS" if result else "❌ FAIL"
-        log(f"{status} - {test}")
-    
-    log(f"\nTotal: {passed}/{total} tests passed ({passed*100//total}%)")
-    
-    if passed == total:
-        log("\n🎉 ALL TESTS PASSED!")
-    else:
-        log(f"\n⚠️  {total - passed} test(s) failed")
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    success = run_test()
+    exit(0 if success else 1)

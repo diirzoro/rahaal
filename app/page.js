@@ -7554,12 +7554,17 @@ function PartnerStatementDialog({ open, onOpenChange }) {
   const [settleFor, setSettleFor] = useState(null) // { stmt, currency, due }
   const [settleForm, setSettleForm] = useState({ box_id: '', amount: '', notes: '' })
   const [settling, setSettling] = useState(false)
+  // v3.26 — Partners monthly summary (earned / settled / outstanding)
+  const [summary, setSummary] = useState(null)
+  const [showSummary, setShowSummary] = useState(false)
+  const loadSummary = () => api('/partners/summary').then(setSummary).catch(() => {})
   useEffect(() => {
     if (!open) return
     api('/clients').then(setClients).catch(() => {})
     api('/suppliers').then(setSuppliers).catch(() => {})
     api('/boxes').then(setBoxes).catch(() => {})
     loadArchive()
+    loadSummary()
     // default: current month
     const now = new Date()
     setFrom(new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10))
@@ -7621,6 +7626,7 @@ function PartnerStatementDialog({ open, onOpenChange }) {
       toast.success(`✅ تمت التسوية — سند صرف ${fmt(res.settled_amount, res.settled_currency)} وقيد محاسبي متوازن`)
       setSettleFor(null)
       loadArchive()
+      loadSummary()
       setArchivedStmt({ ...stmtDoc, settlement_voucher_id: res.voucher?.id, settled_amount: res.settled_amount, settled_currency: res.settled_currency })
     } catch (e) { toast.error(e.message) } finally { setSettling(false) }
   }
@@ -7706,7 +7712,8 @@ function PartnerStatementDialog({ open, onOpenChange }) {
         </div>
         {/* v3.22 — Archive toggle + save snapshot */}
         <div className="flex items-center gap-2 flex-wrap">
-          <Button size="sm" variant={showArchive ? 'default' : 'outline'} onClick={() => setShowArchive(!showArchive)} className={`h-8 text-xs gap-1 ${showArchive ? 'bg-slate-700 text-white' : ''}`}>📁 الأرشيف ({archiveList.length})</Button>
+          <Button size="sm" variant={showSummary ? 'default' : 'outline'} onClick={() => { setShowSummary(!showSummary); if (!showSummary) setShowArchive(false) }} className={`h-8 text-xs gap-1 ${showSummary ? 'bg-amber-600 text-white' : ''}`}>📊 ملخص الشركاء {summary?.partners?.filter(p => p.has_outstanding).length > 0 && <span className="bg-rose-500 text-white rounded-full px-1.5 text-[9px]">{summary.partners.filter(p => p.has_outstanding).length}</span>}</Button>
+          <Button size="sm" variant={showArchive ? 'default' : 'outline'} onClick={() => { setShowArchive(!showArchive); if (!showArchive) setShowSummary(false) }} className={`h-8 text-xs gap-1 ${showArchive ? 'bg-slate-700 text-white' : ''}`}>📁 الأرشيف ({archiveList.length})</Button>
           {data && (data.rows || []).length > 0 && !archivedStmt && (
             <Button size="sm" variant="outline" onClick={() => archiveStmt(false)} className="h-8 text-xs gap-1 border-indigo-300 text-indigo-700 hover:bg-indigo-50">💾 حفظ الكشف في الأرشيف</Button>
           )}
@@ -7739,6 +7746,36 @@ function PartnerStatementDialog({ open, onOpenChange }) {
             <div className="text-[11px] text-slate-500">💡 سيُنشأ سند صرف باسم الشريك يخفّض رصيد العمولة المستحقة له، مع قيد محاسبي متوازن آلياً. {!settleFor.stmt?.id && 'وسيُحفظ الكشف في الأرشيف تلقائياً قبل التسوية (Audit Trail).'}</div>
           </div>
         )}
+        {/* v3.26 — Partners summary view */}
+        {showSummary && (
+          !summary || (summary.partners || []).length === 0 ? (
+            <div className="text-center text-slate-400 py-6 text-sm">لا توجد عمولات شركاء مسجلة بعد</div>
+          ) : (
+            <div className="space-y-2">
+              {summary.partners.map(p => (
+                <div key={p.partner_id} className={`rounded-lg border p-3 ${p.has_outstanding ? 'bg-amber-50/60 border-amber-300' : 'bg-white'}`}>
+                  <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+                    <div className="text-sm font-bold text-slate-800">{p.partner_type === 'supplier' ? '🏢' : '👤'} {p.partner_name || 'شريك'} <span className="text-[10px] text-slate-400 font-normal">({p.ops_count} عملية)</span></div>
+                    <div className="flex gap-2">
+                      {p.has_outstanding && <Badge className="bg-rose-100 text-rose-700 border border-rose-300">⏳ مستحقات غير مسوّاة</Badge>}
+                      <Button size="sm" variant="outline" onClick={() => { setPartnerKey(`${p.partner_type}:${p.partner_id}`); setShowSummary(false); setFrom(''); setTo(new Date().toISOString().slice(0, 10)) }} className="h-6 text-[10px]">📄 عرض الكشف</Button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-1.5">
+                    {Object.entries(p.currencies).map(([cur, c]) => (
+                      <div key={cur} className="rounded border bg-white p-2 text-[11px] space-y-0.5">
+                        <div className="font-bold text-slate-600">{cur}</div>
+                        <div className="flex justify-between"><span className="text-slate-500">مكتسب:</span><b>{c.earned.toLocaleString('en-US')}</b></div>
+                        <div className="flex justify-between text-emerald-700"><span>مُسوّى:</span><b>{c.settled.toLocaleString('en-US')}</b></div>
+                        <div className={`flex justify-between border-t pt-0.5 ${c.outstanding > 0.009 ? 'text-rose-600' : 'text-slate-400'}`}><span>المتبقي:</span><b>{c.outstanding.toLocaleString('en-US')}</b></div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        )}
         {/* v3.22 — Archive list */}
         {showArchive && (
           archiveList.length === 0 ? (
@@ -7767,7 +7804,7 @@ function PartnerStatementDialog({ open, onOpenChange }) {
             </div>
           )
         )}
-        {!showArchive && data && (
+        {!showArchive && !showSummary && data && (
           (data.rows || []).length === 0 ? (
             <div className="text-center text-slate-400 py-8 text-sm">لا توجد عمولات مشتركة لهذا الشريك في الفترة المحددة</div>
           ) : (
@@ -7928,10 +7965,34 @@ function MeraajShareDialog({ pkg, onClose, onSaved }) {
 
 // v3.25 — Marketing Showcase (read-only view for staff to present the package to customers)
 function PackageShowcaseDialog({ pkg, onClose }) {
+  const [waPhone, setWaPhone] = useState('')
   if (!pkg) return null
   const nights = pkg.start_date && pkg.end_date ? Math.max(0, Math.ceil((new Date(pkg.end_date) - new Date(pkg.start_date)) / 86400000)) : null
   const roomRows = (pkg.room_pricing || []).filter(r => (Number(r.sale_per_pax) || 0) > 0)
   const TYPE_LABELS = { umrah: '🕋 عمرة', hajj: '🕋 حج', tourism: '🏝️ سياحة', other: '📦 برنامج' }
+  // v3.26 — WhatsApp marketing message
+  const sendWhatsApp = () => {
+    const L = []
+    L.push(`🕋 *${pkg.name}*`)
+    if (pkg.start_date) L.push(`🛫 الانطلاق: ${new Date(pkg.start_date).toLocaleDateString('en-GB')}${pkg.end_date ? ` — 🛬 العودة: ${new Date(pkg.end_date).toLocaleDateString('en-GB')}` : ''}${nights !== null ? ` (🌙 ${nights} ليلة)` : ''}`)
+    if ((pkg.features || []).length > 0) {
+      L.push('', '✨ *مميزات البرنامج:*')
+      for (const f of pkg.features) L.push(`✅ ${f}`)
+    }
+    if (roomRows.length > 0) {
+      L.push('', `💵 *الأسعار (${pkg.currency}):*`)
+      for (const r of roomRows) {
+        const child = (r.sale_child === null || r.sale_child === undefined) ? (Number(r.sale_per_pax) || 0) : (Number(r.sale_child) || 0)
+        const infant = Number(r.sale_infant) || 0
+        L.push(`🛏️ ${r.type}: بالغ ${(Number(r.sale_per_pax) || 0).toLocaleString('en-US')} • طفل ${child.toLocaleString('en-US')} • رضيع ${infant > 0 ? infant.toLocaleString('en-US') : 'مجاناً'}`)
+      }
+    }
+    if (pkg.notes) L.push('', `📝 ${pkg.notes}`)
+    L.push('', '📞 للحجز والاستفسار تواصل معنا')
+    const text = encodeURIComponent(L.join('\n'))
+    const phone = waPhone.replace(/[^0-9]/g, '')
+    window.open(phone ? `https://wa.me/${phone}?text=${text}` : `https://wa.me/?text=${text}`, '_blank', 'noopener,noreferrer')
+  }
   return (
     <Dialog open={!!pkg} onOpenChange={v => { if (!v) onClose() }}>
       <DialogContent className="max-w-2xl max-h-[92vh] overflow-y-auto p-0">
@@ -8012,8 +8073,15 @@ function PackageShowcaseDialog({ pkg, onClose }) {
               <b>📝 ملاحظات:</b> {pkg.notes}
             </div>
           )}
-          <div className="flex justify-end">
-            <Button variant="outline" onClick={onClose}>إغلاق</Button>
+          <div className="flex flex-col md:flex-row gap-2 items-stretch md:items-end justify-between border-t pt-3">
+            <div className="flex-1 flex gap-2 items-end">
+              <div className="flex-1">
+                <div className="text-[10px] text-slate-500 mb-1">📲 رقم واتساب الزبون (بالرمز الدولي، اختياري)</div>
+                <Input value={waPhone} onChange={e => setWaPhone(e.target.value)} placeholder="9677xxxxxxxx" className="h-9" dir="ltr" />
+              </div>
+              <Button onClick={sendWhatsApp} className="bg-gradient-to-l from-green-600 to-emerald-500 text-white gap-1 h-9">📲 إرسال العرض واتساب</Button>
+            </div>
+            <Button variant="outline" onClick={onClose} className="h-9">إغلاق</Button>
           </div>
         </div>
       </DialogContent>
@@ -8048,6 +8116,17 @@ function MeraajStoreScreen() {
   const newBookings = inbound.filter(b => b.status === 'new')
   const totalSeatsSold = sharedPkgs.reduce((s, p) => s + (Number(p.meraaj?.seats_sold) || 0), 0)
   const EVT_LABELS = { 'inventory.updated': '📊 تحديث مخزون', 'package.shared': '🕋 مشاركة باكج', 'package.updated': '✏️ تحديث باكج', 'package.deactivated': '⛔ إيقاف باكج' }
+  // v3.26 — approve inbound booking into a real accounting booking
+  const [approving, setApproving] = useState(null)
+  const approveBooking = async (b) => {
+    if (!confirm(`اعتماد حجز "${b.buyer_office_name}" (${b.seats} مقعد) وتحويله لحجز محاسبي فعلي؟\n\nسيُنشأ: عميل باسم المكتب المشتري (إن لم يوجد) + حجز في الباكج + قيد يومية متوازن بصافي ${(b.net_to_seller_total || 0).toLocaleString('en-US')} ${b.currency}`)) return
+    try {
+      setApproving(b.id)
+      const res = await api(`/meraaj/inbound-bookings/${b.id}/approve`, { method: 'POST' })
+      toast.success(`✅ تم الاعتماد — حجز محاسبي باسم "${res.client?.name}" وقيد متوازن`)
+      load()
+    } catch (e) { toast.error(e.message) } finally { setApproving(null) }
+  }
   return (
     <div>
       <TopBar title="🕋 متجر معراج نتورك" subtitle="سوق B2B لبيع وشراء برامج العمرة والسياحة بين المكاتب" right={<Button variant="outline" onClick={load} className="gap-1 text-xs h-8">🔄 تحديث</Button>} />
@@ -8115,7 +8194,14 @@ function MeraajStoreScreen() {
               </TableCell>
               <TableCell className="text-xs">{fmt(b.total_price || 0, b.currency)}</TableCell>
               <TableCell className="text-[10px] text-slate-400">{b.meraaj_booking_ref || '—'}</TableCell>
-              <TableCell><Badge className={b.status === 'cancelled' ? 'bg-rose-100 text-rose-700' : 'bg-blue-100 text-blue-700'}>{b.status === 'cancelled' ? '⛔ ملغى' : '🔵 جديد'}</Badge></TableCell>
+              <TableCell>
+                {b.status === 'cancelled' ? <Badge className="bg-rose-100 text-rose-700">⛔ ملغى</Badge>
+                  : b.status === 'approved' ? <Badge className="bg-emerald-100 text-emerald-700">✅ معتمد</Badge>
+                  : <div className="flex items-center gap-1">
+                      <Badge className="bg-blue-100 text-blue-700">🔵 جديد</Badge>
+                      <Button size="sm" onClick={() => approveBooking(b)} disabled={approving === b.id} className="h-6 px-2 text-[10px] grad-green text-white">{approving === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '✅ اعتماد'}</Button>
+                    </div>}
+              </TableCell>
             </TableRow>))}</TableBody>
           </Table></CardContent></Card>
         )
