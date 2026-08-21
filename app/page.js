@@ -7226,6 +7226,27 @@ function PackagesScreen() {
   const [showcasePkg, setShowcasePkg] = useState(null)
   // v3.27 — WhatsApp sales log
   const [waLogsOpen, setWaLogsOpen] = useState(false)
+  const [waReminders, setWaReminders] = useState(0)
+  // v3.28 — Soft archive
+  const [showArchived, setShowArchived] = useState(false)
+  const [archivedList, setArchivedList] = useState([])
+  useEffect(() => { api('/whatsapp-logs/reminders').then(r => setWaReminders(r?.count || 0)).catch(() => {}) }, [waLogsOpen])
+  const loadArchived = () => api('/packages?archived=1').then(setArchivedList).catch(() => {})
+  const archivePkg = async (p) => {
+    if (!confirm(`أرشفة الباكج "${p?.name}"؟\n\n🗂️ أرشفة ناعمة آمنة: سيختفي من واجهات العرض ومن سوق معراج${p?.meraaj?.shared ? ' (وسيُبلغ معراج بإيقافه)' : ''}، لكن تبقى كل بياناته وحجوزاته وقيوده المحاسبية سليمة في النظام — ويمكن استعادته في أي وقت.`)) return
+    try {
+      await api(`/packages/${p.id}/archive`, { method: 'POST', body: { archived: true } })
+      toast.success('🗂️ تمت الأرشفة — البيانات والقيود محفوظة بالكامل')
+      load(); if (showArchived) loadArchived()
+    } catch (e) { toast.error(e.message) }
+  }
+  const restorePkg = async (p) => {
+    try {
+      await api(`/packages/${p.id}/archive`, { method: 'POST', body: { archived: false } })
+      toast.success('✅ تمت الاستعادة')
+      load(); loadArchived()
+    } catch (e) { toast.error(e.message) }
+  }
   // v3.9.11 — Bulk operations for packages
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [dateRange, setDateRange] = useState({ preset: 'all', from: '', to: '' })
@@ -7290,9 +7311,10 @@ function PackagesScreen() {
   }
   return (
     <div className="space-y-4">
-      <TopBar title="الباكجات والبرامج السياحية" subtitle={`${openPackages.length} باكج نشط • ${closedPackages.length} أرشيف`}
+      <TopBar title="الباكجات والبرامج السياحية" subtitle={`${openPackages.length} باكج نشط • ${closedPackages.length} مغلق`}
         right={<div className="flex gap-2">
-          <Button variant="outline" onClick={() => setWaLogsOpen(true)} className="gap-2 border-green-300 text-green-700 hover:bg-green-50">📲 سجل الواتساب</Button>
+          <Button variant="outline" onClick={() => { setShowArchived(!showArchived); if (!showArchived) loadArchived() }} className={`gap-2 ${showArchived ? 'bg-slate-700 text-white border-slate-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>🗂️ المؤرشفة</Button>
+          <Button variant="outline" onClick={() => setWaLogsOpen(true)} className="gap-2 border-green-300 text-green-700 hover:bg-green-50 relative">📲 سجل الواتساب{waReminders > 0 && <span className="absolute -top-2 -left-2 bg-rose-500 text-white text-[10px] rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 font-bold">{waReminders}</span>}</Button>
           <Button variant="outline" onClick={() => setPartnerStmtOpen(true)} className="gap-2 border-amber-300 text-amber-700 hover:bg-amber-50">🤝 كشف الشريك</Button>
           <Button variant="outline" onClick={() => setComparePeriod('all')} className="gap-2 border-blue-200 text-blue-700 hover:bg-blue-50"><BarChart3 className="w-4 h-4" /> مقارنة الربحية</Button>
           <Button onClick={() => { setEditing(null); setOpen(true) }} className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> باكج جديد</Button>
@@ -7356,16 +7378,37 @@ function PackagesScreen() {
         )}
       </div>
       <div>
+        {/* v3.28 — Archived packages panel (soft archive — data & JEs intact) */}
+        {showArchived && (
+          <div className="mb-4 rounded-xl border-2 border-slate-300 bg-slate-50/70 p-3">
+            <div className="text-sm font-bold text-slate-700 mb-2">🗂️ الباكجات المؤرشفة ({archivedList.length}) <span className="text-[10px] font-normal text-slate-400">— مخفية عن الموظفين ومعراج، وبياناتها وقيودها سليمة</span></div>
+            {archivedList.length === 0 ? (
+              <div className="text-xs text-slate-400 text-center py-3">لا توجد باقات مؤرشفة</div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                {archivedList.map(p => (
+                  <div key={p.id} className="rounded-lg border bg-white p-3 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-slate-700 truncate">{p.name}</div>
+                      <div className="text-[10px] text-slate-400">أُرشف {p.archived_at ? new Date(p.archived_at).toLocaleDateString('en-GB') : ''} • {p.bookings_count || 0} حجز محفوظ</div>
+                    </div>
+                    <Button size="sm" variant="outline" onClick={() => restorePkg(p)} className="h-7 text-[10px] border-emerald-300 text-emerald-700 hover:bg-emerald-50 shrink-0">↩️ استعادة</Button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <div className="text-sm font-bold text-slate-700 mb-2">🟢 الباكجات المفتوحة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} onExtend={() => setExtendPkg(p)} onDuplicate={() => dupPkg(p)} onMeraaj={() => setMeraajPkg(p)} onShowcase={() => setShowcasePkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
+          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} onExtend={() => setExtendPkg(p)} onDuplicate={() => dupPkg(p)} onMeraaj={() => setMeraajPkg(p)} onShowcase={() => setShowcasePkg(p)} onArchive={() => archivePkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
           {openPackages.length === 0 && <div className="col-span-full text-center text-slate-400 py-8 text-sm">{dateBounds ? 'لا نتائج ضمن النطاق التاريخي' : 'لا توجد باكجات مفتوحة — أنشئ باكج جديد'}</div>}
         </div>
       </div>
       {closedPackages.length > 0 && <div>
         <div className="text-sm font-bold text-slate-500 mt-6 mb-2">🗄️ أرشيف الباكجات المغلقة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {closedPackages.map(p => <PkgCard key={p?.id} p={p} closed onOpen={() => setDetailsPkg(p)} onReopen={() => reopenPkg(p)} onReport={() => setReportPkg(p)} onDuplicate={() => dupPkg(p)} onShowcase={() => setShowcasePkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
+          {closedPackages.map(p => <PkgCard key={p?.id} p={p} closed onOpen={() => setDetailsPkg(p)} onReopen={() => reopenPkg(p)} onReport={() => setReportPkg(p)} onDuplicate={() => dupPkg(p)} onShowcase={() => setShowcasePkg(p)} onArchive={() => archivePkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
         </div>
       </div>}
       <PackageDialog open={open} onOpenChange={v => { setOpen(v); if (!v) setEditing(null) }} record={editing} onSaved={load} />
@@ -7978,7 +8021,17 @@ function WhatsAppLogsDialog({ open, onOpenChange }) {
     { v: 'no_answer', l: '📵 لا يرد', cls: 'bg-rose-100 text-rose-700' },
   ]
   useEffect(() => { if (open) load() }, [open])
-  const load = () => api('/whatsapp-logs').then(setLogs).catch(() => {})
+  const load = () => {
+    api('/whatsapp-logs').then(setLogs).catch(() => {})
+    api('/whatsapp-logs/reminders').then(setReminders).catch(() => {})
+  }
+  // v3.28 — performance report + follow-up reminders
+  const [view, setView] = useState('log') // log | performance
+  const [reminders, setReminders] = useState(null)
+  const [perf, setPerf] = useState(null)
+  const [perfMonth, setPerfMonth] = useState(new Date().toISOString().slice(0, 7))
+  useEffect(() => { if (open && view === 'performance') api(`/whatsapp-logs/performance?month=${perfMonth}`).then(setPerf).catch(() => {}) }, [open, view, perfMonth])
+  const reminderIds = new Set((reminders?.logs || []).map(r => r.id))
   const updLog = async (id, upd) => {
     try { await api(`/whatsapp-logs/${id}`, { method: 'PATCH', body: upd }); load() }
     catch (e) { toast.error(e.message) }
@@ -7994,11 +8047,72 @@ function WhatsAppLogsDialog({ open, onOpenChange }) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
         <DialogHeader><DialogTitle className="flex items-center gap-2">📲 أرشيف مبيعات الواتساب <span className="text-xs font-normal text-slate-400">— متابعة العملاء المحتملين (Mini CRM)</span></DialogTitle></DialogHeader>
-        <div className="flex gap-1.5 flex-wrap">
+        {/* v3.28 — Follow-up reminders banner */}
+        {(reminders?.count || 0) > 0 && (
+          <div className="rounded-xl border-2 border-amber-300 bg-amber-50 p-3">
+            <div className="text-sm font-bold text-amber-800 mb-1.5">⏰ {reminders.count} زبون "مهتم" بلا متابعة منذ يومين أو أكثر — لا تفقدهم!</div>
+            <div className="flex flex-wrap gap-1.5">
+              {reminders.logs.slice(0, 6).map(r => (
+                <span key={r.id} className="text-[10px] bg-white border border-amber-200 rounded-full px-2 py-1">
+                  👤 {r.customer_name || r.phone || 'غير مسمى'} <span className="text-slate-400">({r.package_name} — {r.sent_by})</span>
+                  {r.phone && <a href={`https://wa.me/${r.phone}`} target="_blank" rel="noopener noreferrer" className="text-emerald-600 font-bold ms-1">📲 تابع الآن</a>}
+                </span>
+              ))}
+              {reminders.count > 6 && <span className="text-[10px] text-slate-400 py-1">+{reminders.count - 6} آخرون</span>}
+            </div>
+          </div>
+        )}
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex gap-1.5">
+            <Button size="sm" variant={view === 'log' ? 'default' : 'outline'} onClick={() => setView('log')} className="h-7 text-xs">📋 السجل</Button>
+            <Button size="sm" variant={view === 'performance' ? 'default' : 'outline'} onClick={() => setView('performance')} className="h-7 text-xs">📊 تقرير الأداء</Button>
+          </div>
+          {view === 'performance' && <Input type="month" value={perfMonth} onChange={e => setPerfMonth(e.target.value)} className="h-7 text-xs w-40" />}
+        </div>
+        {/* v3.28 — Performance report per employee */}
+        {view === 'performance' && (
+          !perf || (perf.rows || []).length === 0 ? (
+            <div className="text-center text-slate-400 py-10 text-sm">لا توجد رسائل في شهر {perfMonth}</div>
+          ) : (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <Card><CardContent className="p-3 text-center"><div className="text-xl font-black text-slate-700">{perf.totals.sent_total}</div><div className="text-[10px] text-slate-500">عروض مُرسلة</div></CardContent></Card>
+                <Card><CardContent className="p-3 text-center"><div className="text-xl font-black text-amber-600">{perf.totals.interested}</div><div className="text-[10px] text-slate-500">مهتمون</div></CardContent></Card>
+                <Card><CardContent className="p-3 text-center"><div className="text-xl font-black text-emerald-600">{perf.totals.booked}</div><div className="text-[10px] text-slate-500">حجوزات</div></CardContent></Card>
+                <Card><CardContent className="p-3 text-center"><div className="text-xl font-black text-purple-700">{perf.totals.conversion_rate}%</div><div className="text-[10px] text-slate-500">معدل التحويل العام</div></CardContent></Card>
+              </div>
+              <Table>
+                <TableHeader><TableRow>
+                  <TableHead className="text-xs">الموظف</TableHead><TableHead className="text-xs">مُرسل</TableHead>
+                  <TableHead className="text-xs">🤝 مهتم</TableHead><TableHead className="text-xs">✅ حجز</TableHead>
+                  <TableHead className="text-xs">📵 لا يرد</TableHead><TableHead className="text-xs">معدل التحويل</TableHead>
+                </TableRow></TableHeader>
+                <TableBody>
+                  {perf.rows.map((r, i) => (
+                    <TableRow key={r.employee} className={i === 0 && r.booked > 0 ? 'bg-emerald-50/50' : ''}>
+                      <TableCell className="text-xs font-bold">{i === 0 && r.booked > 0 ? '🏆 ' : ''}{r.employee}</TableCell>
+                      <TableCell className="text-xs">{r.sent_total}</TableCell>
+                      <TableCell className="text-xs text-amber-700">{r.interested}</TableCell>
+                      <TableCell className="text-xs text-emerald-700 font-bold">{r.booked}</TableCell>
+                      <TableCell className="text-xs text-rose-600">{r.no_answer}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <div className="w-20 h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-gradient-to-l from-emerald-500 to-teal-400" style={{ width: `${Math.min(100, r.conversion_rate)}%` }} /></div>
+                          <span className="text-xs font-bold text-slate-700">{r.conversion_rate}%</span>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )
+        )}
+        {view === 'log' && <div className="flex gap-1.5 flex-wrap">
           <Button size="sm" variant={filter === 'all' ? 'default' : 'outline'} onClick={() => setFilter('all')} className="h-7 text-xs">الكل ({counts.all})</Button>
           {WA_STATUSES.map(s => <Button key={s.v} size="sm" variant={filter === s.v ? 'default' : 'outline'} onClick={() => setFilter(s.v)} className="h-7 text-xs">{s.l} ({counts[s.v]})</Button>)}
-        </div>
-        {shown.length === 0 ? (
+        </div>}
+        {view === 'log' && (shown.length === 0 ? (
           <div className="text-center text-slate-400 py-10 text-sm">لا توجد رسائل — كل عرض تسويقي يُرسل من شاشة "👁️ عرض" يُسجل هنا تلقائياً</div>
         ) : (
           <Table>
@@ -8036,7 +8150,7 @@ function WhatsAppLogsDialog({ open, onOpenChange }) {
               })}
             </TableBody>
           </Table>
-        )}
+        ))}
       </DialogContent>
     </Dialog>
   )
@@ -8324,7 +8438,7 @@ function MeraajStoreScreen() {
   )
 }
 
-function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onExtend, onDuplicate, onMeraaj, onShowcase, closed, selectable, selected, onToggleSelect }) {
+function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onExtend, onDuplicate, onMeraaj, onShowcase, onArchive, closed, selectable, selected, onToggleSelect }) {
   const typeL = PACKAGE_TYPES.find(t => t.v === p?.package_type)?.l || p?.package_type || '—'
   return (
     <Card className={`overflow-hidden hover:shadow-md transition ${closed ? 'opacity-70' : ''} ${selected ? 'ring-2 ring-rose-400' : ''}`}>
@@ -8365,6 +8479,7 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
           {!closed && onExtend && <Button size="sm" variant="outline" onClick={onExtend} className="h-7 px-2 text-xs gap-1 text-teal-600 border-teal-200 hover:bg-teal-50"><Calendar className="w-3 h-3" /> تمديد التاريخ</Button>}
           {onDuplicate && <Button size="sm" variant="outline" onClick={onDuplicate} className="h-7 px-2 text-xs gap-1 text-purple-600 border-purple-200 hover:bg-purple-50" title="نسخ الباكج بكل مكوناته وأسعاره كمسودة جديدة"><Copy className="w-3 h-3" /> نسخ</Button>}
           {onShowcase && <Button size="sm" variant="outline" onClick={onShowcase} className="h-7 px-2 text-xs gap-1 text-sky-600 border-sky-200 hover:bg-sky-50" title="عرض تسويقي للزبون: الصورة والمميزات والأسعار">👁️ عرض</Button>}
+          {onArchive && <Button size="sm" variant="outline" onClick={onArchive} className="h-7 px-2 text-xs gap-1 text-slate-500 border-slate-200 hover:bg-slate-50" title="أرشفة ناعمة: يختفي من الواجهات ومعراج، وتبقى بياناته وقيوده سليمة في النظام">🗂️ أرشفة</Button>}
           {!closed && onMeraaj && <Button size="sm" variant="outline" onClick={onMeraaj} className={`h-7 px-2 text-xs gap-1 ${p?.meraaj?.shared ? 'text-fuchsia-700 border-fuchsia-300 bg-fuchsia-50' : 'text-fuchsia-600 border-fuchsia-200 hover:bg-fuchsia-50'}`} title="مشاركة الباكج في سوق معراج نتورك B2B">🕋 معراج</Button>}
           {!closed && onEdit && <Button size="sm" variant="ghost" onClick={onEdit} className="h-7 px-2 text-xs"><Pencil className="w-3 h-3" /></Button>}
           {!closed && onClose && <Button size="sm" variant="ghost" onClick={onClose} className="h-7 px-2 text-xs text-orange-600">إغلاق</Button>}

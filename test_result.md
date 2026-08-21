@@ -9370,3 +9370,6 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: "Test v3.27 per detailed task. Login owner@demo.com / Demo@2025. HMAC secret in /app/.env. Own test data, FULL cleanup (bookings via API delete, packages, clients incl auto-created Meraaj client, suppliers, whatsapp logs via DELETE endpoint). Use unique test names with v327 marker."
+
+  - agent: "main"
+    message: "v3.28 SESSION FIX: (1) Fixed fatal JSX syntax error in page.js line 8153 (missing closing paren `))}` for the `view === 'log' && (ternary)` block in WhatsAppLogsDialog) - frontend compiles and runs again. (2) Manually verified via Playwright: login, packages tab, WhatsApp Mini CRM dialog (both tabs: log with status filters + performance report with month picker), follow-up reminders endpoints all 200. (3) Verified full archive cycle end-to-end in UI: archive hides package + auto-unshares from Meraaj (emits package.deactivated), shows in archived panel with bookings preserved, restore works. Test data restored to pre-test state (meraaj.shared=true re-applied to package 585b9e89). (4) Renamed misleading subtitle label 'أرشيف' to 'مغلق' for closed packages to avoid confusion with new soft-archive feature. No backend logic changes - no backend retest needed."

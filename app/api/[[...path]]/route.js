@@ -637,6 +637,7 @@ async function handleRoute(request, { params }) {
       if (!meraajVerifyRequest(request, route)) return bad('توقيع غير صالح — Invalid HMAC signature', 401)
       const pkg = await db.collection('packages').findOne({ id: meraajPkgMatch[1] })
       if (!pkg) return bad('الباكج غير موجود', 404)
+      if (pkg.archived) return bad('هذا الباكج مؤرشف وغير متاح', 403)
       if (!pkg.meraaj?.shared) return bad('هذا الباكج غير مُشارَك في معراج نتورك', 403)
       const comps = await db.collection('package_components').find({ package_id: pkg.id, tenant_id: pkg.tenant_id }).toArray()
       return ok(meraajPackagePayload(pkg, comps))
@@ -1569,6 +1570,45 @@ async function handleRoute(request, { params }) {
       if (pid) q.package_id = pid
       return ok(clean(await db.collection('whatsapp_logs').find(q).sort({ created_at: -1 }).limit(300).toArray()))
     }
+    // v3.28 — Sales performance per employee (conversion rates)
+    if (route === '/whatsapp-logs/performance' && method === 'GET') {
+      const url = new URL(request.url)
+      const month = url.searchParams.get('month') // YYYY-MM (optional; default = current month)
+      let start, end
+      if (month && /^\d{4}-\d{2}$/.test(month)) {
+        const [y, m] = month.split('-').map(Number)
+        start = new Date(y, m - 1, 1); end = new Date(y, m, 1)
+      } else {
+        const now = new Date()
+        start = new Date(now.getFullYear(), now.getMonth(), 1); end = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+      }
+      const logs = await db.collection('whatsapp_logs').find({ tenant_id: T, created_at: { $gte: start, $lt: end } }).toArray()
+      const byEmp = {}
+      for (const l of logs) {
+        const emp = l.sent_by || 'غير معروف'
+        byEmp[emp] = byEmp[emp] || { employee: emp, sent_total: 0, interested: 0, booked: 0, no_answer: 0, pending: 0 }
+        byEmp[emp].sent_total++
+        if (l.status === 'interested') byEmp[emp].interested++
+        else if (l.status === 'booked') byEmp[emp].booked++
+        else if (l.status === 'no_answer') byEmp[emp].no_answer++
+        else byEmp[emp].pending++
+      }
+      const rows = Object.values(byEmp).map(r => ({ ...r, conversion_rate: r.sent_total > 0 ? +((r.booked / r.sent_total) * 100).toFixed(1) : 0 }))
+        .sort((a, b) => b.booked - a.booked || b.sent_total - a.sent_total)
+      const totals = rows.reduce((s, r) => ({ sent_total: s.sent_total + r.sent_total, booked: s.booked + r.booked, interested: s.interested + r.interested, no_answer: s.no_answer + r.no_answer }), { sent_total: 0, booked: 0, interested: 0, no_answer: 0 })
+      totals.conversion_rate = totals.sent_total > 0 ? +((totals.booked / totals.sent_total) * 100).toFixed(1) : 0
+      return ok({ month: `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}`, rows, totals })
+    }
+    // v3.28 — Follow-up reminders: 'interested' leads untouched for 2+ days
+    if (route === '/whatsapp-logs/reminders' && method === 'GET') {
+      const cutoff = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+      const logs = await db.collection('whatsapp_logs').find({ tenant_id: T, status: 'interested' }).sort({ created_at: 1 }).limit(100).toArray()
+      const due = logs.filter(l => new Date(l.updated_at || l.created_at) <= cutoff)
+      return ok({
+        count: due.length,
+        logs: clean(due).map(l => ({ id: l.id, customer_name: l.customer_name, phone: l.phone, package_name: l.package_name, sent_by: l.sent_by, last_touch: l.updated_at || l.created_at })),
+      })
+    }
     const waLogMatch = route.match(/^\/whatsapp-logs\/([^/]+)$/)
     if (waLogMatch && method === 'PATCH') {
       const b = await request.json()
@@ -2153,7 +2193,10 @@ async function handleRoute(request, { params }) {
 
     // ============ v3.6 — PACKAGES & TOURS (MVP) ============
     if (route === '/packages' && method === 'GET') {
-      const list = await db.collection('packages').find(tf).sort({ created_at: -1 }).toArray()
+      // v3.28 — Soft archive: archived packages are hidden by default; ?archived=1 lists ONLY archived
+      const wantArchived = q.archived === '1' || q.archived === 'true'
+      const pkgFilter = { ...tf, ...(wantArchived ? { archived: true } : { archived: { $ne: true } }) }
+      const list = await db.collection('packages').find(pkgFilter).sort({ created_at: -1 }).toArray()
       // Enrich each with counts
       const enriched = await Promise.all(list.map(async p => {
         const [comps, books] = await Promise.all([
@@ -2392,6 +2435,28 @@ async function handleRoute(request, { params }) {
     }
 
 
+    // v3.28 — SOFT ARCHIVE (NO hard delete — accounting entries stay 100% intact)
+    const pkgArchiveMatch = route.match(/^\/packages\/([^/]+)\/archive$/)
+    if (pkgArchiveMatch && method === 'POST') {
+      const b = await request.json()
+      const pkg = await db.collection('packages').findOne({ id: pkgArchiveMatch[1], tenant_id: T })
+      if (!pkg) return bad('الباكج غير موجود', 404)
+      const toArchive = b.archived !== false
+      if (toArchive) {
+        const upd = { archived: true, archived_at: new Date() }
+        // Archiving also removes it from Meraaj marketplace (soft — data preserved)
+        if (pkg.meraaj?.shared) {
+          upd['meraaj.shared'] = false
+          upd['meraaj.unshared_at'] = new Date()
+          await emitMeraajEvent(db, T, 'package.deactivated', { package_ref: pkg.id, reason: 'archived_by_office' })
+        }
+        await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: upd })
+        return ok({ archived: true, was_shared: !!pkg.meraaj?.shared })
+      } else {
+        await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { archived: false, restored_at: new Date() } })
+        return ok({ archived: false })
+      }
+    }
     // v3.23 — Package image (upload / view / delete) — stored in separate collection to keep package docs light
     const pkgImgMatch = route.match(/^\/packages\/([^/]+)\/image$/)
     if (pkgImgMatch && method === 'POST') {
