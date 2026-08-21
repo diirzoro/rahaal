@@ -46,7 +46,8 @@ const server = http.createServer((req, res) => {
       saveStore(store)
       entry.result = `MARKETPLACE CREATED/UPDATED ${id}`
       fs.appendFileSync(LOG, JSON.stringify(entry) + '\n')
-      return respond(200, { success: true, package_id: id })
+      // Real Meraaj returns the id ONLY as meraaj_package_id
+      return respond(200, { success: true, meraaj_package_id: id })
     }
 
     // --- Webhooks (contract: X-Rahal-Signature = HMAC-SHA256 of exact raw body) ---

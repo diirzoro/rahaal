@@ -4974,7 +4974,7 @@ async function meraajRegisterPackageAPI(db, T, pkg, comps, meraajSet) {
     if (res.ok) {
       logDoc.status = 'sent'; logDoc.sent_at = new Date()
       await db.collection('meraaj_events').insertOne(logDoc)
-      const remoteId = json?.package_id || json?.id || json?.data?.id || null
+      const remoteId = json?.meraaj_package_id || json?.package_id || json?.id || json?.data?.id || null
       return { ok: true, remote_id: remoteId }
     }
     const errMsg = (json?.message || json?.error || `HTTP ${res.status}`).toString().slice(0, 200)

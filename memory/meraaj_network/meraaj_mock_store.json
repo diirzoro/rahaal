@@ -470,5 +470,31 @@
   },
   "updated_at": "2026-08-21T15:50:49.100Z",
   "deactivate_reason": "deleted_by_office"
+ },
+ "31fd0ae0-56b0-45e6-b431-b4e6e680eba5": {
+  "meraaj_id": "MRJ-TEST-1787330106336",
+  "listed": false,
+  "package_ref": "31fd0ae0-56b0-45e6-b431-b4e6e680eba5",
+  "title": "TEST-v335-REMOTEID",
+  "description": "",
+  "departure_date": "2027-09-01T00:00:00.000Z",
+  "return_date": "2027-09-05T00:00:00.000Z",
+  "departure_city": null,
+  "transport": null,
+  "hotels": [],
+  "images": [],
+  "features": [],
+  "available_seats": 2,
+  "office_ref": "d89bc41d-e19b-430f-be93-e3f8ca6d404a",
+  "office_name": "مكتب الرحّال التجريبي",
+  "owner_name": "مالك المكتب التجريبي",
+  "pricing": {
+   "net_cost_per_seat": 600,
+   "final_sale_price": 615,
+   "buyer_office_commission": 15,
+   "currency": "SAR"
+  },
+  "updated_at": "2026-08-21T16:35:06.437Z",
+  "deactivate_reason": "unshared_by_office"
  }
 }
