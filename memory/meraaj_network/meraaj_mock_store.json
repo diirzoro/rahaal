@@ -355,5 +355,64 @@
   },
   "updated_at": "2026-08-21T15:16:24.367Z",
   "deactivate_reason": "unshared_by_office"
+ },
+ "d9f87da9-0f52-4ed7-9750-3f8a53d14b6f": {
+  "meraaj_id": "MRJ-TEST-1787326860621",
+  "listed": false,
+  "package_ref": "d9f87da9-0f52-4ed7-9750-3f8a53d14b6f",
+  "title": "TEST-v334-RENAMED",
+  "description": "",
+  "departure_date": "2027-05-01T00:00:00.000Z",
+  "return_date": "2027-05-15T00:00:00.000Z",
+  "departure_city": null,
+  "transport": null,
+  "hotels": [],
+  "images": [],
+  "features": [
+   "ميزة أ"
+  ],
+  "available_seats": 8,
+  "office_ref": "d89bc41d-e19b-430f-be93-e3f8ca6d404a",
+  "office_name": "مكتب الرحّال التجريبي",
+  "owner_name": "مالك المكتب التجريبي",
+  "pricing": {
+   "net_cost_per_seat": 1300,
+   "final_sale_price": 1350,
+   "buyer_office_commission": 50,
+   "currency": "SAR"
+  },
+  "updated_at": "2026-08-21T15:41:08.092Z",
+  "rahal_ref": "d9f87da9-0f52-4ed7-9750-3f8a53d14b6f",
+  "meraaj_package_id": "MRJ-TEST-1787326860621",
+  "deactivate_reason": "deleted_by_office"
+ },
+ "e8b02b59-b47a-46a9-bb05-fbd0c4e79f66": {
+  "meraaj_id": "MRJ-TEST-1787326868304",
+  "listed": false,
+  "package_ref": "e8b02b59-b47a-46a9-bb05-fbd0c4e79f66",
+  "title": "TEST-v334-REG",
+  "description": "",
+  "departure_date": "2027-06-01T00:00:00.000Z",
+  "return_date": "2027-06-05T00:00:00.000Z",
+  "departure_city": null,
+  "transport": null,
+  "hotels": [],
+  "images": [],
+  "features": [
+   "ر1",
+   "ر2"
+  ],
+  "available_seats": 3,
+  "office_ref": "d89bc41d-e19b-430f-be93-e3f8ca6d404a",
+  "office_name": "مكتب الرحّال التجريبي",
+  "owner_name": "مالك المكتب التجريبي",
+  "pricing": {
+   "net_cost_per_seat": 700,
+   "final_sale_price": 720,
+   "buyer_office_commission": 20,
+   "currency": "SAR"
+  },
+  "updated_at": "2026-08-21T15:41:08.350Z",
+  "deactivate_reason": "unshared_by_office"
  }
 }

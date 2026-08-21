@@ -1350,8 +1350,12 @@ async function handleRoute(request, { params }) {
       const pkg = await db.collection('packages').findOne({ id: meraajShareMatch[1], tenant_id: T })
       if (!pkg) return bad('الباكج غير موجود', 404)
       if (b.enabled === false) {
+        // v3.34 — deliver deactivation FIRST; if Meraaj can't be reached, keep state consistent (block unshare)
+        if (pkg.meraaj?.shared) {
+          const dlv = await emitMeraajEvent(db, T, 'package.deactivated', { package_ref: pkg.id, reason: 'unshared_by_office' })
+          if (dlv === 'failed') return bad('تعذر إبلاغ سوق معراج بإيقاف المشاركة — لم يتم الإلغاء. حاول لاحقاً', 502)
+        }
         await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { 'meraaj.shared': false, 'meraaj.unshared_at': new Date() } })
-        await emitMeraajEvent(db, T, 'package.deactivated', { package_ref: pkg.id, reason: 'unshared_by_office' })
         return ok({ shared: false })
       }
       // v3.25 — SMART SHARE: prices are pulled AUTOMATICALLY from the package room pricing.
@@ -2463,6 +2467,7 @@ async function handleRoute(request, { params }) {
       updates.updated_at = new Date()
       await db.collection('package_transports').updateOne({ id: tid, tenant_id: T }, { $set: updates })
       const updated = await db.collection('package_transports').findOne({ id: tid, tenant_id: T })
+      await maybeEmitMeraajPackageUpdate(db, T, updated.package_id) // v3.34 — sync marketplace (transport)
       const { _id, ...rest } = updated; return ok(rest)
     }
     if (pkgTransItemMatch && method === 'DELETE') {
@@ -2472,6 +2477,7 @@ async function handleRoute(request, { params }) {
       const usedCount = await db.collection('package_bookings').countDocuments({ tenant_id: T, package_id: pkgIdT2, transport_id: tid })
       if (usedCount > 0) return bad(`لا يمكن الحذف — يوجد ${usedCount} مسافر مسجّل على هذه الوسيلة. انقلهم إلى وسيلة أخرى أولاً.`)
       await db.collection('package_transports').deleteOne({ id: tid, tenant_id: T })
+      await maybeEmitMeraajPackageUpdate(db, T, pkgIdT2) // v3.34 — sync marketplace (transport)
       return ok({ success: true, transport_id: tid })
     }
 
@@ -2486,10 +2492,12 @@ async function handleRoute(request, { params }) {
       if (toArchive) {
         const upd = { archived: true, archived_at: new Date() }
         // Archiving also removes it from Meraaj marketplace (soft — data preserved)
+        // v3.34 — deliver deactivation FIRST; if Meraaj unreachable, block the archive (no dangling listing)
         if (pkg.meraaj?.shared) {
+          const dlv = await emitMeraajEvent(db, T, 'package.deactivated', { package_ref: pkg.id, reason: 'archived_by_office' })
+          if (dlv === 'failed') return bad('تعذر إبلاغ سوق معراج بإيقاف الباكج — لم تتم الأرشفة. حاول لاحقاً أو أوقف المشاركة أولاً', 502)
           upd['meraaj.shared'] = false
           upd['meraaj.unshared_at'] = new Date()
-          await emitMeraajEvent(db, T, 'package.deactivated', { package_ref: pkg.id, reason: 'archived_by_office' })
         }
         await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: upd })
         return ok({ archived: true, was_shared: !!pkg.meraaj?.shared })
@@ -4797,6 +4805,20 @@ function meraajAvailability(pkg) {
 // Outbox pattern: persist the event, then best-effort deliver (signed) if Meraaj endpoint is configured.
 // v3.32 — returns delivery status: 'sent' | 'failed' | 'pending' (pending = no endpoint configured yet)
 async function emitMeraajEvent(db, tenantId, type, payload) {
+  // v3.34 — CRITICAL: enrich every package event with the FULL identity so Meraaj can
+  // match its own record regardless of which key its handler uses:
+  //   rahal_ref (Meraaj's stored link field) + meraaj_package_id (the id Meraaj itself
+  //   returned at first-share registration) + package_ref (legacy, kept).
+  // Without this, Meraaj acked webhooks with 200 but could not locate the package to apply changes.
+  if (payload && payload.package_ref) {
+    if (!payload.rahal_ref) payload.rahal_ref = payload.package_ref
+    if (payload.meraaj_package_id === undefined) {
+      try {
+        const p = await db.collection('packages').findOne({ id: payload.package_ref, tenant_id: tenantId }, { projection: { 'meraaj.remote_id': 1 } })
+        payload.meraaj_package_id = p?.meraaj?.remote_id || null
+      } catch { payload.meraaj_package_id = null }
+    }
+  }
   const doc = {
     id: uuidv4(), tenant_id: tenantId, type, payload,
     status: 'pending', attempts: 0, last_error: null,

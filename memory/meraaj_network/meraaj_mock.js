@@ -62,7 +62,10 @@ const server = http.createServer((req, res) => {
       const store = loadStore()
       const type = parsed?.type
       const data = parsed?.data || {}
-      const ref = data.package_ref
+      // v3.34 realism — match like real Meraaj: by our OWN package id, or by rahal_ref. NOT by legacy package_ref.
+      let ref = null
+      if (data.meraaj_package_id) ref = Object.keys(store).find(k => store[k].meraaj_id === data.meraaj_package_id) || null
+      if (!ref && data.rahal_ref && store[data.rahal_ref]) ref = data.rahal_ref
       if (ref && store[ref]) {
         if (type === 'package.updated') { store[ref] = { ...store[ref], ...data, listed: true, updated_at: new Date().toISOString() } }
         if (type === 'package.deactivated') { store[ref].listed = false; store[ref].deactivate_reason = data.reason; store[ref].updated_at = new Date().toISOString() }
