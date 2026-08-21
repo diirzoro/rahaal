@@ -1388,7 +1388,24 @@ async function handleRoute(request, { params }) {
       await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { meraaj: meraajSet } })
       const updated = await db.collection('packages').findOne({ id: pkg.id, tenant_id: T })
       const comps = await db.collection('package_components').find({ package_id: pkg.id, tenant_id: T }).toArray()
-      await emitMeraajEvent(db, T, pkg.meraaj?.shared ? 'package.updated' : 'package.shared', meraajPackagePayload(updated, comps))
+      // v3.29 — FIRST share = direct REST registration at Meraaj (NO 'package.shared' webhook — removed permanently).
+      // Subsequent shares/updates keep using the 'package.updated' webhook.
+      const firstShare = !pkg.meraaj?.registered_at
+      if (firstShare) {
+        const reg = await meraajRegisterPackageAPI(db, T, updated, comps, meraajSet)
+        if (!reg.ok) {
+          // Share is successful ONLY on 2xx from Meraaj — roll back the local share flag entirely
+          await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { meraaj: { ...(pkg.meraaj || {}), shared: false } } })
+          return bad(`فشلت المشاركة — لم يقبل سوق معراج تسجيل الباكج: ${reg.error}`, 502)
+        }
+        const regSet = { 'meraaj.registered_at': new Date() }
+        if (reg.remote_id) regSet['meraaj.remote_id'] = reg.remote_id
+        await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: regSet })
+        return ok({ shared: true, meraaj: { ...meraajSet, registered_at: regSet['meraaj.registered_at'], remote_id: reg.remote_id || null }, registered_via: 'rest_api' })
+      }
+      // Already registered at Meraaj before → keep registration reference + notify via webhook
+      await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { 'meraaj.registered_at': pkg.meraaj.registered_at, ...(pkg.meraaj.remote_id ? { 'meraaj.remote_id': pkg.meraaj.remote_id } : {}) } })
+      await emitMeraajEvent(db, T, 'package.updated', meraajPackagePayload({ ...updated, meraaj: { ...meraajSet, registered_at: pkg.meraaj.registered_at } }, comps))
       return ok({ shared: true, meraaj: meraajSet })
     }
     // Marketplace bookings received from Meraaj (inbound)
@@ -4801,6 +4818,75 @@ function meraajPackagePayload(pkg, comps = []) {
       shared_at: pkg.meraaj?.shared_at || null,
     },
     components: comps.map(c => ({ name: c.name, component_type: c.component_type, pricing_type: c.pricing_type || 'flat' })),
+  }
+}
+
+// v3.29 — FIRST SHARE: direct REST registration at Meraaj (NOT a webhook event).
+// POST {MERAAJ_API_BASE_URL}/api/integrations/rahal/packages/share with X-Rahal-Api-Key.
+// Share succeeds ONLY on a 2xx response from Meraaj — any failure blocks the share.
+function meraajApiBase() { return (process.env.MERAAJ_API_BASE_URL || '').trim().replace(/\/+$/, '') }
+async function meraajRegisterPackageAPI(db, T, pkg, comps, meraajSet) {
+  const base = meraajApiBase()
+  if (!base) return { ok: false, error: 'MERAAJ_API_BASE_URL غير مُهيأ في إعدادات الخادم' }
+  if (!meraajSecret()) return { ok: false, error: 'MERAAJ_SHARED_SECRET غير مُهيأ' }
+  const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { name: 1 } })
+  const owner = await db.collection('users').findOne({ tenant_id: T, role: 'owner' }, { projection: { name: 1 } })
+  // Representative per-seat pricing = cheapest adult row of the market pricing table
+  const rows = (meraajSet.market_pricing || []).filter(r => (Number(r.customer?.adult) || 0) > 0)
+  const cheapest = rows.slice().sort((a, b) => a.customer.adult - b.customer.adult)[0] || null
+  const hotels = comps.filter(c => c.component_type === 'hotel').map(c => String(c.name || '').trim()).filter(Boolean)
+  const appBase = (process.env.NEXT_PUBLIC_BASE_URL || '').replace(/\/+$/, '')
+  const payload = {
+    package_ref: pkg.id,
+    title: pkg.name,
+    description: pkg.notes || '',
+    departure_date: pkg.start_date || null,
+    return_date: pkg.end_date || null,
+    departure_city: pkg.departure_city || null,
+    transport: pkg.transport || null,
+    hotels,
+    images: pkg.has_image && appBase ? [`${appBase}/api/meraaj/packages/${pkg.id}/image`] : [],
+    available_seats: Math.max(0, (Number(meraajSet.seats_allocated) || 0) - (Number(meraajSet.seats_sold) || 0)),
+    office_ref: T,
+    office_name: tenant?.name || '',
+    owner_name: owner?.name || '',
+    pricing: {
+      net_cost_per_seat: cheapest ? cheapest.net.adult : 0,
+      final_sale_price: cheapest ? cheapest.customer.adult : 0,
+      buyer_office_commission: cheapest ? cheapest.commission.adult : 0,
+      currency: pkg.currency,
+    },
+  }
+  const endpoint = `${base}/api/integrations/rahal/packages/share`
+  const logDoc = {
+    id: uuidv4(), tenant_id: T, type: 'package.share_api', channel: 'rest_api',
+    payload: { package_ref: pkg.id, endpoint },
+    status: 'pending', attempts: 1, last_error: null, created_at: new Date(), sent_at: null,
+  }
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Rahal-Api-Key': meraajSecret() },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15000),
+    })
+    let json = null
+    try { json = await res.json() } catch { /* non-JSON body is fine */ }
+    if (res.ok) {
+      logDoc.status = 'sent'; logDoc.sent_at = new Date()
+      await db.collection('meraaj_events').insertOne(logDoc)
+      const remoteId = json?.package_id || json?.id || json?.data?.id || null
+      return { ok: true, remote_id: remoteId }
+    }
+    const errMsg = (json?.message || json?.error || `HTTP ${res.status}`).toString().slice(0, 200)
+    logDoc.status = 'failed'; logDoc.last_error = errMsg
+    await db.collection('meraaj_events').insertOne(logDoc)
+    return { ok: false, error: errMsg }
+  } catch (e) {
+    const errMsg = String(e.message || e).slice(0, 200)
+    logDoc.status = 'failed'; logDoc.last_error = errMsg
+    try { await db.collection('meraaj_events').insertOne(logDoc) } catch {}
+    return { ok: false, error: errMsg.includes('abort') || errMsg.includes('timeout') ? 'انتهت مهلة الاتصال بمعراج' : errMsg }
   }
 }
 
