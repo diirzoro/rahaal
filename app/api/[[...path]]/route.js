@@ -1497,9 +1497,94 @@ async function handleRoute(request, { params }) {
       }
       await db.collection('package_bookings').insertOne(bookingDoc)
       await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, { $set: { status: 'approved', approved_at: new Date(), booking_id: bookingDoc.id, client_id: cli.id, client_name: cli.name } })
+      // v3.27 — Notify Meraaj: booking accepted (closes the communication loop with the buyer office)
+      await emitMeraajEvent(db, T, 'booking.approved', {
+        booking_ref: inbound.meraaj_booking_ref,
+        package_ref: pkg.id,
+        inbound_id: inbound.id,
+        buyer_office_name: inbound.buyer_office_name,
+        seats: inbound.seats,
+        pax: { adults: adults, children, infants },
+        net_to_seller_total: total_sale,
+        currency: cur,
+        approved_at: new Date(),
+      })
       await maybeEmitMeraajInventory(db, T, pkg.id)
       const { _id, ...rest } = bookingDoc
       return ok({ approved: true, booking: rest, client: { id: cli.id, name: cli.name }, journal_balanced: true })
+    }
+    // v3.27 — REJECT inbound Meraaj booking: releases seats + notifies Meraaj with the reason
+    const meraajRejectMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/reject$/)
+    if (meraajRejectMatch && method === 'POST') {
+      const b = await request.json()
+      const reason = String(b.reason || '').trim().slice(0, 300)
+      if (!reason) return bad('سبب الرفض إلزامي — سيظهر للمكتب المشتري في معراج')
+      const inbound = await db.collection('meraaj_inbound_bookings').findOne({ id: meraajRejectMatch[1], tenant_id: T })
+      if (!inbound) return bad('الحجز الوارد غير موجود', 404)
+      if (inbound.status === 'approved') return bad('لا يمكن رفض حجز معتمد — احذف الحجز المحاسبي أولاً إن لزم')
+      if (inbound.status === 'cancelled') return bad('الحجز ملغى مسبقاً من المشتري')
+      if (inbound.status === 'rejected') return bad('الحجز مرفوض مسبقاً')
+      await db.collection('meraaj_inbound_bookings').updateOne(
+        { id: inbound.id, tenant_id: T },
+        { $set: { status: 'rejected', rejected_at: new Date(), reject_reason: reason } }
+      )
+      // Release the marketplace seats
+      await db.collection('packages').updateOne({ id: inbound.package_id, tenant_id: T }, { $inc: { 'meraaj.seats_sold': -inbound.seats } })
+      // Notify Meraaj (closes the loop — the buyer sees the rejection + reason)
+      await emitMeraajEvent(db, T, 'booking.rejected', {
+        booking_ref: inbound.meraaj_booking_ref,
+        package_ref: inbound.package_id,
+        inbound_id: inbound.id,
+        buyer_office_name: inbound.buyer_office_name,
+        reason,
+        released_seats: inbound.seats,
+        rejected_at: new Date(),
+      })
+      await maybeEmitMeraajInventory(db, T, inbound.package_id)
+      return ok({ rejected: true, released_seats: inbound.seats, reason })
+    }
+    // v3.27 — WhatsApp sales log (Mini CRM): record every marketing message sent
+    if (route === '/whatsapp-logs' && method === 'POST') {
+      const b = await request.json()
+      const doc = {
+        id: uuidv4(), tenant_id: T,
+        package_id: b.package_id || null,
+        package_name: String(b.package_name || '').slice(0, 120),
+        phone: String(b.phone || '').replace(/[^0-9+]/g, '').slice(0, 20),
+        customer_name: String(b.customer_name || '').trim().slice(0, 80),
+        message_preview: String(b.message || '').slice(0, 500),
+        sent_by: sess.user.name || sess.user.email || '',
+        status: 'sent', // sent | interested | booked | no_answer
+        notes: '',
+        created_at: new Date(),
+      }
+      await db.collection('whatsapp_logs').insertOne(doc)
+      const { _id, ...rest } = doc
+      return ok(rest)
+    }
+    if (route === '/whatsapp-logs' && method === 'GET') {
+      const url = new URL(request.url)
+      const q = { ...tf }
+      const pid = url.searchParams.get('package_id')
+      if (pid) q.package_id = pid
+      return ok(clean(await db.collection('whatsapp_logs').find(q).sort({ created_at: -1 }).limit(300).toArray()))
+    }
+    const waLogMatch = route.match(/^\/whatsapp-logs\/([^/]+)$/)
+    if (waLogMatch && method === 'PATCH') {
+      const b = await request.json()
+      const upd = {}
+      if (b.status !== undefined && ['sent', 'interested', 'booked', 'no_answer'].includes(b.status)) upd.status = b.status
+      if (b.notes !== undefined) upd.notes = String(b.notes || '').slice(0, 300)
+      if (b.customer_name !== undefined) upd.customer_name = String(b.customer_name || '').trim().slice(0, 80)
+      if (Object.keys(upd).length === 0) return bad('لا توجد تعديلات')
+      upd.updated_at = new Date()
+      const r = await db.collection('whatsapp_logs').updateOne({ id: waLogMatch[1], tenant_id: T }, { $set: upd })
+      if (!r.matchedCount) return bad('السجل غير موجود', 404)
+      return ok({ success: true })
+    }
+    if (waLogMatch && method === 'DELETE') {
+      await db.collection('whatsapp_logs').deleteOne({ id: waLogMatch[1], tenant_id: T })
+      return ok({ deleted: true })
     }
     // v3.26 — Partners monthly summary: earned vs settled vs outstanding per partner per currency
     if (route === '/partners/summary' && method === 'GET') {

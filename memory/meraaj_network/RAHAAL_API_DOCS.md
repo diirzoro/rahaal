@@ -110,6 +110,8 @@ Headers مطلوبة:
 | `package.shared` | أول مشاركة | Payload الباكج كاملاً (بنية 2.2) |
 | `package.updated` | تعديل بيانات/أسعار باكج مُشارَك | Payload الباكج كاملاً |
 | `package.deactivated` | إيقاف المشاركة أو إغلاق الباكج | `{ package_ref, reason: "unshared_by_office" \| "closed_by_office" }` |
+| `booking.approved` (v3.27) | اعتماد المكتب للحجز الوارد وتحويله لحجز محاسبي | `{ booking_ref, package_ref, inbound_id, buyer_office_name, seats, pax:{adults,children,infants}, net_to_seller_total, currency, approved_at }` |
+| `booking.rejected` (v3.27) | رفض المكتب للحجز الوارد (مع إعادة المقاعد للسوق) | `{ booking_ref, package_ref, inbound_id, buyer_office_name, reason, released_seats, rejected_at }` — اعرضوا `reason` للمشتري |
 
 ---
 

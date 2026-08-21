@@ -9346,3 +9346,27 @@ agent_communication:
     message: "Test v3.26 per detailed task. Login owner@demo.com / Demo@2025. HMAC secret in /app/.env. Own test data, cleanup: delete created booking via DELETE /api/packages/:id/bookings/:bid (reverses balances), then package/component/supplier/client. Report leftover meraaj_* doc ids."
   - agent: "testing"
     message: "✅ v3.26 BACKEND TESTING COMPLETED - ALL TESTS PASSED. Executed comprehensive test suite covering Meraaj inbound booking approval flow and Partners summary endpoint. All critical verifications passed: (1) Inbound booking calculations correct (total_price 3600, net_to_seller_total 3300, seats 2), (2) Approval creates real booking with correct balances and balanced JE, (3) Client auto-creation and reuse working correctly, (4) Double-approve and cancelled booking approval correctly rejected, (5) Partners summary aggregates earned/settled/outstanding per partner per currency, (6) Partial settlement updates summary correctly, (7) All cleanup successful with balance reversals. Backend is production-ready for v3.26 features."
+
+backend:
+  - task: "v3.27 - Booking approve/reject notifications to Meraaj + reject endpoint + WhatsApp sales log (Mini CRM)"
+    implemented: true
+    working: "NA"
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "(1) Approve endpoint now emits outbound 'booking.approved' event {booking_ref, package_ref, inbound_id, buyer_office_name, seats, pax, net_to_seller_total, currency, approved_at}. (2) NEW POST /api/meraaj/inbound-bookings/:id/reject {reason REQUIRED} - validates status (new only; approved/cancelled/rejected blocked), sets status=rejected + reject_reason, releases seats ($inc seats_sold -seats), emits 'booking.rejected' {reason, released_seats} + inventory.updated. (3) WhatsApp Mini CRM: POST /api/whatsapp-logs {package_id, package_name, phone, customer_name, message} stores with sent_by from session, status default 'sent'. GET /api/whatsapp-logs?package_id= list. PATCH /api/whatsapp-logs/:id {status: sent|interested|booked|no_answer, notes, customer_name}. DELETE /api/whatsapp-logs/:id. Needs backend testing."
+
+test_plan:
+  current_focus:
+    - "v3.27 - Booking approve/reject notifications to Meraaj + reject endpoint + WhatsApp sales log (Mini CRM)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: "Test v3.27 per detailed task. Login owner@demo.com / Demo@2025. HMAC secret in /app/.env. Own test data, FULL cleanup (bookings via API delete, packages, clients incl auto-created Meraaj client, suppliers, whatsapp logs via DELETE endpoint). Use unique test names with v327 marker."

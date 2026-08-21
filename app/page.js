@@ -7224,6 +7224,8 @@ function PackagesScreen() {
   const [meraajPkg, setMeraajPkg] = useState(null)
   // v3.25 — Marketing showcase (view mode)
   const [showcasePkg, setShowcasePkg] = useState(null)
+  // v3.27 — WhatsApp sales log
+  const [waLogsOpen, setWaLogsOpen] = useState(false)
   // v3.9.11 — Bulk operations for packages
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [dateRange, setDateRange] = useState({ preset: 'all', from: '', to: '' })
@@ -7290,6 +7292,7 @@ function PackagesScreen() {
     <div className="space-y-4">
       <TopBar title="الباكجات والبرامج السياحية" subtitle={`${openPackages.length} باكج نشط • ${closedPackages.length} أرشيف`}
         right={<div className="flex gap-2">
+          <Button variant="outline" onClick={() => setWaLogsOpen(true)} className="gap-2 border-green-300 text-green-700 hover:bg-green-50">📲 سجل الواتساب</Button>
           <Button variant="outline" onClick={() => setPartnerStmtOpen(true)} className="gap-2 border-amber-300 text-amber-700 hover:bg-amber-50">🤝 كشف الشريك</Button>
           <Button variant="outline" onClick={() => setComparePeriod('all')} className="gap-2 border-blue-200 text-blue-700 hover:bg-blue-50"><BarChart3 className="w-4 h-4" /> مقارنة الربحية</Button>
           <Button onClick={() => { setEditing(null); setOpen(true) }} className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> باكج جديد</Button>
@@ -7370,6 +7373,7 @@ function PackagesScreen() {
       <PartnerStatementDialog open={partnerStmtOpen} onOpenChange={setPartnerStmtOpen} />
       {meraajPkg && <MeraajShareDialog pkg={meraajPkg} onClose={() => setMeraajPkg(null)} onSaved={load} />}
       {showcasePkg && <PackageShowcaseDialog pkg={showcasePkg} onClose={() => setShowcasePkg(null)} />}
+      <WhatsAppLogsDialog open={waLogsOpen} onOpenChange={setWaLogsOpen} />
       {reportPkg && <PackageReportDialog pkg={reportPkg} onClose={() => setReportPkg(null)} />}
       {comparePeriod && <PackageCompareDialog initialPeriod={comparePeriod} onClose={() => setComparePeriod(null)} />}
       {extendPkg && <ExtendPackageDateDialog pkg={extendPkg} onClose={() => setExtendPkg(null)} onSaved={load} />}
@@ -7963,9 +7967,85 @@ function MeraajShareDialog({ pkg, onClose, onSaved }) {
   )
 }
 
+// v3.27 — WhatsApp Sales Log (Mini CRM): sent offers + follow-up status per lead
+function WhatsAppLogsDialog({ open, onOpenChange }) {
+  const [logs, setLogs] = useState([])
+  const [filter, setFilter] = useState('all')
+  const WA_STATUSES = [
+    { v: 'sent', l: '📤 مُرسل', cls: 'bg-slate-100 text-slate-600' },
+    { v: 'interested', l: '🤝 مهتم', cls: 'bg-amber-100 text-amber-700' },
+    { v: 'booked', l: '✅ حجز', cls: 'bg-emerald-100 text-emerald-700' },
+    { v: 'no_answer', l: '📵 لا يرد', cls: 'bg-rose-100 text-rose-700' },
+  ]
+  useEffect(() => { if (open) load() }, [open])
+  const load = () => api('/whatsapp-logs').then(setLogs).catch(() => {})
+  const updLog = async (id, upd) => {
+    try { await api(`/whatsapp-logs/${id}`, { method: 'PATCH', body: upd }); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  const delLog = async (id) => {
+    if (!confirm('حذف هذا السجل؟')) return
+    try { await api(`/whatsapp-logs/${id}`, { method: 'DELETE' }); load() } catch (e) { toast.error(e.message) }
+  }
+  const shown = filter === 'all' ? logs : logs.filter(l => l.status === filter)
+  const counts = { all: logs.length }
+  for (const s of WA_STATUSES) counts[s.v] = logs.filter(l => l.status === s.v).length
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader><DialogTitle className="flex items-center gap-2">📲 أرشيف مبيعات الواتساب <span className="text-xs font-normal text-slate-400">— متابعة العملاء المحتملين (Mini CRM)</span></DialogTitle></DialogHeader>
+        <div className="flex gap-1.5 flex-wrap">
+          <Button size="sm" variant={filter === 'all' ? 'default' : 'outline'} onClick={() => setFilter('all')} className="h-7 text-xs">الكل ({counts.all})</Button>
+          {WA_STATUSES.map(s => <Button key={s.v} size="sm" variant={filter === s.v ? 'default' : 'outline'} onClick={() => setFilter(s.v)} className="h-7 text-xs">{s.l} ({counts[s.v]})</Button>)}
+        </div>
+        {shown.length === 0 ? (
+          <div className="text-center text-slate-400 py-10 text-sm">لا توجد رسائل — كل عرض تسويقي يُرسل من شاشة "👁️ عرض" يُسجل هنا تلقائياً</div>
+        ) : (
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead className="text-xs">التاريخ</TableHead><TableHead className="text-xs">الموظف</TableHead>
+              <TableHead className="text-xs">الباكج</TableHead><TableHead className="text-xs">الزبون / الرقم</TableHead>
+              <TableHead className="text-xs">حالة المتابعة</TableHead><TableHead className="text-xs">ملاحظات</TableHead><TableHead></TableHead>
+            </TableRow></TableHeader>
+            <TableBody>
+              {shown.map(l => {
+                const st = WA_STATUSES.find(s => s.v === l.status) || WA_STATUSES[0]
+                return (
+                  <TableRow key={l.id}>
+                    <TableCell className="text-[11px] whitespace-nowrap">{new Date(l.created_at).toLocaleDateString('en-GB')}<div className="text-[9px] text-slate-400">{new Date(l.created_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</div></TableCell>
+                    <TableCell className="text-[11px]">{l.sent_by}</TableCell>
+                    <TableCell className="text-[11px] font-bold">{l.package_name || '—'}</TableCell>
+                    <TableCell className="text-[11px]">
+                      <div className="font-semibold">{l.customer_name || 'غير مسمى'}</div>
+                      <div className="text-slate-400 flex items-center gap-1" dir="ltr">{l.phone || '—'}
+                        {l.phone && <a href={`https://wa.me/${l.phone}`} target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:underline">↗</a>}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Select value={l.status} onValueChange={v => updLog(l.id, { status: v })}>
+                        <SelectTrigger className={`h-7 text-[11px] w-28 border ${st.cls}`}><SelectValue /></SelectTrigger>
+                        <SelectContent>{WA_STATUSES.map(s => <SelectItem key={s.v} value={s.v}>{s.l}</SelectItem>)}</SelectContent>
+                      </Select>
+                    </TableCell>
+                    <TableCell>
+                      <Input defaultValue={l.notes || ''} onBlur={e => { if (e.target.value !== (l.notes || '')) updLog(l.id, { notes: e.target.value }) }} placeholder="ملاحظة متابعة..." className="h-7 text-[11px] w-36" />
+                    </TableCell>
+                    <TableCell><Button size="sm" variant="ghost" onClick={() => delLog(l.id)} className="h-6 w-6 p-0 text-rose-400 hover:text-rose-600"><Trash2 className="w-3 h-3" /></Button></TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // v3.25 — Marketing Showcase (read-only view for staff to present the package to customers)
 function PackageShowcaseDialog({ pkg, onClose }) {
   const [waPhone, setWaPhone] = useState('')
+  const [waName, setWaName] = useState('')
   if (!pkg) return null
   const nights = pkg.start_date && pkg.end_date ? Math.max(0, Math.ceil((new Date(pkg.end_date) - new Date(pkg.start_date)) / 86400000)) : null
   const roomRows = (pkg.room_pricing || []).filter(r => (Number(r.sale_per_pax) || 0) > 0)
@@ -7989,9 +8069,13 @@ function PackageShowcaseDialog({ pkg, onClose }) {
     }
     if (pkg.notes) L.push('', `📝 ${pkg.notes}`)
     L.push('', '📞 للحجز والاستفسار تواصل معنا')
-    const text = encodeURIComponent(L.join('\n'))
+    const rawText = L.join('\n')
+    const text = encodeURIComponent(rawText)
     const phone = waPhone.replace(/[^0-9]/g, '')
+    // v3.27 — Mini CRM: log the send (fire-and-forget)
+    api('/whatsapp-logs', { method: 'POST', body: { package_id: pkg.id, package_name: pkg.name, phone, customer_name: waName, message: rawText } }).catch(() => {})
     window.open(phone ? `https://wa.me/${phone}?text=${text}` : `https://wa.me/?text=${text}`, '_blank', 'noopener,noreferrer')
+    toast.success('📲 فُتح واتساب — وسُجّل الإرسال في أرشيف المبيعات')
   }
   return (
     <Dialog open={!!pkg} onOpenChange={v => { if (!v) onClose() }}>
@@ -8075,6 +8159,10 @@ function PackageShowcaseDialog({ pkg, onClose }) {
           )}
           <div className="flex flex-col md:flex-row gap-2 items-stretch md:items-end justify-between border-t pt-3">
             <div className="flex-1 flex gap-2 items-end">
+              <div className="w-32">
+                <div className="text-[10px] text-slate-500 mb-1">👤 اسم الزبون (اختياري)</div>
+                <Input value={waName} onChange={e => setWaName(e.target.value)} placeholder="أحمد..." className="h-9" />
+              </div>
               <div className="flex-1">
                 <div className="text-[10px] text-slate-500 mb-1">📲 رقم واتساب الزبون (بالرمز الدولي، اختياري)</div>
                 <Input value={waPhone} onChange={e => setWaPhone(e.target.value)} placeholder="9677xxxxxxxx" className="h-9" dir="ltr" />
@@ -8123,7 +8211,19 @@ function MeraajStoreScreen() {
     try {
       setApproving(b.id)
       const res = await api(`/meraaj/inbound-bookings/${b.id}/approve`, { method: 'POST' })
-      toast.success(`✅ تم الاعتماد — حجز محاسبي باسم "${res.client?.name}" وقيد متوازن`)
+      toast.success(`✅ تم الاعتماد — حجز محاسبي باسم "${res.client?.name}" وقيد متوازن — وسيصل الإشعار لمعراج`)
+      load()
+    } catch (e) { toast.error(e.message) } finally { setApproving(null) }
+  }
+  // v3.27 — reject inbound booking (releases seats + notifies Meraaj with the reason)
+  const rejectBooking = async (b) => {
+    const reason = prompt(`رفض حجز "${b.buyer_office_name}" (${b.seats} مقعد)؟\n\nاكتب سبب الرفض (سيظهر للمكتب المشتري في معراج):`, '')
+    if (reason === null) return
+    if (!String(reason).trim()) return toast.error('سبب الرفض إلزامي')
+    try {
+      setApproving(b.id)
+      const res = await api(`/meraaj/inbound-bookings/${b.id}/reject`, { method: 'POST', body: { reason: String(reason).trim() } })
+      toast.success(`⛔ تم الرفض — أُعيد ${res.released_seats} مقعد للسوق وسيصل السبب لمعراج`)
       load()
     } catch (e) { toast.error(e.message) } finally { setApproving(null) }
   }
@@ -8197,9 +8297,11 @@ function MeraajStoreScreen() {
               <TableCell>
                 {b.status === 'cancelled' ? <Badge className="bg-rose-100 text-rose-700">⛔ ملغى</Badge>
                   : b.status === 'approved' ? <Badge className="bg-emerald-100 text-emerald-700">✅ معتمد</Badge>
+                  : b.status === 'rejected' ? <Badge className="bg-slate-200 text-slate-600" title={b.reject_reason}>🚫 مرفوض</Badge>
                   : <div className="flex items-center gap-1">
                       <Badge className="bg-blue-100 text-blue-700">🔵 جديد</Badge>
                       <Button size="sm" onClick={() => approveBooking(b)} disabled={approving === b.id} className="h-6 px-2 text-[10px] grad-green text-white">{approving === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '✅ اعتماد'}</Button>
+                      <Button size="sm" variant="outline" onClick={() => rejectBooking(b)} disabled={approving === b.id} className="h-6 px-2 text-[10px] border-rose-300 text-rose-600 hover:bg-rose-50">❌ رفض</Button>
                     </div>}
               </TableCell>
             </TableRow>))}</TableBody>
