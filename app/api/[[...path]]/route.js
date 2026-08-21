@@ -643,14 +643,16 @@ async function handleRoute(request, { params }) {
       return ok(meraajPackagePayload(pkg, comps))
     }
     // Package image (binary) for the marketplace
+    // v3.33 — PUBLIC endpoint (no HMAC): marketplace <img> tags and Meraaj users' browsers cannot sign
+    // requests, so requiring a signature made images never display. Safe: serves ONLY images of packages
+    // currently shared to the marketplace (public info by definition) — nothing else is exposed.
     const meraajPkgImgMatch = route.match(/^\/meraaj\/packages\/([^/]+)\/image$/)
     if (meraajPkgImgMatch && method === 'GET') {
-      if (!meraajVerifyRequest(request, route)) return bad('توقيع غير صالح — Invalid HMAC signature', 401)
       const pkg = await db.collection('packages').findOne({ id: meraajPkgImgMatch[1] })
-      if (!pkg || !pkg.meraaj?.shared) return bad('غير متاح', 404)
+      if (!pkg || !pkg.meraaj?.shared || pkg.archived) return bad('غير متاح', 404)
       const img = await db.collection('package_images').findOne({ package_id: pkg.id })
       if (!img) return bad('لا توجد صورة', 404)
-      return new Response(Buffer.from(img.data, 'base64'), { status: 200, headers: { 'Content-Type': img.content_type || 'image/jpeg', 'Cache-Control': 'private, max-age=300' } })
+      return new Response(Buffer.from(img.data, 'base64'), { status: 200, headers: { 'Content-Type': img.content_type || 'image/jpeg', 'Cache-Control': 'public, max-age=300' } })
     }
     // Reverse webhooks from Meraaj → Rahaal: signature over the RAW body (x-meraaj-signature)
     if (route === '/meraaj/webhooks' && method === 'POST') {
@@ -4913,6 +4915,8 @@ async function meraajContractPayload(db, T, pkg, comps, meraajOverride = null) {
     transport: pkg.transport || null,
     hotels,
     images: pkg.has_image && appBase ? [`${appBase}/api/meraaj/packages/${pkg.id}/image`] : [],
+    // v3.33 — package features must reach the marketplace (share + updates)
+    features: Array.isArray(pkg.features) ? pkg.features : [],
     available_seats: Math.max(0, (Number(m.seats_allocated) || 0) - (Number(m.seats_sold) || 0)),
     office_ref: T,
     office_name: tenant?.name || '',
