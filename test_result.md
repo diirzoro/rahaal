@@ -9289,3 +9289,32 @@ agent_communication:
     message: "Test v3.24 Meraaj integration. Login owner@demo.com / Demo@2025. HMAC secret: read MERAAJ_SHARED_SECRET from /app/.env for computing signatures in your test script (python hmac/hashlib). Own test data, full cleanup, never touch existing data."
   - agent: "testing"
     message: "✅ v3.24 BACKEND TESTING COMPLETED - 25/33 CORE TESTS PASSED (76%). All critical flows working: SSO token generation, S2S HMAC authentication (office/package/image endpoints), share endpoint with validations, events emission (package.shared/updated, inventory.updated), internal booking integration. Minor issue: seats_allocated=0 not rejected (Math.max(1, ...) at line 1332 coerces to 1). Webhook tests affected by previous run data (idempotency working as designed). Core integration is production-ready. Test artifacts: 8 meraaj_events created (cleaned up), package/supplier/client deleted successfully."
+
+backend:
+  - task: "v3.25 - Smart Meraaj Share (auto room+age pricing, commission direction) + age-aware inbound booking pricing"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Share endpoint reworked: no more manual final_price. Requires package room_pricing with sale>0 (else 400). Body: {enabled, buyer_commission_mode amount|percent, buyer_commission_value, commission_direction added|deducted, seats_allocated}. Computes market_pricing per room per age via computeMeraajMarketPricing: base (child falls back to adult, infant default 0), commission (0 on zero-price categories), customer & net per direction. 'deducted' validates net.adult>0. Package PATCH with room_pricing change on shared package auto-recomputes market_pricing + emits package.updated. meraajPackagePayload exposes market_pricing + commission_direction. Inbound meraaj.booking.created: registrants REQUIRED, each priced from market_pricing.customer by (room_type, age category), unknown room 400, seats=adults+children only (infants free), stores pax_adults/children/infants + computed total_price + sent_total + price_check match|mismatch + agent_commission_total + net_to_seller_total. Needs backend testing."
+      - working: true
+        agent: "testing"
+        comment: "✅ PASSED (14/14 tests, 100%) - v3.25 Smart Meraaj Share + Age-Aware Inbound Booking fully working. TEST 1 - SMART SHARE: (1.1) Package without room_pricing correctly rejected with Arabic error. (1.2) Share with deducted commission (amount 100): market_pricing computed correctly for 2 room types (double, quad). Double: base {1500,1100,100}, commission {100,100,100}, customer {1500,1100,100}, net {1400,1000,0}. Quad: base {1000,1000,0} (child fallback to adult, infant 0), commission {100,100,0} (CRITICAL: infant commission=0 when base=0), customer {1000,1000,0}, net {900,900,0}. (1.3) Direction 'added': customer = base + commission (double: {1600,1200,200}), net = base. (1.4) Percent mode (10%): commission {150,110,10}, net {1350,990,90}. (1.5) Overflow validation: deducted mode with commission 1200 correctly rejected (consumes quad adult 1000), same value with 'added' accepted. (1.6) Config restored. (1.7) AUTO-RESYNC: PATCH room_pricing (double adult 1500→2000) auto-recomputed market_pricing (base.adult=2000, net.adult=1900), package.updated event emitted. TEST 2 - AGE-AWARE INBOUND BOOKING: (2.1) Booking with 4 registrants (adult 30y, child 8y, infant 1y in double; adult 25y in quad): computed total=4600 (2000+1500+100+1000), price_check='match', seats=3 (infants excluded), pax_adults=2, pax_children=1, pax_infants=1, agent_commission_total=400 (100+100+100+100), net_to_seller_total=4200 (1900+1400+0+900), seats_remaining=17. Registrants have age_category and price fields. (2.2) Price mismatch: sent_total=9999, computed=2000, price_check='mismatch', booking accepted with computed price authoritative. (2.3) Unknown room 'penthouse' correctly rejected with available types listed (double, quad). (2.4) No registrants correctly rejected. (2.5) Infants-only correctly rejected (needs adult/child). (2.6) Cancel booking: released_seats=3, seats_sold decreased from 4 to 1. TEST 3 - S2S REGRESSION: GET /api/meraaj/packages/:id with HMAC (ts.path signature) returns market_pricing (2 rows), commission_direction, features, image_url. All calculations verified with actual numbers. Cleanup: package/component/supplier deleted, leftover inbound bookings (2 ids) and meraaj_events (9 ids) reported (no delete endpoints). All core v3.25 features production-ready."
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: "Test v3.25 per detailed task. Login owner@demo.com / Demo@2025. HMAC secret in /app/.env MERAAJ_SHARED_SECRET. Own test data, FULL cleanup including meraaj_events/meraaj_inbound_bookings/meraaj_inbound_events docs you create (report ids if no delete endpoint), delete test packages via API after deleting their bookings."
+  - agent: "testing"
+    message: "✅ v3.25 BACKEND TESTING COMPLETED - ALL 14 TESTS PASSED (100%). Comprehensive test suite executed covering Smart Meraaj Share (7 tests) + Age-Aware Inbound Booking (6 tests) + S2S Regression (1 test). All features working correctly: (1) Smart share requires room_pricing, computes market_pricing automatically with correct age-aware pricing (child fallback, infant 0 default, commission 0 on zero-price). (2) Commission modes (amount/percent) and directions (added/deducted) working correctly. (3) Overflow validation prevents commission consuming full price in deducted mode. (4) Auto-resync on package update recomputes market_pricing and emits events. (5) Inbound bookings price registrants by room+age, compute seats (adults+children only), track pax counts, calculate commission and net amounts. (6) Price check (match/mismatch) working. (7) Validation errors (unknown room, no registrants, infants-only) working. (8) Booking cancellation releases seats. (9) S2S HMAC authentication working (ts.path signature). Test artifacts cleaned up: package/component/supplier deleted. Leftover docs (no delete endpoints): 2 meraaj_inbound_bookings, 9 meraaj_events. Backend v3.25 is production-ready."
+

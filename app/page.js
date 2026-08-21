@@ -7222,6 +7222,8 @@ function PackagesScreen() {
   const [partnerStmtOpen, setPartnerStmtOpen] = useState(false)
   // v3.24 — Meraaj share dialog
   const [meraajPkg, setMeraajPkg] = useState(null)
+  // v3.25 — Marketing showcase (view mode)
+  const [showcasePkg, setShowcasePkg] = useState(null)
   // v3.9.11 — Bulk operations for packages
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [dateRange, setDateRange] = useState({ preset: 'all', from: '', to: '' })
@@ -7353,20 +7355,21 @@ function PackagesScreen() {
       <div>
         <div className="text-sm font-bold text-slate-700 mb-2">🟢 الباكجات المفتوحة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} onExtend={() => setExtendPkg(p)} onDuplicate={() => dupPkg(p)} onMeraaj={() => setMeraajPkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
+          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} onExtend={() => setExtendPkg(p)} onDuplicate={() => dupPkg(p)} onMeraaj={() => setMeraajPkg(p)} onShowcase={() => setShowcasePkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
           {openPackages.length === 0 && <div className="col-span-full text-center text-slate-400 py-8 text-sm">{dateBounds ? 'لا نتائج ضمن النطاق التاريخي' : 'لا توجد باكجات مفتوحة — أنشئ باكج جديد'}</div>}
         </div>
       </div>
       {closedPackages.length > 0 && <div>
         <div className="text-sm font-bold text-slate-500 mt-6 mb-2">🗄️ أرشيف الباكجات المغلقة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {closedPackages.map(p => <PkgCard key={p?.id} p={p} closed onOpen={() => setDetailsPkg(p)} onReopen={() => reopenPkg(p)} onReport={() => setReportPkg(p)} onDuplicate={() => dupPkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
+          {closedPackages.map(p => <PkgCard key={p?.id} p={p} closed onOpen={() => setDetailsPkg(p)} onReopen={() => reopenPkg(p)} onReport={() => setReportPkg(p)} onDuplicate={() => dupPkg(p)} onShowcase={() => setShowcasePkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
         </div>
       </div>}
       <PackageDialog open={open} onOpenChange={v => { setOpen(v); if (!v) setEditing(null) }} record={editing} onSaved={load} />
       {detailsPkg && <PackageDetailsDialog pkg={detailsPkg} onClose={() => setDetailsPkg(null)} onChanged={load} />}
       <PartnerStatementDialog open={partnerStmtOpen} onOpenChange={setPartnerStmtOpen} />
       {meraajPkg && <MeraajShareDialog pkg={meraajPkg} onClose={() => setMeraajPkg(null)} onSaved={load} />}
+      {showcasePkg && <PackageShowcaseDialog pkg={showcasePkg} onClose={() => setShowcasePkg(null)} />}
       {reportPkg && <PackageReportDialog pkg={reportPkg} onClose={() => setReportPkg(null)} />}
       {comparePeriod && <PackageCompareDialog initialPeriod={comparePeriod} onClose={() => setComparePeriod(null)} />}
       {extendPkg && <ExtendPackageDateDialog pkg={extendPkg} onClose={() => setExtendPkg(null)} onSaved={load} />}
@@ -7804,21 +7807,31 @@ function PartnerStatementDialog({ open, onOpenChange }) {
   )
 }
 
-// v3.24 — Meraaj Network: Share dialog (سعر نهائي + عمولة المكتب المشتري + مقاعد السوق)
+// v3.24/v3.25 — Meraaj Network: SMART Share dialog — prices pulled automatically, only commission is manual
 function MeraajShareDialog({ pkg, onClose, onSaved }) {
   const shared = pkg?.meraaj?.shared
+  const roomRows = (pkg?.room_pricing || []).filter(r => (Number(r.sale_per_pax) || 0) > 0)
   const [form, setForm] = useState({
-    final_price: pkg?.meraaj?.final_price ?? '',
     buyer_commission_mode: pkg?.meraaj?.buyer_commission_mode || 'amount',
     buyer_commission_value: pkg?.meraaj?.buyer_commission_value ?? '',
+    commission_direction: pkg?.meraaj?.commission_direction || 'deducted',
     seats_allocated: pkg?.meraaj?.seats_allocated ?? '',
   })
   const [saving, setSaving] = useState(false)
-  const price = Number(form.final_price) || 0
-  const commission = form.buyer_commission_mode === 'percent'
-    ? +(price * (Number(form.buyer_commission_value) || 0) / 100).toFixed(2)
-    : +(Number(form.buyer_commission_value) || 0).toFixed(2)
-  const net = +(price - commission).toFixed(2)
+  // Live preview: mirrors the backend computeMeraajMarketPricing logic
+  const cv = Number(form.buyer_commission_value) || 0
+  const commFor = (base) => !(base > 0) ? 0 : (form.buyer_commission_mode === 'percent' ? +(base * cv / 100).toFixed(2) : +cv.toFixed(2))
+  const preview = roomRows.map(rp => {
+    const base = { adult: Number(rp.sale_per_pax) || 0, child: (rp.sale_child === null || rp.sale_child === undefined) ? (Number(rp.sale_per_pax) || 0) : (Number(rp.sale_child) || 0), infant: Number(rp.sale_infant) || 0 }
+    const out = { room_type: rp.type, base, customer: {}, net: {} }
+    for (const cat of ['adult', 'child', 'infant']) {
+      const c = commFor(base[cat])
+      if (form.commission_direction === 'added') { out.customer[cat] = +(base[cat] + c).toFixed(2); out.net[cat] = base[cat] }
+      else { out.customer[cat] = base[cat]; out.net[cat] = +(base[cat] - c).toFixed(2) }
+    }
+    return out
+  })
+  const deductProblem = form.commission_direction === 'deducted' && preview.some(r => r.base.adult > 0 && r.net.adult <= 0)
   const submit = async (enabled) => {
     try {
       setSaving(true)
@@ -7834,42 +7847,175 @@ function MeraajShareDialog({ pkg, onClose, onSaved }) {
   }
   return (
     <Dialog open={!!pkg} onOpenChange={v => { if (!v) onClose() }}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader><DialogTitle className="flex items-center gap-2">🕋 مشاركة في معراج نتورك — {pkg?.name}</DialogTitle></DialogHeader>
-        <div className="space-y-3">
-          <Field label={`سعر البيع النهائي للزبون (${pkg?.currency}) / للفرد`} required>
-            <Input type="number" min="0" step="0.01" value={form.final_price} onChange={e => setForm({ ...form, final_price: e.target.value })} className="text-lg font-bold" />
-          </Field>
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="عمولة المكتب المشتري">
-              <Select value={form.buyer_commission_mode} onValueChange={v => setForm({ ...form, buyer_commission_mode: v })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="amount">💰 مبلغ ثابت / للفرد</SelectItem>
-                  <SelectItem value="percent">📊 نسبة من السعر</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
-            <Field label={form.buyer_commission_mode === 'percent' ? 'النسبة %' : `المبلغ (${pkg?.currency})`}>
-              <Input type="number" min="0" step="0.01" value={form.buyer_commission_value} onChange={e => setForm({ ...form, buyer_commission_value: e.target.value })} />
-            </Field>
+        {roomRows.length === 0 ? (
+          <div className="rounded-xl border-2 border-amber-300 bg-amber-50 p-5 text-center space-y-2">
+            <div className="text-3xl">⚠️</div>
+            <div className="font-bold text-amber-800">لا توجد أسعار غرف معرّفة في هذا الباكج</div>
+            <div className="text-xs text-slate-600 leading-relaxed">المشاركة الذكية تسحب الأسعار آلياً من التسعير المباشر (غرفة + عمر).<br />عدّل الباكج وأضف أنواع الغرف مع أسعارها أولاً، ثم عد للمشاركة.</div>
           </div>
-          <Field label="المقاعد المتاحة لسوق معراج" required>
-            <Input type="number" min="1" value={form.seats_allocated} onChange={e => setForm({ ...form, seats_allocated: e.target.value })} />
-            {shared && <div className="text-[10px] text-slate-500 mt-1">مباع حالياً عبر معراج: {pkg?.meraaj?.seats_sold || 0} مقعد — لا يمكن التخصيص أقل من ذلك</div>}
-          </Field>
-          <div className="rounded-xl border-2 border-purple-200 bg-purple-50/50 p-3 text-sm space-y-1">
-            <div className="flex justify-between"><span className="text-slate-500">سعر الزبون النهائي:</span><b>{fmt(price, pkg?.currency)}</b></div>
-            <div className="flex justify-between text-amber-700"><span>عمولة المكتب المشتري:</span><b>{fmt(commission, pkg?.currency)}</b></div>
-            <div className="flex justify-between text-emerald-700 border-t pt-1"><span>صافي التكلفة المستحق لمكتبك:</span><b className="text-base">{fmt(net, pkg?.currency)}</b></div>
+        ) : (
+          <div className="space-y-3">
+            <div className="text-[11px] text-slate-500 bg-slate-50 border rounded-lg p-2">⚡ الأسعار تُسحب <b>آلياً</b> من تسعير الباكج في رحّال وتبقى متزامنة معه — أي تعديل مستقبلي على أسعار الباقة ينعكس فوراً في السوق. الحقل اليدوي الوحيد: عمولة الوكيل.</div>
+            {/* Commission direction toggle */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <button type="button" onClick={() => setForm({ ...form, commission_direction: 'added' })} className={`text-right rounded-lg border-2 p-3 transition ${form.commission_direction === 'added' ? 'border-fuchsia-500 bg-fuchsia-50 shadow-sm' : 'border-slate-200 bg-white hover:border-fuchsia-300'}`}>
+                <div className="text-sm font-bold text-slate-800">➕ تُضاف فوق السعر (Net Price)</div>
+                <div className="text-[10px] text-slate-500 mt-1">الوكيل يبيع بسعرنا + عمولته — نقبض سعرنا كاملاً</div>
+              </button>
+              <button type="button" onClick={() => setForm({ ...form, commission_direction: 'deducted' })} className={`text-right rounded-lg border-2 p-3 transition ${form.commission_direction === 'deducted' ? 'border-fuchsia-500 bg-fuchsia-50 shadow-sm' : 'border-slate-200 bg-white hover:border-fuchsia-300'}`}>
+                <div className="text-sm font-bold text-slate-800">➖ تُقتطع من السعر (سعر سوق موحد)</div>
+                <div className="text-[10px] text-slate-500 mt-1">الزبون يدفع سعرنا نفسه — عمولة الوكيل من هامشنا</div>
+              </button>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <Field label="صيغة عمولة الوكيل">
+                <Select value={form.buyer_commission_mode} onValueChange={v => setForm({ ...form, buyer_commission_mode: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="amount">💰 مبلغ / للفرد</SelectItem>
+                    <SelectItem value="percent">📊 نسبة %</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label={form.buyer_commission_mode === 'percent' ? 'النسبة %' : `المبلغ (${pkg?.currency})`}>
+                <Input type="number" min="0" step="0.01" value={form.buyer_commission_value} onChange={e => setForm({ ...form, buyer_commission_value: e.target.value })} className="font-bold" />
+              </Field>
+              <Field label="المقاعد المخصصة للسوق" required>
+                <Input type="number" min="1" value={form.seats_allocated} onChange={e => setForm({ ...form, seats_allocated: e.target.value })} />
+              </Field>
+            </div>
+            {shared && <div className="text-[10px] text-slate-500">مباع حالياً عبر معراج: {pkg?.meraaj?.seats_sold || 0} مقعد — لا يمكن التخصيص أقل من ذلك</div>}
+            {/* Auto price table preview */}
+            <div className="rounded-xl border-2 border-purple-200 overflow-hidden">
+              <div className="bg-purple-50 px-3 py-2 text-xs font-bold text-purple-800">💵 جدول الأسعار في السوق (محسوب آلياً)</div>
+              <Table>
+                <TableHeader><TableRow>
+                  <TableHead className="text-xs">الغرفة</TableHead>
+                  <TableHead className="text-xs">👨 زبون / صافينا</TableHead>
+                  <TableHead className="text-xs">🧒 زبون / صافينا</TableHead>
+                  <TableHead className="text-xs">👶 زبون / صافينا</TableHead>
+                </TableRow></TableHeader>
+                <TableBody>
+                  {preview.map(r => (
+                    <TableRow key={r.room_type}>
+                      <TableCell className="text-xs font-bold">🛏️ {r.room_type}</TableCell>
+                      {['adult', 'child', 'infant'].map(cat => (
+                        <TableCell key={cat} className="text-xs">
+                          <span className="font-bold text-purple-700">{r.customer[cat].toLocaleString('en-US')}</span>
+                          <span className="text-slate-400"> / </span>
+                          <span className={`font-bold ${r.net[cat] > 0 || r.base[cat] === 0 ? 'text-emerald-700' : 'text-rose-600'}`}>{r.net[cat].toLocaleString('en-US')}</span>
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            {deductProblem && <div className="text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded p-2">⚠️ العمولة تلتهم كامل سعر بعض الغرف — خفّضها أو بدّل الاتجاه إلى "تُضاف فوق السعر"</div>}
           </div>
-          <div className="text-[11px] text-slate-500 leading-relaxed">💡 عند المشاركة، سيظهر البرنامج بمميزاته وصورته في سوق معراج، وأي حجز هناك يخصم المقاعد تلقائياً هنا (مزامنة لحظية لمنع البيع المزدوج).</div>
-        </div>
+        )}
         <DialogFooter className="gap-2">
           {shared && <Button variant="outline" onClick={() => submit(false)} disabled={saving} className="border-rose-300 text-rose-600 hover:bg-rose-50">⛔ إيقاف المشاركة</Button>}
           <Button variant="outline" onClick={onClose}>إلغاء</Button>
-          <Button onClick={() => submit(true)} disabled={saving} className="bg-gradient-to-l from-purple-700 to-fuchsia-500 text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (shared ? '💾 تحديث المشاركة' : '🕋 مشاركة الآن')}</Button>
+          {roomRows.length > 0 && <Button onClick={() => submit(true)} disabled={saving || deductProblem} className="bg-gradient-to-l from-purple-700 to-fuchsia-500 text-white">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (shared ? '💾 تحديث المشاركة' : '🕋 مشاركة الآن')}</Button>}
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// v3.25 — Marketing Showcase (read-only view for staff to present the package to customers)
+function PackageShowcaseDialog({ pkg, onClose }) {
+  if (!pkg) return null
+  const nights = pkg.start_date && pkg.end_date ? Math.max(0, Math.ceil((new Date(pkg.end_date) - new Date(pkg.start_date)) / 86400000)) : null
+  const roomRows = (pkg.room_pricing || []).filter(r => (Number(r.sale_per_pax) || 0) > 0)
+  const TYPE_LABELS = { umrah: '🕋 عمرة', hajj: '🕋 حج', tourism: '🏝️ سياحة', other: '📦 برنامج' }
+  return (
+    <Dialog open={!!pkg} onOpenChange={v => { if (!v) onClose() }}>
+      <DialogContent className="max-w-2xl max-h-[92vh] overflow-y-auto p-0">
+        {/* Hero */}
+        <div className="relative">
+          {pkg.has_image ? (
+            <img src={`/api/packages/${pkg.id}/image?t=${Date.now()}`} alt={pkg.name} className="w-full h-56 object-cover" />
+          ) : (
+            <div className="w-full h-40 bg-gradient-to-l from-teal-600 via-emerald-500 to-teal-400 flex items-center justify-center text-6xl">🕋</div>
+          )}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/10 to-transparent" />
+          <div className="absolute bottom-3 right-4 left-4 text-white">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/20 backdrop-blur border border-white/30">{TYPE_LABELS[pkg.package_type] || pkg.package_type}</span>
+              {pkg.meraaj?.shared && <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/60 backdrop-blur border border-white/30">🕋 في معراج نتورك</span>}
+            </div>
+            <div className="text-2xl font-black drop-shadow">{pkg.name}</div>
+          </div>
+        </div>
+        <div className="px-5 pb-5 space-y-4">
+          {/* Dates strip */}
+          <div className="grid grid-cols-3 gap-2 -mt-2">
+            <div className="rounded-xl border bg-teal-50/60 border-teal-200 p-2 text-center">
+              <div className="text-[10px] text-slate-500">🛫 الانطلاق</div>
+              <div className="text-sm font-black text-teal-800">{pkg.start_date ? new Date(pkg.start_date).toLocaleDateString('en-GB') : 'غير محدد'}</div>
+            </div>
+            <div className="rounded-xl border bg-emerald-50/60 border-emerald-200 p-2 text-center">
+              <div className="text-[10px] text-slate-500">🛬 العودة</div>
+              <div className="text-sm font-black text-emerald-800">{pkg.end_date ? new Date(pkg.end_date).toLocaleDateString('en-GB') : 'غير محدد'}</div>
+            </div>
+            <div className="rounded-xl border bg-indigo-50/60 border-indigo-200 p-2 text-center">
+              <div className="text-[10px] text-slate-500">🌙 الليالي</div>
+              <div className="text-sm font-black text-indigo-800">{nights !== null ? `${nights} ليلة` : '—'}</div>
+            </div>
+          </div>
+          {/* Features */}
+          {(pkg.features || []).length > 0 && (
+            <div>
+              <div className="text-sm font-black text-slate-800 mb-2">✨ مميزات البرنامج</div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5">
+                {pkg.features.map(feat => (
+                  <div key={feat} className="flex items-center gap-2 text-sm text-slate-700 bg-slate-50 border rounded-lg px-3 py-1.5">
+                    <span className="text-emerald-500 font-black">✓</span> {feat}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* Room prices */}
+          {roomRows.length > 0 && (
+            <div>
+              <div className="text-sm font-black text-slate-800 mb-2">🛏️ الأسعار حسب التسكين ({pkg.currency})</div>
+              <div className="rounded-xl border-2 border-teal-200 overflow-hidden">
+                <Table>
+                  <TableHeader><TableRow className="bg-teal-50">
+                    <TableHead className="text-xs">نوع الغرفة</TableHead>
+                    <TableHead className="text-xs">👨 بالغ</TableHead>
+                    <TableHead className="text-xs">🧒 طفل (2-11)</TableHead>
+                    <TableHead className="text-xs">👶 رضيع</TableHead>
+                  </TableRow></TableHeader>
+                  <TableBody>
+                    {roomRows.map(r => (
+                      <TableRow key={r.type}>
+                        <TableCell className="text-sm font-bold">🛏️ {r.type}</TableCell>
+                        <TableCell className="text-sm font-black text-teal-700">{(Number(r.sale_per_pax) || 0).toLocaleString('en-US')}</TableCell>
+                        <TableCell className="text-sm font-bold text-slate-700">{((r.sale_child === null || r.sale_child === undefined) ? (Number(r.sale_per_pax) || 0) : (Number(r.sale_child) || 0)).toLocaleString('en-US')}</TableCell>
+                        <TableCell className="text-sm text-slate-600">{(Number(r.sale_infant) || 0) > 0 ? (Number(r.sale_infant) || 0).toLocaleString('en-US') : 'مجاناً'}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          )}
+          {/* Notes */}
+          {pkg.notes && (
+            <div className="text-xs text-slate-600 bg-amber-50/60 border border-amber-200 rounded-xl p-3 leading-relaxed">
+              <b>📝 ملاحظات:</b> {pkg.notes}
+            </div>
+          )}
+          <div className="flex justify-end">
+            <Button variant="outline" onClick={onClose}>إغلاق</Button>
+          </div>
+        </div>
       </DialogContent>
     </Dialog>
   )
@@ -7933,15 +8079,21 @@ function MeraajStoreScreen() {
       {view === 'shared' && (
         sharedPkgs.length === 0 ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">لا توجد باقات مُشارَكة — من قسم الباكجات اضغط زر "🕋 معراج" على أي باقة</CardContent></Card> : (
           <Card><CardContent className="p-0"><Table>
-            <TableHeader><TableRow><TableHead>الباكج</TableHead><TableHead>السعر النهائي</TableHead><TableHead>عمولة المشتري</TableHead><TableHead>صافي مكتبك</TableHead><TableHead>المقاعد (مباع/مخصص)</TableHead><TableHead>متاح</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>الباكج</TableHead><TableHead>أسعار السوق (بالغ)</TableHead><TableHead>عمولة الوكيل</TableHead><TableHead>المقاعد (مباع/مخصص)</TableHead><TableHead>متاح</TableHead></TableRow></TableHeader>
             <TableBody>{sharedPkgs.map(p => {
               const m = p.meraaj || {}
               const avail = Math.max(0, (Number(m.seats_allocated) || 0) - (Number(m.seats_sold) || 0))
+              const mp = m.market_pricing || []
               return (<TableRow key={p.id}>
                 <TableCell className="font-bold text-xs">{p.name}</TableCell>
-                <TableCell className="text-xs">{fmt(m.final_price || 0, p.currency)}</TableCell>
-                <TableCell className="text-xs text-amber-700">{m.buyer_commission_mode === 'percent' ? `${m.buyer_commission_value}%` : fmt(m.buyer_commission_value || 0, p.currency)}</TableCell>
-                <TableCell className="text-xs text-emerald-700 font-bold">{fmt(m.net_to_seller || 0, p.currency)}</TableCell>
+                <TableCell className="text-xs">
+                  {mp.length === 0 ? '—' : mp.slice(0, 3).map(r => <span key={r.room_type} className="me-2 whitespace-nowrap">🛏️{r.room_type}: <b className="text-purple-700">{(r.customer?.adult || 0).toLocaleString('en-US')}</b></span>)}
+                  {mp.length > 3 && <span className="text-slate-400">+{mp.length - 3}</span>}
+                </TableCell>
+                <TableCell className="text-xs text-amber-700 whitespace-nowrap">
+                  {m.buyer_commission_mode === 'percent' ? `${m.buyer_commission_value}%` : fmt(m.buyer_commission_value || 0, p.currency)}
+                  <span className="text-[9px] text-slate-400 block">{m.commission_direction === 'added' ? '➕ فوق السعر' : '➖ من السعر'}</span>
+                </TableCell>
                 <TableCell className="text-xs">{m.seats_sold || 0} / {m.seats_allocated || 0}</TableCell>
                 <TableCell><Badge className={avail > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}>{avail > 0 ? `${avail} متاح` : 'نفدت'}</Badge></TableCell>
               </TableRow>)
@@ -7957,7 +8109,10 @@ function MeraajStoreScreen() {
               <TableCell className="text-xs whitespace-nowrap">{new Date(b.created_at).toLocaleDateString('en-GB')}</TableCell>
               <TableCell className="text-xs font-bold">{b.package_name}</TableCell>
               <TableCell className="text-xs">{b.buyer_office_name}</TableCell>
-              <TableCell className="text-xs">{b.seats} ({(b.registrants || []).map(r => r.name).slice(0, 2).join('، ')}{(b.registrants || []).length > 2 ? '...' : ''})</TableCell>
+              <TableCell className="text-xs">
+                <div>👨 {b.pax_adults ?? b.seats} • 🧒 {b.pax_children ?? 0} • 👶 {b.pax_infants ?? 0}</div>
+                <div className="text-[9px] text-slate-400">{(b.registrants || []).map(r => r.name).slice(0, 2).join('، ')}{(b.registrants || []).length > 2 ? '...' : ''}</div>
+              </TableCell>
               <TableCell className="text-xs">{fmt(b.total_price || 0, b.currency)}</TableCell>
               <TableCell className="text-[10px] text-slate-400">{b.meraaj_booking_ref || '—'}</TableCell>
               <TableCell><Badge className={b.status === 'cancelled' ? 'bg-rose-100 text-rose-700' : 'bg-blue-100 text-blue-700'}>{b.status === 'cancelled' ? '⛔ ملغى' : '🔵 جديد'}</Badge></TableCell>
@@ -7981,7 +8136,7 @@ function MeraajStoreScreen() {
   )
 }
 
-function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onExtend, onDuplicate, onMeraaj, closed, selectable, selected, onToggleSelect }) {
+function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onExtend, onDuplicate, onMeraaj, onShowcase, closed, selectable, selected, onToggleSelect }) {
   const typeL = PACKAGE_TYPES.find(t => t.v === p?.package_type)?.l || p?.package_type || '—'
   return (
     <Card className={`overflow-hidden hover:shadow-md transition ${closed ? 'opacity-70' : ''} ${selected ? 'ring-2 ring-rose-400' : ''}`}>
@@ -8021,6 +8176,7 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
           <Button size="sm" variant="outline" onClick={onReport} className="h-7 px-2 text-xs gap-1 text-blue-600"><ReceiptText className="w-3 h-3" /> التقرير</Button>
           {!closed && onExtend && <Button size="sm" variant="outline" onClick={onExtend} className="h-7 px-2 text-xs gap-1 text-teal-600 border-teal-200 hover:bg-teal-50"><Calendar className="w-3 h-3" /> تمديد التاريخ</Button>}
           {onDuplicate && <Button size="sm" variant="outline" onClick={onDuplicate} className="h-7 px-2 text-xs gap-1 text-purple-600 border-purple-200 hover:bg-purple-50" title="نسخ الباكج بكل مكوناته وأسعاره كمسودة جديدة"><Copy className="w-3 h-3" /> نسخ</Button>}
+          {onShowcase && <Button size="sm" variant="outline" onClick={onShowcase} className="h-7 px-2 text-xs gap-1 text-sky-600 border-sky-200 hover:bg-sky-50" title="عرض تسويقي للزبون: الصورة والمميزات والأسعار">👁️ عرض</Button>}
           {!closed && onMeraaj && <Button size="sm" variant="outline" onClick={onMeraaj} className={`h-7 px-2 text-xs gap-1 ${p?.meraaj?.shared ? 'text-fuchsia-700 border-fuchsia-300 bg-fuchsia-50' : 'text-fuchsia-600 border-fuchsia-200 hover:bg-fuchsia-50'}`} title="مشاركة الباكج في سوق معراج نتورك B2B">🕋 معراج</Button>}
           {!closed && onEdit && <Button size="sm" variant="ghost" onClick={onEdit} className="h-7 px-2 text-xs"><Pencil className="w-3 h-3" /></Button>}
           {!closed && onClose && <Button size="sm" variant="ghost" onClick={onClose} className="h-7 px-2 text-xs text-orange-600">إغلاق</Button>}

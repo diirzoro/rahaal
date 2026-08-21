@@ -676,15 +676,44 @@ async function handleRoute(request, { params }) {
           age: r.age === '' || r.age === null || r.age === undefined ? null : Math.max(0, Math.min(120, Number(r.age) || 0)),
           room_type: String(r.room_type || '').trim().slice(0, 40),
         })).filter(r => r.name)
-        const seats = registrants.length || Math.max(1, Number(data.pax_count) || 1)
+        if (registrants.length === 0) return bad('قائمة المسافرين (registrants) مطلوبة مع العمر ونوع الغرفة')
+        // v3.25 — AGE-AWARE PRICING: compute each traveller's price from the marketplace table (room + age)
+        const marketMap = {}
+        for (const row of (pkg.meraaj.market_pricing || [])) marketMap[row.room_type] = row
+        let adults = 0, children = 0, infants = 0
+        let computedTotal = 0, commissionTotal = 0, netTotal = 0
+        const priced = []
+        for (const r of registrants) {
+          const cat = ageCategoryOf(r.age)
+          if (cat === 'adult') adults++; else if (cat === 'child') children++; else infants++
+          const row = marketMap[r.room_type]
+          if (!row) return bad(`نوع الغرفة "${r.room_type || 'غير محدد'}" غير متاح في تسعير هذا الباكج — الأنواع المتاحة: ${Object.keys(marketMap).join('، ') || 'لا يوجد'}`)
+          const price = Number(row.customer[cat]) || 0
+          computedTotal += price
+          commissionTotal += Number(row.commission[cat]) || 0
+          netTotal += Number(row.net[cat]) || 0
+          priced.push({ ...r, age_category: cat, price })
+        }
+        computedTotal = +computedTotal.toFixed(2)
+        commissionTotal = +commissionTotal.toFixed(2)
+        netTotal = +netTotal.toFixed(2)
+        // Seats consume billed persons only (infants do not occupy seats)
+        const seats = adults + children
+        if (seats === 0) return bad('يجب وجود بالغ أو طفل واحد على الأقل')
         const available = meraajAvailability(pkg)
         if (seats > available) return bad(`المقاعد المتاحة غير كافية (متاح: ${available}، مطلوب: ${seats})`, 409)
+        const sentTotal = data.total_price !== undefined ? +(Number(data.total_price) || 0).toFixed(2) : null
         const inbound = {
           id: uuidv4(), tenant_id: pkg.tenant_id, package_id: pkg.id, package_name: pkg.name,
           meraaj_booking_ref: String(data.booking_ref || '').slice(0, 60),
           buyer_office_name: String(data.buyer_office_name || 'مكتب عبر معراج').slice(0, 120),
-          registrants, seats,
-          total_price: Number(data.total_price) || 0,
+          registrants: priced, seats,
+          pax_adults: adults, pax_children: children, pax_infants: infants,
+          total_price: computedTotal,           // authoritative: computed from room+age matrix
+          sent_total: sentTotal,                 // what Meraaj sent (for reconciliation)
+          price_check: sentTotal === null ? 'not_sent' : (Math.abs(sentTotal - computedTotal) <= 0.01 ? 'match' : 'mismatch'),
+          agent_commission_total: commissionTotal,
+          net_to_seller_total: netTotal,
           currency: CURRENCIES.includes(data.currency) ? data.currency : pkg.currency,
           status: 'new', // new | cancelled | approved (approval into accounting is a manual office step)
           created_at: new Date(),
@@ -1322,13 +1351,22 @@ async function handleRoute(request, { params }) {
         await emitMeraajEvent(db, T, 'package.deactivated', { package_ref: pkg.id, reason: 'unshared_by_office' })
         return ok({ shared: false })
       }
-      const finalPrice = Number(b.final_price)
-      if (!(finalPrice > 0)) return bad('حدد سعر البيع النهائي للزبون')
+      // v3.25 — SMART SHARE: prices are pulled AUTOMATICALLY from the package room pricing.
+      // The only manual inputs: buyer (agent) commission + direction + seats.
+      const roomPricing = Array.isArray(pkg.room_pricing) ? pkg.room_pricing.filter(r => (Number(r.sale_per_pax) || 0) > 0) : []
+      if (roomPricing.length === 0) return bad('لا توجد أسعار غرف معرّفة في الباكج — حدّد التسعير المباشر (غرفة + عمر) في إعدادات الباكج أولاً')
       const commissionMode = b.buyer_commission_mode === 'percent' ? 'percent' : 'amount'
       const commissionValue = Math.max(0, Number(b.buyer_commission_value) || 0)
       if (commissionMode === 'percent' && commissionValue > 90) return bad('نسبة العمولة غير منطقية (>90%)')
-      const buyerCommission = commissionMode === 'percent' ? +(finalPrice * commissionValue / 100).toFixed(2) : +commissionValue.toFixed(2)
-      if (buyerCommission >= finalPrice) return bad('العمولة تتجاوز أو تساوي السعر النهائي')
+      // 'added'  → الوكيل يضيف عمولته فوق سعرنا (نقبض سعرنا كاملاً)
+      // 'deducted' → سعر السوق ثابت وتُقتطع العمولة من هامشنا
+      const commissionDirection = b.commission_direction === 'added' ? 'added' : 'deducted'
+      const marketPricing = computeMeraajMarketPricing(roomPricing, commissionMode, commissionValue, commissionDirection)
+      // Sanity: in 'deducted' mode the commission must not consume the full price
+      if (commissionDirection === 'deducted') {
+        const badRow = marketPricing.find(r => r.base.adult > 0 && r.net.adult <= 0)
+        if (badRow) return bad(`العمولة تلتهم كامل سعر غرفة (${badRow.room_type}) — خفّض العمولة أو غيّر الاتجاه إلى "تُضاف فوق السعر"`)
+      }
       const seatsAllocatedRaw = Number(b.seats_allocated)
       if (!(seatsAllocatedRaw > 0)) return bad('حدد عدد المقاعد المتاحة للسوق (1 على الأقل)')
       const seatsAllocated = Math.min(10000, Math.floor(seatsAllocatedRaw))
@@ -1336,11 +1374,11 @@ async function handleRoute(request, { params }) {
       if (seatsAllocated < prevSold) return bad(`لا يمكن تخصيص أقل من المقاعد المباعة مسبقاً (${prevSold})`)
       const meraajSet = {
         shared: true,
-        final_price: +finalPrice.toFixed(2),
+        pricing_source: 'auto_room_pricing', // v3.25 — prices always mirror the package itself
         buyer_commission_mode: commissionMode,
         buyer_commission_value: commissionValue,
-        buyer_commission_amount: buyerCommission,
-        net_to_seller: +(finalPrice - buyerCommission).toFixed(2),
+        commission_direction: commissionDirection,
+        market_pricing: marketPricing,
         seats_allocated: seatsAllocated,
         seats_sold: prevSold,
         shared_at: pkg.meraaj?.shared_at || new Date(),
@@ -1985,12 +2023,19 @@ async function handleRoute(request, { params }) {
         upd.features = sanitizeFeatures(b.features)
       }
       await db.collection('packages').updateOne({ id: pkgIdMatch[1], tenant_id: T }, { $set: upd })
-      // v3.24 — Meraaj sync: shared packages emit updates; closing emits deactivation
+      // v3.24/v3.25 — Meraaj sync: shared packages emit updates; closing emits deactivation
       try {
         const pkgAfter = await db.collection('packages').findOne({ id: pkgIdMatch[1], tenant_id: T })
         if (pkgAfter?.meraaj?.shared) {
           if (upd.status === 'closed') await emitMeraajEvent(db, T, 'package.deactivated', { package_ref: pkgAfter.id, reason: 'closed_by_office' })
           else {
+            // v3.25 — room prices changed → auto-recompute marketplace pricing (always mirrors Rahaal)
+            if (upd.room_pricing !== undefined) {
+              const m = pkgAfter.meraaj
+              const newMarket = computeMeraajMarketPricing(pkgAfter.room_pricing, m.buyer_commission_mode || 'amount', Number(m.buyer_commission_value) || 0, m.commission_direction || 'deducted')
+              await db.collection('packages').updateOne({ id: pkgAfter.id, tenant_id: T }, { $set: { 'meraaj.market_pricing': newMarket, 'meraaj.updated_at': new Date() } })
+              pkgAfter.meraaj.market_pricing = newMarket
+            }
             const compsM = await db.collection('package_components').find({ package_id: pkgAfter.id, tenant_id: T }).toArray()
             await emitMeraajEvent(db, T, 'package.updated', meraajPackagePayload(pkgAfter, compsM))
           }
@@ -4354,6 +4399,28 @@ function meraajVerifyRequest(request, route) {
   if (Math.abs(now - Number(ts)) > 300) return false
   return meraajVerify(`${ts}.${route}`, sig)
 }
+// v3.25 — Compute marketplace pricing table from package room pricing + agent commission config
+function computeMeraajMarketPricing(roomPricingArr, mode, value, direction) {
+  const rows = (Array.isArray(roomPricingArr) ? roomPricingArr : []).filter(r => (Number(r.sale_per_pax) || 0) > 0)
+  const commFor = (base) => {
+    if (!(base > 0)) return 0
+    return mode === 'percent' ? +(base * value / 100).toFixed(2) : +(+value).toFixed(2)
+  }
+  return rows.map(rp => {
+    const baseAdult = +(Number(rp.sale_per_pax) || 0).toFixed(2)
+    const baseChild = (rp.sale_child === null || rp.sale_child === undefined) ? baseAdult : +(Number(rp.sale_child) || 0).toFixed(2)
+    const baseInfant = +(Number(rp.sale_infant) || 0).toFixed(2)
+    const row = { room_type: rp.type, base: { adult: baseAdult, child: baseChild, infant: baseInfant }, commission: {}, customer: {}, net: {} }
+    for (const cat of ['adult', 'child', 'infant']) {
+      const base = row.base[cat]
+      const comm = commFor(base)
+      row.commission[cat] = comm
+      if (direction === 'added') { row.customer[cat] = +(base + comm).toFixed(2); row.net[cat] = base }
+      else { row.customer[cat] = base; row.net[cat] = +(base - comm).toFixed(2) }
+    }
+    return row
+  })
+}
 // Availability of a shared package in the marketplace (allocated - sold)
 function meraajAvailability(pkg) {
   const m = pkg?.meraaj || {}
@@ -4426,9 +4493,12 @@ function meraajPackagePayload(pkg, comps = []) {
     status: pkg.status,
     meraaj: {
       shared: !!pkg.meraaj?.shared,
-      final_price: pkg.meraaj?.final_price ?? null,
+      pricing_source: 'auto_room_pricing',
       buyer_commission_mode: pkg.meraaj?.buyer_commission_mode || 'amount',
       buyer_commission_value: pkg.meraaj?.buyer_commission_value ?? 0,
+      commission_direction: pkg.meraaj?.commission_direction || 'deducted',
+      // v3.25 — full per-room per-age marketplace price table (customer price + agent commission + seller net)
+      market_pricing: pkg.meraaj?.market_pricing || [],
       seats_allocated: Number(pkg.meraaj?.seats_allocated) || 0,
       seats_sold: Number(pkg.meraaj?.seats_sold) || 0,
       seats_available: meraajAvailability(pkg),
