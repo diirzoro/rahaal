@@ -562,5 +562,43 @@
   },
   "updated_at": "2026-08-21T20:56:40.831Z",
   "deactivate_reason": "unshared_by_office"
+ },
+ "521295e8-f169-4dab-b550-d5c996522bbf": {
+  "meraaj_id": "MRJ-TEST-1787384132703",
+  "listed": false,
+  "package_ref": "521295e8-f169-4dab-b550-d5c996522bbf",
+  "rahal_ref": "521295e8-f169-4dab-b550-d5c996522bbf",
+  "meraaj_package_id": null,
+  "title": "باقة التقاط العقد النهائي",
+  "description": "برنامج عمرة 14 يوم شامل الإعاشة والنقل",
+  "departure_date": "2026-10-10T00:00:00.000Z",
+  "return_date": "2026-10-24T00:00:00.000Z",
+  "departure_city": null,
+  "transport": null,
+  "hotels": [
+   "فندق دار التوحيد - مكة",
+   "فندق الأنصار - المدينة"
+  ],
+  "images": [
+   "https://visa-booking-5.preview.emergentagent.com/api/meraaj/packages/521295e8-f169-4dab-b550-d5c996522bbf/image"
+  ],
+  "features": [
+   "🧳 شنطة سفر",
+   "🕋 قريب من الحرم",
+   "🧭 مرشد ديني",
+   "💧 ماء زمزم"
+  ],
+  "available_seats": 40,
+  "office_ref": "d89bc41d-e19b-430f-be93-e3f8ca6d404a",
+  "office_name": "مكتب الرحّال التجريبي",
+  "owner_name": "مالك المكتب التجريبي",
+  "pricing": {
+   "net_cost_per_seat": 2000,
+   "final_sale_price": 2100,
+   "buyer_office_commission": 100,
+   "currency": "SAR"
+  },
+  "updated_at": "2026-08-22T07:35:33.243Z",
+  "deactivate_reason": "unshared_by_office"
  }
 }
