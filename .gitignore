@@ -97,3 +97,16 @@ credentials.json
 *.key
 .credentials
 .next/cache/webpack/client-production/0.pack
+
+# ===== Test/Preview artifacts — NEVER ship to production =====
+test_result.md
+memory/meraaj_network/*
+!memory/meraaj_network/RAHAAL_API_DOCS.md
+*.mock.log
+mock_server.out
+backend_test*.py
+test_v*_output.log
+phase5_test.py
+test_v3_9_21_patch_booking.py
+verify_phone_storage.py
+verify_trial_balance.py

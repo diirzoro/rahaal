@@ -1,8 +1,0 @@
-PASS | setup: shared & listed 
-PASS | add hotel → Meraaj hotels synced | ['فندق الاختبار v332']
-PASS | delete hotel → Meraaj hotels empty 
-PASS | add transport → package.updated delivered 
-PASS | upload image → Meraaj images synced | ['https://visa-booking-5.preview.emergentagent.com/api/meraaj/packages/3f80cf60-898b-4873-9c5a-7e7cd6157dfc/image']
-PASS | delete image → Meraaj images empty 
-PASS | duplicate still works, copy has NO meraaj identity 
-PASS | cleanup done + pre-existing 585b9e89 untouched 

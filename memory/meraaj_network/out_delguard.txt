@@ -1,9 +1,0 @@
-PASS | setup: pkg shared to Meraaj 
-PASS | delete BLOCKED (502) while Meraaj unreachable | {"error":"لم يتم الحذف — تعذر إبلاغ سوق معراج بإيقاف الباكج. حاول لاحقاً أو أوقف المشاركة أولاً"}
-PASS | package still exists locally 
-PASS | bulk-delete skips it (failed=1, deleted=0) | {'ok': True, 'deleted': 0, 'failed': 1, 'errors': [{'id': 'a142e74b-4f18-455c-a102-78a9e53d0bc2', 'error': 'تعذر إبلاغ معراج بإيقاف الباكج
-PASS | package still exists after bulk attempt 
-PASS | delete succeeds when Meraaj reachable 
-PASS | package gone locally 
-PASS | Meraaj UNLISTED (deleted_by_office) 
-PASS | pre-existing pkg 585b9e89 untouched 
