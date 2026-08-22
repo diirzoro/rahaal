@@ -589,6 +589,15 @@ async function handleRoute(request, { params }) {
   const method = request.method
   const url = new URL(request.url)
   const q = Object.fromEntries(url.searchParams.entries())
+  // v3.42 — Cache the real public origin from live request headers (used as a last-resort base for
+  // package image URLs in Meraaj payloads when RAHAAL_PUBLIC_BASE_URL / NEXT_PUBLIC_BASE_URL are empty).
+  try {
+    const xfHost = request.headers.get('x-forwarded-host') || request.headers.get('host')
+    if (xfHost && !/^(localhost|127\.|0\.0\.0\.0)/.test(xfHost)) {
+      const xfProto = (request.headers.get('x-forwarded-proto') || 'https').split(',')[0].trim()
+      globalThis.__rahaalPublicOrigin = `${xfProto}://${xfHost.split(',')[0].trim()}`
+    }
+  } catch {}
 
   try {
     const db = await connectToMongo()
@@ -4999,6 +5008,16 @@ function meraajPackagePayload(pkg, comps = []) {
 // POST {MERAAJ_API_BASE_URL}/api/integrations/rahal/packages/share with X-Rahal-Api-Key.
 // Share succeeds ONLY on a 2xx response from Meraaj — any failure blocks the share.
 function meraajApiBase() { return (process.env.MERAAJ_API_BASE_URL || '').trim().replace(/\/+$/, '') }
+// v3.42 — Resilient public base URL for Rahaal-hosted assets (package image URLs sent to Meraaj).
+// Root cause fix: on LIVE, an empty NEXT_PUBLIC_BASE_URL silently produced images: [] even when has_image=true.
+// Priority: RAHAAL_PUBLIC_BASE_URL (explicit server-side override) → NEXT_PUBLIC_BASE_URL → live request origin (cached per request in the router).
+function rahaalPublicBase() {
+  const explicit = (process.env.RAHAAL_PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '')
+  if (explicit) return explicit
+  const pub = (process.env.NEXT_PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '')
+  if (pub) return pub
+  return String(globalThis.__rahaalPublicOrigin || '').replace(/\/+$/, '')
+}
 // v3.30 — UNIFIED Meraaj CONTRACT payload — single source of truth for field names:
 // Rahaal name → Meraaj title | notes → description | start_date → departure_date | end_date → return_date
 // Used by BOTH the first-share REST call AND the package.updated webhook (never send non-contract shapes).
@@ -5010,7 +5029,9 @@ async function meraajContractPayload(db, T, pkg, comps, meraajOverride = null) {
   const rows = (m.market_pricing || []).filter(r => (Number(r.customer?.adult) || 0) > 0)
   const cheapest = rows.slice().sort((a, b) => a.customer.adult - b.customer.adult)[0] || null
   const hotels = (comps || []).filter(c => c.component_type === 'hotel').map(c => String(c.name || '').trim()).filter(Boolean)
-  const appBase = (process.env.NEXT_PUBLIC_BASE_URL || '').replace(/\/+$/, '')
+  const appBase = rahaalPublicBase()
+  // v3.42 — never fail silently: has_image=true must always yield a real image URL (root cause of LIVE images:[] bug)
+  if (pkg.has_image && !appBase) console.error(`[MERAAJ] WARNING: package ${pkg.id} has_image=true but no public base URL could be resolved (set RAHAAL_PUBLIC_BASE_URL or NEXT_PUBLIC_BASE_URL) — images[] will be sent empty`)
   // v3.37 — EXTENDED CONTRACT (backward-compatible: all previous fields kept unchanged)
   const transports = await db.collection('package_transports').find({ package_id: pkg.id, tenant_id: T }).toArray()
   return {

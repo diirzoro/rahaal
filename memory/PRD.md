@@ -20,5 +20,10 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 - Meraaj E2E 15/15 test (blocked on Meraaj team configuring temp secret)
 - Package Comparison feature (deferred by user)
 
+## v3.42 (completed)
+- Fixed LIVE bug: `package.updated` sent `images: []` despite `has_image=true` because NEXT_PUBLIC_BASE_URL was empty at runtime.
+- `rahaalPublicBase()` in route.js: RAHAAL_PUBLIC_BASE_URL (new optional env) → NEXT_PUBLIC_BASE_URL → cached live request origin (x-forwarded-host). Loud console.error if unresolvable (never silent).
+- Backend-tested: image URL present when has_image=true, [] when not; deactivated/updated events + identity fields intact.
+
 ## Test Credentials
 See /app/memory/test_credentials.md
