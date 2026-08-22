@@ -496,5 +496,71 @@
   },
   "updated_at": "2026-08-21T16:35:06.437Z",
   "deactivate_reason": "unshared_by_office"
+ },
+ "6809c8b6-aea2-4003-9de4-17184acba572": {
+  "meraaj_id": "MRJ-TEST-1787345499988",
+  "listed": false,
+  "package_ref": "6809c8b6-aea2-4003-9de4-17184acba572",
+  "rahal_ref": "6809c8b6-aea2-4003-9de4-17184acba572",
+  "meraaj_package_id": "MRJ-TEST-1787345499988",
+  "title": "TEST-v336-RENAMED",
+  "description": "",
+  "departure_date": "2027-10-01T00:00:00.000Z",
+  "return_date": "2027-10-05T00:00:00.000Z",
+  "departure_city": null,
+  "transport": null,
+  "hotels": [],
+  "images": [
+   "https://visa-booking-5.preview.emergentagent.com/api/meraaj/packages/6809c8b6-aea2-4003-9de4-17184acba572/image"
+  ],
+  "features": [
+   "ف1",
+   "ف2"
+  ],
+  "available_seats": 3,
+  "office_ref": "d89bc41d-e19b-430f-be93-e3f8ca6d404a",
+  "office_name": "مكتب الرحّال التجريبي",
+  "owner_name": "مالك المكتب التجريبي",
+  "pricing": {
+   "net_cost_per_seat": 700,
+   "final_sale_price": 720,
+   "buyer_office_commission": 20,
+   "currency": "SAR"
+  },
+  "updated_at": "2026-08-21T20:51:41.094Z",
+  "deactivate_reason": "unshared_by_office"
+ },
+ "66809fd3-75b7-4172-a9e0-bd47970caf33": {
+  "meraaj_id": "MRJ-TEST-1787345799757",
+  "listed": false,
+  "package_ref": "66809fd3-75b7-4172-a9e0-bd47970caf33",
+  "rahal_ref": "66809fd3-75b7-4172-a9e0-bd47970caf33",
+  "meraaj_package_id": "MRJ-TEST-1787345799757",
+  "title": "TEST-v336-RENAMED",
+  "description": "",
+  "departure_date": "2027-10-01T00:00:00.000Z",
+  "return_date": "2027-10-05T00:00:00.000Z",
+  "departure_city": null,
+  "transport": null,
+  "hotels": [],
+  "images": [
+   "https://visa-booking-5.preview.emergentagent.com/api/meraaj/packages/66809fd3-75b7-4172-a9e0-bd47970caf33/image"
+  ],
+  "features": [
+   "ف1",
+   "ف2"
+  ],
+  "available_seats": 3,
+  "office_ref": "d89bc41d-e19b-430f-be93-e3f8ca6d404a",
+  "office_name": "مكتب الرحّال التجريبي",
+  "owner_name": "مالك المكتب التجريبي",
+  "pricing": {
+   "net_cost_per_seat": 700,
+   "final_sale_price": 720,
+   "buyer_office_commission": 20,
+   "currency": "SAR"
+  },
+  "updated_at": "2026-08-21T20:56:40.831Z",
+  "deactivate_reason": "unshared_by_office"
  }
 }

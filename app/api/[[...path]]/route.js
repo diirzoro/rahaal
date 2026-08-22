@@ -4929,6 +4929,9 @@ async function meraajContractPayload(db, T, pkg, comps, meraajOverride = null) {
   const appBase = (process.env.NEXT_PUBLIC_BASE_URL || '').replace(/\/+$/, '')
   return {
     package_ref: pkg.id,
+    // v3.36 — Meraaj v1.1 contract: unique-linkage identity fields in EVERY payload (share + webhooks)
+    rahal_ref: pkg.id,
+    meraaj_package_id: (meraajOverride?.remote_id ?? pkg.meraaj?.remote_id) || null,
     title: pkg.name,
     description: pkg.notes || '',
     departure_date: pkg.start_date || null,
@@ -4963,10 +4966,13 @@ async function meraajRegisterPackageAPI(db, T, pkg, comps, meraajSet) {
     status: 'pending', attempts: 1, last_error: null, created_at: new Date(), sent_at: null,
   }
   try {
+    // v3.36 — Meraaj v1.1: EVERY request is HMAC-SHA256 signed over the exact raw body.
+    // Share request carries BOTH: X-Rahal-Api-Key (existing contract) + X-Rahal-Signature.
+    const rawBody = JSON.stringify(payload)
     const res = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Rahal-Api-Key': meraajSecret() },
-      body: JSON.stringify(payload),
+      headers: { 'Content-Type': 'application/json', 'X-Rahal-Api-Key': meraajSecret(), 'X-Rahal-Signature': meraajSign(rawBody) },
+      body: rawBody,
       signal: AbortSignal.timeout(15000),
     })
     let json = null
