@@ -2467,6 +2467,9 @@ async function handleRoute(request, { params }) {
         sale_per_pax: Number(b.sale_per_pax) || 0,
         pricing_type: pricingType,
         include_infants: !!b.include_infants,
+        // v3.40 — Hotel nights management: nights per hotel + city (e.g. 3 nights Makkah, 4 nights Madinah)
+        nights: Math.max(0, Number(b.nights) || 0),
+        city: String(b.city || '').slice(0, 60),
         notes: b.notes || '', created_at: new Date(),
       }
       if (pricingType === 'per_age') {
@@ -5025,7 +5028,8 @@ async function meraajContractPayload(db, T, pkg, comps, meraajOverride = null) {
     // Full transport/bus fleet of the package (internal booking counts are not exposed)
     package_transports: transports.map(t => ({ name: t.name || '', type: t.type || 'bus', capacity: Number(t.capacity) || 0 })),
     // Full package components (names + types; internal cost/sale breakdown is not exposed)
-    components: (comps || []).map(c => ({ name: c.name || '', component_type: c.component_type || 'other' })),
+    // v3.40 — additive optional fields: nights + city per hotel component
+    components: (comps || []).map(c => ({ name: c.name || '', component_type: c.component_type || 'other', ...(Number(c.nights) > 0 ? { nights: Number(c.nights) } : {}), ...(c.city ? { city: c.city } : {}) })),
     description: pkg.notes || '',
     departure_date: pkg.start_date || null,
     return_date: pkg.end_date || null,

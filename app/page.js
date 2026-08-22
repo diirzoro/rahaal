@@ -8660,7 +8660,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
   const addRoom = (type = '') => setRooms(r => [...r, { type, sale_per_pax: 0, sale_child: '', sale_infant: '' }])
   const updRoom = (i, k, v) => { const c = [...rooms]; c[i] = { ...c[i], [k]: v }; setRooms(c) }
   const rmRoom = (i) => setRooms(rooms.filter((_, idx) => idx !== i))
-  const addItem = () => setItems([...items, { component_type: 'hotel', name: '', supplier_id: '', cost: 0, sale: 0, pricing_type: 'flat', include_infants: false, cost_adult: '', cost_child: '', cost_infant: '', sale_adult: '', sale_child: '', sale_infant: '', room_rates: {} }])
+  const addItem = () => setItems([...items, { component_type: 'hotel', name: '', supplier_id: '', cost: 0, sale: 0, pricing_type: 'flat', include_infants: false, nights: '', city: '', cost_adult: '', cost_child: '', cost_infant: '', sale_adult: '', sale_child: '', sale_infant: '', room_rates: {} }])
   const updItem = (i, k, v) => { const c = [...items]; c[i] = { ...c[i], [k]: v }; setItems(c) }
   const updItemRoomRate = (i, roomType, k, v) => {
     const c = [...items]
@@ -8704,6 +8704,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
             component_type: it.component_type, name: it.name, supplier_id: it.supplier_id,
             cost_per_pax: Number(it.cost) || 0, sale_per_pax: isDirectMode ? 0 : (Number(it.sale) || 0),
             pricing_type: isDirectMode ? 'flat' : (it.pricing_type || 'flat'), include_infants: !!it.include_infants,
+            nights: Number(it.nights) || 0, city: it.city || '',
           }
           if (!isDirectMode && it.pricing_type === 'per_age') {
             for (const k of ['cost_adult', 'cost_child', 'cost_infant', 'sale_adult', 'sale_child', 'sale_infant']) body[k] = Number(it[k]) || 0
@@ -8892,6 +8893,15 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
                       )}
                       <div className="col-span-1"><Button size="sm" variant="ghost" onClick={() => rmItem(i)} className="h-8 w-8 p-0 text-rose-600 hover:bg-rose-50"><Trash2 className="w-3 h-3" /></Button></div>
                     </div>
+                    {it.component_type === 'hotel' && (
+                      <div className="grid grid-cols-12 gap-2 items-end bg-indigo-50/60 border border-indigo-200 rounded p-1.5">
+                        <div className="col-span-3"><div className="text-[10px] text-indigo-700 mb-1">🌙 عدد الليالي</div><Input type="number" min="1" value={it.nights} onChange={e => updItem(i, 'nights', e.target.value)} placeholder="3" className="h-8 text-xs bg-white" /></div>
+                        <div className="col-span-5"><div className="text-[10px] text-indigo-700 mb-1">🕌 المدينة</div><Input value={it.city} onChange={e => updItem(i, 'city', e.target.value)} placeholder="مكة المكرمة" className="h-8 text-xs bg-white" /></div>
+                        <div className="col-span-4 flex items-end pb-1.5">
+                          <span className="text-[10px] text-indigo-700 font-bold">مجموع ليالي الفنادق: {items.filter(x => x.component_type === 'hotel').reduce((s, x) => s + (Number(x.nights) || 0), 0)}{f.start_date && f.end_date ? ` / المدة ${Math.max(0, Math.round((new Date(f.end_date) - new Date(f.start_date)) / 86400000))} ليلة` : ''}</span>
+                        </div>
+                      </div>
+                    )}
                     {(f.pricing_mode === 'direct' || (it.pricing_type || 'flat') === 'flat') && (
                       <div className="grid grid-cols-12 gap-2 items-end">
                         <div className="col-span-3"><div className="text-[10px] text-slate-500 mb-1">{f.pricing_mode === 'direct' ? '💰 تكلفة المورد / فرد (اختياري)' : 'تكلفة / فرد'}</div><Input type="number" min="0" value={it.cost} onChange={e => updItem(i, 'cost', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
@@ -8996,7 +9006,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   const [suppliers, setSuppliers] = useState([])
   const [clients, setClients] = useState([])
   const [boxes, setBoxes] = useState([])
-  const [newComp, setNewComp] = useState({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '', pricing_type: 'flat', include_infants: false, cost_adult: '', cost_child: '', cost_infant: '', sale_adult: '', sale_child: '', sale_infant: '', room_rates: {} })
+  const [newComp, setNewComp] = useState({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '', pricing_type: 'flat', include_infants: false, nights: '', city: '', cost_adult: '', cost_child: '', cost_infant: '', sale_adult: '', sale_child: '', sale_infant: '', room_rates: {} })
   const [newBooking, setNewBooking] = useState({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '', registrants: [], discount: '', discount_reason: '' })
   const load = () => Promise.all([
     api(`/packages/${pkg.id}/components`).then(setComps),
@@ -9022,7 +9032,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
           return { room_type: rp.type, cost_adult: Number(rr.cost_adult) || 0, cost_child: Number(rr.cost_child) || 0, cost_infant: Number(rr.cost_infant) || 0, sale_adult: Number(rr.sale_adult) || 0, sale_child: Number(rr.sale_child) || 0, sale_infant: Number(rr.sale_infant) || 0 }
         })
       } else { delete body.room_rates }
-      await api(`/packages/${pkg.id}/components`, { method: 'POST', body }); toast.success('تمت الإضافة'); setNewComp({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '', pricing_type: 'flat', include_infants: false, cost_adult: '', cost_child: '', cost_infant: '', sale_adult: '', sale_child: '', sale_infant: '', room_rates: {} }); load(); onChanged && onChanged() }
+      await api(`/packages/${pkg.id}/components`, { method: 'POST', body }); toast.success('تمت الإضافة'); setNewComp({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '', pricing_type: 'flat', include_infants: false, nights: '', city: '', cost_adult: '', cost_child: '', cost_infant: '', sale_adult: '', sale_child: '', sale_infant: '', room_rates: {} }); load(); onChanged && onChanged() }
     catch (e) { toast.error(e.message) }
   }
   const delComp = async (id) => { if (!confirm('حذف المكوّن؟')) return; try { await api(`/packages/${pkg.id}/components/${id}`, { method: 'DELETE' }); load(); onChanged && onChanged() } catch (e) { toast.error(e.message) } }
@@ -9098,6 +9108,24 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                   {!pkgIsDirect && <Field label="طريقة التسعير"><Select value={newComp.pricing_type} onValueChange={v => setNewComp({ ...newComp, pricing_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{COMP_PRICING_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>}
                   <div className="flex items-end"><Button onClick={addComp} className="w-full grad-brand text-white gap-1"><Plus className="w-4 h-4" /> إضافة</Button></div>
                 </div>
+                {newComp.component_type === 'hotel' && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2 bg-indigo-50/60 border border-indigo-200 rounded-lg p-2">
+                    <Field label="🌙 عدد الليالي"><Input type="number" min="1" value={newComp.nights} onChange={e => setNewComp({ ...newComp, nights: e.target.value })} placeholder="مثال: 3" className="bg-white" /></Field>
+                    <Field label="🕌 المدينة"><Input value={newComp.city} onChange={e => setNewComp({ ...newComp, city: e.target.value })} placeholder="مكة المكرمة / المدينة المنورة" className="bg-white" /></Field>
+                    {(() => {
+                      const hotelNights = comps.filter(x => x.component_type === 'hotel').reduce((s, x) => s + (Number(x.nights) || 0), 0) + (Number(newComp.nights) || 0)
+                      const durationNights = pkg.start_date && pkg.end_date ? Math.max(0, Math.round((new Date(pkg.end_date) - new Date(pkg.start_date)) / 86400000)) : null
+                      return (
+                        <div className="flex items-end pb-1">
+                          <span className={`text-[11px] font-bold px-2 py-1 rounded ${durationNights !== null && hotelNights > durationNights ? 'bg-rose-100 text-rose-700' : 'bg-indigo-100 text-indigo-700'}`}>
+                            مجموع الليالي: {hotelNights}{durationNights !== null ? ` / مدة البرنامج ${durationNights} ليلة` : ''}
+                            {durationNights !== null && hotelNights > durationNights ? ' ⚠️ يتجاوز المدة' : ''}
+                          </span>
+                        </div>
+                      )
+                    })()}
+                  </div>
+                )}
                 {pkgIsDirect && (
                   <div className="space-y-2">
                     <div className="text-[11px] text-teal-800 bg-teal-50 border border-teal-200 rounded-lg p-2">
@@ -9170,7 +9198,14 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                 {comps.map(c => (
                   <TableRow key={c.id}>
                     <TableCell><Badge variant="outline">{COMPONENT_TYPES.find(t => t.v === c.component_type)?.l || c.component_type}</Badge></TableCell>
-                    <TableCell className="font-semibold">{c.name}</TableCell>
+                    <TableCell className="font-semibold">
+                      {c.name}
+                      {c.component_type === 'hotel' && (Number(c.nights) > 0 || c.city) && (
+                        <div className="text-[10px] text-indigo-600 font-normal mt-0.5">
+                          {Number(c.nights) > 0 ? `🌙 ${c.nights} ${Number(c.nights) === 1 ? 'ليلة' : Number(c.nights) === 2 ? 'ليلتان' : Number(c.nights) <= 10 ? 'ليالٍ' : 'ليلة'}` : ''}{Number(c.nights) > 0 && c.city ? ' — ' : ''}{c.city || ''}
+                        </div>
+                      )}
+                    </TableCell>
                     <TableCell className="text-xs">{c.supplier_name}</TableCell>
                     <TableCell className="text-left">{c.pricing_type === 'per_age' ? <span className="text-[10px] whitespace-nowrap">👨{c.cost_adult ?? 0} 🧒{c.cost_child ?? 0} 👶{c.cost_infant ?? 0}</span> : c.pricing_type === 'room_age' ? <span className="text-[10px] text-indigo-600 font-bold">🛏️ غرفة+عمر</span> : fmt(c.cost_per_pax, pkg.currency)}</TableCell>
                     <TableCell className="text-left">{c.pricing_type === 'per_age' ? <span className="text-[10px] whitespace-nowrap">👨{c.sale_adult ?? 0} 🧒{c.sale_child ?? 0} 👶{c.sale_infant ?? 0}</span> : c.pricing_type === 'room_age' ? <span className="text-[10px] text-indigo-600 font-bold">🛏️ غرفة+عمر</span> : fmt(c.sale_per_pax, pkg.currency)}</TableCell>
