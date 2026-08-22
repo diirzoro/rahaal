@@ -735,6 +735,84 @@ async function handleRoute(request, { params }) {
         await maybeEmitMeraajInventory(db, inbound.tenant_id, inbound.package_id)
         return ok({ received: true, released_seats: inbound.seats })
       }
+      // v3.38 — REFLECTION: a package created/published/updated on MERAAJ by an office that also exists in Rahaal
+      // must be stored in Rahaal and linked to the CORRECT office. Matching is STRICTLY by ids
+      // (rahal_ref, meraaj_package_id, office_ref = Rahaal tenant id) — NEVER by office/package names.
+      if (type === 'meraaj.package.published' || type === 'meraaj.package.created' || type === 'meraaj.package.updated') {
+        const meraajId = String(data.meraaj_package_id || data.package_id || '').trim()
+        const officeRef = String(data.office_ref || data.rahal_office_ref || '').trim()
+        if (!meraajId) return bad('meraaj_package_id مطلوب لأحداث انعكاس الباقات', 422)
+        const tenant = officeRef ? await db.collection('tenants').findOne({ id: officeRef }) : null
+        // Locate existing package: 1) by rahal_ref  2) by stored meraaj.remote_id
+        let existing = null
+        if (data.rahal_ref) existing = await db.collection('packages').findOne({ id: String(data.rahal_ref) })
+        if (!existing) existing = await db.collection('packages').findOne({ 'meraaj.remote_id': meraajId })
+        if (existing && officeRef && existing.tenant_id !== officeRef) return bad('عدم تطابق المكتب — الباقة مرتبطة بمكتب آخر', 403)
+        if (!existing && !tenant) return bad('office_ref غير معروف في رحّال — لا يمكن ربط الباقة بمكتب', 422)
+        // Tolerant room pricing mapping (accepts Contract-v2 matrix rows or simple rows)
+        const mapRooms = (rows) => (Array.isArray(rows) ? rows : []).map(r => ({
+          type: String(r.room_type || r.type || '').trim(),
+          sale_per_pax: Number(r.sale_per_pax ?? r.base?.adult ?? r.customer?.adult ?? r.net?.adult) || 0,
+          sale_child: (r.sale_child ?? r.base?.child ?? r.customer?.child ?? r.net?.child ?? null),
+          sale_infant: Number(r.sale_infant ?? r.base?.infant ?? r.customer?.infant ?? r.net?.infant) || 0,
+        })).filter(r => r.type)
+        // PARTIAL semantics: only fields present in the event are applied — absent fields are NEVER wiped
+        const upd = { updated_at: new Date() }
+        if (data.title !== undefined) upd.name = String(data.title).slice(0, 200)
+        if (data.description !== undefined) upd.notes = String(data.description).slice(0, 2000)
+        if (data.package_type) upd.package_type = String(data.package_type).slice(0, 40)
+        if (data.departure_date) upd.start_date = new Date(data.departure_date)
+        if (data.return_date) upd.end_date = new Date(data.return_date)
+        if (data.currency && CURRENCIES.includes(data.currency)) upd.currency = data.currency
+        if (Array.isArray(data.features)) upd.features = data.features.map(f => String(f).slice(0, 120)).slice(0, 40)
+        if (Array.isArray(data.room_pricing) && data.room_pricing.length) upd.room_pricing = mapRooms(data.room_pricing)
+        const reflectionSnap = {
+          hotels: Array.isArray(data.hotels) ? data.hotels.slice(0, 40) : undefined,
+          components: Array.isArray(data.components) ? data.components.slice(0, 60) : undefined,
+          package_transports: Array.isArray(data.package_transports) ? data.package_transports.slice(0, 40) : undefined,
+          images: Array.isArray(data.images) ? data.images.slice(0, 10) : undefined,
+          available_seats: data.available_seats !== undefined ? (Number(data.available_seats) || 0) : undefined,
+          last_event_type: type, last_event_at: new Date(),
+        }
+        Object.keys(reflectionSnap).forEach(k => reflectionSnap[k] === undefined && delete reflectionSnap[k])
+        if (existing) {
+          const setDoc = { ...upd, 'meraaj.remote_id': meraajId }
+          for (const [k, v] of Object.entries(reflectionSnap)) setDoc[`meraaj.reflection.${k}`] = v
+          if (!existing.meraaj?.registered_at) setDoc['meraaj.registered_at'] = new Date()
+          if (data.available_seats !== undefined) setDoc['meraaj.seats_allocated'] = Number(data.available_seats) || 0
+          await db.collection('packages').updateOne({ id: existing.id }, { $set: setDoc })
+          return ok({ received: true, reflected: 'updated', rahal_ref: existing.id, tenant_id: existing.tenant_id, meraaj_package_id: meraajId })
+        }
+        const newPkg = {
+          id: uuidv4(), tenant_id: tenant.id,
+          name: upd.name || 'باقة من معراج', package_type: upd.package_type || 'umrah',
+          currency: upd.currency || 'SAR',
+          start_date: upd.start_date || null, end_date: upd.end_date || null,
+          room_pricing: upd.room_pricing || [], pricing_mode: 'direct',
+          features: upd.features || [], has_image: false,
+          notes: upd.notes || '', status: 'open',
+          source: 'meraaj_reflection',
+          meraaj: {
+            shared: true, registered_at: new Date(), remote_id: meraajId,
+            seats_allocated: Number(data.available_seats) || 0, seats_sold: 0,
+            buyer_commission_mode: 'amount', buyer_commission_value: 0, commission_direction: 'added',
+            market_pricing: computeMeraajMarketPricing(upd.room_pricing || [], 'amount', 0, 'added'),
+            reflection: reflectionSnap,
+          },
+          created_at: new Date(),
+        }
+        await db.collection('packages').insertOne(newPkg)
+        return ok({ received: true, reflected: 'created', rahal_ref: newPkg.id, tenant_id: tenant.id, meraaj_package_id: meraajId })
+      }
+      if (type === 'meraaj.package.deactivated') {
+        const meraajId = String(data.meraaj_package_id || data.package_id || '').trim()
+        const existing = data.rahal_ref
+          ? await db.collection('packages').findOne({ id: String(data.rahal_ref) })
+          : await db.collection('packages').findOne({ 'meraaj.remote_id': meraajId })
+        if (!existing) return bad('الباقة غير موجودة', 404)
+        await db.collection('packages').updateOne({ id: existing.id }, { $set: { 'meraaj.shared': false, 'meraaj.unshared_at': new Date() } })
+        return ok({ received: true, reflected: 'deactivated', rahal_ref: existing.id })
+      }
       return ok({ received: true, ignored: true, note: `نوع حدث غير معروف: ${type}` })
     }
 
