@@ -360,7 +360,7 @@ function SuperAdminPanel() {
   useEffect(() => { load() }, [])
   const pendingResets = resetReqs.filter(r => r.status === 'pending')
   const rejectReset = async (r) => {
-    if (!confirm(`رفض طلب ${r.email}؟`)) return
+    if (!(await askConfirm({ title: 'رفض طلب استعادة كلمة المرور', desc: `رفض طلب ${r.email}؟`, icon: '🚫', variant: 'danger', confirmLabel: 'رفض الطلب' }))) return
     try { await api(`/admin/password-reset-requests/${r.id}`, { method: 'PATCH', body: { action: 'reject' } }); toast.success('تم الرفض'); load() } catch (e) { toast.error(e.message) }
   }
 
@@ -532,12 +532,12 @@ function SuperAdminPanel() {
                         <div className="flex gap-1 justify-end flex-wrap">
                           <Button size="sm" variant={t.status === 'suspended' ? 'default' : 'outline'} className={t.status === 'suspended' ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'text-amber-600 border-amber-300'} onClick={async () => {
                             const action = t.status === 'suspended' ? 'تفعيل' : 'تعليق'
-                            if (!confirm(`${action} المكتب "${t.name}"؟`)) return
+                            if (!(await askConfirm({ title: 'تغيير حالة المكتب', desc: `${action} المكتب "${t.name}"؟`, icon: '🏢', confirmLabel: 'تأكيد' }))) return
                             try { const r = await api(`/admin/tenants/${t.id}/toggle-status`, { method: 'POST' }); toast.success(`تم — الحالة الآن: ${r.status === 'active' ? 'نشط' : 'معلّق'}`); load() }
                             catch (e) { toast.error(e.message) }
                           }}>{t.status === 'suspended' ? '▶️ تفعيل' : '⏸️ تعليق'}</Button>
                           <Button size="sm" variant="outline" className="text-purple-600 border-purple-300" onClick={async () => {
-                            if (!confirm(`الدخول كمالك المكتب "${t.name}"؟\n\nستُفتح جلسة مؤقتة (30 دقيقة) في تاب جديد. سيظهر شريط أحمر أعلى الشاشة يذكّرك بحالة الجلسة.`)) return
+                            if (!(await askConfirm({ title: `الدخول كمالك المكتب "${t.name}"`, desc: `ستُفتح جلسة مؤقتة (30 دقيقة) في تاب جديد. سيظهر شريط أحمر أعلى الشاشة يذكّرك بحالة الجلسة.`, icon: '👤', confirmLabel: 'فتح الجلسة' }))) return
                             try {
                               const r = await api(`/admin/tenants/${t.id}/impersonate`, { method: 'POST' })
                               // Open new tab with the session cookie
@@ -548,7 +548,7 @@ function SuperAdminPanel() {
                           }}>🎭 دخول كـ</Button>
                           {!t.activation_confirmed && (
                             <Button size="sm" variant="outline" className="text-blue-600 border-blue-300" onClick={async () => {
-                              if (!confirm(`تأكيد أن المكتب "${t.name}" قد دفع القسط الأول؟`)) return
+                              if (!(await askConfirm({ title: 'تأكيد دفع القسط الأول', desc: `تأكيد أن المكتب "${t.name}" قد دفع القسط الأول؟`, icon: '💳', confirmLabel: 'تأكيد الدفع' }))) return
                               try {
                                 const r = await api(`/admin/tenants/${t.id}/confirm-payment`, { method: 'POST' })
                                 toast.success(r.referrer_bonus ? `✅ تم التأكيد + منح +${r.referrer_bonus.bonus_added} قيد إلى "${r.referrer_bonus.referrer_name}"` : '✅ تم تأكيد الدفع')
@@ -557,7 +557,7 @@ function SuperAdminPanel() {
                             }}>💳 تأكيد دفع</Button>
                           )}
                           <Button size="sm" variant="outline" className="text-emerald-600" onClick={async () => {
-                            const amt = prompt(`إضافة رصيد قيود للمكتب "${t.name}" (عدد القيود):`, '500')
+                            const amt = await askConfirm({ title: 'إضافة رصيد قيود', desc: `إضافة رصيد قيود للمكتب "${t.name}"`, icon: '➕', confirmLabel: 'إضافة الرصيد', input: { label: 'عدد القيود', placeholder: '500', required: true }, inputDefault: '500' })
                             if (!amt) return
                             const n = Number(amt); if (!n || n < 1) return
                             await api(`/admin/tenants/${t.id}`, { method: 'PATCH', body: { top_up_amount: n } })
@@ -572,7 +572,7 @@ function SuperAdminPanel() {
                             }}><Power className="w-3 h-3" /></Button>
                           <Button size="sm" variant="outline" className="text-rose-600"
                             onClick={async () => {
-                              if (!confirm(`حذف المكتب "${t.name}" وجميع بياناته نهائياً؟`)) return
+                              if (!(await askConfirm({ title: 'حذف المكتب نهائياً', desc: `حذف المكتب "${t.name}" وجميع بياناته نهائياً؟`, icon: '🗑️', variant: 'danger', irreversible: true, confirmLabel: 'تأكيد الحذف' }))) return
                               await api(`/admin/tenants/${t.id}`, { method: 'DELETE' })
                               toast.success('تم الحذف'); load()
                             }}><Trash2 className="w-3 h-3" /></Button>
@@ -618,7 +618,7 @@ function AnnouncementsManager() {
     catch (e) { toast.error(e.message) }
   }
   const del = async (a) => {
-    if (!confirm(`حذف الإعلان "${a.title}"؟`)) return
+    if (!(await askConfirm({ title: 'حذف الإعلان', desc: `حذف الإعلان "${a.title}"؟`, variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/admin/announcements/${a.id}`, { method: 'DELETE' }); toast.success('حُذف'); load() }
     catch (e) { toast.error(e.message) }
   }
@@ -852,7 +852,7 @@ function InstallmentsDialog({ row, onClose, onChanged }) {
   const allPaid = list.length > 0 && list.every(i => i.paid)
   const generate = async () => {
     if (!Number(init.total)) return toast.error('أدخل المبلغ الإجمالي')
-    if (list.length > 0 && !confirm('سيتم استبدال الجدول الحالي بالكامل. متابعة؟')) return
+    if (list.length > 0 && !(await askConfirm({ title: 'استبدال الجدول الحالي', desc: 'سيتم استبدال الجدول الحالي بالكامل.', icon: '🔄', variant: 'danger', confirmLabel: 'استبدال' }))) return
     try {
       setBusy(true)
       const r = await api(`/admin/tenants/${row.id}/installments`, { method: 'PUT', body: init })
@@ -1770,14 +1770,14 @@ function TicketsScreen() {
   const toggleOne = (id) => { const s = new Set(selectedIds); if (s.has(id)) s.delete(id); else s.add(id); setSelectedIds(s) }
   const handleDelete = async () => {
     if (!selectedId) return
-    if (!confirm('حذف هذه التذكرة وعكس القيد المحاسبي؟')) return
+    if (!(await askConfirm({ title: 'حذف التذكرة', desc: 'سيتم حذف هذه التذكرة وعكس القيد المحاسبي المرتبط بها.', variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/tickets/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
     catch (e) { toast.error(e.message) }
   }
   const handleBulkDelete = async () => {
     const ids = Array.from(selectedIds)
     if (ids.length === 0) return toast.error('لم يتم اختيار أي تذكرة')
-    if (!confirm(`حذف ${ids.length} تذكرة وعكس قيودها المحاسبية دفعة واحدة؟ لا يمكن التراجع.`)) return
+    if (!(await askConfirm({ title: 'حذف جماعي للتذاكر', desc: `حذف ${ids.length} تذكرة وعكس قيودها المحاسبية دفعة واحدة؟`, variant: 'danger', irreversible: true, confirmLabel: 'حذف الكل' }))) return
     try {
       const r = await api('/tickets/bulk-delete', { method: 'POST', body: { ids } })
       toast.success(`✅ تم حذف ${r.deleted}${r.failed ? ` • فشل ${r.failed}` : ''}`)
@@ -2776,9 +2776,9 @@ function BulkStatementDialog({ open, onOpenChange }) {
       setResults(r); toast.success(`تم توليد ${r.count} كشف`)
     } catch (e) { toast.error(e.message) } finally { setLoading(false) }
   }
-  const openAll = () => {
+  const openAll = async () => {
     if (!results?.items) return
-    if (!confirm(`سيتم فتح ${results.items.length} نافذة واتساب — تأكد من السماح بالنوافذ المنبثقة. متابعة؟`)) return
+    if (!(await askConfirm({ title: 'فتح نوافذ واتساب', desc: `سيتم فتح ${results.items.length} نافذة واتساب — تأكد من السماح بالنوافذ المنبثقة.`, icon: '📲', confirmLabel: 'فتح النوافذ' }))) return
     results.items.forEach((it, i) => setTimeout(() => window.open(it.wa_link, '_blank', 'noopener'), i * 300))
   }
   return (
@@ -3485,7 +3485,7 @@ function BulkEditDialog({ open, onOpenChange, kind, ids, suppliers, boxes, onDon
       changes.payment_method = paymentMethod
       if (paymentMethod === 'cash') changes.box_id = boxId
     }
-    if (!confirm(`تعديل ${ids.length} سجل — سيتم عكس القيود القديمة وإنشاء قيود جديدة. متابعة؟`)) return
+    if (!(await askConfirm({ title: 'تعديل جماعي', desc: `تعديل ${ids.length} سجل — سيتم عكس القيود القديمة وإنشاء قيود جديدة.`, icon: '✏️', confirmLabel: 'تنفيذ التعديل' }))) return
     try {
       setSaving(true)
       const r = await api(`/${kind}/bulk-edit`, { method: 'POST', body: { ids, changes } })
@@ -3631,14 +3631,14 @@ function VisasScreen() {
   const handleEdit = () => { if (!selected) return toast.error('اختر خدمة أولاً'); setEditing(selected); setOpenManual(true) }
   const handleDelete = async () => {
     if (!selectedId) return
-    if (!confirm('حذف هذه الخدمة/التأشيرة وعكس القيد المحاسبي؟')) return
+    if (!(await askConfirm({ title: 'حذف الخدمة/التأشيرة', desc: 'سيتم حذف هذه الخدمة/التأشيرة وعكس القيد المحاسبي المرتبط بها.', variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/visas/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
     catch (e) { toast.error(e.message) }
   }
   const handleBulkDelete = async () => {
     const ids = Array.from(selectedIds)
     if (ids.length === 0) return toast.error('لم يتم اختيار أي سجل')
-    if (!confirm(`حذف ${ids.length} تأشيرة/خدمة وعكس قيودها المحاسبية دفعة واحدة؟`)) return
+    if (!(await askConfirm({ title: 'حذف جماعي', desc: `حذف ${ids.length} تأشيرة/خدمة وعكس قيودها المحاسبية دفعة واحدة؟`, variant: 'danger', confirmLabel: 'حذف الكل' }))) return
     try {
       const r = await api('/visas/bulk-delete', { method: 'POST', body: { ids } })
       toast.success(`✅ تم حذف ${r.deleted}${r.failed ? ` • فشل ${r.failed}` : ''}`)
@@ -3960,13 +3960,13 @@ function ServicesScreen() {
   const handleEdit = () => { if (!selected) return toast.error('اختر خدمة أولاً'); setEditing(selected); setOpenManual(true) }
   const handleDelete = async () => {
     if (!selectedId) return
-    if (!confirm('حذف هذه الخدمة وعكس القيد المحاسبي؟')) return
+    if (!(await askConfirm({ title: 'حذف الخدمة', desc: 'سيتم حذف هذه الخدمة وعكس القيد المحاسبي المرتبط بها.', variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/services/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
     catch (e) { toast.error(e.message) }
   }
   const handleBulkDelete = async () => {
     const ids = Array.from(selectedIds); if (ids.length === 0) return toast.error('لم يتم اختيار أي سجل')
-    if (!confirm(`حذف ${ids.length} خدمة وعكس قيودها المحاسبية دفعة واحدة؟`)) return
+    if (!(await askConfirm({ title: 'حذف جماعي', desc: `حذف ${ids.length} خدمة وعكس قيودها المحاسبية دفعة واحدة؟`, variant: 'danger', confirmLabel: 'حذف الكل' }))) return
     try { const r = await api('/services/bulk-delete', { method: 'POST', body: { ids } }); toast.success(`✅ تم حذف ${r.deleted}${r.failed ? ` • فشل ${r.failed}` : ''}`); setSelectedIds(new Set()); setSelectedId(null); load() }
     catch (e) { toast.error(e.message) }
   }
@@ -4259,7 +4259,7 @@ function ServiceTypesDialog({ open, onOpenChange, onChanged }) {
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
   const del = async (id) => {
-    if (!confirm('حذف نوع الخدمة؟')) return
+    if (!(await askConfirm({ title: 'حذف نوع الخدمة', desc: 'سيتم حذف نوع الخدمة من القائمة.', variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/service-types/${id}`, { method: 'DELETE' }); await load(); onChanged && onChanged(); toast.success('تم الحذف') }
     catch (e) { toast.error(e.message) }
   }
@@ -4330,7 +4330,7 @@ function VoucherScreen({ mode }) {
   const handleEdit = () => { if (!selected) return toast.error('اختر سنداً أولاً'); setEditing(selected); setOpen(true) }
   const handleDelete = async () => {
     if (!selectedId) return
-    if (!confirm('حذف هذا السند وعكس القيد المحاسبي؟')) return
+    if (!(await askConfirm({ title: 'حذف السند', desc: 'سيتم حذف هذا السند وعكس القيد المحاسبي المرتبط به.', variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/vouchers/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
     catch (e) { toast.error(e.message) }
   }
@@ -4512,7 +4512,7 @@ function PartiesScreen({ kind }) {
     } catch (e) { toast.error(e.message) }
   }
   const del = async (r) => {
-    if (!confirm(`حذف ${r.name}؟`)) return
+    if (!(await askConfirm({ title: 'تأكيد الحذف', desc: `حذف ${r.name}؟`, variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/${kind}/${r.id}`, { method: 'DELETE' }); load(); toast.success('تم الحذف') }
     catch (e) { toast.error(e.message) }
   }
@@ -4705,7 +4705,7 @@ function ChartScreen() {
     } catch (e) { toast.error(e.message) }
   }
   const del = async (a) => {
-    if (!confirm(`حذف الحساب ${a.code} — ${a.name_ar}؟`)) return
+    if (!(await askConfirm({ title: 'حذف الحساب المحاسبي', desc: `حذف الحساب ${a.code} — ${a.name_ar}؟`, variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/accounts/${a.id}`, { method: 'DELETE' }); load(); toast.success('تم الحذف') }
     catch (e) { toast.error(e.message) }
   }
@@ -4937,7 +4937,7 @@ function JournalScreen() {
   const handleDelete = async () => {
     if (!selected) return
     if (!isEditableJe) return toast.error('لا يمكن حذف قيد معاملة مباشرةً — احذف السجل الأصلي')
-    if (!confirm('حذف هذا القيد اليدوي؟')) return
+    if (!(await askConfirm({ title: 'حذف القيد اليدوي', desc: 'سيتم حذف هذا القيد اليدوي من دفتر اليومية.', variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try {
       // Reverse effects then delete via generic route (backend keeps this clean for manual JEs only)
       // Simplest: We call DELETE on /journal-entries/:id (needs backend support) — for now, disallow via toast
@@ -5304,11 +5304,11 @@ function VisaMonitorScreen() {
   useEffect(() => { load() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [filters.track])
 
   const del = async (row) => {
-    if (!confirm(`حذف سجل ${row.traveler_name} نهائياً؟`)) return
+    if (!(await askConfirm({ title: 'حذف السجل نهائياً', desc: `حذف سجل ${row.traveler_name} نهائياً؟`, variant: 'danger', irreversible: true, confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/visa-monitor/${row.id}`, { method: 'DELETE' }); toast.success('حُذف'); load() } catch (e) { toast.error(e.message) }
   }
   const reactivate = async (row) => {
-    if (!confirm('إعادة تفعيل السجل (إلغاء المغادرة)؟')) return
+    if (!(await askConfirm({ title: 'إعادة تفعيل السجل', desc: 'سيتم إلغاء حالة المغادرة وإعادة تفعيل السجل.', icon: '↩️', confirmLabel: 'إعادة التفعيل' }))) return
     try { await api(`/visa-monitor/${row.id}`, { method: 'PATCH', body: { action: 'reactivate' } }); toast.success('✅ أُعيد التفعيل'); load() } catch (e) { toast.error(e.message) }
   }
 
@@ -5719,7 +5719,7 @@ function VisaMonitorImportDialog({ open, onOpenChange, countries, onDone }) {
     if (rows.length === 0) return toast.error('لا توجد بيانات صالحة')
     // Client-side validation of mandatory columns
     const invalid = rows.filter(r => !r.agent_name || !r.agent_phone || !r.visa_no || !r.visa_issue_date || !r.entry_date)
-    if (invalid.length > 0 && !confirm(`⚠️ ${invalid.length} سجل ينقصه حقول إجبارية (وكيل/جوال/تأشيرة/تواريخ) وسيتم تجاهله عند الإدراج الجديد. متابعة؟`)) return
+    if (invalid.length > 0 && !(await askConfirm({ title: 'سجلات ناقصة', desc: `${invalid.length} سجل ينقصه حقول إجبارية (وكيل/جوال/تأشيرة/تواريخ) وسيتم تجاهله عند الإدراج الجديد.`, icon: '⚠️', confirmLabel: 'متابعة' }))) return
     setUploading(true)
     try {
       const res = await api('/visa-monitor/import', { method: 'POST', body: { rows } })
@@ -5832,7 +5832,7 @@ function YearCloseScreen() {
   }
   const confirmClose = async () => {
     if (!closing?.year) return
-    if (!confirm(`⚠️ تأكيد إقفال السنة ${closing.year}؟\n\nسيتم:\n• إنشاء قيد إقفال تلقائي بتاريخ 31/12/${closing.year}\n• تصفير أرصدة الإيرادات والمصروفات\n• ترحيل صافي الربح/الخسارة إلى حساب 3900 (الأرباح المُدوّرة)\n• قفل السنة — لن تُقبل أي إضافة أو تعديل بتاريخها\n\nمتابعة؟`)) return
+    if (!(await askConfirm({ title: `إقفال السنة المالية ${closing.year}`, desc: `سيتم:\n• إنشاء قيد إقفال تلقائي بتاريخ 31/12/${closing.year}\n• تصفير أرصدة الإيرادات والمصروفات\n• ترحيل صافي الربح/الخسارة إلى حساب 3900 (الأرباح المُدوّرة)\n• قفل السنة — لن تُقبل أي إضافة أو تعديل بتاريخها`, icon: '🔒', variant: 'danger', irreversible: true, confirmLabel: 'إقفال السنة' }))) return
     try {
       setLoading(true)
       const r = await api('/accounting/close-year', { method: 'POST', body: { year: closing.year } })
@@ -5878,7 +5878,7 @@ function YearCloseScreen() {
                   )}
                   {y.is_closed && user?.role === 'super_admin' && (
                     <Button variant="outline" onClick={async () => {
-                      if (!confirm(`فتح السنة ${y.year} المقفلة؟ سيتم حذف قيد الإقفال. (صلاحية سوبر أدمن)`)) return
+                      if (!(await askConfirm({ title: `فتح السنة ${y.year} المقفلة`, desc: 'سيتم حذف قيد الإقفال. (صلاحية سوبر أدمن)', icon: '🔓', variant: 'danger', confirmLabel: 'فتح السنة' }))) return
                       try { await api('/accounting/reopen-year', { method: 'POST', body: { year: y.year } }); toast.success('تم فتح السنة'); load() } catch (e) { toast.error(e.message) }
                     }} className="text-xs">🔓 فتح</Button>
                   )}
@@ -6326,7 +6326,7 @@ function ExtensionTab() {
     } catch (e) { toast.error(e.message) } finally { setCreating(false) }
   }
   const revokeToken = async (id) => {
-    if (!confirm('إلغاء هذا الرمز نهائياً؟ الإضافة المرتبطة به لن تعمل بعد ذلك.')) return
+    if (!(await askConfirm({ title: 'إلغاء الرمز نهائياً', desc: 'الإضافة المرتبطة به لن تعمل بعد ذلك.', variant: 'danger', irreversible: true, confirmLabel: 'إلغاء الرمز' }))) return
     try { await api(`/pats/${id}`, { method: 'DELETE' }); toast.success('تم الإلغاء'); load() }
     catch (e) { toast.error(e.message) }
   }
@@ -6957,7 +6957,7 @@ function AffiliateScreen() {
                 </div>
                 <div className="flex gap-1 mt-3 pt-2 border-t">
                   <Button size="sm" variant="ghost" onClick={() => { setEditingPm(m); setPmOpen(true) }} className="h-7 px-2 text-xs gap-1"><Pencil className="w-3 h-3" /> تعديل</Button>
-                  <Button size="sm" variant="ghost" onClick={async () => { if (confirm('حذف طريقة السحب؟')) { await api(`/affiliate/payout-methods/${m.id}`, { method: 'DELETE' }); load(); toast.success('تم الحذف') } }} className="h-7 px-2 text-xs text-rose-600 gap-1"><Trash2 className="w-3 h-3" /> حذف</Button>
+                  <Button size="sm" variant="ghost" onClick={async () => { if (await askConfirm({ title: 'حذف طريقة السحب', desc: 'سيتم حذف طريقة السحب هذه.', variant: 'danger', confirmLabel: 'تأكيد الحذف' })) { await api(`/affiliate/payout-methods/${m.id}`, { method: 'DELETE' }); load(); toast.success('تم الحذف') } }} className="h-7 px-2 text-xs text-rose-600 gap-1"><Trash2 className="w-3 h-3" /> حذف</Button>
                 </div>
               </div>
             ))}
@@ -7222,7 +7222,7 @@ function PackagesScreen() {
   useEffect(() => { api('/whatsapp-logs/reminders').then(r => setWaReminders(r?.count || 0)).catch(() => {}) }, [waLogsOpen])
   const loadArchived = () => api('/packages?archived=1').then(setArchivedList).catch(() => {})
   const archivePkg = async (p) => {
-    if (!confirm(`أرشفة الباكج "${p?.name}"؟\n\n🗂️ أرشفة ناعمة آمنة: سيختفي من واجهات العرض ومن سوق معراج${p?.meraaj?.shared ? ' (وسيُبلغ معراج بإيقافه)' : ''}، لكن تبقى كل بياناته وحجوزاته وقيوده المحاسبية سليمة في النظام — ويمكن استعادته في أي وقت.`)) return
+    if (!(await askConfirm({ title: `أرشفة الباكج "${p?.name}"`, desc: `أرشفة ناعمة آمنة: سيختفي من واجهات العرض ومن سوق معراج${p?.meraaj?.shared ? ' (وسيُبلغ معراج بإيقافه)' : ''}، لكن تبقى كل بياناته وحجوزاته وقيوده المحاسبية سليمة في النظام — ويمكن استعادته في أي وقت.`, icon: '🗂️', confirmLabel: 'أرشفة' }))) return
     try {
       await api(`/packages/${p.id}/archive`, { method: 'POST', body: { archived: true } })
       toast.success('🗂️ تمت الأرشفة — البيانات والقيود محفوظة بالكامل')
@@ -7245,7 +7245,7 @@ function PackagesScreen() {
   }
   useEffect(() => { load() }, [])
   const closePkg = async (p) => {
-    if (!confirm(`إغلاق الباكج "${p?.name}"؟ (لن يمكن إضافة تسجيلات جديدة)`)) return
+    if (!(await askConfirm({ title: `إغلاق الباكج "${p?.name}"`, desc: 'لن يمكن إضافة تسجيلات جديدة بعد الإغلاق — ويمكن إعادة فتحه لاحقاً.', icon: '🔒', confirmLabel: 'إغلاق الباكج' }))) return
     try { await api(`/packages/${p.id}`, { method: 'PATCH', body: { status: 'closed' } }); toast.success('تم إغلاق الباكج'); load() }
     catch (e) { toast.error(e.message) }
   }
@@ -7254,14 +7254,14 @@ function PackagesScreen() {
     catch (e) { toast.error(e.message) }
   }
   const delPkg = async (p) => {
-    if (!confirm(`حذف الباكج "${p?.name}"؟`)) return
+    if (!(await askConfirm({ title: 'حذف الباكج', desc: `حذف الباكج "${p?.name}"؟`, variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/packages/${p.id}`, { method: 'DELETE' }); toast.success('تم الحذف'); load() }
     catch (e) { toast.error(e.message) }
   }
   // v3.21/v3.31 — Duplicate package: full independent copy (components + transports + image, fresh Meraaj identity)
   // then immediately open the FULL edit form so the user can modify anything before using it.
   const dupPkg = async (p) => {
-    if (!confirm(`نسخ الباكج "${p?.name}" بكامل بياناته (الأسعار، المكونات، الفنادق، النقل، المميزات، الصورة) كباكج مستقل جديد؟\n\nسيُفتح نموذج التعديل الكامل للنسخة فور إنشائها.`)) return
+    if (!(await askConfirm({ title: `نسخ الباكج "${p?.name}"`, desc: `سيتم نسخ الباكج بكامل بياناته (الأسعار، المكونات، الفنادق، النقل، المميزات، الصورة) كباكج مستقل جديد.\n\nسيُفتح نموذج التعديل الكامل للنسخة فور إنشائها.`, icon: '📋', confirmLabel: 'نسخ الآن' }))) return
     try {
       const res = await api(`/packages/${p.id}/duplicate`, { method: 'POST', body: {} })
       toast.success(`✅ تم النسخ: ${res.name} (${res.components_copied || 0} مكوّن${res.transports_copied ? ` + ${res.transports_copied} وسيلة نقل` : ''}) — عدّل ما تشاء ثم احفظ`)
@@ -7289,13 +7289,13 @@ function PackagesScreen() {
   const toggleOne = (id) => { const s = new Set(selectedIds); if (s.has(id)) s.delete(id); else s.add(id); setSelectedIds(s) }
   const handleBulkDelete = async () => {
     const ids = Array.from(selectedIds); if (ids.length === 0) return toast.error('لم يتم اختيار أي باكج')
-    if (!confirm(`حذف ${ids.length} باكج دفعة واحدة؟ (لن يتم حذف الباكجات التي بها تسجيلات)`)) return
+    if (!(await askConfirm({ title: 'حذف جماعي للباكجات', desc: `حذف ${ids.length} باكج دفعة واحدة؟ (لن يتم حذف الباكجات التي بها تسجيلات)`, variant: 'danger', confirmLabel: 'حذف الكل' }))) return
     try { const r = await api('/packages/bulk-delete', { method: 'POST', body: { ids } }); toast.success(`✅ تم حذف ${r.deleted}${r.failed ? ` • فشل ${r.failed} (بسبب وجود حجوزات)` : ''}`); setSelectedIds(new Set()); load() }
     catch (e) { toast.error(e.message) }
   }
   const handleBulkClose = async (status) => {
     const ids = Array.from(selectedIds); if (ids.length === 0) return toast.error('لم يتم اختيار أي باكج')
-    if (!confirm(`${status === 'closed' ? 'إغلاق' : 'إعادة فتح'} ${ids.length} باكج دفعة واحدة؟`)) return
+    if (!(await askConfirm({ title: 'عملية جماعية', desc: `${status === 'closed' ? 'إغلاق' : 'إعادة فتح'} ${ids.length} باكج دفعة واحدة؟`, icon: '📦', confirmLabel: 'تأكيد' }))) return
     try { const r = await api('/packages/bulk-close', { method: 'POST', body: { ids, status } }); toast.success(`✅ تم تحديث ${r.updated} باكج`); setSelectedIds(new Set()); load() }
     catch (e) { toast.error(e.message) }
   }
@@ -7422,7 +7422,7 @@ function ExtendPackageDateDialog({ pkg, onClose, onSaved }) {
   const save = async () => {
     if (!newDate) return toast.error('اختر تاريخاً جديداً')
     if (pkg.end_date && new Date(newDate) <= new Date(pkg.end_date)) {
-      if (!confirm('التاريخ الجديد ليس بعد التاريخ الحالي — هل تريد المتابعة؟')) return
+      if (!(await askConfirm({ title: 'تنبيه التاريخ', desc: 'التاريخ الجديد ليس بعد التاريخ الحالي — هل تريد المتابعة؟', icon: '⚠️', confirmLabel: 'متابعة' }))) return
     }
     try {
       setSaving(true)
@@ -8026,7 +8026,7 @@ function WhatsAppLogsDialog({ open, onOpenChange }) {
     catch (e) { toast.error(e.message) }
   }
   const delLog = async (id) => {
-    if (!confirm('حذف هذا السجل؟')) return
+    if (!(await askConfirm({ title: 'حذف السجل', desc: 'سيتم حذف هذا السجل نهائياً.', variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/whatsapp-logs/${id}`, { method: 'DELETE' }); load() } catch (e) { toast.error(e.message) }
   }
   const shown = filter === 'all' ? logs : logs.filter(l => l.status === filter)
@@ -8310,7 +8310,7 @@ function MeraajStoreScreen() {
   // v3.26 — approve inbound booking into a real accounting booking
   const [approving, setApproving] = useState(null)
   const approveBooking = async (b) => {
-    if (!confirm(`اعتماد حجز "${b.buyer_office_name}" (${b.seats} مقعد) وتحويله لحجز محاسبي فعلي؟\n\nسيُنشأ: عميل باسم المكتب المشتري (إن لم يوجد) + حجز في الباكج + قيد يومية متوازن بصافي ${(b.net_to_seller_total || 0).toLocaleString('en-US')} ${b.currency}`)) return
+    if (!(await askConfirm({ title: `اعتماد حجز "${b.buyer_office_name}"`, desc: `اعتماد الحجز (${b.seats} مقعد) وتحويله لحجز محاسبي فعلي؟\n\nسيُنشأ: عميل باسم المكتب المشتري (إن لم يوجد) + حجز في الباكج + قيد يومية متوازن بصافي ${(b.net_to_seller_total || 0).toLocaleString('en-US')} ${b.currency}`, icon: '✅', confirmLabel: 'اعتماد وتحويل' }))) return
     try {
       setApproving(b.id)
       const res = await api(`/meraaj/inbound-bookings/${b.id}/approve`, { method: 'POST' })
@@ -8320,7 +8320,7 @@ function MeraajStoreScreen() {
   }
   // v3.27 — reject inbound booking (releases seats + notifies Meraaj with the reason)
   const rejectBooking = async (b) => {
-    const reason = prompt(`رفض حجز "${b.buyer_office_name}" (${b.seats} مقعد)؟\n\nاكتب سبب الرفض (سيظهر للمكتب المشتري في معراج):`, '')
+    const reason = await askConfirm({ title: `رفض حجز "${b.buyer_office_name}"`, desc: `رفض الحجز (${b.seats} مقعد)؟ سيُعاد المقعد للسوق ويصل السبب لمعراج.`, icon: '⛔', variant: 'danger', confirmLabel: 'تأكيد الرفض', input: { label: 'سبب الرفض (سيظهر للمكتب المشتري في معراج)', required: true, textarea: true } })
     if (reason === null) return
     if (!String(reason).trim()) return toast.error('سبب الرفض إلزامي')
     try {
@@ -8478,6 +8478,73 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
       </CardContent>
     </Card>
   )
+}
+
+// v3.41 — Professional ERP confirmation dialog (replaces all browser confirm()/prompt() for package actions)
+// ctrl: { title, desc, icon, variant: 'danger'|'primary', irreversible, confirmLabel, input: {label, placeholder, required, textarea}, onConfirm(inputValue) }
+function ConfirmDialog({ ctrl, onClose }) {
+  const [val, setVal] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { setVal(ctrl?.inputDefault || ''); setBusy(false) }, [ctrl])
+  if (!ctrl) return null
+  const danger = ctrl.variant === 'danger'
+  const run = async () => {
+    if (ctrl.input?.required && !val.trim()) return toast.error(`${ctrl.input.label} مطلوب`)
+    setBusy(true)
+    try { await ctrl.onConfirm(val.trim()); onClose(true) }
+    catch (e) { toast.error(e.message); setBusy(false) }
+  }
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !busy) onClose() }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-3 text-base">
+            <span className={`w-10 h-10 shrink-0 rounded-full flex items-center justify-center text-xl ${danger ? 'bg-rose-100' : 'bg-teal-100'}`}>{ctrl.icon || (danger ? '⚠️' : '❓')}</span>
+            <span>{ctrl.title}</span>
+          </DialogTitle>
+        </DialogHeader>
+        {ctrl.desc && <div className="text-sm text-slate-600 leading-relaxed whitespace-pre-line">{ctrl.desc}</div>}
+        {ctrl.irreversible && (
+          <div className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg p-2.5">
+            ⚠️ تنبيه: هذا إجراء حساس وقد لا يمكن التراجع عنه — تأكد قبل المتابعة.
+          </div>
+        )}
+        {ctrl.input && (
+          <Field label={ctrl.input.label} required={!!ctrl.input.required}>
+            {ctrl.input.textarea
+              ? <Textarea value={val} onChange={e => setVal(e.target.value)} placeholder={ctrl.input.placeholder || ''} rows={3} />
+              : <Input value={val} onChange={e => setVal(e.target.value)} placeholder={ctrl.input.placeholder || ''} />}
+          </Field>
+        )}
+        <div className="flex gap-2 pt-1">
+          <Button onClick={run} disabled={busy} className={`${danger ? 'bg-rose-600 hover:bg-rose-700' : 'grad-brand'} text-white min-w-28`}>
+            {busy ? '⏳ جارِ التنفيذ...' : (ctrl.confirmLabel || 'تأكيد')}
+          </Button>
+          <Button variant="outline" onClick={onClose} disabled={busy}>إلغاء</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// v3.41 — Global promise-based confirm/prompt host (replaces window.confirm()/prompt() everywhere)
+let __confirmSetterRef = null
+function ConfirmHost() {
+  const [ctrl, setCtrl] = useState(null)
+  useEffect(() => { __confirmSetterRef = setCtrl; return () => { __confirmSetterRef = null } }, [])
+  return <ConfirmDialog ctrl={ctrl} onClose={(confirmed) => { if (!confirmed && ctrl?.__cancel) ctrl.__cancel(); setCtrl(null) }} />
+}
+// askConfirm(opts) → Promise<boolean> — or Promise<string|null> when opts.input is provided (prompt mode)
+// opts: { title, desc, icon, variant: 'danger'|undefined, irreversible, confirmLabel, input: {label, placeholder, required, textarea}, inputDefault }
+function askConfirm(opts) {
+  return new Promise((resolve) => {
+    if (!__confirmSetterRef) { resolve(typeof window !== 'undefined' ? window.confirm(opts.desc || opts.title) : false); return }
+    __confirmSetterRef({
+      ...opts,
+      onConfirm: (val) => { resolve(opts.input ? val : true) },
+      __cancel: () => { resolve(opts.input ? null : false) },
+    })
+  })
 }
 
 // v3.20 — Dual pricing frontend helpers (live preview only; backend is authoritative)
@@ -9035,14 +9102,14 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
       await api(`/packages/${pkg.id}/components`, { method: 'POST', body }); toast.success('تمت الإضافة'); setNewComp({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '', pricing_type: 'flat', include_infants: false, nights: '', city: '', cost_adult: '', cost_child: '', cost_infant: '', sale_adult: '', sale_child: '', sale_infant: '', room_rates: {} }); load(); onChanged && onChanged() }
     catch (e) { toast.error(e.message) }
   }
-  const delComp = async (id) => { if (!confirm('حذف المكوّن؟')) return; try { await api(`/packages/${pkg.id}/components/${id}`, { method: 'DELETE' }); load(); onChanged && onChanged() } catch (e) { toast.error(e.message) } }
+  const delComp = async (id) => { if (!(await askConfirm({ title: 'حذف المكوّن', desc: 'سيتم حذف هذا المكوّن من الباكج.', variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return; try { await api(`/packages/${pkg.id}/components/${id}`, { method: 'DELETE' }); load(); onChanged && onChanged() } catch (e) { toast.error(e.message) } }
   // v3.9.26 — Transport CRUD
   const addTransport = async () => {
     if (!newTransport.name.trim()) return toast.error('اسم وسيلة النقل مطلوب')
     try { await api(`/packages/${pkg.id}/transports`, { method: 'POST', body: newTransport }); toast.success('✅ تمت الإضافة'); setNewTransport({ name: '', type: 'bus', capacity: 44, driver_name: '', driver_phone: '', vehicle_plate: '', flight_no: '' }); load() }
     catch (e) { toast.error(e.message) }
   }
-  const delTransport = async (t) => { if (!confirm(`حذف وسيلة النقل "${t.name}"؟`)) return; try { await api(`/packages/${pkg.id}/transports/${t.id}`, { method: 'DELETE' }); toast.success('تم الحذف'); load() } catch (e) { toast.error(e.message) } }
+  const delTransport = async (t) => { if (!(await askConfirm({ title: 'حذف وسيلة النقل', desc: `حذف وسيلة النقل "${t.name}"؟`, variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return; try { await api(`/packages/${pkg.id}/transports/${t.id}`, { method: 'DELETE' }); toast.success('تم الحذف'); load() } catch (e) { toast.error(e.message) } }
   const toggleTransportStatus = async (t) => { try { await api(`/packages/${pkg.id}/transports/${t.id}`, { method: 'PATCH', body: { status: t.status === 'open' ? 'closed' : 'open' } }); load() } catch (e) { toast.error(e.message) } }
   const addBooking = async () => {
     // v3.9.22 — Unified payment: credit → client_id required; cash → box_id required
@@ -9516,7 +9583,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                           </Button>
                         )}
                         <Button size="sm" variant="ghost" onClick={async () => {
-                          if (!confirm(`حذف تسجيل "${b?.pilgrim_name}"؟ سيتم عكس القيد المحاسبي وتحديث رصيد العميل تلقائياً.`)) return
+                          if (!(await askConfirm({ title: `حذف تسجيل "${b?.pilgrim_name}"`, desc: 'سيتم عكس القيد المحاسبي وتحديث رصيد العميل تلقائياً.', variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
                           try { await api(`/packages/${pkg.id}/bookings/${b.id}`, { method: 'DELETE' }); toast.success('✅ تم الحذف'); load(); onChanged && onChanged() }
                           catch (e) { toast.error(e.message) }
                         }} className="h-7 w-7 p-0 text-rose-600 hover:bg-rose-50" title="حذف التسجيل"><Trash2 className="w-3.5 h-3.5" /></Button>
@@ -9984,7 +10051,7 @@ function OfficeSettings() {
     catch (e) { toast.error(e.message) }
   }
   const deleteUser = async (u) => {
-    if (!confirm(`حذف الموظف ${u.name} (${u.email})؟`)) return
+    if (!(await askConfirm({ title: 'حذف الموظف', desc: `حذف الموظف ${u.name} (${u.email})؟`, variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/tenant/users/${u.id}`, { method: 'DELETE' }); setUsers(await api('/tenant/users')); toast.success('تم الحذف') }
     catch (e) { toast.error(e.message) }
   }
@@ -10505,7 +10572,7 @@ function FxScreen() {
   }
   const handleDelete = async () => {
     if (!selectedId) return
-    if (!confirm('حذف هذه العملية وعكس القيد المحاسبي؟')) return
+    if (!(await askConfirm({ title: 'حذف العملية', desc: 'سيتم حذف هذه العملية وعكس القيد المحاسبي المرتبط بها.', variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/fx/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
     catch (e) { toast.error(e.message) }
   }
@@ -11294,6 +11361,7 @@ function App() {
 
   return (
     <AuthCtx.Provider value={{ ...auth, refreshMe, logout }}>
+      <ConfirmHost />
       {auth.user.role === 'super_admin' ? <SuperAdminPanel /> : <TenantApp />}
     </AuthCtx.Provider>
   )
