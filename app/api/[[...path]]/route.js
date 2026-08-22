@@ -4927,12 +4927,24 @@ async function meraajContractPayload(db, T, pkg, comps, meraajOverride = null) {
   const cheapest = rows.slice().sort((a, b) => a.customer.adult - b.customer.adult)[0] || null
   const hotels = (comps || []).filter(c => c.component_type === 'hotel').map(c => String(c.name || '').trim()).filter(Boolean)
   const appBase = (process.env.NEXT_PUBLIC_BASE_URL || '').replace(/\/+$/, '')
+  // v3.37 — EXTENDED CONTRACT (backward-compatible: all previous fields kept unchanged)
+  const transports = await db.collection('package_transports').find({ package_id: pkg.id, tenant_id: T }).toArray()
   return {
     package_ref: pkg.id,
     // v3.36 — Meraaj v1.1 contract: unique-linkage identity fields in EVERY payload (share + webhooks)
     rahal_ref: pkg.id,
     meraaj_package_id: (meraajOverride?.remote_id ?? pkg.meraaj?.remote_id) || null,
     title: pkg.name,
+    // v3.37 — extended fields
+    package_type: pkg.package_type || null,
+    // Full marketplace room pricing matrix (per room type × adult/child/infant):
+    // net = what the buyer office pays the seller, customer = suggested final sale price,
+    // commission = buyer office margin. (Seller's internal costs are NEVER exposed.)
+    room_pricing: (m.market_pricing || []),
+    // Full transport/bus fleet of the package (internal booking counts are not exposed)
+    package_transports: transports.map(t => ({ name: t.name || '', type: t.type || 'bus', capacity: Number(t.capacity) || 0 })),
+    // Full package components (names + types; internal cost/sale breakdown is not exposed)
+    components: (comps || []).map(c => ({ name: c.name || '', component_type: c.component_type || 'other' })),
     description: pkg.notes || '',
     departure_date: pkg.start_date || null,
     return_date: pkg.end_date || null,
