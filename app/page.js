@@ -1938,21 +1938,16 @@ function CommissionShareBlock({ form, setForm, clients, suppliers, commission, e
       </div>
       <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
         <Field label="الشريك (المستفيد)">
-          <Select value={form.commission_partner_id ? `${form.commission_partner_type}:${form.commission_partner_id}` : ''} onValueChange={v => {
-            if (!v) return
-            const [type, id] = v.split(':')
-            const items = type === 'supplier' ? suppliers : clients
-            const found = items.find(x => x.id === id)
-            setForm({ ...form, commission_partner_type: type, commission_partner_id: id, commission_partner_name: found?.name || '' })
-          }}>
-            <SelectTrigger className="bg-white"><SelectValue placeholder="اختر عميل / مورد" /></SelectTrigger>
-            <SelectContent>
-              {clients.length > 0 && <SelectItem value="__hdr_c__" disabled>— العملاء —</SelectItem>}
-              {clients.map(c => <SelectItem key={`c-${c.id}`} value={`client:${c.id}`}>👤 {c.name}</SelectItem>)}
-              {suppliers.length > 0 && <SelectItem value="__hdr_s__" disabled>— الموردون / الوكلاء —</SelectItem>}
-              {suppliers.map(s => <SelectItem key={`s-${s.id}`} value={`supplier:${s.id}`}>🏢 {s.name}</SelectItem>)}
-            </SelectContent>
-          </Select>
+          <SearchPick
+            items={[...clients.map(c => ({ id: `client:${c.id}`, name: c.name, badge: '👤' })), ...suppliers.map(s => ({ id: `supplier:${s.id}`, name: s.name, badge: '🏢' }))]}
+            value={form.commission_partner_id ? `${form.commission_partner_type}:${form.commission_partner_id}` : ''}
+            onChange={(v, item) => { const [type, id] = String(v).split(':'); setForm({ ...form, commission_partner_type: type, commission_partner_id: id, commission_partner_name: item?.name || '' }) }}
+            placeholder="اختر عميل / مورد"
+            quickAdds={[
+              { label: 'عميل غير موجود — إضافة جديد', badge: '👤', fn: async (name) => { const c = await api('/clients', { method: 'POST', body: { name } }); return { id: `client:${c.id}`, name: c.name } } },
+              { label: 'مورد غير موجود — إضافة جديد', badge: '🏢', fn: async (name) => { const s = await api('/suppliers', { method: 'POST', body: { name } }); return { id: `supplier:${s.id}`, name: s.name } } },
+            ]}
+          />
         </Field>
         <Field label="الصيغة">
           <Select value={form.commission_share_mode} onValueChange={v => setForm({ ...form, commission_share_mode: v })} disabled={!form.commission_partner_id}>
@@ -2227,21 +2222,16 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
               </div>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
                 <Field label="الشريك (المستفيد)">
-                  <Select value={form.commission_partner_id ? `${form.commission_partner_type}:${form.commission_partner_id}` : ''} onValueChange={v => {
-                    if (!v) return
-                    const [type, id] = v.split(':')
-                    const items = type === 'supplier' ? suppliers : clients
-                    const found = items.find(x => x.id === id)
-                    setForm({ ...form, commission_partner_type: type, commission_partner_id: id, commission_partner_name: found?.name || '' })
-                  }}>
-                    <SelectTrigger><SelectValue placeholder="اختر عميل / مورد" /></SelectTrigger>
-                    <SelectContent>
-                      {clients.length > 0 && <SelectItem value="__hdr_c__" disabled>— العملاء —</SelectItem>}
-                      {clients.map(c => <SelectItem key={`c-${c.id}`} value={`client:${c.id}`}>👤 {c.name}</SelectItem>)}
-                      {suppliers.length > 0 && <SelectItem value="__hdr_s__" disabled>— الموردون / الوكلاء —</SelectItem>}
-                      {suppliers.map(s => <SelectItem key={`s-${s.id}`} value={`supplier:${s.id}`}>🏢 {s.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
+                  <SearchPick
+                    items={[...clients.map(c => ({ id: `client:${c.id}`, name: c.name, badge: '👤' })), ...suppliers.map(s => ({ id: `supplier:${s.id}`, name: s.name, badge: '🏢' }))]}
+                    value={form.commission_partner_id ? `${form.commission_partner_type}:${form.commission_partner_id}` : ''}
+                    onChange={(v, item) => { const [type, id] = String(v).split(':'); setForm({ ...form, commission_partner_type: type, commission_partner_id: id, commission_partner_name: item?.name || '' }) }}
+                    placeholder="اختر عميل / مورد"
+                    quickAdds={[
+                      { label: 'عميل غير موجود — إضافة جديد', badge: '👤', fn: async (name) => { const c = await api('/clients', { method: 'POST', body: { name } }); return { id: `client:${c.id}`, name: c.name } } },
+                      { label: 'مورد غير موجود — إضافة جديد', badge: '🏢', fn: async (name) => { const s = await api('/suppliers', { method: 'POST', body: { name } }); return { id: `supplier:${s.id}`, name: s.name } } },
+                    ]}
+                  />
                 </Field>
                 <Field label="الصيغة">
                   <Select value={form.commission_share_mode} onValueChange={v => setForm({ ...form, commission_share_mode: v })} disabled={!form.commission_partner_id}>
@@ -3539,10 +3529,9 @@ function BulkEditDialog({ open, onOpenChange, kind, ids, suppliers, boxes, onDon
                 <span className="font-bold text-sm">تغيير المورد</span>
               </label>
               {changeSupplier && (
-                <Select value={supplierId} onValueChange={setSupplierId}>
-                  <SelectTrigger className="mt-2"><SelectValue placeholder="اختر المورد الجديد" /></SelectTrigger>
-                  <SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
-                </Select>
+                <div className="mt-2">
+                  <SearchPick items={suppliers.map(s => ({ id: s.id, name: s.name }))} value={supplierId} onChange={setSupplierId} placeholder="ابحث عن المورد الجديد..." quickAdds={[quickAddSupplier()]} />
+                </div>
               )}
             </div>
             {/* Date */}
@@ -7741,15 +7730,14 @@ function PartnerStatementDialog({ open, onOpenChange }) {
         <DialogHeader><DialogTitle className="flex items-center gap-2">🤝 كشف حساب عمولات الشريك (B2B)</DialogTitle></DialogHeader>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
           <Field label="الشريك">
-            <Select value={partnerKey} onValueChange={setPartnerKey}>
-              <SelectTrigger><SelectValue placeholder="اختر عميل / مورد" /></SelectTrigger>
-              <SelectContent>
-                {clients.length > 0 && <SelectItem value="__hc__" disabled>— العملاء —</SelectItem>}
-                {clients.map(c => <SelectItem key={`c-${c.id}`} value={`client:${c.id}`}>👤 {c.name}</SelectItem>)}
-                {suppliers.length > 0 && <SelectItem value="__hs__" disabled>— الموردون / الوكلاء —</SelectItem>}
-                {suppliers.map(s => <SelectItem key={`s-${s.id}`} value={`supplier:${s.id}`}>🏢 {s.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
+            <SearchPick
+              items={[...clients.map(c => ({ id: `client:${c.id}`, name: c.name, badge: '👤' })), ...suppliers.map(s => ({ id: `supplier:${s.id}`, name: s.name, badge: '🏢' }))]}
+              value={partnerKey} onChange={setPartnerKey} placeholder="اختر عميل / مورد"
+              quickAdds={[
+                { label: 'عميل غير موجود — إضافة جديد', badge: '👤', fn: async (name) => { const c = await api('/clients', { method: 'POST', body: { name } }); return { id: `client:${c.id}`, name: c.name } } },
+                { label: 'مورد غير موجود — إضافة جديد', badge: '🏢', fn: async (name) => { const s = await api('/suppliers', { method: 'POST', body: { name } }); return { id: `supplier:${s.id}`, name: s.name } } },
+              ]}
+            />
           </Field>
           <Field label="من تاريخ"><Input type="date" value={from} onChange={e => setFrom(e.target.value)} /></Field>
           <Field label="إلى تاريخ"><Input type="date" value={to} onChange={e => setTo(e.target.value)} /></Field>
@@ -8493,6 +8481,75 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
 }
 
 // v3.20 — Dual pricing frontend helpers (live preview only; backend is authoritative)
+// v3.39 — Searchable account picker with inline quick-add (used for suppliers & clients everywhere)
+function SearchPick({ items, value, onChange, placeholder = 'اكتب للبحث...', quickAdds = [], compact = false }) {
+  const [open, setOpen] = useState(false)
+  const [q, setQ] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [extra, setExtra] = useState([]) // accounts created inline in this session
+  const boxRef = useRef(null)
+  useEffect(() => {
+    const h = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [])
+  const all = [...(items || []), ...extra.filter(x => !(items || []).some(i => i.id === x.id))]
+  const sel = all.find(x => x.id === value)
+  const norm = (s) => String(s || '').toLowerCase().trim()
+  const filtered = all.filter(x => !q.trim() || norm(x.name).includes(norm(q)))
+  const exact = all.some(x => norm(x.name) === norm(q))
+  const doQuickAdd = async (qa) => {
+    const name = q.trim(); if (!name || busy) return
+    setBusy(true)
+    try {
+      const created = await qa.fn(name)
+      if (created?.id) {
+        const item = { id: created.id, name: created.name || name, badge: qa.badge }
+        setExtra(x => [...x, item])
+        onChange(created.id, item)
+        toast.success(`✅ تمت إضافة "${created.name || name}"`)
+        setOpen(false); setQ('')
+      }
+    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <div className="relative" ref={boxRef}>
+      <button type="button" onClick={() => setOpen(o => !o)}
+        className={`w-full flex items-center justify-between gap-2 rounded-md border border-input bg-white px-3 text-right ${compact ? 'h-8 text-xs' : 'h-10 text-sm'} ${sel ? 'text-slate-800' : 'text-slate-400'}`}>
+        <span className="truncate">{sel ? `${sel.badge ? sel.badge + ' ' : ''}${sel.name}` : placeholder}</span>
+        <span className="text-slate-400 text-[10px]">▼</span>
+      </button>
+      {open && (
+        <div className="absolute z-[70] mt-1 w-full min-w-[220px] rounded-lg border bg-white shadow-xl p-2 space-y-1.5">
+          <Input autoFocus value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 اكتب اسم للبحث..." className="h-8 text-xs" />
+          <div className="max-h-44 overflow-y-auto space-y-0.5">
+            {filtered.slice(0, 60).map(x => (
+              <button key={x.id} type="button" onClick={() => { onChange(x.id, x); setOpen(false); setQ('') }}
+                className={`w-full text-right px-2 py-1.5 rounded text-xs hover:bg-teal-50 ${x.id === value ? 'bg-teal-50 font-bold text-teal-700' : 'text-slate-700'}`}>
+                {x.badge ? `${x.badge} ` : ''}{x.name}
+              </button>
+            ))}
+            {filtered.length === 0 && !q.trim() && <div className="text-[11px] text-slate-400 text-center py-2">لا توجد حسابات بعد — اكتب اسماً لإضافته</div>}
+            {filtered.length === 0 && q.trim() && <div className="text-[11px] text-amber-700 text-center py-1.5">"{q.trim()}" غير موجود في القائمة</div>}
+          </div>
+          {q.trim() && !exact && quickAdds.length > 0 && (
+            <div className="border-t pt-1.5 space-y-1">
+              {quickAdds.map((qa, i) => (
+                <button key={i} type="button" disabled={busy} onClick={() => doQuickAdd(qa)}
+                  className="w-full text-right px-2 py-1.5 rounded text-xs font-bold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
+                  {busy ? '⏳ جارِ الإضافة...' : `➕ ${qa.label}: "${q.trim()}"`}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+// v3.39 — shared quick-add factories
+const quickAddSupplier = (badge = '') => ({ label: 'مورد غير موجود — إضافة جديد', badge, fn: async (name) => await api('/suppliers', { method: 'POST', body: { name } }) })
+const quickAddClient = (badge = '') => ({ label: 'عميل غير موجود — إضافة جديد', badge, fn: async (name) => await api('/clients', { method: 'POST', body: { name } }) })
 const regAgeCat = (age) => { if (age === '' || age === null || age === undefined) return 'adult'; const a = Number(age); if (a < 2) return 'infant'; if (a < 12) return 'child'; return 'adult' }
 function directRoomSaleFE(roomPricing, registrants) {
   const map = {}; (roomPricing || []).forEach(rp => { map[rp.type] = rp })
@@ -8640,16 +8697,18 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
         const pkg = await api('/packages', { method: 'POST', body: { ...f, room_pricing: roomPricing, features } })
         savedId = pkg.id
         // Create each item as a package component
+        // v3.39 — unified pricing: in direct mode sale prices come ONLY from the room table (components sale = 0)
         for (const it of items) {
+          const isDirectMode = f.pricing_mode === 'direct'
           const body = {
             component_type: it.component_type, name: it.name, supplier_id: it.supplier_id,
-            cost_per_pax: Number(it.cost) || 0, sale_per_pax: Number(it.sale) || 0,
-            pricing_type: it.pricing_type || 'flat', include_infants: !!it.include_infants,
+            cost_per_pax: Number(it.cost) || 0, sale_per_pax: isDirectMode ? 0 : (Number(it.sale) || 0),
+            pricing_type: isDirectMode ? 'flat' : (it.pricing_type || 'flat'), include_infants: !!it.include_infants,
           }
-          if (it.pricing_type === 'per_age') {
+          if (!isDirectMode && it.pricing_type === 'per_age') {
             for (const k of ['cost_adult', 'cost_child', 'cost_infant', 'sale_adult', 'sale_child', 'sale_infant']) body[k] = Number(it[k]) || 0
           }
-          if (it.pricing_type === 'room_age') {
+          if (!isDirectMode && it.pricing_type === 'room_age') {
             body.room_rates = rooms.filter(r => String(r.type || '').trim()).map(r => {
               const rr = (it.room_rates || {})[r.type] || {}
               return { room_type: r.type, cost_adult: Number(rr.cost_adult) || 0, cost_child: Number(rr.cost_child) || 0, cost_infant: Number(rr.cost_infant) || 0, sale_adult: Number(rr.sale_adult) || 0, sale_child: Number(rr.sale_child) || 0, sale_infant: Number(rr.sale_infant) || 0 }
@@ -8818,35 +8877,36 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
                       </div>
                       <div className="col-span-3">
                         <div className="text-[10px] text-slate-500 mb-1">المورد (شجرة الحسابات) *</div>
-                        <Select value={it.supplier_id} onValueChange={v => updItem(i, 'supplier_id', v)}>
-                          <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="اختر" /></SelectTrigger>
-                          <SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
-                        </Select>
+                        <SearchPick compact items={suppliers.map(s => ({ id: s.id, name: s.name }))} value={it.supplier_id} onChange={v => updItem(i, 'supplier_id', v)} placeholder="ابحث أو أضف مورداً..." quickAdds={[quickAddSupplier()]} />
                       </div>
-                      <div className="col-span-3">
-                        <div className="text-[10px] text-slate-500 mb-1">طريقة تسعير البند</div>
-                        <Select value={it.pricing_type || 'flat'} onValueChange={v => updItem(i, 'pricing_type', v)}>
-                          <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                          <SelectContent>{COMP_PRICING_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent>
-                        </Select>
-                      </div>
+                      {f.pricing_mode !== 'direct' ? (
+                        <div className="col-span-3">
+                          <div className="text-[10px] text-slate-500 mb-1">طريقة تسعير البند</div>
+                          <Select value={it.pricing_type || 'flat'} onValueChange={v => updItem(i, 'pricing_type', v)}>
+                            <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                            <SelectContent>{COMP_PRICING_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent>
+                          </Select>
+                        </div>
+                      ) : (
+                        <div className="col-span-3 flex items-end pb-1.5"><span className="text-[10px] text-teal-700 font-semibold">💡 سعر البيع من جدول الغرف أعلاه</span></div>
+                      )}
                       <div className="col-span-1"><Button size="sm" variant="ghost" onClick={() => rmItem(i)} className="h-8 w-8 p-0 text-rose-600 hover:bg-rose-50"><Trash2 className="w-3 h-3" /></Button></div>
                     </div>
-                    {(it.pricing_type || 'flat') === 'flat' && (
+                    {(f.pricing_mode === 'direct' || (it.pricing_type || 'flat') === 'flat') && (
                       <div className="grid grid-cols-12 gap-2 items-end">
-                        <div className="col-span-3"><div className="text-[10px] text-slate-500 mb-1">تكلفة / فرد</div><Input type="number" min="0" value={it.cost} onChange={e => updItem(i, 'cost', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
-                        <div className="col-span-3"><div className="text-[10px] text-slate-500 mb-1">بيع / فرد</div><Input type="number" min="0" value={it.sale} onChange={e => updItem(i, 'sale', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
-                        <div className="col-span-2 text-center">
+                        <div className="col-span-3"><div className="text-[10px] text-slate-500 mb-1">{f.pricing_mode === 'direct' ? '💰 تكلفة المورد / فرد (اختياري)' : 'تكلفة / فرد'}</div><Input type="number" min="0" value={it.cost} onChange={e => updItem(i, 'cost', e.target.value)} className="h-8 text-xs" step="0.01" /></div>
+                        {f.pricing_mode !== 'direct' && <div className="col-span-3"><div className="text-[10px] text-slate-500 mb-1">بيع / فرد</div><Input type="number" min="0" value={it.sale} onChange={e => updItem(i, 'sale', e.target.value)} className="h-8 text-xs" step="0.01" /></div>}
+                        {f.pricing_mode !== 'direct' && <div className="col-span-2 text-center">
                           <div className="text-[10px] text-slate-500 mb-1">ربح / فرد</div>
                           <div className={`text-xs font-bold ${(Number(it.sale) - Number(it.cost)) >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{((Number(it.sale) || 0) - (Number(it.cost) || 0)).toFixed(2)}</div>
-                        </div>
+                        </div>}
                         <div className="col-span-4 flex items-center gap-2 pb-1">
                           <input type="checkbox" id={`inf-${i}`} checked={!!it.include_infants} onChange={e => updItem(i, 'include_infants', e.target.checked)} className="w-4 h-4 accent-teal-600" />
                           <label htmlFor={`inf-${i}`} className="text-[11px] text-slate-600 cursor-pointer">يُحتسب للرضّع أيضاً (مثل رسوم التأشيرة)</label>
                         </div>
                       </div>
                     )}
-                    {it.pricing_type === 'per_age' && (
+                    {f.pricing_mode !== 'direct' && it.pricing_type === 'per_age' && (
                       <div className="grid grid-cols-3 gap-2">
                         {[{ k: 'adult', l: '👨 بالغ (12+)' }, { k: 'child', l: '🧒 طفل (2-11)' }, { k: 'infant', l: '👶 رضيع (<2)' }].map(cat => (
                           <div key={cat.k} className="rounded-lg border bg-slate-50/60 p-2 space-y-1">
@@ -8857,7 +8917,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
                         ))}
                       </div>
                     )}
-                    {it.pricing_type === 'room_age' && (
+                    {f.pricing_mode !== 'direct' && it.pricing_type === 'room_age' && (
                       rooms.filter(r => String(r.type || '').trim()).length === 0 ? (
                         <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ أضف أنواع الغرف في قسم التسكين أعلاه أولاً — ثم حدّد أسعار هذا البند لكل غرفة.</div>
                       ) : (
@@ -8945,12 +9005,18 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
     api('/suppliers').then(setSuppliers), api('/clients').then(setClients), api('/boxes').then(setBoxes),
   ]).catch(e => toast.error(e.message))
   useEffect(() => { load() }, [pkg.id])
+  // v3.39 — UNIFIED PRICING: direct mode = package room table is THE price source; components = details only
+  const pkgIsDirect = (pkg.pricing_mode || ((pkg.room_pricing || []).length > 0 ? 'direct' : 'components')) === 'direct'
   const addComp = async () => {
     if (!newComp.name || !newComp.supplier_id) return toast.error('اسم المكوّن والمورد مطلوبان')
     if (newComp.pricing_type === 'room_age' && (pkg.room_pricing || []).length === 0) return toast.error('حدّد أنواع الغرف في إعدادات الباكج أولاً (تعديل الباكج → التسكين)')
     try {
       const body = { ...newComp }
-      if (newComp.pricing_type === 'room_age') {
+      delete body._showCost
+      // v3.39 — UNIFIED PRICING: in direct mode the package room table is the single source of sale prices.
+      // Components carry details only (name/supplier) + optional supplier cost for accounting.
+      if (pkgIsDirect) { body.pricing_type = 'flat'; body.sale_per_pax = 0 }
+      if (newComp.pricing_type === 'room_age' && !pkgIsDirect) {
         body.room_rates = (pkg.room_pricing || []).map(rp => {
           const rr = (newComp.room_rates || {})[rp.type] || {}
           return { room_type: rp.type, cost_adult: Number(rr.cost_adult) || 0, cost_child: Number(rr.cost_child) || 0, cost_infant: Number(rr.cost_infant) || 0, sale_adult: Number(rr.sale_adult) || 0, sale_child: Number(rr.sale_child) || 0, sale_infant: Number(rr.sale_infant) || 0 }
@@ -9025,14 +9091,34 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
           <div className="space-y-3">
             {pkg.status !== 'closed' && (
               <div className="p-3 bg-slate-50 rounded-lg space-y-2">
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
+                <div className={`grid grid-cols-1 ${pkgIsDirect ? 'md:grid-cols-4' : 'md:grid-cols-5'} gap-2`}>
                   <Field label="نوع"><Select value={newComp.component_type} onValueChange={v => setNewComp({ ...newComp, component_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{COMPONENT_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
                   <Field label="الاسم"><Input value={newComp.name} onChange={e => setNewComp({ ...newComp, name: e.target.value })} placeholder="فندق البلد" /></Field>
-                  <Field label="المورد"><Select value={newComp.supplier_id} onValueChange={v => setNewComp({ ...newComp, supplier_id: v })}><SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger><SelectContent>{suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent></Select></Field>
-                  <Field label="طريقة التسعير"><Select value={newComp.pricing_type} onValueChange={v => setNewComp({ ...newComp, pricing_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{COMP_PRICING_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
+                  <Field label="المورد"><SearchPick items={suppliers.map(s => ({ id: s.id, name: s.name }))} value={newComp.supplier_id} onChange={v => setNewComp({ ...newComp, supplier_id: v })} placeholder="ابحث أو أضف مورداً..." quickAdds={[quickAddSupplier()]} /></Field>
+                  {!pkgIsDirect && <Field label="طريقة التسعير"><Select value={newComp.pricing_type} onValueChange={v => setNewComp({ ...newComp, pricing_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{COMP_PRICING_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>}
                   <div className="flex items-end"><Button onClick={addComp} className="w-full grad-brand text-white gap-1"><Plus className="w-4 h-4" /> إضافة</Button></div>
                 </div>
-                {newComp.pricing_type === 'flat' && (
+                {pkgIsDirect && (
+                  <div className="space-y-2">
+                    <div className="text-[11px] text-teal-800 bg-teal-50 border border-teal-200 rounded-lg p-2">
+                      💡 <b>التسعير موحد:</b> أسعار البيع تُؤخذ تلقائياً من جدول الغرف في الباكج — المكونات هنا للتفاصيل فقط (اسم الفندق، المورد...) بدون إدخال أسعار.
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer text-[11px] text-slate-600">
+                      <input type="checkbox" checked={!!newComp._showCost} onChange={e => setNewComp({ ...newComp, _showCost: e.target.checked, ...(e.target.checked ? {} : { cost_per_pax: '' }) })} className="w-4 h-4 accent-teal-600" />
+                      💰 إضافة تكلفة المورد (اختياري — لحساب مستحقات المورد وهامش الربح)
+                    </label>
+                    {!!newComp._showCost && (
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                        <Field label={`تكلفة المورد / فرد (${pkg.currency})`}><Input type="number" min="0" value={newComp.cost_per_pax} onChange={e => setNewComp({ ...newComp, cost_per_pax: e.target.value })} className="bg-white" /></Field>
+                        <div className="flex items-end gap-2 pb-2">
+                          <input type="checkbox" id="nc-inf-d" checked={!!newComp.include_infants} onChange={e => setNewComp({ ...newComp, include_infants: e.target.checked })} className="w-4 h-4 accent-teal-600" />
+                          <label htmlFor="nc-inf-d" className="text-[11px] text-slate-600 cursor-pointer">تُحتسب للرضّع أيضاً</label>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {!pkgIsDirect && newComp.pricing_type === 'flat' && (
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                     <Field label={`تكلفة/فرد (${pkg.currency})`}><Input type="number" min="0" value={newComp.cost_per_pax} onChange={e => setNewComp({ ...newComp, cost_per_pax: e.target.value })} className="bg-white" /></Field>
                     <Field label={`بيع/فرد (${pkg.currency})`}><Input type="number" min="0" value={newComp.sale_per_pax} onChange={e => setNewComp({ ...newComp, sale_per_pax: e.target.value })} className="bg-white" /></Field>
@@ -9042,7 +9128,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     </div>
                   </div>
                 )}
-                {newComp.pricing_type === 'per_age' && (
+                {!pkgIsDirect && newComp.pricing_type === 'per_age' && (
                   <div className="grid grid-cols-3 gap-2">
                     {[{ k: 'adult', l: '👨 بالغ (12+)' }, { k: 'child', l: '🧒 طفل (2-11)' }, { k: 'infant', l: '👶 رضيع (<2)' }].map(cat => (
                       <div key={cat.k} className="rounded-lg border bg-white p-2 space-y-1">
@@ -9053,7 +9139,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     ))}
                   </div>
                 )}
-                {newComp.pricing_type === 'room_age' && (
+                {!pkgIsDirect && newComp.pricing_type === 'room_age' && (
                   (pkg.room_pricing || []).length === 0 ? (
                     <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ لا توجد أنواع غرف معرّفة في الباكج — عدّل الباكج وأضف أنواع التسكين أولاً.</div>
                   ) : (
@@ -9315,10 +9401,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     </Field>
                     {newBooking.payment_method === 'credit' ? (
                       <Field label="حساب القبض / العميل" required>
-                        <Select value={newBooking.client_id} onValueChange={v => setNewBooking({ ...newBooking, client_id: v })}>
-                          <SelectTrigger className="bg-white"><SelectValue placeholder="اختر" /></SelectTrigger>
-                          <SelectContent>{clients.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
-                        </Select>
+                        <SearchPick items={clients.map(c => ({ id: c.id, name: c.name }))} value={newBooking.client_id} onChange={v => setNewBooking({ ...newBooking, client_id: v })} placeholder="ابحث عن العميل..." quickAdds={[quickAddClient()]} />
                       </Field>
                     ) : (
                       <Field label="الصندوق / البنك" required>

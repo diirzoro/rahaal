@@ -3048,7 +3048,10 @@ async function handleRoute(request, { params }) {
       const cli = b.client_id ? await db.collection('clients').findOne({ id: b.client_id, tenant_id: T }) : null
       if (payMethod === 'credit' && !cli) return bad('العميل غير موجود')
       const comps = await db.collection('package_components').find({ tenant_id: T, package_id: pkgId }).toArray()
-      if (comps.length === 0) return bad('لا توجد مكونات في الباكج — أضف المكونات قبل التسجيل')
+      // v3.39 — UNIFIED PRICING: in direct mode with a room price table, components are optional details
+      // (sale comes from room_pricing; component costs are optional supplier accounting)
+      const hasDirectRooms = (pkg.pricing_mode || ((pkg.room_pricing || []).length > 0 ? 'direct' : 'components')) === 'direct' && (pkg.room_pricing || []).length > 0
+      if (comps.length === 0 && !hasDirectRooms) return bad('لا توجد مكونات في الباكج — أضف المكونات قبل التسجيل')
       const pax = totalPax
       const cur = pkg.currency
       // v3.20 — DUAL PRICING: per-component totals honoring pricing_type (flat / per_age / room_age)
