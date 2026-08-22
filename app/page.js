@@ -8330,21 +8330,48 @@ function MeraajStoreScreen() {
       load()
     } catch (e) { toast.error(e.message) } finally { setApproving(null) }
   }
+  // v3.43 — Self-service store activation (Subscribe / Activate)
+  const [activating, setActivating] = useState(false)
+  const storeActive = !!config?.store_active
+  const activateStore = async () => {
+    if (!(await askConfirm({ title: 'تفعيل متجر معراج نتورك', desc: 'سيتم تفعيل اشتراك مكتبك في سوق معراج B2B فوراً:\n• باقاتك المُشارَكة تظهر للمكاتب الأخرى في السوق\n• تستقبل حجوزات واردة مباشرة داخل رحّال\n• تفعيل ذاتي فوري — بدون انتظار أو إجراءات يدوية', icon: '🚀', confirmLabel: 'تفعيل الاشتراك الآن' }))) return
+    setActivating(true)
+    try {
+      await api('/meraaj/activate', { method: 'POST' })
+      toast.success('🎉 تم تفعيل متجرك في معراج نتورك — باقاتك المُشارَكة معروضة في السوق الآن')
+      await load()
+    } catch (e) { toast.error(e.message) } finally { setActivating(false) }
+  }
   return (
     <div>
-      <TopBar title="🕋 متجر معراج نتورك" subtitle="سوق B2B لبيع وشراء برامج العمرة والسياحة بين المكاتب" right={<Button variant="outline" onClick={load} className="gap-1 text-xs h-8">🔄 تحديث</Button>} />
-      {iframeUrl ? (
+      <TopBar title="🕋 متجر معراج نتورك" subtitle="سوق B2B لبيع وشراء برامج العمرة والسياحة بين المكاتب" right={<div className="flex gap-2 items-center">
+        {storeActive && <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 h-8 px-3">✅ المتجر مفعّل</Badge>}
+        <Button variant="outline" onClick={load} className="gap-1 text-xs h-8">🔄 تحديث</Button>
+      </div>} />
+      {iframeUrl && storeActive ? (
         <div className="rounded-xl overflow-hidden border-2 border-purple-200 shadow-lg bg-white" style={{ height: 'calc(100vh - 160px)' }}>
           <iframe src={iframeUrl} title="متجر معراج نتورك" className="w-full h-full border-0" allow="clipboard-write" />
+        </div>
+      ) : storeActive ? (
+        <div className="rounded-xl border-2 border-emerald-300 bg-gradient-to-b from-emerald-50/70 to-teal-50/40 p-6 text-center mb-4">
+          <div className="text-4xl mb-1">✅</div>
+          <div className="text-xl font-black text-emerald-800">متجرك مفعّل ومشترك في معراج نتورك</div>
+          <div className="text-sm text-slate-600 mt-2 max-w-xl mx-auto leading-relaxed">
+            اشتراك مكتبك نشط{config?.store_activated_at ? ` منذ ${new Date(config.store_activated_at).toLocaleDateString('en-GB')}` : ''} — كل باقة تشاركها عبر زر <b>"🕋 معراج"</b> في قسم الباكجات تظهر مباشرة في السوق، وتصلك الحجوزات هنا فوراً.
+            {!config?.store_url && <><br /><span className="text-xs text-slate-400">واجهة التصفح المدمجة للسوق ستظهر هنا تلقائياً فور إتاحة رابطها من معراج — دون أي تحديث برمجي.</span></>}
+          </div>
         </div>
       ) : (
         <div className="rounded-xl border-2 border-dashed border-purple-300 bg-gradient-to-b from-purple-50/60 to-fuchsia-50/40 p-8 text-center mb-4">
           <div className="text-5xl mb-2">🕋</div>
-          <div className="text-xl font-black text-purple-800">متجر معراج نتورك — قريباً</div>
+          <div className="text-xl font-black text-purple-800">متجر معراج نتورك</div>
           <div className="text-sm text-slate-500 mt-2 max-w-xl mx-auto leading-relaxed">
-            نظامك <b>جاهز ومربوط تقنياً</b> {config?.configured ? '✅' : '⚠️ (بانتظار تهيئة المفتاح السري)'} — فور تفعيل المنصة سيظهر السوق هنا مباشرة داخل رحّال بدون أي تحديث برمجي.
-            <br />يمكنك من الآن مشاركة باقاتك عبر زر <b>"🕋 معراج"</b> في قسم الباكجات وستكون جاهزة للعرض فور الإطلاق.
+            نظامك <b>جاهز ومربوط تقنياً</b> {config?.configured ? '✅' : '⚠️ (بانتظار تهيئة المفتاح السري)'} — فعّل اشتراك مكتبك الآن لتظهر باقاتك وبرامجك المُشارَكة في سوق معراج B2B مباشرة وتستقبل الحجوزات داخل رحّال.
           </div>
+          <Button onClick={activateStore} disabled={activating} className="mt-4 h-11 px-8 text-base font-black bg-gradient-to-l from-purple-700 to-fuchsia-600 hover:from-purple-800 hover:to-fuchsia-700 text-white shadow-lg gap-2">
+            {activating ? '⏳ جارِ التفعيل...' : '🚀 تفعيل المتجر والاشتراك الآن'}
+          </Button>
+          <div className="text-[11px] text-slate-400 mt-2">تفعيل فوري ذاتي — بدون انتظار أو إجراءات يدوية</div>
         </div>
       )}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 my-4">

@@ -1424,11 +1424,36 @@ async function handleRoute(request, { params }) {
     }
     // Integration status for the frontend tab
     if (route === '/meraaj/config' && method === 'GET') {
+      const settingsCfg = await db.collection('tenant_settings').findOne(tf)
       return ok({
         configured: !!meraajSecret(),
         store_url: process.env.MERAAJ_STORE_URL || null,
         outbound_webhook_set: !!process.env.MERAAJ_WEBHOOK_URL,
+        // v3.43 — per-office self-service store subscription state
+        store_active: !!settingsCfg?.meraaj_store?.active,
+        store_activated_at: settingsCfg?.meraaj_store?.activated_at || null,
       })
+    }
+    // v3.43 — SELF-SERVICE STORE ACTIVATION (Subscribe / Activate) — instant, no manual steps.
+    // Stores the subscription flag per office; best-effort notifies Meraaj via the outbox
+    // (additive event — delivery failure NEVER blocks activation; contract payloads untouched).
+    if (route === '/meraaj/activate' && method === 'POST') {
+      const settingsAct = await db.collection('tenant_settings').findOne(tf)
+      if (settingsAct?.meraaj_store?.active) {
+        return ok({ active: true, activated_at: settingsAct.meraaj_store.activated_at, already: true })
+      }
+      const activatedAt = new Date()
+      await db.collection('tenant_settings').updateOne(tf, {
+        $set: { meraaj_store: { active: true, activated_at: activatedAt, activated_by: sess.user.email } },
+      }, { upsert: true })
+      try {
+        await emitMeraajEvent(db, T, 'office.store_activated', {
+          office_ref: T,
+          office_name: settingsAct?.agency_name || sess.tenant.name || '',
+          activated_at: activatedAt.toISOString(),
+        })
+      } catch { /* non-blocking */ }
+      return ok({ active: true, activated_at: activatedAt })
     }
     // Share / update / unshare a package to Meraaj marketplace
     const meraajShareMatch = route.match(/^\/packages\/([^/]+)\/meraaj-share$/)
