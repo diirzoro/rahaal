@@ -1325,6 +1325,23 @@ const NAV = [
   { id: 'settings',  label: 'إعدادات المكتب', icon: Settings, color: 'from-slate-800 to-slate-600' },
 ]
 
+// v3.45 — RBAC Phase 1: module access catalog + helper (owner always allowed; settings owner-only)
+const MODULE_LABELS = [
+  { k: 'mod_dashboard', l: 'لوحة التحكم' }, { k: 'mod_tickets', l: 'حجز التذاكر' }, { k: 'mod_visas', l: 'التأشيرات' },
+  { k: 'mod_services', l: 'الخدمات' }, { k: 'mod_packages', l: 'الباكجات والبرامج' }, { k: 'mod_meraaj', l: '🕋 متجر معراج' },
+  { k: 'mod_visa_monitor', l: 'مراقبة التأشيرات' }, { k: 'mod_query', l: 'مركز الاستعلامات' }, { k: 'mod_fx', l: 'صرافة العملات' },
+  { k: 'mod_receipt', l: 'سند قبض' }, { k: 'mod_payment', l: 'سند صرف' }, { k: 'mod_clients', l: 'العملاء' },
+  { k: 'mod_suppliers', l: 'الموردون والوكلاء' }, { k: 'mod_boxes', l: 'الصناديق والبنوك' }, { k: 'mod_chart', l: 'الدليل المحاسبي' },
+  { k: 'mod_journal', l: 'قيود اليومية' }, { k: 'mod_reports', l: 'التقارير المالية' }, { k: 'mod_affiliate', l: 'التسويق بالعمولة' },
+  { k: 'mod_help', l: 'دليل الاستخدام' },
+]
+const canModule = (user, tabId) => {
+  if (!user) return false
+  if (user.role === 'owner') return true
+  if (tabId === 'settings') return false
+  return user.permissions?.[`mod_${String(tabId).replace(/-/g, '_')}`] !== false
+}
+
 function Sidebar({ current, onChange }) {
   const { tenant, settings, user } = useAuth()
   return (
@@ -1358,7 +1375,7 @@ function Sidebar({ current, onChange }) {
         </div>
       </div>
       <nav className="flex-1 overflow-y-auto p-1 md:p-3 space-y-1">
-        {NAV.filter(n => n.id !== 'settings' || user.role === 'owner').map(item => {
+        {NAV.filter(n => canModule(user, n.id)).map(item => {
           const Icon = item.icon
           const active = current === item.id
           return (
@@ -6562,6 +6579,10 @@ function ReferralsTab() {
 // ================================================================
 const PERMISSION_GROUPS = [
   {
+    // v3.45 — RBAC Phase 1: module-level access (full sidebar sections)
+    title: '🧭 الوصول إلى الأقسام (القائمة الجانبية)', keys: MODULE_LABELS.map(m => ({ k: m.k, l: m.l }))
+  },
+  {
     title: '🎫 التذاكر', keys: [
       { k: 'tickets_view', l: 'عرض التذاكر' },
       { k: 'tickets_add',  l: 'إضافة تذكرة' },
@@ -6611,14 +6632,24 @@ function PermissionsDialog({ target, onClose, onSaved }) {
   const [boxes, setBoxes] = useState([]) // v3.9.9
   const [defaultBoxId, setDefaultBoxId] = useState('')
   const [lockBox, setLockBox] = useState(false)
+  // v3.45 — RBAC role templates (baseline + individual overrides)
+  const [templates, setTemplates] = useState([])
+  const [roleKey, setRoleKey] = useState('')
   useEffect(() => {
     if (target) {
       setPerms(target.permissions || {})
       setDefaultBoxId(target.default_box_id || '')
       setLockBox(!!target.lock_box)
+      setRoleKey(target.role_key || '')
       api('/boxes').then(setBoxes).catch(() => {})
+      api('/rbac/templates').then(r => setTemplates(r?.templates || [])).catch(() => {})
     }
   }, [target])
+  const applyTemplate = (t) => {
+    setPerms({ ...t.perms })
+    setRoleKey(t.key)
+    toast.success(`تم تطبيق قالب "${t.label}" — عدّل أي مفتاح أدناه كاستثناء فردي قبل الحفظ`)
+  }
   const setKey = (k, v) => setPerms(p => ({ ...p, [k]: v }))
   const setAll = (val) => {
     const next = {}
@@ -6628,7 +6659,7 @@ function PermissionsDialog({ target, onClose, onSaved }) {
   const save = async () => {
     try {
       setSaving(true)
-      await api(`/tenant/users/${target.id}`, { method: 'PATCH', body: { permissions: perms, default_box_id: defaultBoxId || null, lock_box: lockBox } })
+      await api(`/tenant/users/${target.id}`, { method: 'PATCH', body: { permissions: perms, role_key: roleKey, default_box_id: defaultBoxId || null, lock_box: lockBox } })
       onSaved && onSaved()
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
@@ -6642,6 +6673,22 @@ function PermissionsDialog({ target, onClose, onSaved }) {
           </DialogTitle>
           <DialogDescription>حدد بالضبط ما يستطيع هذا الموظف فعله. المالك دائماً لديه صلاحيات كاملة (لا يحتاج ضبط).</DialogDescription>
         </DialogHeader>
+        {/* v3.45 — RBAC role templates: apply a baseline, then tweak checkboxes as individual overrides */}
+        <div className="border-2 border-blue-200 rounded-lg p-3 bg-blue-50 mb-3">
+          <div className="font-bold text-sm text-blue-800 mb-2 flex items-center gap-2 flex-wrap">
+            🎭 قوالب الأدوار الجاهزة
+            {roleKey && <Badge className="bg-blue-600 text-white hover:bg-blue-600">{templates.find(t => t.key === roleKey)?.label || roleKey}</Badge>}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {templates.map(t => (
+              <button key={t.key} type="button" onClick={() => applyTemplate(t)} title={t.desc}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${roleKey === t.key ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-700 border-slate-300 hover:border-blue-400 hover:bg-blue-50'}`}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <div className="text-[11px] text-slate-500 mt-2">اختر قالباً لتطبيق صلاحياته الافتراضية دفعة واحدة، ثم عدّل أي مفتاح أدناه كاستثناء فردي لهذا الموظف.</div>
+        </div>
         {/* v3.9.9 — Default cash box for cashiers */}
         <div className="border-2 border-emerald-200 rounded-lg p-3 bg-emerald-50 mb-3">
           <div className="font-bold text-sm text-emerald-800 mb-2 flex items-center gap-2">💵 الصندوق الافتراضي للكاشير</div>
@@ -7199,6 +7246,9 @@ const COMPONENT_TYPES = [
 ]
 
 function PackagesScreen() {
+  // v3.45 — RBAC: profits/commissions visible only to owner or staff with show_profit
+  const { user: rbacUser } = useAuth()
+  const canProfit = rbacUser?.role === 'owner' || rbacUser?.permissions?.show_profit === true
   const [packages, setPackages] = useState([])
   const [leaderboard, setLeaderboard] = useState(null)
   const [open, setOpen] = useState(false)
@@ -7305,12 +7355,12 @@ function PackagesScreen() {
         right={<div className="flex gap-2">
           <Button variant="outline" onClick={() => { setShowArchived(!showArchived); if (!showArchived) loadArchived() }} className={`gap-2 ${showArchived ? 'bg-slate-700 text-white border-slate-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>🗂️ المؤرشفة</Button>
           <Button variant="outline" onClick={() => setWaLogsOpen(true)} className="gap-2 border-green-300 text-green-700 hover:bg-green-50 relative">📲 سجل الواتساب{waReminders > 0 && <span className="absolute -top-2 -left-2 bg-rose-500 text-white text-[10px] rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 font-bold">{waReminders}</span>}</Button>
-          <Button variant="outline" onClick={() => setPartnerStmtOpen(true)} className="gap-2 border-amber-300 text-amber-700 hover:bg-amber-50">🤝 كشف الشريك</Button>
-          <Button variant="outline" onClick={() => setComparePeriod('all')} className="gap-2 border-blue-200 text-blue-700 hover:bg-blue-50"><BarChart3 className="w-4 h-4" /> مقارنة الربحية</Button>
+          {canProfit && <Button variant="outline" onClick={() => setPartnerStmtOpen(true)} className="gap-2 border-amber-300 text-amber-700 hover:bg-amber-50">🤝 كشف الشريك</Button>}
+          {canProfit && <Button variant="outline" onClick={() => setComparePeriod('all')} className="gap-2 border-blue-200 text-blue-700 hover:bg-blue-50"><BarChart3 className="w-4 h-4" /> مقارنة الربحية</Button>}
           <Button onClick={() => { setEditing(null); setOpen(true) }} className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> باكج جديد</Button>
         </div>} />
-      {/* v3.7 — Top Profitable Package KPI (current month) */}
-      {top && top.bookings > 0 && (
+      {/* v3.7 — Top Profitable Package KPI (current month) — v3.45: hidden without show_profit */}
+      {canProfit && top && top.bookings > 0 && (
         <Card className="overflow-hidden border-0 shadow-md bg-gradient-to-l from-emerald-500 via-teal-500 to-cyan-500 text-white">
           <CardContent className="p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -7391,14 +7441,14 @@ function PackagesScreen() {
         )}
         <div className="text-sm font-bold text-slate-700 mb-2">🟢 الباكجات المفتوحة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={() => setReportPkg(p)} onExtend={() => setExtendPkg(p)} onDuplicate={() => dupPkg(p)} onMeraaj={() => setMeraajPkg(p)} onShowcase={() => setShowcasePkg(p)} onArchive={() => archivePkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
+          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={canProfit ? () => setReportPkg(p) : undefined} onExtend={() => setExtendPkg(p)} onDuplicate={() => dupPkg(p)} onMeraaj={() => setMeraajPkg(p)} onShowcase={() => setShowcasePkg(p)} onArchive={() => archivePkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
           {openPackages.length === 0 && <div className="col-span-full text-center text-slate-400 py-8 text-sm">{dateBounds ? 'لا نتائج ضمن النطاق التاريخي' : 'لا توجد باكجات مفتوحة — أنشئ باكج جديد'}</div>}
         </div>
       </div>
       {closedPackages.length > 0 && <div>
         <div className="text-sm font-bold text-slate-500 mt-6 mb-2">🗄️ أرشيف الباكجات المغلقة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {closedPackages.map(p => <PkgCard key={p?.id} p={p} closed onOpen={() => setDetailsPkg(p)} onReopen={() => reopenPkg(p)} onReport={() => setReportPkg(p)} onDuplicate={() => dupPkg(p)} onShowcase={() => setShowcasePkg(p)} onArchive={() => archivePkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
+          {closedPackages.map(p => <PkgCard key={p?.id} p={p} closed onOpen={() => setDetailsPkg(p)} onReopen={() => reopenPkg(p)} onReport={canProfit ? () => setReportPkg(p) : undefined} onDuplicate={() => dupPkg(p)} onShowcase={() => setShowcasePkg(p)} onArchive={() => archivePkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
         </div>
       </div>}
       <PackageDialog open={open} onOpenChange={v => { setOpen(v); if (!v) setEditing(null) }} record={editing} onSaved={load} />
@@ -8491,7 +8541,7 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
         )}
         <div className="flex flex-wrap gap-1 pt-2 border-t">
           <Button size="sm" variant="outline" onClick={onOpen} className="h-7 px-2 text-xs gap-1"><FileBadge2 className="w-3 h-3" /> المكونات والتسجيل</Button>
-          <Button size="sm" variant="outline" onClick={onReport} className="h-7 px-2 text-xs gap-1 text-blue-600"><ReceiptText className="w-3 h-3" /> التقرير</Button>
+          {onReport && <Button size="sm" variant="outline" onClick={onReport} className="h-7 px-2 text-xs gap-1 text-blue-600"><ReceiptText className="w-3 h-3" /> التقرير</Button>}
           {!closed && onExtend && <Button size="sm" variant="outline" onClick={onExtend} className="h-7 px-2 text-xs gap-1 text-teal-600 border-teal-200 hover:bg-teal-50"><Calendar className="w-3 h-3" /> تمديد التاريخ</Button>}
           {onDuplicate && <Button size="sm" variant="outline" onClick={onDuplicate} className="h-7 px-2 text-xs gap-1 text-purple-600 border-purple-200 hover:bg-purple-50" title="نسخ الباكج بكل مكوناته وأسعاره كمسودة جديدة"><Copy className="w-3 h-3" /> نسخ</Button>}
           {onShowcase && <Button size="sm" variant="outline" onClick={onShowcase} className="h-7 px-2 text-xs gap-1 text-sky-600 border-sky-200 hover:bg-sky-50" title="عرض تسويقي للزبون: الصورة والمميزات والأسعار">👁️ عرض</Button>}
@@ -10322,6 +10372,15 @@ function OfficeSettings() {
 function TenantApp() {
   const [tab, setTab] = useState('dashboard')
   const { user, tenant, logout } = useAuth()
+  // v3.45 — RBAC: keep employees inside modules they're allowed to access
+  const tabAllowed = canModule(user, tab)
+  useEffect(() => {
+    if (user && user.role !== 'owner' && !canModule(user, tab)) {
+      const first = NAV.find(n => canModule(user, n.id))
+      if (first && first.id !== tab) setTab(first.id)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, tab])
   const [announcements, setAnnouncements] = useState([])
   const [popupShown, setPopupShown] = useState(false)
   const [popupAnn, setPopupAnn] = useState(null)
@@ -10392,26 +10451,34 @@ function TenantApp() {
             <button onClick={() => { setInstAlertDismissed(true); sessionStorage.setItem(`rahaal_inst_alert_${instAlert.no}_${instAlert.due_date}`, '1') }} className="text-white/80 hover:text-white text-lg leading-none px-1" title="إخفاء (لهذه الجلسة)">✕</button>
           </div>
         )}
-        {tab === 'dashboard' && <ErrorBoundary tabName="لوحة التحكم"><Dashboard setTab={setTab} /></ErrorBoundary>}
-        {tab === 'tickets' && <ErrorBoundary tabName="حجز التذاكر"><TicketsScreen /></ErrorBoundary>}
-        {tab === 'visas' && <ErrorBoundary tabName="التأشيرات والخدمات"><VisasScreen /></ErrorBoundary>}
-        {tab === 'services' && <ErrorBoundary tabName="الخدمات"><ServicesScreen /></ErrorBoundary>}
-        {tab === 'packages' && <ErrorBoundary tabName="الباكجات والبرامج"><PackagesScreen /></ErrorBoundary>}
-        {tab === 'meraaj' && <ErrorBoundary tabName="متجر معراج"><MeraajStoreScreen /></ErrorBoundary>}
-        {tab === 'fx' && <ErrorBoundary tabName="صرافة العملات"><FxScreen /></ErrorBoundary>}
-        {tab === 'receipt' && <ErrorBoundary tabName="سند القبض"><VoucherScreen mode="receipt" /></ErrorBoundary>}
-        {tab === 'payment' && <ErrorBoundary tabName="سند الصرف"><VoucherScreen mode="payment" /></ErrorBoundary>}
-        {tab === 'clients' && <ErrorBoundary tabName="العملاء"><PartiesScreen kind="clients" /></ErrorBoundary>}
-        {tab === 'suppliers' && <ErrorBoundary tabName="الموردون"><PartiesScreen kind="suppliers" /></ErrorBoundary>}
-        {tab === 'boxes' && <ErrorBoundary tabName="الصناديق والبنوك"><BoxesScreen /></ErrorBoundary>}
-        {tab === 'chart' && <ErrorBoundary tabName="الدليل المحاسبي"><ChartScreen /></ErrorBoundary>}
-        {tab === 'journal' && <ErrorBoundary tabName="قيود اليومية"><JournalScreen /></ErrorBoundary>}
-        {tab === 'reports' && <ErrorBoundary tabName="التقارير المالية"><ReportsScreen /></ErrorBoundary>}
-        {tab === 'query' && <ErrorBoundary tabName="مركز الاستعلامات"><QueryCenterScreen /></ErrorBoundary>}
-        {tab === 'visa-monitor' && <ErrorBoundary tabName="مراقبة التأشيرات"><VisaMonitorScreen /></ErrorBoundary>}
-        {tab === 'settings' && user.role === 'owner' && <ErrorBoundary tabName="إعدادات المكتب"><OfficeSettings /></ErrorBoundary>}
-        {tab === 'affiliate' && <ErrorBoundary tabName="التسويق بالعمولة"><AffiliateScreen /></ErrorBoundary>}
-        {tab === 'help' && <ErrorBoundary tabName="دليل الاستخدام"><HelpCenter setTab={setTab} /></ErrorBoundary>}
+        {/* v3.45 — RBAC module guard (server also enforces on API level) */}
+        {!tabAllowed && (
+          <Card className="border-2 border-rose-200 bg-rose-50/40"><CardContent className="p-12 text-center">
+            <div className="text-5xl mb-3">🚫</div>
+            <div className="text-xl font-black text-rose-700">غير مصرح بالوصول</div>
+            <div className="text-sm text-slate-500 mt-2">ليس لديك صلاحية لعرض هذا القسم — تواصل مع مالك المكتب لمنحك الصلاحية.</div>
+          </CardContent></Card>
+        )}
+        {tabAllowed && tab === 'dashboard' && <ErrorBoundary tabName="لوحة التحكم"><Dashboard setTab={setTab} /></ErrorBoundary>}
+        {tabAllowed && tab === 'tickets' && <ErrorBoundary tabName="حجز التذاكر"><TicketsScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'visas' && <ErrorBoundary tabName="التأشيرات والخدمات"><VisasScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'services' && <ErrorBoundary tabName="الخدمات"><ServicesScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'packages' && <ErrorBoundary tabName="الباكجات والبرامج"><PackagesScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'meraaj' && <ErrorBoundary tabName="متجر معراج"><MeraajStoreScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'fx' && <ErrorBoundary tabName="صرافة العملات"><FxScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'receipt' && <ErrorBoundary tabName="سند القبض"><VoucherScreen mode="receipt" /></ErrorBoundary>}
+        {tabAllowed && tab === 'payment' && <ErrorBoundary tabName="سند الصرف"><VoucherScreen mode="payment" /></ErrorBoundary>}
+        {tabAllowed && tab === 'clients' && <ErrorBoundary tabName="العملاء"><PartiesScreen kind="clients" /></ErrorBoundary>}
+        {tabAllowed && tab === 'suppliers' && <ErrorBoundary tabName="الموردون"><PartiesScreen kind="suppliers" /></ErrorBoundary>}
+        {tabAllowed && tab === 'boxes' && <ErrorBoundary tabName="الصناديق والبنوك"><BoxesScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'chart' && <ErrorBoundary tabName="الدليل المحاسبي"><ChartScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'journal' && <ErrorBoundary tabName="قيود اليومية"><JournalScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'reports' && <ErrorBoundary tabName="التقارير المالية"><ReportsScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'query' && <ErrorBoundary tabName="مركز الاستعلامات"><QueryCenterScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'visa-monitor' && <ErrorBoundary tabName="مراقبة التأشيرات"><VisaMonitorScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'settings' && user.role === 'owner' && <ErrorBoundary tabName="إعدادات المكتب"><OfficeSettings /></ErrorBoundary>}
+        {tabAllowed && tab === 'affiliate' && <ErrorBoundary tabName="التسويق بالعمولة"><AffiliateScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'help' && <ErrorBoundary tabName="دليل الاستخدام"><HelpCenter setTab={setTab} /></ErrorBoundary>}
 
         {/* v2.8.1 — Global footer with contact + Target Media badge */}
         <div className="mt-8 pt-4 border-t border-slate-200 text-center text-xs text-slate-500 space-y-2">

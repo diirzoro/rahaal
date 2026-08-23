@@ -6,19 +6,27 @@ import crypto from 'crypto'
 
 // ---------- MongoDB ----------
 let client, db
+// v3.45 — Fix latent race: concurrent requests during cold start could see `client` set
+// before `db` was ready (500: Cannot read properties of undefined). Cache the connect promise.
+let mongoConnectPromise = null
 async function connectToMongo() {
-  if (!client) {
-    // v3.10.1 — Fail-fast with clear error when env vars are missing (prevents obscure "startsWith of undefined" from mongodb driver)
-    if (!process.env.MONGO_URL || typeof process.env.MONGO_URL !== 'string') {
-      throw new Error('MONGO_URL environment variable is required (missing in this deployment environment)')
-    }
-    if (!process.env.DB_NAME) throw new Error('DB_NAME environment variable is required')
-    client = new MongoClient(process.env.MONGO_URL)
-    await client.connect()
-    db = client.db(process.env.DB_NAME)
-    await seedInitial(db)
+  if (db) return db
+  if (!mongoConnectPromise) {
+    mongoConnectPromise = (async () => {
+      // v3.10.1 — Fail-fast with clear error when env vars are missing (prevents obscure "startsWith of undefined" from mongodb driver)
+      if (!process.env.MONGO_URL || typeof process.env.MONGO_URL !== 'string') {
+        throw new Error('MONGO_URL environment variable is required (missing in this deployment environment)')
+      }
+      if (!process.env.DB_NAME) throw new Error('DB_NAME environment variable is required')
+      client = new MongoClient(process.env.MONGO_URL)
+      await client.connect()
+      const d = client.db(process.env.DB_NAME)
+      await seedInitial(d)
+      db = d
+      return d
+    })().catch((e) => { mongoConnectPromise = null; client = null; throw e })
   }
-  return db
+  return mongoConnectPromise
 }
 
 const CURRENCIES = ['USD', 'SAR', 'YER']
@@ -109,6 +117,13 @@ const DEFAULT_STAFF_PERMISSIONS = {
   edit_price: false, apply_discount: false,
   can_close_periods: false,  // v3.10.6 — permission to lock/unlock financial periods
   can_refund: false,          // v3.10.6 — permission to refund/cancel transactions
+  // v3.45 — RBAC Phase 1: module-level access (sidebar sections).
+  // Operational modules default ON for staff; financial/sensitive modules default OFF.
+  mod_dashboard: true, mod_tickets: true, mod_visas: true, mod_services: true, mod_packages: true,
+  mod_meraaj: false, mod_visa_monitor: true, mod_query: false, mod_fx: false,
+  mod_receipt: true, mod_payment: false, mod_clients: true, mod_suppliers: false,
+  mod_boxes: false, mod_chart: false, mod_journal: false, mod_reports: false,
+  mod_affiliate: false, mod_help: true,
 }
 function ownerPermissions() {
   const p = {}
@@ -119,6 +134,19 @@ function effectivePermissions(user) {
   if (!user) return DEFAULT_STAFF_PERMISSIONS
   if (user.role === 'owner') return ownerPermissions()
   return { ...DEFAULT_STAFF_PERMISSIONS, ...(user.permissions || {}) }
+}
+// v3.45 — RBAC role templates: baseline presets applied by the owner, then per-employee
+// checkbox edits act as individual overrides (stored on the user document).
+function rbacAllPerms(v) { const p = {}; for (const k of Object.keys(DEFAULT_STAFF_PERMISSIONS)) p[k] = v; return p }
+function RBAC_ROLE_TEMPLATES() {
+  const base = (over) => ({ ...rbacAllPerms(false), mod_dashboard: true, mod_help: true, ...over })
+  return [
+    { key: 'registrar', label: '🧾 موظف تسجيل', desc: 'تسجيل الزبائن في الباكجات فقط — بدون أي أرقام مالية أو أرباح', perms: base({ mod_packages: true, mod_clients: true }) },
+    { key: 'sales', label: '💼 موظف مبيعات', desc: 'بيع التذاكر والتأشيرات والخدمات والباكجات + سند قبض — بدون أرباح أو خصومات', perms: base({ mod_tickets: true, mod_visas: true, mod_services: true, mod_packages: true, mod_clients: true, mod_receipt: true, mod_visa_monitor: true, tickets_view: true, tickets_add: true, visas_view: true, visas_add: true, services_view: true, services_add: true, vouchers_manage: true }) },
+    { key: 'sales_manager', label: '📈 مدير مبيعات', desc: 'كل المبيعات + الأرباح والخصومات ومتجر معراج والاستعلامات', perms: base({ mod_tickets: true, mod_visas: true, mod_services: true, mod_packages: true, mod_meraaj: true, mod_clients: true, mod_receipt: true, mod_visa_monitor: true, mod_query: true, mod_reports: true, tickets_view: true, tickets_add: true, tickets_edit: true, tickets_delete: true, visas_view: true, visas_add: true, visas_edit: true, visas_delete: true, services_view: true, services_add: true, services_edit: true, services_delete: true, vouchers_manage: true, reports_view: true, show_profit: true, edit_price: true, apply_discount: true, can_refund: true }) },
+    { key: 'accountant', label: '🧮 محاسب', desc: 'السندات والقيود والصناديق والدليل والتقارير المالية والصرافة', perms: base({ mod_receipt: true, mod_payment: true, mod_fx: true, mod_clients: true, mod_suppliers: true, mod_boxes: true, mod_chart: true, mod_journal: true, mod_reports: true, mod_query: true, tickets_view: true, visas_view: true, services_view: true, vouchers_manage: true, accounts_manage: true, reports_view: true, show_profit: true }) },
+    { key: 'full_manager', label: '👑 مدير كامل', desc: 'جميع الصلاحيات — مطابق للمالك', perms: rbacAllPerms(true) },
+  ]
 }
 
 // v3.4 — Affiliate defaults
@@ -332,7 +360,7 @@ async function getPatSession(request, db) {
     return null
   }
 }
-function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
+function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
 function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price, billing_mode: t.billing_mode || null, unlimited_journals: !!t.unlimited_journals } : null }
 
 // ============ v3.14 — PRICING & PLANS (Phase 2) ============
@@ -977,6 +1005,30 @@ async function handleRoute(request, { params }) {
     }
 
     if (!sess || sess.blocked) return bad('يجب تسجيل الدخول', 401)
+
+    // ============ v3.45 — RBAC PHASE 1: module-level access enforcement (staff only) ============
+    // Server-side guard (not just UI hiding). Owner/super_admin bypass. Shared lookup endpoints
+    // (/clients, /suppliers, /boxes, /accounts) stay open as they feed dropdowns across screens.
+    if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') {
+      const P = effectivePermissions(sess.user)
+      const deny = (label) => bad(`🚫 غير مصرح — ليس لديك صلاحية الوصول إلى قسم ${label}`, 403)
+      if (/^\/tickets/.test(route) && !P.mod_tickets) return deny('حجز التذاكر')
+      if (/^\/visas/.test(route) && !P.mod_visas) return deny('التأشيرات')
+      if ((/^\/services/.test(route) || /^\/service-types/.test(route)) && !P.mod_services) return deny('الخدمات')
+      if (/^\/packages/.test(route) && !P.mod_packages && !P.mod_meraaj) return deny('الباكجات والبرامج')
+      if (/^\/meraaj\//.test(route) && !P.mod_meraaj) return deny('متجر معراج')
+      if (/^\/fx/.test(route) && !P.mod_fx) return deny('صرافة العملات')
+      if (/^\/journal-entries/.test(route) && !P.mod_journal) return deny('قيود اليومية')
+      if (route === '/reports/query' && !P.mod_query && !P.mod_reports) return deny('مركز الاستعلامات')
+      if (/^\/reports\//.test(route) && route !== '/reports/query' && !P.mod_reports) return deny('التقارير المالية')
+      if (/^\/vouchers/.test(route) && !P.mod_receipt && !P.mod_payment) return deny('السندات')
+      if (/^\/affiliate/.test(route) && !P.mod_affiliate) return deny('التسويق بالعمولة')
+    }
+    // v3.45 — Role templates catalog for the permissions manager (owner only)
+    if (route === '/rbac/templates' && method === 'GET') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      return ok({ templates: RBAC_ROLE_TEMPLATES(), defaults: DEFAULT_STAFF_PERMISSIONS })
+    }
 
     // ============ SUPER ADMIN ============
     if (route.startsWith('/admin/')) {
@@ -1809,7 +1861,7 @@ async function handleRoute(request, { params }) {
     if (route === '/tenant/users' && method === 'GET') {
       if (sess.user.role !== 'owner') return bad('غير مصرح', 403)
       const users = await db.collection('users').find(tf).sort({ created_at: 1 }).toArray()
-      return ok(users.map(u => ({ id: u.id, email: u.email, name: u.name, role: u.role, active: u.active, created_at: u.created_at, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } })))
+      return ok(users.map(u => ({ id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, active: u.active, created_at: u.created_at, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } })))
     }
     if (route === '/tenant/users' && method === 'POST') {
       if (sess.user.role !== 'owner') return bad('غير مصرح', 403)
@@ -1853,6 +1905,8 @@ async function handleRoute(request, { params }) {
         for (const k of Object.keys(DEFAULT_STAFF_PERMISSIONS)) sanitized[k] = !!b.permissions[k]
         upd.permissions = sanitized
       }
+      // v3.45 — RBAC role template key (display/reference; actual access = permissions object)
+      if (b.role_key !== undefined) upd.role_key = String(b.role_key || '')
       // v3.9.9 — Update default box + lock flag
       if (b.default_box_id !== undefined) upd.default_box_id = b.default_box_id || null
       if (b.lock_box !== undefined) upd.lock_box = !!b.lock_box
