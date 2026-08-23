@@ -20,6 +20,12 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 - Meraaj E2E 15/15 test (blocked on Meraaj team configuring temp secret)
 - Package Comparison feature (deferred by user)
 
+## v3.49 (completed) — NaN/zero-price fix + Hotels details
+- Root cause of Meraaj NaN/zeros: (a) contract payload used stored meraaj.market_pricing which could be EMPTY/stale → now meraajContractPayload recomputes live from room_pricing + stored commission when empty (marketRows fallback); (b) meraajPackagePayload sent raw sale_child/sale_infant nulls → now resolved (child→adult, infant→0). Same payload structures — values only.
+- hotels field on packages: sanitizeHotels (max 10, name<=80, city<=40, nights 0-60) + POST/PATCH support. Contract hotels[] (string names) merges component hotels + package hotels (deduped).
+- FE: form section "🏨 تفاصيل الفنادق والليالي" (quick-add Makkah/Madinah buttons, name/city/nights rows, nights-vs-duration summary), completeness note under room pricing, showcase dialog hotels cards, WhatsApp message hotel lines.
+- Tested 5/5 via agent (critical test: empty market_pricing + null child/infant → payload fully numeric, correct commission math, hotels merged). Form UI verified via screenshot.
+
 ## v3.48 (completed) — Full responsive audit & fixes
 - Central fixes: shared DialogContent now max-h-[92vh] + overflow-y-auto + rounded-lg (all 48 dialogs fit any viewport with internal scroll); TopBar flex-wrap + min-w-0 + responsive title sizes (action buttons wrap on narrow screens).
 - Existing foundations kept: sidebar icon-rail w-16 on mobile / w-64 md+, main overflow-x-hidden min-w-0, globals.css v3.9.5 (tables horizontal scroll, tablist scroll, dialog 96vw mobile).

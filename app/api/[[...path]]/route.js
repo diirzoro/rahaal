@@ -2465,6 +2465,7 @@ async function handleRoute(request, { params }) {
         end_date: b.end_date ? new Date(b.end_date) : null,
         room_pricing: roomPricing,
         pricing_mode: pricingMode,
+        hotels: sanitizeHotels(b.hotels), // v3.49
         features: sanitizeFeatures(b.features),
         has_image: false,
         notes: b.notes || '', status: 'open',
@@ -2499,6 +2500,10 @@ async function handleRoute(request, { params }) {
       // v3.23 — Features/amenities update (Miraj Network readiness)
       if (b.features !== undefined) {
         upd.features = sanitizeFeatures(b.features)
+      }
+      // v3.49 — Hotels quick-details (name + city + nights) for program display
+      if (b.hotels !== undefined) {
+        upd.hotels = sanitizeHotels(b.hotels)
       }
       await db.collection('packages').updateOne({ id: pkgIdMatch[1], tenant_id: T }, { $set: upd })
       // v3.24/v3.25 — Meraaj sync: shared packages emit updates; closing emits deactivation
@@ -4826,6 +4831,17 @@ function sanitizeRoomPricing(arr) {  return (Array.isArray(arr) ? arr : [])
       sale_infant: (r.sale_infant === undefined || r.sale_infant === null || r.sale_infant === '') ? null : Math.max(0, Number(r.sale_infant) || 0),
     }))
 }
+// v3.49 — Hotels quick-details on the package itself (name + city + nights) for program display
+function sanitizeHotels(arr) {
+  return (Array.isArray(arr) ? arr : [])
+    .filter(h => h && String(h.name || '').trim())
+    .slice(0, 10)
+    .map(h => ({
+      name: String(h.name).trim().slice(0, 80),
+      city: String(h.city || '').trim().slice(0, 40),
+      nights: Math.max(0, Math.min(60, Math.round(Number(h.nights) || 0))),
+    }))
+}
 // Sanitize per-room-type rates for 'room_age' components
 function sanitizeRoomRates(arr) {
   return (Array.isArray(arr) ? arr : [])
@@ -5083,7 +5099,17 @@ function meraajPackagePayload(pkg, comps = []) {
     has_image: !!pkg.has_image,
     image_url: pkg.has_image ? `/api/meraaj/packages/${pkg.id}/image` : null,
     pricing_mode: pkg.pricing_mode || 'direct',
-    room_pricing: pkg.room_pricing || [],
+    // v3.49 — NaN fix: resolve age-tier fallbacks before sending (empty child = adult price, empty infant = 0)
+    // Same keys/structure as Contract v2 — values only, so Meraaj never receives null.
+    room_pricing: (pkg.room_pricing || []).map(r => {
+      const adult = Number(r.sale_per_pax) || 0
+      return {
+        ...r,
+        sale_per_pax: adult,
+        sale_child: (r.sale_child === null || r.sale_child === undefined || r.sale_child === '') ? adult : (Number(r.sale_child) || 0),
+        sale_infant: (r.sale_infant === null || r.sale_infant === undefined || r.sale_infant === '') ? 0 : (Number(r.sale_infant) || 0),
+      }
+    }),
     status: pkg.status,
     meraaj: {
       shared: !!pkg.meraaj?.shared,
@@ -5123,10 +5149,19 @@ async function meraajContractPayload(db, T, pkg, comps, meraajOverride = null) {
   const m = meraajOverride || pkg.meraaj || {}
   const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { name: 1 } })
   const owner = await db.collection('users').findOne({ tenant_id: T, role: 'owner' }, { projection: { name: 1 } })
+  // v3.49 — ZERO/NaN GUARD: if market_pricing is empty/stale while the package has room prices,
+  // recompute it live from room_pricing + stored commission settings (values only — same structure).
+  const marketRows = (Array.isArray(m.market_pricing) && m.market_pricing.length > 0)
+    ? m.market_pricing
+    : computeMeraajMarketPricing(pkg.room_pricing || [], m.buyer_commission_mode || 'amount', Number(m.buyer_commission_value) || 0, m.commission_direction || 'deducted')
   // Representative per-seat pricing = cheapest adult row of the market pricing table
-  const rows = (m.market_pricing || []).filter(r => (Number(r.customer?.adult) || 0) > 0)
+  const rows = marketRows.filter(r => (Number(r.customer?.adult) || 0) > 0)
   const cheapest = rows.slice().sort((a, b) => a.customer.adult - b.customer.adult)[0] || null
-  const hotels = (comps || []).filter(c => c.component_type === 'hotel').map(c => String(c.name || '').trim()).filter(Boolean)
+  // v3.49 — hotels: merge component-based hotels with the package's quick hotel details (names only — same string[] structure)
+  const hotels = [...new Set([
+    ...(comps || []).filter(c => c.component_type === 'hotel').map(c => String(c.name || '').trim()),
+    ...((Array.isArray(pkg.hotels) ? pkg.hotels : []).map(h => String(h.name || '').trim())),
+  ].filter(Boolean))]
   const appBase = rahaalPublicBase()
   // v3.42 — never fail silently: has_image=true must always yield a real image URL (root cause of LIVE images:[] bug)
   if (pkg.has_image && !appBase) console.error(`[MERAAJ] WARNING: package ${pkg.id} has_image=true but no public base URL could be resolved (set RAHAAL_PUBLIC_BASE_URL or NEXT_PUBLIC_BASE_URL) — images[] will be sent empty`)
@@ -5143,7 +5178,7 @@ async function meraajContractPayload(db, T, pkg, comps, meraajOverride = null) {
     // Full marketplace room pricing matrix (per room type × adult/child/infant):
     // net = what the buyer office pays the seller, customer = suggested final sale price,
     // commission = buyer office margin. (Seller's internal costs are NEVER exposed.)
-    room_pricing: (m.market_pricing || []),
+    room_pricing: marketRows,
     // Full transport/bus fleet of the package (internal booking counts are not exposed)
     package_transports: transports.map(t => ({ name: t.name || '', type: t.type || 'bus', capacity: Number(t.capacity) || 0 })),
     // Full package components (names + types; internal cost/sale breakdown is not exposed)

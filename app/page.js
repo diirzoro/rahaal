@@ -8219,6 +8219,12 @@ function PackageShowcaseDialog({ pkg, onClose }) {
       L.push('', '✨ *مميزات البرنامج:*')
       for (const f of pkg.features) L.push(`✅ ${f}`)
     }
+    // v3.49 — hotels & nights in the marketing message
+    const pkgHotels = (pkg.hotels || []).filter(h => h.name)
+    if (pkgHotels.length > 0) {
+      L.push('', '🏨 *الإقامة الفندقية:*')
+      for (const h of pkgHotels) L.push(`🏨 ${h.name}${h.city ? ` — ${h.city}` : ''}${Number(h.nights) > 0 ? ` (🌙 ${h.nights} ليالٍ)` : ''}`)
+    }
     if (roomRows.length > 0) {
       L.push('', `💵 *الأسعار (${pkg.currency}):*`)
       for (const r of roomRows) {
@@ -8272,6 +8278,23 @@ function PackageShowcaseDialog({ pkg, onClose }) {
               <div className="text-sm font-black text-indigo-800">{nights !== null ? `${nights} ليلة` : '—'}</div>
             </div>
           </div>
+          {/* v3.49 — Hotels & nights distribution */}
+          {(pkg.hotels || []).filter(h => h.name).length > 0 && (
+            <div>
+              <div className="text-sm font-black text-slate-800 mb-2">🏨 الإقامة الفندقية</div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5">
+                {(pkg.hotels || []).filter(h => h.name).map((h, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2 text-sm text-slate-700 bg-amber-50/60 border border-amber-200 rounded-lg px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="font-bold truncate">🏨 {h.name}</div>
+                      {h.city && <div className="text-[11px] text-slate-500">📍 {h.city}</div>}
+                    </div>
+                    {Number(h.nights) > 0 && <div className="text-xs font-black text-amber-700 whitespace-nowrap">🌙 {h.nights} ليالٍ</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {/* Features */}
           {(pkg.features || []).length > 0 && (
             <div>
@@ -8790,6 +8813,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
       setF({ name: record.name, package_type: record.package_type, currency: record.currency, start_date: record.start_date ? new Date(record.start_date).toISOString().slice(0,10) : '', end_date: record.end_date ? new Date(record.end_date).toISOString().slice(0,10) : '', notes: record.notes || '', pricing_mode: record.pricing_mode || ((record.room_pricing || []).length > 0 ? 'direct' : 'components') })
       setItems([])
       setRooms(Array.isArray(record.room_pricing) ? record.room_pricing.map(r => ({ ...r })) : [])
+      setHotels(Array.isArray(record.hotels) ? record.hotels.map(h => ({ ...h })) : []) // v3.49
       setFeatures(Array.isArray(record.features) ? [...record.features] : [])
       setImgPreview(record.has_image ? `/api/packages/${record.id}/image?t=${Date.now()}` : null)
       setImgChanged(false); setImgRemoved(false); setFeatureInput('')
@@ -8797,6 +8821,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
       setF({ name: '', package_type: 'umrah', currency: 'SAR', start_date: todayISO(), end_date: '', notes: '', pricing_mode: 'direct' })
       setItems([])
       setRooms([])
+      setHotels([]) // v3.49
       setFeatures([]); setImgPreview(null); setImgChanged(false); setImgRemoved(false); setFeatureInput('')
     }
   }, [open, record])
@@ -8823,6 +8848,12 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
   const addRoom = (type = '') => setRooms(r => [...r, { type, sale_per_pax: 0, sale_child: '', sale_infant: '' }])
   const updRoom = (i, k, v) => { const c = [...rooms]; c[i] = { ...c[i], [k]: v }; setRooms(c) }
   const rmRoom = (i) => setRooms(rooms.filter((_, idx) => idx !== i))
+  // v3.49 — Hotels quick-details helpers (name + city + nights)
+  const [hotels, setHotels] = useState([])
+  const addHotel = (city = '') => setHotels(h => [...h, { name: '', city, nights: '' }])
+  const updHotel = (i, k, v) => { const c = [...hotels]; c[i] = { ...c[i], [k]: v }; setHotels(c) }
+  const rmHotel = (i) => setHotels(hotels.filter((_, idx) => idx !== i))
+  const hotelNightsTotal = hotels.reduce((s, h) => s + (Number(h.nights) || 0), 0)
   const addItem = () => setItems([...items, { component_type: 'hotel', name: '', supplier_id: '', cost: 0, sale: 0, pricing_type: 'flat', include_infants: false, nights: '', city: '', cost_adult: '', cost_child: '', cost_infant: '', sale_adult: '', sale_child: '', sale_infant: '', room_rates: {} }])
   const updItem = (i, k, v) => { const c = [...items]; c[i] = { ...c[i], [k]: v }; setItems(c) }
   const updItemRoomRate = (i, roomType, k, v) => {
@@ -8852,12 +8883,13 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
     try {
       setSaving(true)
       const roomPricing = rooms.filter(r => String(r.type || '').trim()).map(r => ({ type: r.type, sale_per_pax: Number(r.sale_per_pax) || 0, sale_child: r.sale_child === '' || r.sale_child === null || r.sale_child === undefined ? null : Number(r.sale_child) || 0, sale_infant: r.sale_infant === '' || r.sale_infant === null || r.sale_infant === undefined ? null : Number(r.sale_infant) || 0 }))
+      const hotelsClean = hotels.filter(h => String(h.name || '').trim()).map(h => ({ name: h.name.trim(), city: String(h.city || '').trim(), nights: Number(h.nights) || 0 })) // v3.49
       let savedId = record?.id
       if (record) {
-        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, currency: f.currency, start_date: f.start_date || null, end_date: f.end_date || null, notes: f.notes, room_pricing: roomPricing, pricing_mode: f.pricing_mode, features } })
+        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, currency: f.currency, start_date: f.start_date || null, end_date: f.end_date || null, notes: f.notes, room_pricing: roomPricing, pricing_mode: f.pricing_mode, features, hotels: hotelsClean } })
         toast.success('تم التحديث')
       } else {
-        const pkg = await api('/packages', { method: 'POST', body: { ...f, room_pricing: roomPricing, features } })
+        const pkg = await api('/packages', { method: 'POST', body: { ...f, room_pricing: roomPricing, features, hotels: hotelsClean } })
         savedId = pkg.id
         // Create each item as a package component
         // v3.39 — unified pricing: in direct mode sale prices come ONLY from the room table (components sale = 0)
@@ -8990,6 +9022,9 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
                 <div className="col-span-3">🧒 طفل (2-11) — فارغ = كالبالغ</div>
                 <div className="col-span-2">👶 رضيع (&lt;2) — فارغ = 0</div>
               </div>
+              <div className="text-[10px] text-teal-700 bg-teal-50 border border-teal-200 rounded-md px-2 py-1">
+                ℹ️ تُرسل الأسعار لمعراج <b>مكتملة دائماً</b>: الطفل الفارغ يُرسل بسعر البالغ، والرضيع الفارغ يُرسل 0 — لا قيم فارغة تسبب NaN.
+              </div>
               {rooms.map((r, i) => (
                 <div key={i} className="grid grid-cols-2 md:grid-cols-12 gap-2 items-center bg-white rounded-lg border p-2">
                   <Input value={r.type} onChange={e => updRoom(i, 'type', e.target.value)} placeholder="نوع الغرفة (ثنائي...)" className="h-8 text-xs md:col-span-3" />
@@ -9011,6 +9046,44 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
                   <Button size="sm" variant="ghost" onClick={() => rmRoom(i)} className="h-7 w-7 p-0 text-rose-500"><Trash2 className="w-3 h-3" /></Button>
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+        {/* v3.49 — Hotels quick-details: name + city + nights (shown in program details & showcase) */}
+        <div className="border-2 border-dashed border-amber-200 rounded-xl p-3 mb-3 bg-amber-50/40">
+          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+            <div className="font-bold text-slate-800 text-sm">🏨 تفاصيل الفنادق والليالي</div>
+            <div className="flex gap-1 flex-wrap">
+              {!hotels.some(h => h.city === 'مكة المكرمة') && <Button size="sm" variant="outline" onClick={() => addHotel('مكة المكرمة')} className="h-7 text-xs border-amber-300 text-amber-700 hover:bg-amber-50">+ فندق مكة</Button>}
+              {!hotels.some(h => h.city === 'المدينة المنورة') && <Button size="sm" variant="outline" onClick={() => addHotel('المدينة المنورة')} className="h-7 text-xs border-amber-300 text-amber-700 hover:bg-amber-50">+ فندق المدينة</Button>}
+              <Button size="sm" variant="outline" onClick={() => addHotel('')} className="h-7 text-xs">+ فندق آخر</Button>
+            </div>
+          </div>
+          {hotels.length === 0 ? (
+            <div className="text-xs text-slate-400 text-center py-2">أضف فنادق البرنامج (الاسم + المدينة + عدد الليالي) — ستظهر بدقة في تفاصيل البرنامج ورسالة الواتساب.</div>
+          ) : (
+            <div className="space-y-2">
+              <div className="hidden md:grid md:grid-cols-12 gap-2 px-2 text-[10px] text-slate-500 font-semibold">
+                <div className="col-span-5">اسم الفندق</div>
+                <div className="col-span-4">المدينة</div>
+                <div className="col-span-3">🌙 عدد الليالي</div>
+              </div>
+              {hotels.map((h, i) => (
+                <div key={i} className="grid grid-cols-2 md:grid-cols-12 gap-2 items-center bg-white rounded-lg border p-2">
+                  <Input value={h.name} onChange={e => updHotel(i, 'name', e.target.value)} placeholder="اسم الفندق (رتاج الحرم...)" className="h-8 text-xs font-semibold md:col-span-5 col-span-2" />
+                  <Input value={h.city} onChange={e => updHotel(i, 'city', e.target.value)} placeholder="المدينة (مكة المكرمة...)" className="h-8 text-xs md:col-span-4" />
+                  <div className="flex items-center gap-1 md:col-span-3">
+                    <Input type="number" min="0" value={h.nights} onChange={e => updHotel(i, 'nights', e.target.value)} placeholder="الليالي" className="h-8 text-xs flex-1" />
+                    <span className="text-[10px] text-slate-400 whitespace-nowrap">ليلة</span>
+                    <Button size="sm" variant="ghost" onClick={() => rmHotel(i)} className="h-7 w-7 p-0 text-rose-500"><Trash2 className="w-3 h-3" /></Button>
+                  </div>
+                </div>
+              ))}
+              {nights > 0 && (
+                <div className={`text-[11px] font-bold rounded-md px-2 py-1 border ${hotelNightsTotal === nights ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-orange-50 border-orange-200 text-orange-700'}`}>
+                  🌙 مجموع ليالي الفنادق: {hotelNightsTotal} من أصل {nights} ليلة للبرنامج {hotelNightsTotal === nights ? '✓ متطابق' : hotelNightsTotal > nights ? '⚠️ أكثر من مدة البرنامج' : `(${nights - hotelNightsTotal} ليلة غير موزعة)`}
+                </div>
+              )}
             </div>
           )}
         </div>
