@@ -1342,6 +1342,13 @@ const canModule = (user, tabId) => {
   return user.permissions?.[`mod_${String(tabId).replace(/-/g, '_')}`] !== false
 }
 
+// v3.46 — Idle session auto-lock configuration (centralized — adjust here)
+const IDLE_TIMEOUT_MINUTES = 15
+// sessionStorage key set ONLY at idle-logout and consumed once on next login.
+// Deliberately NOT written on normal navigation, so a hard refresh (Ctrl+R / Ctrl+Shift+R)
+// always lands on the Dashboard (tab state is in-memory only), keeping both behaviors separate.
+const IDLE_RESUME_KEY = 'rahaal_idle_resume_tab'
+
 function Sidebar({ current, onChange }) {
   const { tenant, settings, user } = useAuth()
   return (
@@ -10372,6 +10379,43 @@ function OfficeSettings() {
 function TenantApp() {
   const [tab, setTab] = useState('dashboard')
   const { user, tenant, logout } = useAuth()
+  // v3.46 — Idle session auto-lock: logout via the EXISTING logout mechanism after inactivity,
+  // saving the current section so the user resumes exactly where they were after re-login.
+  const idleTimerRef = useRef(null)
+  const tabRef = useRef(tab)
+  useEffect(() => { tabRef.current = tab }, [tab])
+  useEffect(() => {
+    const arm = () => {
+      clearTimeout(idleTimerRef.current)
+      idleTimerRef.current = setTimeout(() => {
+        try { sessionStorage.setItem(IDLE_RESUME_KEY, tabRef.current) } catch {}
+        toast.warning(`🔒 تم قفل الجلسة تلقائياً بعد ${IDLE_TIMEOUT_MINUTES} دقيقة من عدم النشاط — سجّل الدخول للمتابعة من نفس الشاشة`, { duration: 10000 })
+        logout()
+      }, IDLE_TIMEOUT_MINUTES * 60 * 1000)
+    }
+    let lastMove = 0
+    const onActivity = (e) => {
+      if (e.type === 'mousemove') { const now = Date.now(); if (now - lastMove < 5000) return; lastMove = now }
+      arm()
+    }
+    const events = ['mousedown', 'keydown', 'scroll', 'touchstart', 'mousemove']
+    events.forEach(ev => window.addEventListener(ev, onActivity, { passive: true }))
+    arm()
+    return () => { clearTimeout(idleTimerRef.current); events.forEach(ev => window.removeEventListener(ev, onActivity)) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  // v3.46 — Resume the exact section after an idle-lock re-login (consumed once).
+  // Hard refresh is unaffected: this key exists ONLY after an idle logout.
+  useEffect(() => {
+    try {
+      const resume = sessionStorage.getItem(IDLE_RESUME_KEY)
+      if (resume) {
+        sessionStorage.removeItem(IDLE_RESUME_KEY)
+        if (NAV.some(n => n.id === resume) && canModule(user, resume)) setTab(resume)
+      }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   // v3.45 — RBAC: keep employees inside modules they're allowed to access
   const tabAllowed = canModule(user, tab)
   useEffect(() => {
@@ -11433,6 +11477,14 @@ function App() {
   }, [])
 
   useEffect(() => { refreshMe() }, [refreshMe])
+
+  // v3.46 — After an idle auto-lock, land directly on the LOGIN page (not the public landing)
+  // so the user can resume quickly. Key is written only by the idle-lock logout.
+  useEffect(() => {
+    if (!auth.loading && !auth.user) {
+      try { if (sessionStorage.getItem('rahaal_idle_resume_tab')) setPublicView('login') } catch {}
+    }
+  }, [auth.loading, auth.user])
 
   const onLogin = async (r) => {
     // Re-fetch to get settings
