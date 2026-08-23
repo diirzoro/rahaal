@@ -8516,6 +8516,13 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
   return (
     <Card className={`overflow-hidden hover:shadow-md transition ${closed ? 'opacity-70' : ''} ${selected ? 'ring-2 ring-rose-400' : ''}`}>
       <div className={closed ? 'h-1 bg-slate-400' : 'h-1 grad-brand'} />
+      {/* v3.47 — Optimized package image: fixed 16/9 ratio + object-cover (consistent on desktop/tablet/mobile) */}
+      {p?.has_image && (
+        <div className="w-full aspect-[16/9] overflow-hidden bg-slate-100">
+          <img src={`/api/packages/${p.id}/image`} alt={p?.name || 'صورة الباكج'} loading="lazy"
+            className="w-full h-full object-cover" onError={(e) => { e.currentTarget.parentElement.style.display = 'none' }} />
+        </div>
+      )}
       <CardContent className="p-4 space-y-2">
         <div className="flex items-start justify-between">
           <div className="flex items-start gap-2">

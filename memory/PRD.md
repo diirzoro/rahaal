@@ -20,6 +20,11 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 - Meraaj E2E 15/15 test (blocked on Meraaj team configuring temp secret)
 - Package Comparison feature (deferred by user)
 
+## v3.47 (completed) — Automatic image optimization
+- POST /api/packages/:id/image now optimizes ONCE at upload via sharp@0.34.5 (pinned in package.json): EXIF auto-rotate, resize fit:'inside' max 1200px longest side (aspect preserved, withoutEnlargement), WebP q82 (constants IMG_MAX_DIM/IMG_WEBP_QUALITY at top of route.js). package_images doc stores content_type='image/webp' + width/height/original_bytes/optimized_bytes. Serve endpoints & Meraaj contract untouched (content_type read from doc; public URL unchanged).
+- FE: PkgCard displays the image (when has_image) in aspect-[16/9] + object-cover block above card content, lazy-loaded, hides on error.
+- Tested 9/9 via agent: 3000x2000→1200x800 (97.6% smaller), portrait 1500x3000→600x1200, small 400x300 not enlarged, WebP RIFF signature, invalid input 400s, meraaj package.updated images URL intact. UI verified desktop + mobile screenshots.
+
 ## v3.46 (completed) — Idle Auto-Lock + Hard Refresh behavior
 - IDLE_TIMEOUT_MINUTES=15 (centralized const in page.js near NAV) + IDLE_RESUME_KEY sessionStorage key.
 - TenantApp: activity listeners (mousedown/keydown/scroll/touchstart/mousemove throttled 5s) arm a timer; on expiry: save current tab to sessionStorage key, toast, then EXISTING logout() (same as manual). Resume effect on mount consumes the key once and restores the tab (validated via canModule).

@@ -3,6 +3,11 @@ import { v4 as uuidv4 } from 'uuid'
 import { NextResponse } from 'next/server'
 import bcrypt from 'bcryptjs'
 import crypto from 'crypto'
+import sharp from 'sharp'
+
+// v3.47 — Package image optimization settings (applied ONCE at upload; centralized — adjust here)
+const IMG_MAX_DIM = 1200        // longest side in px (aspect ratio preserved, never enlarged)
+const IMG_WEBP_QUALITY = 82     // web-optimized quality (80–85 range)
 
 // ---------- MongoDB ----------
 let client, db
@@ -2685,14 +2690,28 @@ async function handleRoute(request, { params }) {
       const m = raw.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/)
       if (!m) return bad('صيغة الصورة غير صالحة — يُقبل JPG / PNG / WebP فقط')
       if (m[2].length > 4_000_000) return bad('حجم الصورة كبير جداً (الحد الأقصى ~3MB)')
+      // v3.47 — Automatic optimization ONCE at upload: resize to max 1200px (aspect preserved,
+      // never enlarged), auto-rotate per EXIF, convert to WebP q82. Keeps MongoDB payloads small.
+      // Serving endpoints & Meraaj integration unchanged (content_type is read from the doc).
+      let outBuf, outMeta
+      try {
+        const srcBuf = Buffer.from(m[2], 'base64')
+        const pipeline = sharp(srcBuf, { failOn: 'none' }).rotate()
+          .resize({ width: IMG_MAX_DIM, height: IMG_MAX_DIM, fit: 'inside', withoutEnlargement: true })
+          .webp({ quality: IMG_WEBP_QUALITY })
+        outBuf = await pipeline.toBuffer()
+        outMeta = await sharp(outBuf).metadata()
+      } catch {
+        return bad('تعذر معالجة الصورة — تأكد أنها صورة صالحة (JPG / PNG / WebP)')
+      }
       await db.collection('package_images').updateOne(
         { package_id: pkg.id, tenant_id: T },
-        { $set: { package_id: pkg.id, tenant_id: T, content_type: m[1], data: m[2], updated_at: new Date() }, $setOnInsert: { id: uuidv4(), created_at: new Date() } },
+        { $set: { package_id: pkg.id, tenant_id: T, content_type: 'image/webp', data: outBuf.toString('base64'), width: outMeta.width || null, height: outMeta.height || null, original_bytes: Math.round(m[2].length * 0.75), optimized_bytes: outBuf.length, updated_at: new Date() }, $setOnInsert: { id: uuidv4(), created_at: new Date() } },
         { upsert: true }
       )
       await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { has_image: true } })
       await maybeEmitMeraajPackageUpdate(db, T, pkg.id) // v3.32 — sync marketplace images
-      return ok({ saved: true })
+      return ok({ saved: true, optimized: { width: outMeta.width, height: outMeta.height, bytes: outBuf.length, format: 'webp' } })
     }
     if (pkgImgMatch && method === 'GET') {
       const img = await db.collection('package_images').findOne({ package_id: pkgImgMatch[1], tenant_id: T })
