@@ -8523,7 +8523,7 @@ function ConfirmDialog({ ctrl, onClose }) {
   }
   return (
     <Dialog open onOpenChange={(o) => { if (!o && !busy) onClose() }}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md" disableDirtyGuard>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-3 text-base">
             <span className={`w-10 h-10 shrink-0 rounded-full flex items-center justify-center text-xl ${danger ? 'bg-rose-100' : 'bg-teal-100'}`}>{ctrl.icon || (danger ? '⚠️' : '❓')}</span>
@@ -8558,7 +8558,12 @@ function ConfirmDialog({ ctrl, onClose }) {
 let __confirmSetterRef = null
 function ConfirmHost() {
   const [ctrl, setCtrl] = useState(null)
-  useEffect(() => { __confirmSetterRef = setCtrl; return () => { __confirmSetterRef = null } }, [])
+  useEffect(() => {
+    __confirmSetterRef = setCtrl
+    // v3.44 — global "discard typed data?" confirmation used by DialogContent's X/Esc dirty guard
+    globalThis.__rahaalConfirmDiscard = () => askConfirm({ title: 'إغلاق النافذة؟', desc: 'لديك بيانات مُدخلة لم تُحفظ — سيتم تجاهلها عند الإغلاق.', icon: '⚠️', variant: 'danger', confirmLabel: 'إغلاق وتجاهل البيانات' })
+    return () => { __confirmSetterRef = null; delete globalThis.__rahaalConfirmDiscard }
+  }, [])
   return <ConfirmDialog ctrl={ctrl} onClose={(confirmed) => { if (!confirmed && ctrl?.__cancel) ctrl.__cancel(); setCtrl(null) }} />
 }
 // askConfirm(opts) → Promise<boolean> — or Promise<string|null> when opts.input is provided (prompt mode)
