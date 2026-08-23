@@ -20,6 +20,12 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 - Meraaj E2E 15/15 test (blocked on Meraaj team configuring temp secret)
 - Package Comparison feature (deferred by user)
 
+## v3.48 (completed) — Full responsive audit & fixes
+- Central fixes: shared DialogContent now max-h-[92vh] + overflow-y-auto + rounded-lg (all 48 dialogs fit any viewport with internal scroll); TopBar flex-wrap + min-w-0 + responsive title sizes (action buttons wrap on narrow screens).
+- Existing foundations kept: sidebar icon-rail w-16 on mobile / w-64 md+, main overflow-x-hidden min-w-0, globals.css v3.9.5 (tables horizontal scroll, tablist scroll, dialog 96vw mobile).
+- Audited via emulation: 320x640, 360x800, 1920x1080. ALL 20 sidebar tabs = 0 horizontal overflow at 360px. Login/landing/dashboard/packages/tickets/receipt/boxes/reports/settings/meraaj verified visually. Package form dialog (345x736), voucher dialog, showcase dialog (with image + pricing table) all fit viewport. Desktop 1920 layout intact. RTL/Arabic wrapping correct.
+- Note: GitHub push must be done by the user via "Save to GitHub" in the chat UI (agent does not perform git write actions).
+
 ## v3.47 (completed) — Automatic image optimization
 - POST /api/packages/:id/image now optimizes ONCE at upload via sharp@0.34.5 (pinned in package.json): EXIF auto-rotate, resize fit:'inside' max 1200px longest side (aspect preserved, withoutEnlargement), WebP q82 (constants IMG_MAX_DIM/IMG_WEBP_QUALITY at top of route.js). package_images doc stores content_type='image/webp' + width/height/original_bytes/optimized_bytes. Serve endpoints & Meraaj contract untouched (content_type read from doc; public URL unchanged).
 - FE: PkgCard displays the image (when has_image) in aspect-[16/9] + object-cover block above card content, lazy-loaded, hides on error.

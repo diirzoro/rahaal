@@ -1418,12 +1418,12 @@ function Sidebar({ current, onChange }) {
 
 function TopBar({ title, subtitle, right }) {
   return (
-    <div className="flex items-center justify-between mb-6 animate-fade-in">
-      <div>
-        <h1 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight">{title}</h1>
+    <div className="flex flex-wrap items-center justify-between gap-2 mb-6 animate-fade-in">
+      <div className="min-w-0">
+        <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-slate-900 tracking-tight break-words">{title}</h1>
         {subtitle && <p className="text-sm text-slate-500 mt-1">{subtitle}</p>}
       </div>
-      <div className="flex items-center gap-2">{right}</div>
+      <div className="flex flex-wrap items-center gap-2 max-w-full">{right}</div>
     </div>
   )
 }
