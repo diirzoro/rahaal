@@ -1462,6 +1462,27 @@ async function handleRoute(request, { params }) {
       return ok({ success: true })
     }
 
+
+    // v3.50 — BATCH RE-SYNC: recompute market pricing fresh from current room_pricing and
+    // re-emit package.updated for ALL shared packages (owner only). Fixes stale/zero prices at once.
+    if (route === '/meraaj/resync-all' && method === 'POST') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const sharedPkgs = await db.collection('packages').find({ tenant_id: T, 'meraaj.shared': true, archived: { $ne: true } }).toArray()
+      let synced = 0, failed = 0
+      for (const pkg of sharedPkgs) {
+        try {
+          const m = pkg.meraaj || {}
+          const fresh = computeMeraajMarketPricing(pkg.room_pricing || [], m.buyer_commission_mode || 'amount', Number(m.buyer_commission_value) || 0, m.commission_direction || 'deducted')
+          if (fresh.length > 0) {
+            await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { 'meraaj.market_pricing': fresh, 'meraaj.market_pricing_updated_at': new Date() } })
+          }
+          await maybeEmitMeraajPackageUpdate(db, T, pkg.id)
+          synced++
+        } catch { failed++ }
+      }
+      return ok({ total: sharedPkgs.length, synced, failed })
+    }
+
     // ============ v3.24 — MERAAJ NETWORK: tenant-authenticated endpoints ============
     // SSO token: signed payload the Meraaj store verifies with the shared secret (5-minute expiry)
     if (route === '/meraaj/sso-token' && method === 'POST') {

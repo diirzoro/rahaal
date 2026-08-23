@@ -7448,7 +7448,7 @@ function PackagesScreen() {
         )}
         <div className="text-sm font-bold text-slate-700 mb-2">🟢 الباكجات المفتوحة</div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={canProfit ? () => setReportPkg(p) : undefined} onExtend={() => setExtendPkg(p)} onDuplicate={() => dupPkg(p)} onMeraaj={() => setMeraajPkg(p)} onShowcase={() => setShowcasePkg(p)} onArchive={() => archivePkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
+          {openPackages.map(p => <PkgCard key={p?.id} p={p} onOpen={() => setDetailsPkg(p)} onClose={() => closePkg(p)} onEdit={() => { setEditing(p); setOpen(true) }} onDelete={() => delPkg(p)} onReport={canProfit ? () => setReportPkg(p) : undefined} onExtend={() => setExtendPkg(p)} onDuplicate={() => dupPkg(p)} onMeraaj={canProfit ? () => setMeraajPkg(p) : undefined} onShowcase={() => setShowcasePkg(p)} onArchive={() => archivePkg(p)} selectable selected={selectedIds.has(p?.id)} onToggleSelect={() => toggleOne(p?.id)} />)}
           {openPackages.length === 0 && <div className="col-span-full text-center text-slate-400 py-8 text-sm">{dateBounds ? 'لا نتائج ضمن النطاق التاريخي' : 'لا توجد باكجات مفتوحة — أنشئ باكج جديد'}</div>}
         </div>
       </div>
@@ -8362,6 +8362,10 @@ function PackageShowcaseDialog({ pkg, onClose }) {
 
 // v3.24 — Meraaj Network Store screen (iframe عند توفر الرابط + مركز مزامنة)
 function MeraajStoreScreen() {
+  // v3.50 — RBAC Phase 2: commissions/net visible only to owner or show_profit holders
+  const { user: mrUser } = useAuth()
+  const isOwner = mrUser?.role === 'owner'
+  const canProfit = isOwner || mrUser?.permissions?.show_profit === true
   const [config, setConfig] = useState(null)
   const [iframeUrl, setIframeUrl] = useState(null)
   const [inbound, setInbound] = useState([])
@@ -8390,7 +8394,7 @@ function MeraajStoreScreen() {
   // v3.26 — approve inbound booking into a real accounting booking
   const [approving, setApproving] = useState(null)
   const approveBooking = async (b) => {
-    if (!(await askConfirm({ title: `اعتماد حجز "${b.buyer_office_name}"`, desc: `اعتماد الحجز (${b.seats} مقعد) وتحويله لحجز محاسبي فعلي؟\n\nسيُنشأ: عميل باسم المكتب المشتري (إن لم يوجد) + حجز في الباكج + قيد يومية متوازن بصافي ${(b.net_to_seller_total || 0).toLocaleString('en-US')} ${b.currency}`, icon: '✅', confirmLabel: 'اعتماد وتحويل' }))) return
+    if (!(await askConfirm({ title: `اعتماد حجز "${b.buyer_office_name}"`, desc: `اعتماد الحجز (${b.seats} مقعد) وتحويله لحجز محاسبي فعلي؟\n\nسيُنشأ: عميل باسم المكتب المشتري (إن لم يوجد) + حجز في الباكج + قيد يومية متوازن${canProfit ? ` بصافي ${(b.net_to_seller_total || 0).toLocaleString('en-US')} ${b.currency}` : ''}`, icon: '✅', confirmLabel: 'اعتماد وتحويل' }))) return
     try {
       setApproving(b.id)
       const res = await api(`/meraaj/inbound-bookings/${b.id}/approve`, { method: 'POST' })
@@ -8422,10 +8426,22 @@ function MeraajStoreScreen() {
       await load()
     } catch (e) { toast.error(e.message) } finally { setActivating(false) }
   }
+  // v3.50 — Batch re-sync all shared packages (owner only)
+  const [resyncing, setResyncing] = useState(false)
+  const resyncAll = async () => {
+    if (!(await askConfirm({ title: 'تحديث كل الباقات في معراج', desc: `سيتم إعادة حساب أسعار السوق من أسعار الغرف الحالية لكل الباقات المُشارَكة (${sharedPkgs.length} باقة) وإرسال تحديث فوري لمعراج — لضمان ظهور الأسعار الصحيحة بدون أصفار.`, icon: '🔄', confirmLabel: 'تحديث الكل الآن' }))) return
+    setResyncing(true)
+    try {
+      const r = await api('/meraaj/resync-all', { method: 'POST' })
+      toast.success(`✅ تم إرسال التحديث لـ ${r.synced} باقة${r.failed ? ` — فشل ${r.failed}` : ''} من أصل ${r.total}`)
+      await load()
+    } catch (e) { toast.error(e.message) } finally { setResyncing(false) }
+  }
   return (
     <div>
-      <TopBar title="🕋 متجر معراج نتورك" subtitle="سوق B2B لبيع وشراء برامج العمرة والسياحة بين المكاتب" right={<div className="flex gap-2 items-center">
+      <TopBar title="🕋 متجر معراج نتورك" subtitle="سوق B2B لبيع وشراء برامج العمرة والسياحة بين المكاتب" right={<div className="flex gap-2 items-center flex-wrap">
         {storeActive && <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 h-8 px-3">✅ المتجر مفعّل</Badge>}
+        {isOwner && sharedPkgs.length > 0 && <Button size="sm" onClick={resyncAll} disabled={resyncing} className="gap-1 text-xs h-8 bg-purple-700 hover:bg-purple-800 text-white">{resyncing ? <Loader2 className="w-3 h-3 animate-spin" /> : '🔄'} تحديث كل الباقات في معراج</Button>}
         <Button variant="outline" onClick={load} className="gap-1 text-xs h-8">🔄 تحديث</Button>
       </div>} />
       {iframeUrl && storeActive ? (
@@ -8468,7 +8484,7 @@ function MeraajStoreScreen() {
       {view === 'shared' && (
         sharedPkgs.length === 0 ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">لا توجد باقات مُشارَكة — من قسم الباكجات اضغط زر "🕋 معراج" على أي باقة</CardContent></Card> : (
           <Card><CardContent className="p-0"><Table>
-            <TableHeader><TableRow><TableHead>الباكج</TableHead><TableHead>أسعار السوق (بالغ)</TableHead><TableHead>عمولة الوكيل</TableHead><TableHead>المقاعد (مباع/مخصص)</TableHead><TableHead>متاح</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>الباكج</TableHead><TableHead>أسعار السوق (بالغ)</TableHead>{canProfit && <TableHead>عمولة الوكيل</TableHead>}<TableHead>المقاعد (مباع/مخصص)</TableHead><TableHead>متاح</TableHead></TableRow></TableHeader>
             <TableBody>{sharedPkgs.map(p => {
               const m = p.meraaj || {}
               const avail = Math.max(0, (Number(m.seats_allocated) || 0) - (Number(m.seats_sold) || 0))
@@ -8479,10 +8495,10 @@ function MeraajStoreScreen() {
                   {mp.length === 0 ? '—' : mp.slice(0, 3).map(r => <span key={r.room_type} className="me-2 whitespace-nowrap">🛏️{r.room_type}: <b className="text-purple-700">{(r.customer?.adult || 0).toLocaleString('en-US')}</b></span>)}
                   {mp.length > 3 && <span className="text-slate-400">+{mp.length - 3}</span>}
                 </TableCell>
-                <TableCell className="text-xs text-amber-700 whitespace-nowrap">
+                {canProfit && <TableCell className="text-xs text-amber-700 whitespace-nowrap">
                   {m.buyer_commission_mode === 'percent' ? `${m.buyer_commission_value}%` : fmt(m.buyer_commission_value || 0, p.currency)}
                   <span className="text-[9px] text-slate-400 block">{m.commission_direction === 'added' ? '➕ فوق السعر' : '➖ من السعر'}</span>
-                </TableCell>
+                </TableCell>}
                 <TableCell className="text-xs">{m.seats_sold || 0} / {m.seats_allocated || 0}</TableCell>
                 <TableCell><Badge className={avail > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}>{avail > 0 ? `${avail} متاح` : 'نفدت'}</Badge></TableCell>
               </TableRow>)
@@ -9231,7 +9247,10 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
 }
 
 function PackageDetailsDialog({ pkg, onClose, onChanged }) {
-  const [tab, setTab] = useState('components')
+  // v3.50 — RBAC Phase 2: costs/components/transports tabs are financial — owner or show_profit only
+  const { user: pdUser } = useAuth()
+  const canProfit = pdUser?.role === 'owner' || pdUser?.permissions?.show_profit === true
+  const [tab, setTab] = useState(canProfit ? 'components' : 'bookings')
   const [comps, setComps] = useState([])
   const [bookings, setBookings] = useState([])
   const [transports, setTransports] = useState([]) // v3.9.26 — Package transports
@@ -9325,15 +9344,15 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
       <DialogContent dir="rtl" className="max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{pkg.name} — {PACKAGE_TYPES.find(t => t.v === pkg.package_type)?.l}</DialogTitle>
-          <DialogDescription>سعر الفرد الواحد: تكلفة <b>{fmt(totalCost, pkg.currency)}</b> • بيع <b>{fmt(totalSale, pkg.currency)}</b> • ربح <b className="text-emerald-600">{fmt(profit, pkg.currency)}</b></DialogDescription>
+          <DialogDescription>{canProfit ? (<>سعر الفرد الواحد: تكلفة <b>{fmt(totalCost, pkg.currency)}</b> • بيع <b>{fmt(totalSale, pkg.currency)}</b> • ربح <b className="text-emerald-600">{fmt(profit, pkg.currency)}</b></>) : (<>سعر الفرد الواحد (بيع): <b>{fmt(totalSale, pkg.currency)}</b></>)}</DialogDescription>
         </DialogHeader>
         <div className="flex gap-2 mb-3 border-b flex-wrap">
-          <button onClick={() => setTab('components')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'components' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500'}`}>🧩 المكونات ({comps.length})</button>
-          <button onClick={() => setTab('transports')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'transports' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500'}`}>🚌 وسائل النقل ({transports.length})</button>
+          {canProfit && <button onClick={() => setTab('components')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'components' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500'}`}>🧩 المكونات ({comps.length})</button>}
+          {canProfit && <button onClick={() => setTab('transports')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'transports' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500'}`}>🚌 وسائل النقل ({transports.length})</button>}
           <button onClick={() => setTab('bookings')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'bookings' ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-slate-500'}`}>👥 المسجلون ({bookings.length})</button>
           <button onClick={printRoomingList} className="px-4 py-2 text-sm font-bold text-indigo-600 hover:text-indigo-800 ms-auto">🖨️ كشف التسكين</button>
         </div>
-        {tab === 'components' && (
+        {canProfit && tab === 'components' && (
           <div className="space-y-3">
             {pkg.status !== 'closed' && (
               <div className="p-3 bg-slate-50 rounded-lg space-y-2">
@@ -9454,7 +9473,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
             </Table>
           </div>
         )}
-        {tab === 'transports' && (
+        {canProfit && tab === 'transports' && (
           <div className="space-y-3">
             {pkg.status !== 'closed' && (
               <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
@@ -9628,7 +9647,8 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     </div>
                   )}
                 </div>
-                {/* v3.17 — Manual booking discount (B2B flexibility) */}
+                {/* v3.17 — Manual booking discount (B2B flexibility) — v3.50: apply_discount permission only */}
+                {(pdUser?.role === 'owner' || pdUser?.permissions?.apply_discount === true) && (
                 <div className="bg-white/60 border-2 border-amber-200 rounded-lg p-3">
                   <div className="text-xs font-bold text-slate-800 mb-2">💸 خصم على الحجز (اختياري)</div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -9657,6 +9677,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     )
                   })()}
                 </div>
+                )}
                 {/* v3.9.22 — Unified Payment Selector (Package Booking) */}
                 <div className="bg-white/60 border-2 border-blue-200 rounded-lg p-3">
                   <div className="text-xs font-bold text-slate-800 mb-2 flex items-center gap-2">💳 <span>طريقة الدفع + جهة الاستلام</span></div>
