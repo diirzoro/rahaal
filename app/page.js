@@ -9150,13 +9150,36 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
                       <Input type="number" min="0" value={r.cost_adult ?? ''} onChange={e => updRoom(i, 'cost_adult', e.target.value)} placeholder="تكلفة البالغ" className="h-7 text-[11px] md:col-span-3" />
                       <Input type="number" min="0" value={r.cost_child ?? ''} onChange={e => updRoom(i, 'cost_child', e.target.value)} placeholder="تكلفة الطفل" className="h-7 text-[11px] md:col-span-3" />
                       <Input type="number" min="0" value={r.cost_infant ?? ''} onChange={e => updRoom(i, 'cost_infant', e.target.value)} placeholder="تكلفة الرضيع" className="h-7 text-[11px] md:col-span-3" />
-                      {(Number(r.sale_per_pax) || 0) > 0 && (Number(r.cost_adult) || 0) > 0 && (
-                        <div className="col-span-3 md:col-span-12 text-[10px] font-bold text-emerald-700">
-                          📈 ربح البالغ: {((Number(r.sale_per_pax) || 0) - (Number(r.cost_adult) || 0)).toLocaleString('en-US')}
-                          {(Number(r.cost_child) || 0) > 0 && <> • ربح الطفل: {(((r.sale_child ?? '') === '' ? (Number(r.sale_per_pax) || 0) : (Number(r.sale_child) || 0)) - (Number(r.cost_child) || 0)).toLocaleString('en-US')}</>}
-                          {(Number(r.cost_infant) || 0) > 0 && <> • ربح الرضيع: {((Number(r.sale_infant) || 0) - (Number(r.cost_infant) || 0)).toLocaleString('en-US')}</>} {f.currency}
-                        </div>
-                      )}
+                      {/* v3.55 — LIVE per-age profit badges (updates as you type; mirrors backend semantics: empty child sale = adult, empty infant sale = 0, empty costs = 0) */}
+                      {(() => {
+                        const saleA = Number(r.sale_per_pax) || 0
+                        const saleC = ((r.sale_child ?? '') === '') ? saleA : (Number(r.sale_child) || 0)
+                        const saleI = Number(r.sale_infant) || 0
+                        const costA = Number(r.cost_adult) || 0
+                        const costC = Number(r.cost_child) || 0
+                        const costI = Number(r.cost_infant) || 0
+                        const tiers = [
+                          { key: 'a', icon: '👨', label: 'بالغ', sale: saleA, cost: costA },
+                          { key: 'c', icon: '🧒', label: 'طفل', sale: saleC, cost: costC },
+                          { key: 'i', icon: '👶', label: 'رضيع', sale: saleI, cost: costI },
+                        ].filter(t => t.sale > 0 || t.cost > 0)
+                        if (tiers.length === 0) return null
+                        return (
+                          <div className="col-span-3 md:col-span-12 flex flex-wrap items-center gap-1.5 pt-0.5">
+                            <span className="text-[10px] font-bold text-slate-500">📈 الربح المباشر:</span>
+                            {tiers.map(t => {
+                              const profit = t.sale - t.cost
+                              const pct = t.sale > 0 ? Math.round((profit / t.sale) * 1000) / 10 : null
+                              const cls = profit > 0 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : profit < 0 ? 'bg-rose-50 border-rose-300 text-rose-700' : 'bg-slate-50 border-slate-200 text-slate-500'
+                              return (
+                                <span key={t.key} className={`text-[10px] font-bold border rounded-md px-1.5 py-0.5 whitespace-nowrap ${cls}`}>
+                                  {t.icon} {t.label}: {profit.toLocaleString('en-US')} {f.currency}{pct !== null ? ` (${pct}%)` : ''}{profit < 0 ? ' ⚠️ خسارة' : ''}
+                                </span>
+                              )
+                            })}
+                          </div>
+                        )
+                      })()}
                     </div>
                   )}
                 </div>
