@@ -1742,6 +1742,45 @@ async function handleRoute(request, { params }) {
     if (route === '/meraaj/inbound-bookings' && method === 'GET') {
       return ok(clean(await db.collection('meraaj_inbound_bookings').find(tf).sort({ created_at: -1 }).limit(200).toArray()))
     }
+    // v3.63 — ONE-TAP SEAT REFILL (owner): raise a shared package's allocated Meraaj seats
+    // directly from the dashboard capacity warning. Emits the standard package.updated event
+    // (untouched meraajContractPayload) so the marketplace availability updates immediately.
+    const seatRefillMatch = route.match(/^\/meraaj\/packages\/([^/]+)\/add-seats$/)
+    if (seatRefillMatch && method === 'POST') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const pkg = await db.collection('packages').findOne({ id: seatRefillMatch[1], tenant_id: T })
+      if (!pkg) return bad('الباكج غير موجود', 404)
+      if (!pkg.meraaj?.shared) return bad('الباكج غير مشارك في سوق معراج')
+      const b = await request.json().catch(() => ({}))
+      if (!(Number(b.add) > 0)) return bad('حدد عدد المقاعد المضافة (1 على الأقل)')
+      const add = Math.min(1000, Math.max(1, Math.floor(Number(b.add))))
+      const newAlloc = Math.min(10000, (Number(pkg.meraaj.seats_allocated) || 0) + add)
+      await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { 'meraaj.seats_allocated': newAlloc, 'meraaj.updated_at': new Date() } })
+      const updated = await db.collection('packages').findOne({ id: pkg.id, tenant_id: T })
+      const comps = await db.collection('package_components').find({ package_id: pkg.id, tenant_id: T }).toArray()
+      await emitMeraajEvent(db, T, 'package.updated', await meraajContractPayload(db, T, updated, comps, updated.meraaj))
+      const sold = Number(updated.meraaj?.seats_sold) || 0
+      return ok({ seats_allocated: newAlloc, seats_sold: sold, remaining: Math.max(0, newAlloc - sold), added: add })
+    }
+    // v3.63 — BUYER OFFICE RATING TAGS (owner): excellent | good | late_payment | '' (remove)
+    if (route === '/meraaj/office-tag' && method === 'POST') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const b = await request.json().catch(() => ({}))
+      const office = String(b.office || '').trim().slice(0, 120)
+      if (!office) return bad('اسم المكتب مطلوب')
+      const allowed = ['excellent', 'good', 'late_payment', '']
+      if (!allowed.includes(b.tag)) return bad('تقييم غير صالح')
+      if (b.tag === '') {
+        await db.collection('meraaj_office_tags').deleteOne({ tenant_id: T, office })
+      } else {
+        await db.collection('meraaj_office_tags').updateOne(
+          { tenant_id: T, office },
+          { $set: { tag: b.tag, updated_at: new Date(), updated_by: sess.user.id }, $setOnInsert: { id: uuidv4(), tenant_id: T, office } },
+          { upsert: true }
+        )
+      }
+      return ok({ office, tag: b.tag })
+    }
     // v3.26 — APPROVE inbound Meraaj booking → real package_booking + balanced Journal Entry
     // v3.53 — logic extracted to approveMeraajInboundBooking() (shared with the optional auto-approve setting)
     const meraajApproveMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/approve$/)
@@ -1976,6 +2015,11 @@ async function handleRoute(request, { params }) {
       }
       const buyers = Object.values(buyerMap).sort((a, b) => b.revenue - a.revenue).slice(0, 10)
         .map(b => ({ ...b, revenue: +b.revenue.toFixed(2), net_to_seller: +b.net_to_seller.toFixed(2) }))
+      // v3.63 — attach owner rating tags to buyer offices
+      const tagDocs = await db.collection('meraaj_office_tags').find(tf).toArray()
+      const tagMap = {}
+      for (const t of tagDocs) tagMap[t.office] = t.tag
+      for (const b of buyers) b.tag = tagMap[b.office] || ''
       return ok({
         stats: {
           accepted_24h: accepted24, accepted_7d: accepted7d,

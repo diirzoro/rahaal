@@ -1459,6 +1459,18 @@ function Dashboard({ setTab }) {
   const [tomorrow, setTomorrow] = useState([])
   const [monAlerts, setMonAlerts] = useState(null)
   const [digest, setDigest] = useState(null) // v3.61 — owner Meraaj daily digest (null for staff/errors)
+  // v3.63 — full digest card in morning hours (before 12:00), compact strip afterwards (expandable)
+  const [digestOpen, setDigestOpen] = useState(() => new Date().getHours() < 12)
+  const [refillBusy, setRefillBusy] = useState(null)
+  const refillSeats = async (w) => {
+    setRefillBusy(w.id)
+    try {
+      const r = await api(`/meraaj/packages/${w.id}/add-seats`, { method: 'POST', body: { add: 5 } })
+      toast.success(`✅ أُضيفت ${r.added} مقاعد لـ«${w.name}» — المتاح الآن ${r.remaining} من ${r.seats_allocated} (تم إشعار معراج)`)
+      const dg = await api('/meraaj/daily-digest').catch(() => null)
+      setDigest(dg)
+    } catch (e) { toast.error(e.message) } finally { setRefillBusy(null) }
+  }
   const [loading, setLoading] = useState(true)
   const load = useCallback(async () => {
     try {
@@ -1514,8 +1526,18 @@ function Dashboard({ setTab }) {
           <Button size="sm" variant="outline" onClick={() => setTab('meraaj')} className="border-rose-300 text-rose-700 hover:bg-rose-100 text-xs shrink-0">فحص الصحة ←</Button>
         </div>
       )}
-      {/* v3.61 — Owner morning digest: yesterday's Meraaj bookings, revenue, pending approvals */}
-      {digest && (
+      {/* v3.61 — Owner morning digest. v3.63 — full card in morning hours only; compact strip otherwise */}
+      {digest && !digestOpen && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-indigo-50/70 border border-indigo-200 rounded-xl px-3 py-2">
+          <span className="text-xs font-black text-indigo-900">🌅 ملخص معراج:</span>
+          <span className="text-[11px] font-bold text-slate-600">أمس {digest.yesterday?.bookings ?? 0} حجز • صافي <span className="font-mono">{(digest.yesterday?.net_to_seller ?? 0).toLocaleString('en-US')}</span></span>
+          <span className="text-[11px] font-bold text-slate-600">اليوم {digest.today?.bookings ?? 0} حجز</span>
+          {digest.pending > 0 && <button onClick={() => setTab('meraaj')} className="text-[11px] font-black text-amber-700 hover:underline">🔔 {digest.pending} معلق</button>}
+          {(digest.capacity_warnings || []).length > 0 && <span className="text-[11px] font-black text-amber-700">⚠️ {digest.capacity_warnings.length} باكج قرب النفاد</span>}
+          <button onClick={() => setDigestOpen(true)} className="text-[11px] font-bold text-indigo-600 hover:underline mr-auto">عرض التفاصيل ▾</button>
+        </div>
+      )}
+      {digest && digestOpen && (
         <Card className="border-indigo-200 bg-gradient-to-l from-indigo-50/60 via-white to-white">
           <CardContent className="p-4">
             <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
@@ -1528,6 +1550,8 @@ function Dashboard({ setTab }) {
                 ) : (
                   <span className="text-[11px] font-bold text-emerald-600">✅ لا حجوزات معلقة</span>
                 )}
+                {/* v3.63 — collapse to compact strip */}
+                <button onClick={() => setDigestOpen(false)} title="طي الملخص" className="text-slate-400 hover:text-slate-600 text-sm px-1">▴</button>
               </div>
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
@@ -1562,6 +1586,11 @@ function Dashboard({ setTab }) {
                       <div className={`h-full rounded-full ${w.pct >= 95 ? 'bg-rose-500' : 'bg-amber-500'}`} style={{ width: `${Math.min(100, w.pct)}%` }} />
                     </div>
                     <span className={`text-[10px] font-black shrink-0 ${w.pct >= 95 ? 'text-rose-600' : 'text-amber-700'}`}>{w.pct}%</span>
+                    {/* v3.63 — one-tap seat refill (+5, notifies Meraaj) */}
+                    <Button size="sm" onClick={() => refillSeats(w)} disabled={refillBusy === w.id}
+                      className="h-6 text-[10px] px-2 gap-1 bg-amber-600 hover:bg-amber-700 shrink-0" title="زيادة 5 مقاعد وإشعار معراج فوراً">
+                      {refillBusy === w.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '➕'} 5 مقاعد
+                    </Button>
                   </div>
                 ))}
               </div>
@@ -8570,6 +8599,18 @@ function MeraajStoreScreen() {
   // v3.62 — monthly Meraaj Excel report
   const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7))
   const [reportBusy, setReportBusy] = useState(false)
+  // v3.63 — buyer office rating tags: click cycles — → ممتاز → جيد → متأخر بالدفع → —
+  const OFFICE_TAGS = { '': { label: 'بدون تقييم', cls: 'bg-slate-100 text-slate-400 border-slate-200' }, excellent: { label: '⭐ ممتاز', cls: 'bg-emerald-100 text-emerald-700 border-emerald-200' }, good: { label: '👍 جيد', cls: 'bg-blue-100 text-blue-700 border-blue-200' }, late_payment: { label: '⏰ متأخر بالدفع', cls: 'bg-rose-100 text-rose-700 border-rose-200' } }
+  const cycleOfficeTag = async (b, e) => {
+    e.stopPropagation()
+    const order = ['', 'excellent', 'good', 'late_payment']
+    const next = order[(order.indexOf(b.tag || '') + 1) % order.length]
+    try {
+      await api('/meraaj/office-tag', { method: 'POST', body: { office: b.office, tag: next } })
+      setHealth(h => ({ ...h, buyers: (h.buyers || []).map(x => x.office === b.office ? { ...x, tag: next } : x) }))
+      toast.success(next === '' ? `أُزيل تقييم «${b.office}»` : `تقييم «${b.office}»: ${OFFICE_TAGS[next].label}`)
+    } catch (err) { toast.error(err.message) }
+  }
   const downloadMonthlyReport = async () => {
     setReportBusy(true)
     try {
@@ -8876,9 +8917,13 @@ function MeraajStoreScreen() {
               <CardContent className="p-0">
                 {(health.buyers || []).length === 0 ? <div className="p-6 text-center text-xs text-slate-400">لا توجد حجوزات من مكاتب بعد</div> : (
                   <Table>
-                    <TableHeader><TableRow><TableHead className="text-xs">المكتب المشتري</TableHead><TableHead className="text-xs">حجوزات</TableHead><TableHead className="text-xs">معتمدة</TableHead><TableHead className="text-xs">مقاعد</TableHead><TableHead className="text-xs">الإيراد</TableHead><TableHead className="text-xs">صافي لك</TableHead><TableHead className="text-xs">آخر حجز</TableHead></TableRow></TableHeader>
+                    <TableHeader><TableRow><TableHead className="text-xs">المكتب المشتري</TableHead><TableHead className="text-xs">التقييم</TableHead><TableHead className="text-xs">حجوزات</TableHead><TableHead className="text-xs">معتمدة</TableHead><TableHead className="text-xs">مقاعد</TableHead><TableHead className="text-xs">الإيراد</TableHead><TableHead className="text-xs">صافي لك</TableHead><TableHead className="text-xs">آخر حجز</TableHead></TableRow></TableHeader>
                     <TableBody>{(health.buyers || []).map((b, i) => (<TableRow key={b.office} onClick={() => setOfficeFilter(b.office)} className={`cursor-pointer hover:bg-blue-50/60 ${i === 0 ? 'bg-amber-50/40' : ''}`} title="عرض حجوزات هذا المكتب">
                       <TableCell className="text-[11px] font-black text-blue-700 hover:underline">{i === 0 && '🏆 '}{b.office}</TableCell>
+                      {/* v3.63 — clickable rating badge (cycles values, does not open the office dialog) */}
+                      <TableCell onClick={e => cycleOfficeTag(b, e)} title="انقر لتغيير التقييم">
+                        <span className={`text-[9px] font-black border rounded-full px-2 py-0.5 whitespace-nowrap ${(OFFICE_TAGS[b.tag || ''] || OFFICE_TAGS['']).cls}`}>{(OFFICE_TAGS[b.tag || ''] || OFFICE_TAGS['']).label}</span>
+                      </TableCell>
                       <TableCell className="text-[11px]">{b.bookings}</TableCell>
                       <TableCell className="text-[11px] text-emerald-700 font-bold">{b.approved}</TableCell>
                       <TableCell className="text-[11px]">{b.seats}</TableCell>
