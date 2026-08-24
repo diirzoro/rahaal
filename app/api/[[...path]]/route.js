@@ -1538,10 +1538,13 @@ async function handleRoute(request, { params }) {
         // v3.67 — opportunistic auto-retry of failed outbound events (OFF by default)
         auto_retry: !!settingsCfg?.meraaj_auto_retry,
         auto_retry_last: settingsCfg?.meraaj_auto_retry_last || null,
+        // v3.71 — daily WhatsApp digest reminder time ('HH:MM' or '' = disabled)
+        digest_reminder_time: settingsCfg?.meraaj_digest_reminder_time || '',
       })
     }
     // v3.53 — Meraaj behavior settings (owner only): auto-approve toggle
     // v3.61 — also accepts reject_alert_threshold (int 0..1000, 0 = alert disabled)
+    // v3.71 — also accepts digest_reminder_time ('HH:MM' 24h format, '' = disabled)
     if (route === '/meraaj/settings' && method === 'POST') {
       if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
       const b = await request.json()
@@ -1549,6 +1552,11 @@ async function handleRoute(request, { params }) {
       if ('auto_approve' in b) set.meraaj_auto_approve = !!b.auto_approve
       if ('reject_alert_threshold' in b) set.meraaj_reject_alert_threshold = Math.max(0, Math.min(1000, parseInt(b.reject_alert_threshold, 10) || 0))
       if ('auto_retry' in b) set.meraaj_auto_retry = !!b.auto_retry // v3.67
+      if ('digest_reminder_time' in b) { // v3.71
+        const t71 = String(b.digest_reminder_time || '').trim()
+        if (t71 !== '' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(t71)) return bad('صيغة الوقت غير صحيحة — استخدم HH:MM (24 ساعة)')
+        set.meraaj_digest_reminder_time = t71
+      }
       if (Object.keys(set).length === 0) return bad('لا توجد إعدادات لتحديثها')
       await db.collection('tenant_settings').updateOne(tf, { $set: set }, { upsert: true })
       const cfgDoc = await db.collection('tenant_settings').findOne(tf)
@@ -1556,6 +1564,7 @@ async function handleRoute(request, { params }) {
         auto_approve: !!cfgDoc?.meraaj_auto_approve,
         reject_alert_threshold: Number.isFinite(cfgDoc?.meraaj_reject_alert_threshold) ? cfgDoc.meraaj_reject_alert_threshold : 5,
         auto_retry: !!cfgDoc?.meraaj_auto_retry, // v3.67
+        digest_reminder_time: cfgDoc?.meraaj_digest_reminder_time || '', // v3.71
       })
     }
     // v3.53 — Lightweight pending-bookings counter (for the header notification bell)
@@ -1719,16 +1728,25 @@ async function handleRoute(request, { params }) {
       const cfgA = await db.collection('tenant_settings').findOne(tf)
       const thresholdA = Number.isFinite(cfgA?.meraaj_reject_alert_threshold) ? cfgA.meraaj_reject_alert_threshold : 5
       const rejectAlertA = thresholdA > 0 && rejectedTodayA >= thresholdA
+      const countsA = {
+        failed_events: failedTotal,
+        pending_bookings: pendingTotal,
+        capacity_warnings: capacityWarningsA.length,
+        missing_passports: missingTotal,
+        rejected_today: rejectedTodayA,
+        total: failedTotal + pendingTotal + capacityWarningsA.length + missingTotal + (rejectAlertA ? 1 : 0),
+      }
+      // v3.71 — DAILY SNAPSHOT (fire-and-forget, never blocks the response): one doc per
+      // tenant per UTC day in meraaj_alerts_history; upsert = last read of the day wins.
+      const todayKey71 = new Date().toISOString().slice(0, 10)
+      db.collection('meraaj_alerts_history').updateOne(
+        { tenant_id: T, date: todayKey71 },
+        { $set: { counts: countsA, updated_at: new Date() }, $setOnInsert: { id: uuidv4(), tenant_id: T, date: todayKey71, created_at: new Date() } },
+        { upsert: true }
+      ).catch(() => {})
       return ok({
         generated_at: new Date().toISOString(),
-        counts: {
-          failed_events: failedTotal,
-          pending_bookings: pendingTotal,
-          capacity_warnings: capacityWarningsA.length,
-          missing_passports: missingTotal,
-          rejected_today: rejectedTodayA,
-          total: failedTotal + pendingTotal + capacityWarningsA.length + missingTotal + (rejectAlertA ? 1 : 0),
-        },
+        counts: countsA,
         failed_events: failedLatest,
         pending_bookings: pendingLatest,
         capacity_warnings: capacityWarningsA,
@@ -1736,6 +1754,65 @@ async function handleRoute(request, { params }) {
         rejected_today: rejectedTodayA,
         reject_alert_threshold: thresholdA,
         reject_alert: rejectAlertA,
+      })
+    }
+    // v3.71 — ALERTS HISTORY (owner-only, READ-ONLY): daily snapshots of alerts-center counts
+    // (written opportunistically by GET /meraaj/alerts-center). ?days=N (default 14, clamp 7..60).
+    // Returns rows oldest→newest, one per day that has a snapshot.
+    if (route === '/meraaj/alerts-history' && method === 'GET') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const days71 = Math.max(7, Math.min(60, parseInt(url.searchParams.get('days'), 10) || 14))
+      const fromKey71 = new Date(Date.now() - (days71 - 1) * 24 * 3600 * 1000).toISOString().slice(0, 10)
+      const rows71 = await db.collection('meraaj_alerts_history').find({ tenant_id: T, date: { $gte: fromKey71 } }).sort({ date: 1 }).project({ _id: 0, date: 1, counts: 1, updated_at: 1 }).toArray()
+      return ok({ days: days71, rows: rows71 })
+    }
+    // v3.71 — COMPARISON TREND (owner-only, READ-ONLY): net_to_seller per month for the last
+    // N months (default 6, clamp 3..12) ending at ?month=YYYY-MM (default current). Series
+    // returned for the OVERALL total plus the top 6 offices and top 6 packages by window net.
+    // SAME sum semantics: rejected/cancelled excluded from net, counted in bookings.
+    if (route === '/meraaj/comparison-trend' && method === 'GET') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const endMonth71 = url.searchParams.get('month') || new Date().toISOString().slice(0, 7)
+      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(endMonth71)) return bad('صيغة الشهر غير صحيحة — استخدم YYYY-MM')
+      const nMonths71 = Math.max(3, Math.min(12, parseInt(url.searchParams.get('months'), 10) || 6))
+      const endMStart = new Date(endMonth71 + '-01T00:00:00.000Z')
+      const months71 = []
+      for (let i = nMonths71 - 1; i >= 0; i--) {
+        const d = new Date(Date.UTC(endMStart.getUTCFullYear(), endMStart.getUTCMonth() - i, 1))
+        months71.push(d.toISOString().slice(0, 7))
+      }
+      const winStart = new Date(months71[0] + '-01T00:00:00.000Z')
+      const winEnd = new Date(Date.UTC(endMStart.getUTCFullYear(), endMStart.getUTCMonth() + 1, 1))
+      const docs71 = await db.collection('meraaj_inbound_bookings').find({ ...tf, created_at: { $gte: winStart, $lt: winEnd } }).project({ buyer_office_name: 1, package_id: 1, package_name: 1, net_to_seller_total: 1, status: 1, created_at: 1, currency: 1 }).toArray()
+      const mIdx = {}
+      months71.forEach((m, i) => { mIdx[m] = i })
+      const zeros = () => months71.map(() => 0)
+      const totalsNet = zeros(), totalsBookings = zeros()
+      const offSeries = {}, pkgSeries = {}
+      let currency71 = ''
+      for (const d of docs71) {
+        const mk = new Date(d.created_at).toISOString().slice(0, 7)
+        const i = mIdx[mk]
+        if (i === undefined) continue
+        totalsBookings[i]++
+        if (d.status === 'rejected' || d.status === 'cancelled') continue
+        const net = Number(d.net_to_seller_total) || 0
+        totalsNet[i] += net
+        if (!currency71 && d.currency) currency71 = d.currency
+        const of = (d.buyer_office_name || 'غير معروف').trim() || 'غير معروف'
+        const pk = d.package_name || d.package_id || 'غير معروف'
+        offSeries[of] = offSeries[of] || zeros(); offSeries[of][i] += net
+        pkgSeries[pk] = pkgSeries[pk] || zeros(); pkgSeries[pk][i] += net
+      }
+      const topSeries = (map) => Object.entries(map)
+        .map(([name, values]) => ({ name, values: values.map(v => +v.toFixed(2)), total: +values.reduce((s, v) => s + v, 0).toFixed(2) }))
+        .sort((a, b) => b.total - a.total).slice(0, 6)
+      return ok({
+        months: months71,
+        currency: currency71,
+        totals: { net: totalsNet.map(v => +v.toFixed(2)), bookings: totalsBookings },
+        offices: topSeries(offSeries),
+        packages: topSeries(pkgSeries),
       })
     }
     // v3.69 — OFFICE PERFORMANCE COMPARISON (owner-only): month-over-month buyer-office

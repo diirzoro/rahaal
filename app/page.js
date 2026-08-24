@@ -8643,10 +8643,17 @@ function MeraajStoreScreen() {
   const [compMonth, setCompMonth] = useState(new Date().toISOString().slice(0, 7))
   const [compBusy, setCompBusy] = useState(false)
   const [alertRefillBusy, setAlertRefillBusy] = useState(null)
-  const loadAlertsCenter = () => api('/meraaj/alerts-center').then(setAlertsCenter).catch(() => {})
+  const loadAlertsCenter = () => {
+    api('/meraaj/alerts-center').then(setAlertsCenter).catch(() => {})
+    api('/meraaj/alerts-history?days=14').then(setAlertsHistory).catch(() => {}) // v3.71
+  }
   const loadComparison = async (m = compMonth) => {
     setCompBusy(true)
-    try { setComparison(await api(`/meraaj/office-comparison?month=${m}`)) } catch (e) { toast.error(e.message) } finally { setCompBusy(false) }
+    try {
+      setComparison(await api(`/meraaj/office-comparison?month=${m}`))
+      setTrendPick('__total__') // v3.71 — reset series selection on new month
+      api(`/meraaj/comparison-trend?month=${m}&months=6`).then(setCompTrend).catch(() => {}) // v3.71
+    } catch (e) { toast.error(e.message) } finally { setCompBusy(false) }
   }
   const alertsRefill = async (w) => {
     setAlertRefillBusy(w.id)
@@ -8688,8 +8695,10 @@ function MeraajStoreScreen() {
     } catch (e) { toast.error(e.message) }
   }
   // v3.70 — one-tap WhatsApp share of the alerts-center summary (client-side wa.me, no backend)
+  const alertsCenterRef = useRef(null)
+  useEffect(() => { alertsCenterRef.current = alertsCenter }, [alertsCenter])
   const shareAlertsWhatsApp = () => {
-    const a = alertsCenter
+    const a = alertsCenterRef.current || alertsCenter
     if (!a) { toast.error('لم تُحمَّل التنبيهات بعد'); return }
     const c = a.counts || {}
     const lines = [
@@ -8717,6 +8726,40 @@ function MeraajStoreScreen() {
     const iv = setInterval(() => { api('/meraaj/alerts-center').then(setAlertsCenter).catch(() => {}) }, 180000)
     return () => clearInterval(iv)
   }, [isOwner])
+  // v3.71 — alerts history (daily snapshots) + scheduled WhatsApp digest reminder + 6-month trend
+  const [alertsHistory, setAlertsHistory] = useState(null)
+  const [reminderVal, setReminderVal] = useState('')
+  const [compTrend, setCompTrend] = useState(null)
+  const [trendPick, setTrendPick] = useState('__total__')
+  useEffect(() => { if (config) setReminderVal(config.digest_reminder_time || '') }, [config])
+  const saveReminder = async () => {
+    try {
+      const r = await api('/meraaj/settings', { method: 'POST', body: { digest_reminder_time: reminderVal } })
+      setConfig(c => ({ ...c, digest_reminder_time: r.digest_reminder_time }))
+      toast.success(r.digest_reminder_time ? `⏰ سيذكّرك النظام يومياً عند ${r.digest_reminder_time} بإرسال الملخص` : '🔕 تم تعطيل تذكير الملخص اليومي')
+    } catch (e) { toast.error(e.message) }
+  }
+  // v3.71 — client-side daily reminder: fires ONCE per day (localStorage guard) while the app is open
+  useEffect(() => {
+    if (!isOwner) return
+    const check = () => {
+      const t = config?.digest_reminder_time
+      if (!t) return
+      const now = new Date()
+      const hm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+      const dayKey = now.toISOString().slice(0, 10)
+      if (hm >= t && localStorage.getItem('rahaal_digest_reminder') !== dayKey) {
+        localStorage.setItem('rahaal_digest_reminder', dayKey)
+        toast('⏰ تذكير يومي: أرسل ملخص تنبيهات معراج عبر واتساب', {
+          duration: 20000,
+          action: { label: '💬 إرسال الآن', onClick: () => shareAlertsWhatsApp() },
+        })
+      }
+    }
+    check()
+    const iv = setInterval(check, 60000)
+    return () => clearInterval(iv)
+  }, [isOwner, config?.digest_reminder_time])
   const runRetryAll = async () => {
     retryAllStopRef.current = false
     let agg = { running: true, total: null, processed: 0, succeeded: 0, failed: 0, remaining: null }
@@ -9312,6 +9355,13 @@ function MeraajStoreScreen() {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="text-sm font-black text-slate-700">🔔 مركز التنبيهات الموحد — كل التحذيرات التشغيلية في مكان واحد</div>
               <div className="flex items-center gap-2">
+                {/* v3.71 — daily WhatsApp digest reminder time */}
+                <div className="flex items-center gap-1 bg-white border rounded-lg px-2 py-1" title="عند هذا الوقت يومياً سيظهر تذكير بإرسال الملخص عبر واتساب (أثناء فتح النظام)">
+                  <span className="text-[10px] font-bold text-slate-500 whitespace-nowrap">⏰ تذكير يومي:</span>
+                  <Input type="time" value={reminderVal} onChange={e => setReminderVal(e.target.value)} className="h-6 w-24 text-xs font-bold" />
+                  <Button size="sm" onClick={saveReminder} className="h-6 text-[10px] px-2">حفظ</Button>
+                  {reminderVal && <button onClick={() => { setReminderVal(''); api('/meraaj/settings', { method: 'POST', body: { digest_reminder_time: '' } }).then(r => { setConfig(c => ({ ...c, digest_reminder_time: '' })); toast.success('🔕 تم تعطيل التذكير') }).catch(e => toast.error(e.message)) }} className="text-[10px] text-rose-500 hover:underline font-bold">إيقاف</button>}
+                </div>
                 <Button size="sm" onClick={shareAlertsWhatsApp} className="h-7 text-xs gap-1 bg-emerald-600 hover:bg-emerald-700">💬 مشاركة واتساب</Button>
                 <Button size="sm" variant="outline" onClick={loadAlertsCenter} className="h-7 text-xs gap-1"><RefreshCw className="w-3 h-3" /> تحديث</Button>
               </div>
@@ -9324,6 +9374,34 @@ function MeraajStoreScreen() {
               <Card className={(alertsCenter.counts?.missing_passports || 0) > 0 ? 'border-orange-300 bg-orange-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.missing_passports || 0) > 0 ? 'text-orange-600' : 'text-slate-400'}`}>{alertsCenter.counts?.missing_passports ?? 0}</div><div className="text-[10px] text-slate-500">🛂 جوازات ناقصة (معتمدة)</div></CardContent></Card>
               <Card className={alertsCenter.reject_alert ? 'border-rose-400 bg-rose-50/60' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${alertsCenter.reject_alert ? 'text-rose-700' : 'text-slate-400'}`}>{alertsCenter.rejected_today ?? 0}</div><div className="text-[10px] text-slate-500">🚫 ويبهوك مرفوض اليوم{(alertsCenter.reject_alert_threshold || 0) > 0 ? ` (الحد ${alertsCenter.reject_alert_threshold})` : ''}</div></CardContent></Card>
             </div>
+            {/* v3.71 — daily alerts history trend (snapshots written by each alerts-center load) */}
+            {(alertsHistory?.rows || []).length > 0 && (() => {
+              const rows = alertsHistory.rows
+              const maxV = Math.max(1, ...rows.map(r => r.counts?.total || 0))
+              return (
+                <Card>
+                  <CardHeader className="py-2 px-4 flex-row items-center justify-between space-y-0">
+                    <CardTitle className="text-sm">📈 اتجاه التنبيهات اليومي — آخر {rows.length} {rows.length > 10 ? 'يوماً' : 'أيام'} <span className="text-[10px] font-normal text-slate-400">(لقطة تُحفظ تلقائياً كل يوم)</span></CardTitle>
+                  </CardHeader>
+                  <CardContent className="p-3">
+                    <div className="flex gap-1.5 items-end justify-between" style={{ height: '90px' }}>
+                      {rows.map(r => (
+                        <div key={r.date} className="flex flex-col items-center justify-end h-full gap-0.5 flex-1">
+                          <div className="text-[9px] font-bold text-slate-600">{r.counts?.total ?? 0}</div>
+                          <div className={`w-full max-w-[28px] rounded-t ${(r.counts?.total || 0) === 0 ? 'bg-emerald-400/70' : (r.counts?.failed_events || 0) > 0 ? 'bg-rose-500/75' : 'bg-amber-500/80'}`} title={`${r.date}: ${r.counts?.total ?? 0} تنبيه (فاشلة: ${r.counts?.failed_events ?? 0} • معلقة: ${r.counts?.pending_bookings ?? 0} • سعة: ${r.counts?.capacity_warnings ?? 0} • جوازات: ${r.counts?.missing_passports ?? 0})`} style={{ height: `${Math.round(((r.counts?.total || 0) / maxV) * 100)}%`, minHeight: (r.counts?.total || 0) > 0 ? '4px' : '2px' }} />
+                          <div className="text-[8px] text-slate-400 font-mono">{r.date.slice(5)}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-3 justify-center mt-2 text-[9px] text-slate-500">
+                      <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-rose-500/75 inline-block" /> يوجد أحداث فاشلة</span>
+                      <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-500/80 inline-block" /> تنبيهات أخرى</span>
+                      <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-400/70 inline-block" /> يوم نظيف</span>
+                    </div>
+                  </CardContent>
+                </Card>
+              )
+            })()}
             {(alertsCenter.counts?.total || 0) === 0 ? (
               <Card className="border-emerald-200"><CardContent className="p-8 text-center"><div className="text-3xl mb-2">✅</div><div className="text-sm font-black text-emerald-700">كل شيء سليم — لا توجد تنبيهات تشغيلية حالياً</div></CardContent></Card>
             ) : (
@@ -9435,6 +9513,78 @@ function MeraajStoreScreen() {
                 })()}</CardContent></Card>
                 <Card><CardContent className="p-3 text-center"><div className="text-lg font-black text-slate-700">{comparison.totals?.current?.bookings ?? 0} <span className="text-xs text-slate-400">/ {comparison.totals?.previous?.bookings ?? 0}</span></div><div className="text-[10px] text-slate-500">حجوزات (الحالي / السابق)</div></CardContent></Card>
               </div>
+              {/* v3.71 — TOP OFFICE REWARD: monthly best-office highlight with its growth story */}
+              {(comparison.offices || []).length > 0 && comparison.offices[0].current.net_to_seller > 0 && (() => {
+                const top = comparison.offices[0]
+                const gT = top.growth_pct
+                const cur = top.current.net_to_seller.toLocaleString('en-US')
+                const prv = top.previous.net_to_seller.toLocaleString('en-US')
+                const ccy = top.current.currency || ''
+                const story = gT === null
+                  ? `انضم حديثاً وحقق صافي ${cur} ${ccy} من أول شهر! 🚀`
+                  : gT > 0 ? `نما بنسبة ${gT}% — من ${prv} إلى ${cur} ${ccy} 📈`
+                  : gT < 0 ? `حافظ على الصدارة بصافي ${cur} ${ccy} رغم تراجع ${Math.abs(gT)}%`
+                  : `حافظ على مستواه الثابت بصافي ${cur} ${ccy}`
+                const congrats = () => {
+                  const msg = [
+                    `🏆 *مكتب الشهر — ${comparison.month}*`, '',
+                    `تهانينا «${top.office}»! 🎉`,
+                    story,
+                    `${top.current.bookings} حجز • ${top.current.seats} مقعد هذا الشهر`, '',
+                    'شكراً لثقتكم وتعاملكم معنا عبر سوق معراج 🌟',
+                    '— نظام رحّال ERP',
+                  ].join('\n')
+                  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
+                }
+                return (
+                  <Card className="border-2 border-amber-300 bg-gradient-to-l from-amber-50 via-yellow-50/60 to-white">
+                    <CardContent className="p-4 flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className="text-4xl">🏆</div>
+                        <div>
+                          <div className="text-[10px] font-black text-amber-600 tracking-wide">مكتب الشهر — {comparison.month}</div>
+                          <div className="text-lg font-black text-slate-800">{top.office}</div>
+                          <div className="text-xs font-bold text-slate-600 mt-0.5">{story}</div>
+                          <div className="text-[10px] text-slate-500 mt-0.5">{top.current.bookings} حجز • {top.current.seats} مقعد{gT !== null && gT > 0 ? ' • 🚀 في صعود مستمر' : ''}</div>
+                        </div>
+                      </div>
+                      <Button size="sm" onClick={congrats} className="h-8 text-xs gap-1 bg-emerald-600 hover:bg-emerald-700">🎉 تهنئة عبر واتساب</Button>
+                    </CardContent>
+                  </Card>
+                )
+              })()}
+              {/* v3.71 — 6-MONTH TREND CHART: net_to_seller per month, switchable per office/package */}
+              {compTrend && (compTrend.months || []).length > 0 && (() => {
+                const series = trendPick === '__total__' ? compTrend.totals?.net
+                  : trendPick.startsWith('o:') ? (compTrend.offices || []).find(o => o.name === trendPick.slice(2))?.values
+                  : (compTrend.packages || []).find(p => p.name === trendPick.slice(2))?.values
+                const vals = series || compTrend.months.map(() => 0)
+                const maxV = Math.max(1, ...vals)
+                return (
+                  <Card>
+                    <CardHeader className="py-2 px-4 flex-row items-center justify-between space-y-0">
+                      <CardTitle className="text-sm">📈 اتجاه آخر {compTrend.months.length} أشهر — صافي لك {compTrend.currency || ''}</CardTitle>
+                      <select value={trendPick} onChange={e => setTrendPick(e.target.value)} className="h-7 text-[11px] font-bold border rounded-lg px-2 bg-white cursor-pointer">
+                        <option value="__total__">الإجمالي (الكل)</option>
+                        {(compTrend.offices || []).map(o => <option key={`o:${o.name}`} value={`o:${o.name}`}>🏢 {o.name}</option>)}
+                        {(compTrend.packages || []).map(p => <option key={`p:${p.name}`} value={`p:${p.name}`}>📦 {p.name}</option>)}
+                      </select>
+                    </CardHeader>
+                    <CardContent className="p-3">
+                      <div className="grid gap-2 items-end" style={{ height: '120px', gridTemplateColumns: `repeat(${compTrend.months.length}, 1fr)` }}>
+                        {compTrend.months.map((m, i) => (
+                          <div key={m} className="flex flex-col items-center justify-end h-full gap-0.5">
+                            <div className="text-[9px] font-bold text-slate-600 font-mono">{(vals[i] || 0).toLocaleString('en-US')}</div>
+                            <div className={`w-full max-w-[56px] rounded-t ${m === comparison.month ? 'bg-emerald-600' : 'bg-blue-500/70'}`} title={`${m}: صافي ${(vals[i] || 0).toLocaleString('en-US')} ${compTrend.currency || ''} • ${compTrend.totals?.bookings?.[i] ?? 0} حجز`} style={{ height: `${Math.round(((vals[i] || 0) / maxV) * 100)}%`, minHeight: (vals[i] || 0) > 0 ? '4px' : '2px' }} />
+                            <div className="text-[9px] text-slate-400 font-mono">{m.slice(2)}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="text-[9px] text-slate-400 text-center mt-1.5">العمود الأخضر = الشهر المختار • مرّر على الأعمدة لتفاصيل كل شهر</div>
+                    </CardContent>
+                  </Card>
+                )
+              })()}
               <Card>
                 <CardHeader className="py-2 px-4"><CardTitle className="text-sm">🏢 المكاتب ({(comparison.offices || []).length})</CardTitle></CardHeader>
                 <CardContent className="p-0">
