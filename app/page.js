@@ -5057,13 +5057,16 @@ function JournalScreen() {
 }
 
 function ReportsScreen() {
+  // v3.51 — RBAC Phase 3: account statements restricted to owner / fin_statements holders
+  const { user: rsUser } = useAuth()
+  const canStatements = rsUser?.role === 'owner' || rsUser?.permissions?.fin_statements === true
   return (
     <div className="space-y-6">
       <TopBar title="التقارير المالية" subtitle="الأرباح، كشوف الحسابات، ميزان المراجعة، قائمة الدخل، الإقفال السنوي" />
       <Tabs defaultValue="profits">
-        <TabsList className="w-full justify-start bg-slate-100"><TabsTrigger value="profits">الأرباح</TabsTrigger><TabsTrigger value="statement">كشف حساب</TabsTrigger><TabsTrigger value="trial">ميزان المراجعة</TabsTrigger><TabsTrigger value="income">قائمة الدخل</TabsTrigger><TabsTrigger value="year-close" className="text-rose-700 font-bold">🔒 الإقفال السنوي</TabsTrigger></TabsList>
+        <TabsList className="w-full justify-start bg-slate-100"><TabsTrigger value="profits">الأرباح</TabsTrigger>{canStatements && <TabsTrigger value="statement">كشف حساب</TabsTrigger>}<TabsTrigger value="trial">ميزان المراجعة</TabsTrigger><TabsTrigger value="income">قائمة الدخل</TabsTrigger><TabsTrigger value="year-close" className="text-rose-700 font-bold">🔒 الإقفال السنوي</TabsTrigger></TabsList>
         <TabsContent value="profits" className="mt-4"><ProfitsReport /></TabsContent>
-        <TabsContent value="statement" className="mt-4"><StatementReport /></TabsContent>
+        {canStatements && <TabsContent value="statement" className="mt-4"><StatementReport /></TabsContent>}
         <TabsContent value="trial" className="mt-4"><TrialBalanceReport /></TabsContent>
         <TabsContent value="income" className="mt-4"><IncomeStatement /></TabsContent>
         <TabsContent value="year-close" className="mt-4"><YearCloseScreen /></TabsContent>
@@ -6616,6 +6619,8 @@ const PERMISSION_GROUPS = [
   {
     title: '📊 التقارير والأرباح', keys: [
       { k: 'reports_view', l: 'الوصول إلى التقارير المالية' },
+      { k: 'fin_statements', l: '📄 كشوفات الحساب (عملاء/موردين)' },
+      { k: 'fin_partner_summary', l: '🤝 ملخص وكشوفات الشركاء' },
       { k: 'show_profit', l: 'إظهار عمود الربح والعمولة' },
     ]
   },
@@ -6642,16 +6647,19 @@ function PermissionsDialog({ target, onClose, onSaved }) {
   // v3.45 — RBAC role templates (baseline + individual overrides)
   const [templates, setTemplates] = useState([])
   const [roleKey, setRoleKey] = useState('')
+  const [allowedBoxIds, setAllowedBoxIds] = useState([]) // v3.51 — Phase 3: box restriction (empty = all)
   useEffect(() => {
     if (target) {
       setPerms(target.permissions || {})
       setDefaultBoxId(target.default_box_id || '')
       setLockBox(!!target.lock_box)
       setRoleKey(target.role_key || '')
+      setAllowedBoxIds(Array.isArray(target.allowed_box_ids) ? [...target.allowed_box_ids] : [])
       api('/boxes').then(setBoxes).catch(() => {})
       api('/rbac/templates').then(r => setTemplates(r?.templates || [])).catch(() => {})
     }
   }, [target])
+  const toggleAllowedBox = (id) => setAllowedBoxIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
   const applyTemplate = (t) => {
     setPerms({ ...t.perms })
     setRoleKey(t.key)
@@ -6666,7 +6674,7 @@ function PermissionsDialog({ target, onClose, onSaved }) {
   const save = async () => {
     try {
       setSaving(true)
-      await api(`/tenant/users/${target.id}`, { method: 'PATCH', body: { permissions: perms, role_key: roleKey, default_box_id: defaultBoxId || null, lock_box: lockBox } })
+      await api(`/tenant/users/${target.id}`, { method: 'PATCH', body: { permissions: perms, role_key: roleKey, default_box_id: defaultBoxId || null, lock_box: lockBox, allowed_box_ids: allowedBoxIds } })
       onSaved && onSaved()
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
@@ -6695,6 +6703,21 @@ function PermissionsDialog({ target, onClose, onSaved }) {
             ))}
           </div>
           <div className="text-[11px] text-slate-500 mt-2">اختر قالباً لتطبيق صلاحياته الافتراضية دفعة واحدة، ثم عدّل أي مفتاح أدناه كاستثناء فردي لهذا الموظف.</div>
+        </div>
+        {/* v3.51 — RBAC Phase 3: restrict the employee to specific boxes/bank accounts */}
+        <div className="border-2 border-emerald-200 rounded-lg p-3 bg-emerald-50/50 mb-3">
+          <div className="font-bold text-sm text-emerald-800 mb-1">🏦 الصناديق والحسابات البنكية المسموحة</div>
+          <div className="text-[11px] text-slate-500 mb-2">اترك الكل بدون تحديد = يرى جميع الصناديق. حدّد صناديق معينة = يرى ويتعامل معها <b>فقط</b> وتُخفى أرصدة الصناديق الأخرى عنه تماماً (مفروض من الخادم).</div>
+          <div className="flex flex-wrap gap-2">
+            {boxes.map(bx => (
+              <button key={bx.id} type="button" onClick={() => toggleAllowedBox(bx.id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${allowedBoxIds.includes(bx.id) ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-700 border-slate-300 hover:border-emerald-400'}`}>
+                {allowedBoxIds.includes(bx.id) ? '✓ ' : ''}{bx.type === 'cash' ? '💵' : '🏦'} {bx.name_ar || bx.name}
+              </button>
+            ))}
+            {boxes.length === 0 && <span className="text-xs text-slate-400">لا توجد صناديق بعد</span>}
+          </div>
+          {allowedBoxIds.length > 0 && <div className="text-[11px] font-bold text-emerald-700 mt-2">مقيّد بـ {allowedBoxIds.length} صندوق — باقي الصناديق محجوبة عنه بالكامل</div>}
         </div>
         {/* v3.9.9 — Default cash box for cashiers */}
         <div className="border-2 border-emerald-200 rounded-lg p-3 bg-emerald-50 mb-3">
@@ -7362,7 +7385,7 @@ function PackagesScreen() {
         right={<div className="flex gap-2">
           <Button variant="outline" onClick={() => { setShowArchived(!showArchived); if (!showArchived) loadArchived() }} className={`gap-2 ${showArchived ? 'bg-slate-700 text-white border-slate-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>🗂️ المؤرشفة</Button>
           <Button variant="outline" onClick={() => setWaLogsOpen(true)} className="gap-2 border-green-300 text-green-700 hover:bg-green-50 relative">📲 سجل الواتساب{waReminders > 0 && <span className="absolute -top-2 -left-2 bg-rose-500 text-white text-[10px] rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 font-bold">{waReminders}</span>}</Button>
-          {canProfit && <Button variant="outline" onClick={() => setPartnerStmtOpen(true)} className="gap-2 border-amber-300 text-amber-700 hover:bg-amber-50">🤝 كشف الشريك</Button>}
+          {(rbacUser?.role === 'owner' || rbacUser?.permissions?.fin_partner_summary === true) && <Button variant="outline" onClick={() => setPartnerStmtOpen(true)} className="gap-2 border-amber-300 text-amber-700 hover:bg-amber-50">🤝 كشف الشريك</Button>}
           {canProfit && <Button variant="outline" onClick={() => setComparePeriod('all')} className="gap-2 border-blue-200 text-blue-700 hover:bg-blue-50"><BarChart3 className="w-4 h-4" /> مقارنة الربحية</Button>}
           <Button onClick={() => { setEditing(null); setOpen(true) }} className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> باكج جديد</Button>
         </div>} />
@@ -8593,7 +8616,7 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
           </div>
         )}
         <div className="flex flex-wrap gap-1 pt-2 border-t">
-          <Button size="sm" variant="outline" onClick={onOpen} className="h-7 px-2 text-xs gap-1"><FileBadge2 className="w-3 h-3" /> المكونات والتسجيل</Button>
+          <Button size="sm" variant="outline" onClick={onOpen} className="h-7 px-2 text-xs gap-1"><FileBadge2 className="w-3 h-3" /> التسجيل والمواصلات</Button>
           {onReport && <Button size="sm" variant="outline" onClick={onReport} className="h-7 px-2 text-xs gap-1 text-blue-600"><ReceiptText className="w-3 h-3" /> التقرير</Button>}
           {!closed && onExtend && <Button size="sm" variant="outline" onClick={onExtend} className="h-7 px-2 text-xs gap-1 text-teal-600 border-teal-200 hover:bg-teal-50"><Calendar className="w-3 h-3" /> تمديد التاريخ</Button>}
           {onDuplicate && <Button size="sm" variant="outline" onClick={onDuplicate} className="h-7 px-2 text-xs gap-1 text-purple-600 border-purple-200 hover:bg-purple-50" title="نسخ الباكج بكل مكوناته وأسعاره كمسودة جديدة"><Copy className="w-3 h-3" /> نسخ</Button>}
@@ -8811,7 +8834,7 @@ const compressImage = (file, maxDim = 1200, quality = 0.78) => new Promise((reso
 function PackageDialog({ open, onOpenChange, record, onSaved }) {
   // v3.9.6 — Dynamic Package Builder: items list + live totals + supplier per item
   // v3.20 — Dual pricing: 'direct' (room+age matrix, B2B) | 'components' (assembled)
-  const [f, setF] = useState({ name: '', package_type: 'umrah', currency: 'SAR', start_date: '', end_date: '', notes: '', pricing_mode: 'direct' })
+  const [f, setF] = useState({ name: '', package_type: 'umrah', currency: 'SAR', start_date: '', end_date: '', notes: '', pricing_mode: 'direct', supplier_id: '' })
   const [items, setItems] = useState([]) // [{ component_type, name, supplier_id, cost, sale, pricing_type, ... }]
   const [rooms, setRooms] = useState([]) // v3.15/v3.20 — [{type, sale_per_pax, sale_child, sale_infant}]
   const [suppliers, setSuppliers] = useState([])
@@ -8826,7 +8849,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
     if (!open) return
     api('/suppliers').then(setSuppliers).catch(() => {})
     if (record) {
-      setF({ name: record.name, package_type: record.package_type, currency: record.currency, start_date: record.start_date ? new Date(record.start_date).toISOString().slice(0,10) : '', end_date: record.end_date ? new Date(record.end_date).toISOString().slice(0,10) : '', notes: record.notes || '', pricing_mode: record.pricing_mode || ((record.room_pricing || []).length > 0 ? 'direct' : 'components') })
+      setF({ name: record.name, package_type: record.package_type, currency: record.currency, start_date: record.start_date ? new Date(record.start_date).toISOString().slice(0,10) : '', end_date: record.end_date ? new Date(record.end_date).toISOString().slice(0,10) : '', notes: record.notes || '', pricing_mode: record.pricing_mode || ((record.room_pricing || []).length > 0 ? 'direct' : 'components'), supplier_id: record.supplier_id || '' })
       setItems([])
       setRooms(Array.isArray(record.room_pricing) ? record.room_pricing.map(r => ({ ...r })) : [])
       setHotels(Array.isArray(record.hotels) ? record.hotels.map(h => ({ ...h })) : []) // v3.49
@@ -8834,7 +8857,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
       setImgPreview(record.has_image ? `/api/packages/${record.id}/image?t=${Date.now()}` : null)
       setImgChanged(false); setImgRemoved(false); setFeatureInput('')
     } else {
-      setF({ name: '', package_type: 'umrah', currency: 'SAR', start_date: todayISO(), end_date: '', notes: '', pricing_mode: 'direct' })
+      setF({ name: '', package_type: 'umrah', currency: 'SAR', start_date: todayISO(), end_date: '', notes: '', pricing_mode: 'direct', supplier_id: '' })
       setItems([])
       setRooms([])
       setHotels([]) // v3.49
@@ -8902,7 +8925,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
       const hotelsClean = hotels.filter(h => String(h.name || '').trim()).map(h => ({ name: h.name.trim(), city: String(h.city || '').trim(), nights: Number(h.nights) || 0 })) // v3.49
       let savedId = record?.id
       if (record) {
-        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, currency: f.currency, start_date: f.start_date || null, end_date: f.end_date || null, notes: f.notes, room_pricing: roomPricing, pricing_mode: f.pricing_mode, features, hotels: hotelsClean } })
+        await api(`/packages/${record.id}`, { method: 'PATCH', body: { name: f.name, package_type: f.package_type, currency: f.currency, start_date: f.start_date || null, end_date: f.end_date || null, notes: f.notes, room_pricing: roomPricing, pricing_mode: f.pricing_mode, features, hotels: hotelsClean, supplier_id: f.supplier_id || null } })
         toast.success('تم التحديث')
       } else {
         const pkg = await api('/packages', { method: 'POST', body: { ...f, room_pricing: roomPricing, features, hotels: hotelsClean } })
@@ -8955,6 +8978,8 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
           <Field label="تاريخ البداية"><Input type="date" value={f.start_date} onChange={e => setF({ ...f, start_date: e.target.value })} /></Field>
           <Field label="تاريخ النهاية"><Input type="date" value={f.end_date} onChange={e => setF({ ...f, end_date: e.target.value })} /></Field>
           <div className="md:col-span-2"><Field label={`المدة${nights > 0 ? ` (${nights} ليلة تلقائي)` : ''}`}><Input value={nights ? `${nights} ليلة` : ''} disabled className="bg-slate-50" /></Field></div>
+          {/* v3.51 — Main package supplier: saved with the package in one shot */}
+          <div className="md:col-span-6"><Field label="🏢 المورد الرئيسي للباقة (اختياري)"><SearchPick items={suppliers.map(s => ({ id: s.id, name: s.name }))} value={f.supplier_id} onChange={v => setF({ ...f, supplier_id: v })} placeholder="ابحث أو أضف المورد الرئيسي..." quickAdds={[quickAddSupplier()]} /></Field></div>
         </div>
         {/* v3.23 — Features + Image (Miraj Network marketplace readiness) */}
         <div className="border-2 border-purple-200 rounded-xl p-3 mb-3 bg-purple-50/30">

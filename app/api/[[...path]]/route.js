@@ -129,6 +129,9 @@ const DEFAULT_STAFF_PERMISSIONS = {
   mod_receipt: true, mod_payment: false, mod_clients: true, mod_suppliers: false,
   mod_boxes: false, mod_chart: false, mod_journal: false, mod_reports: false,
   mod_affiliate: false, mod_help: true,
+  // v3.51 — RBAC Phase 3: fine-grained financial restrictions
+  fin_statements: false,       // كشوفات الحساب (عملاء/موردين/تقارير)
+  fin_partner_summary: false,  // ملخص/كشوفات الشركاء
 }
 function ownerPermissions() {
   const p = {}
@@ -148,8 +151,8 @@ function RBAC_ROLE_TEMPLATES() {
   return [
     { key: 'registrar', label: '🧾 موظف تسجيل', desc: 'تسجيل الزبائن في الباكجات فقط — بدون أي أرقام مالية أو أرباح', perms: base({ mod_packages: true, mod_clients: true }) },
     { key: 'sales', label: '💼 موظف مبيعات', desc: 'بيع التذاكر والتأشيرات والخدمات والباكجات + سند قبض — بدون أرباح أو خصومات', perms: base({ mod_tickets: true, mod_visas: true, mod_services: true, mod_packages: true, mod_clients: true, mod_receipt: true, mod_visa_monitor: true, tickets_view: true, tickets_add: true, visas_view: true, visas_add: true, services_view: true, services_add: true, vouchers_manage: true }) },
-    { key: 'sales_manager', label: '📈 مدير مبيعات', desc: 'كل المبيعات + الأرباح والخصومات ومتجر معراج والاستعلامات', perms: base({ mod_tickets: true, mod_visas: true, mod_services: true, mod_packages: true, mod_meraaj: true, mod_clients: true, mod_receipt: true, mod_visa_monitor: true, mod_query: true, mod_reports: true, tickets_view: true, tickets_add: true, tickets_edit: true, tickets_delete: true, visas_view: true, visas_add: true, visas_edit: true, visas_delete: true, services_view: true, services_add: true, services_edit: true, services_delete: true, vouchers_manage: true, reports_view: true, show_profit: true, edit_price: true, apply_discount: true, can_refund: true }) },
-    { key: 'accountant', label: '🧮 محاسب', desc: 'السندات والقيود والصناديق والدليل والتقارير المالية والصرافة', perms: base({ mod_receipt: true, mod_payment: true, mod_fx: true, mod_clients: true, mod_suppliers: true, mod_boxes: true, mod_chart: true, mod_journal: true, mod_reports: true, mod_query: true, tickets_view: true, visas_view: true, services_view: true, vouchers_manage: true, accounts_manage: true, reports_view: true, show_profit: true }) },
+    { key: 'sales_manager', label: '📈 مدير مبيعات', desc: 'كل المبيعات + الأرباح والخصومات ومتجر معراج والاستعلامات', perms: base({ mod_tickets: true, mod_visas: true, mod_services: true, mod_packages: true, mod_meraaj: true, mod_clients: true, mod_receipt: true, mod_visa_monitor: true, mod_query: true, mod_reports: true, tickets_view: true, tickets_add: true, tickets_edit: true, tickets_delete: true, visas_view: true, visas_add: true, visas_edit: true, visas_delete: true, services_view: true, services_add: true, services_edit: true, services_delete: true, vouchers_manage: true, reports_view: true, show_profit: true, edit_price: true, apply_discount: true, can_refund: true, fin_partner_summary: true }) },
+    { key: 'accountant', label: '🧮 محاسب', desc: 'السندات والقيود والصناديق والدليل والتقارير المالية والصرافة', perms: base({ mod_receipt: true, mod_payment: true, mod_fx: true, mod_clients: true, mod_suppliers: true, mod_boxes: true, mod_chart: true, mod_journal: true, mod_reports: true, mod_query: true, tickets_view: true, visas_view: true, services_view: true, vouchers_manage: true, accounts_manage: true, reports_view: true, show_profit: true, fin_statements: true, fin_partner_summary: true }) },
     { key: 'full_manager', label: '👑 مدير كامل', desc: 'جميع الصلاحيات — مطابق للمالك', perms: rbacAllPerms(true) },
   ]
 }
@@ -365,7 +368,7 @@ async function getPatSession(request, db) {
     return null
   }
 }
-function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
+function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
 function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price, billing_mode: t.billing_mode || null, unlimited_journals: !!t.unlimited_journals } : null }
 
 // ============ v3.14 — PRICING & PLANS (Phase 2) ============
@@ -1028,6 +1031,9 @@ async function handleRoute(request, { params }) {
       if (/^\/reports\//.test(route) && route !== '/reports/query' && !P.mod_reports) return deny('التقارير المالية')
       if (/^\/vouchers/.test(route) && !P.mod_receipt && !P.mod_payment) return deny('السندات')
       if (/^\/affiliate/.test(route) && !P.mod_affiliate) return deny('التسويق بالعمولة')
+      // v3.51 — RBAC Phase 3: fine-grained financial guards (staff only)
+      if ((route === '/reports/statement' || route === '/bulk-statement/generate') && !P.fin_statements) return deny('كشوفات الحساب')
+      if (/^\/partners\/statements/.test(route) && !P.fin_partner_summary) return deny('ملخص الشركاء')
     }
     // v3.45 — Role templates catalog for the permissions manager (owner only)
     if (route === '/rbac/templates' && method === 'GET') {
@@ -1887,7 +1893,7 @@ async function handleRoute(request, { params }) {
     if (route === '/tenant/users' && method === 'GET') {
       if (sess.user.role !== 'owner') return bad('غير مصرح', 403)
       const users = await db.collection('users').find(tf).sort({ created_at: 1 }).toArray()
-      return ok(users.map(u => ({ id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, active: u.active, created_at: u.created_at, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } })))
+      return ok(users.map(u => ({ id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, active: u.active, created_at: u.created_at, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } })))
     }
     if (route === '/tenant/users' && method === 'POST') {
       if (sess.user.role !== 'owner') return bad('غير مصرح', 403)
@@ -1933,6 +1939,10 @@ async function handleRoute(request, { params }) {
       }
       // v3.45 — RBAC role template key (display/reference; actual access = permissions object)
       if (b.role_key !== undefined) upd.role_key = String(b.role_key || '')
+      // v3.51 — RBAC Phase 3: allowed boxes restriction (empty array = all boxes allowed)
+      if (b.allowed_box_ids !== undefined) {
+        upd.allowed_box_ids = (Array.isArray(b.allowed_box_ids) ? b.allowed_box_ids : []).map(x => String(x)).slice(0, 50)
+      }
       // v3.9.9 — Update default box + lock flag
       if (b.default_box_id !== undefined) upd.default_box_id = b.default_box_id || null
       if (b.lock_box !== undefined) upd.lock_box = !!b.lock_box
@@ -2487,6 +2497,7 @@ async function handleRoute(request, { params }) {
         room_pricing: roomPricing,
         pricing_mode: pricingMode,
         hotels: sanitizeHotels(b.hotels), // v3.49
+        supplier_id: b.supplier_id ? String(b.supplier_id) : null, // v3.51 — main supplier saved with the package
         features: sanitizeFeatures(b.features),
         has_image: false,
         notes: b.notes || '', status: 'open',
@@ -2525,6 +2536,10 @@ async function handleRoute(request, { params }) {
       // v3.49 — Hotels quick-details (name + city + nights) for program display
       if (b.hotels !== undefined) {
         upd.hotels = sanitizeHotels(b.hotels)
+      }
+      // v3.51 — Main package supplier (internal field — NOT part of the Meraaj contract payload)
+      if (b.supplier_id !== undefined) {
+        upd.supplier_id = b.supplier_id ? String(b.supplier_id) : null
       }
       await db.collection('packages').updateOne({ id: pkgIdMatch[1], tenant_id: T }, { $set: upd })
       // v3.24/v3.25 — Meraaj sync: shared packages emit updates; closing emits deactivation
@@ -3145,6 +3160,17 @@ async function handleRoute(request, { params }) {
       // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id
       if (payMethod === 'credit' && !b.client_id) return bad('اختر حساب القبض / العميل (للحجز الآجل)')
       if (payMethod === 'cash' && !b.box_id) return bad('اختر الصندوق / البنك (للنقد)')
+      // v3.51 — RBAC Phase 3: smart discount restricted to owner / apply_discount holders (server-enforced)
+      if ((Number(b.discount) || 0) > 0 && sess.user.role !== 'owner' && !effectivePermissions(sess.user).apply_discount) {
+        return bad('🚫 غير مصرح — الخصم الذكي حصري لمدير المبيعات والمالك', 403)
+      }
+      // v3.51 — RBAC Phase 3: cash bookings must use an allowed box
+      {
+        const abIds = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
+        if (payMethod === 'cash' && sess.user.role !== 'owner' && abIds.length > 0 && !abIds.includes(String(b.box_id))) {
+          return bad('🚫 غير مصرح — هذا الصندوق خارج الصناديق المسموحة لك', 403)
+        }
+      }
       // v3.15 — Registrants dynamic list: [{name, passport_no, age, visa_no, room_type}]
       const registrants = (Array.isArray(b.registrants) ? b.registrants : [])
         .filter(r => r && String(r.name || '').trim())
@@ -3529,7 +3555,13 @@ async function handleRoute(request, { params }) {
     }
 
     // Boxes
-    if (route === '/boxes' && method === 'GET') return ok(clean(await db.collection('boxes').find(tf).sort({ created_at: 1 }).toArray()))
+    // v3.51 — RBAC Phase 3: staff restricted to specific boxes see ONLY those boxes (names & balances)
+    if (route === '/boxes' && method === 'GET') {
+      const allBoxes = clean(await db.collection('boxes').find(tf).sort({ created_at: 1 }).toArray())
+      const abIds = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
+      if (sess.user.role !== 'owner' && abIds.length > 0) return ok(allBoxes.filter(x => abIds.includes(x.id)))
+      return ok(allBoxes)
+    }
     if (route === '/boxes' && method === 'POST') {
       const b = await request.json()
       if (!b.name_ar) return bad('اسم الصندوق مطلوب')
@@ -4379,6 +4411,13 @@ async function handleRoute(request, { params }) {
     }
     if (route === '/vouchers' && method === 'POST') {
       const b = await request.json()
+      // v3.51 — RBAC Phase 3: staff restricted to specific boxes cannot use other boxes
+      {
+        const abIds = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
+        if (sess.user.role !== 'owner' && abIds.length > 0 && b.box_id && !abIds.includes(String(b.box_id))) {
+          return bad('🚫 غير مصرح — هذا الصندوق خارج الصناديق المسموحة لك', 403)
+        }
+      }
       const result = await createVoucher(db, T, b)
       if (result.error) return bad(result.error)
       return ok(result.doc)

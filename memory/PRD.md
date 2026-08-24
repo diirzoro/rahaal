@@ -20,6 +20,11 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 - Meraaj E2E 15/15 test (blocked on Meraaj team configuring temp secret)
 - Package Comparison feature (deferred by user)
 
+## v3.51 (completed) — Supplier on page 1 + tab rename + RBAC Phase 3
+- Package form page 1: supplier SearchPick (f.supplier_id, saved in one shot via POST/PATCH; internal field — NOT in Meraaj payload, verified). Card button renamed "المكونات والتسجيل" → "التسجيل والمواصلات".
+- RBAC Phase 3: new perms fin_statements / fin_partner_summary (accountant template both, sales_manager partner only). allowed_box_ids per user (empty = all): GET /boxes filtered for restricted staff (server-enforced), POST /vouchers + cash booking box guard 403, discount>0 requires owner/apply_discount 403. Route guards: /reports/statement + /bulk-statement/generate → fin_statements; /partners/statements → fin_partner_summary. FE: ReportsScreen statement tab hidden, packages كشف الشريك gated by fin_partner_summary, PermissionsDialog boxes multi-select (name_ar labels) + 2 new keys in التقارير group.
+- Tested 7/7 backend + UI screenshots (supplier field, renamed buttons 15/0, boxes UI). Box docs use name_ar (not name).
+
 ## v3.50 (completed) — Batch Re-sync + RBAC Phase 2
 - POST /api/meraaj/resync-all (owner only; endpoint lives in tenant-scoped section — test agent moved it there after a T-scope bug): recomputes meraaj.market_pricing fresh from room_pricing + stored commission for ALL shared non-archived packages, persists + market_pricing_updated_at, emits package.updated each. Returns {total, synced, failed}. FE button "🔄 تحديث كل الباقات في معراج" in MeraajStoreScreen TopBar (owner only, askConfirm + result toast).
 - RBAC Phase 2 (hide financials from staff without show_profit): PackageDetailsDialog — components & transports tabs hidden (default tab=bookings), header cost/profit line replaced with sale-only; discount section in booking form gated by apply_discount; PkgCard معراج share button gated; MeraajStoreScreen commission column ("عمولة الوكيل") hidden + approve-confirm net amount text hidden.
