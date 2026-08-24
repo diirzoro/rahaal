@@ -1851,6 +1851,36 @@ async function handleRoute(request, { params }) {
       // Outbound sync events (outbox)
       const outboundDocs = await db.collection('meraaj_events').find(tf).sort({ created_at: -1 }).limit(15).toArray()
       const outboundFailed24 = await db.collection('meraaj_events').countDocuments({ ...tf, status: 'failed', created_at: { $gte: h24 } })
+      // v3.60 — 7-day accepted vs rejected trend (per calendar day, oldest→newest)
+      const dayKey = (d) => new Date(d).toISOString().slice(0, 10)
+      const trendMap = {}
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(nowMs - i * 24 * 3600 * 1000)
+        trendMap[dayKey(d)] = { date: dayKey(d), accepted: 0, rejected: 0 }
+      }
+      const acc7 = await db.collection('meraaj_inbound_bookings').find({ ...tf, created_at: { $gte: d7 } }).project({ created_at: 1 }).toArray()
+      for (const a of acc7) { const k = dayKey(a.created_at); if (trendMap[k]) trendMap[k].accepted++ }
+      const rej7docs = await db.collection('meraaj_webhook_log').find({ ok: false, at: { $gte: d7 } }).project({ at: 1 }).toArray()
+      for (const rj of rej7docs) { const k = dayKey(rj.at); if (trendMap[k]) trendMap[k].rejected++ }
+      const trend = Object.values(trendMap)
+      // v3.60 — Buyer office insights: which Meraaj offices book the most (all-time, top 10 by revenue)
+      const allInbound = await db.collection('meraaj_inbound_bookings').find(tf).project({ buyer_office_name: 1, seats: 1, total_price: 1, net_to_seller_total: 1, status: 1, currency: 1, created_at: 1 }).toArray()
+      const buyerMap = {}
+      for (const b of allInbound) {
+        const key = (b.buyer_office_name || 'غير معروف').trim() || 'غير معروف'
+        buyerMap[key] = buyerMap[key] || { office: key, bookings: 0, approved: 0, seats: 0, revenue: 0, net_to_seller: 0, currency: b.currency || '', last_at: null }
+        const bm = buyerMap[key]
+        bm.bookings++
+        if (b.status === 'approved') bm.approved++
+        if (b.status !== 'rejected' && b.status !== 'cancelled') {
+          bm.seats += Number(b.seats) || 0
+          bm.revenue += Number(b.total_price) || 0
+          bm.net_to_seller += Number(b.net_to_seller_total) || 0
+        }
+        if (!bm.last_at || new Date(b.created_at) > new Date(bm.last_at)) bm.last_at = b.created_at
+      }
+      const buyers = Object.values(buyerMap).sort((a, b) => b.revenue - a.revenue).slice(0, 10)
+        .map(b => ({ ...b, revenue: +b.revenue.toFixed(2), net_to_seller: +b.net_to_seller.toFixed(2) }))
       return ok({
         stats: {
           accepted_24h: accepted24, accepted_7d: accepted7d,
@@ -1862,6 +1892,8 @@ async function handleRoute(request, { params }) {
         incoming: incoming.map(b => ({ id: b.id, at: b.created_at, package_name: b.package_name, buyer_office_name: b.buyer_office_name, seats: b.seats, total_price: b.total_price, currency: b.currency, status: b.status, price_check: b.price_check || 'not_sent', booking_ref: b.meraaj_booking_ref || null })),
         rejected,
         outbound: outboundDocs.map(ev => ({ id: ev.id, at: ev.created_at, type: ev.type, status: ev.status, attempts: ev.attempts ?? null, last_error: ev.last_error ? String(ev.last_error).slice(0, 140) : null })),
+        trend, // v3.60 — [{date, accepted, rejected}] × 7 days
+        buyers, // v3.60 — top buyer offices by revenue
       })
     }
 

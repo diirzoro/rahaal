@@ -7586,6 +7586,29 @@ function PackageCompareDialog({ initialPeriod = 'all', onClose }) {
   }, { adult: 0, child: 0, infant: 0 })
   const periodLabel = { all: 'كل الفترات', month: 'الشهر الحالي', year: 'السنة الحالية' }[period]
   const printReport = () => window.print()
+  // v3.59 — Excel export including the per-age tier columns
+  const exportExcel = () => {
+    try {
+      const headers = ['#', 'الباكج', 'النوع', 'الحالة', 'الحجوزات', 'المسافرون', 'الإيرادات', 'التكاليف', 'صافي الربح', 'ربح البالغين', 'عدد البالغين', 'ربح الأطفال', 'عدد الأطفال', 'ربح الرضع', 'عدد الرضع', 'الهامش %', 'العملة']
+      const body = rows.map((r, i) => [
+        i + 1, r.name, r.package_type || '', r.status === 'open' ? 'مفتوح' : 'مغلق', r.bookings, r.pax,
+        r.revenue, r.cost, r.profit,
+        r.tiers?.computable ? (r.tiers?.profit?.adult ?? 0) : '', r.tiers?.counts?.adult || 0,
+        r.tiers?.computable ? (r.tiers?.profit?.child ?? 0) : '', r.tiers?.counts?.child || 0,
+        r.tiers?.computable ? (r.tiers?.profit?.infant ?? 0) : '', r.tiers?.counts?.infant || 0,
+        r.margin_pct, r.currency || '',
+      ])
+      const totalRow = ['', 'الإجمالي', '', '', totals.bookings, totals.pax, totals.revenue, totals.cost, totals.profit,
+        tierTotals.adult, '', tierTotals.child, '', tierTotals.infant, '', totals.margin_pct, '']
+      const ws = XLSX.utils.aoa_to_sheet([[`تقرير مقارنة ربحية الباكجات — ${periodLabel}`], [], headers, ...body, totalRow])
+      ws['!cols'] = [{ wch: 4 }, { wch: 34 }, { wch: 8 }, { wch: 8 }, { wch: 9 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 11 }, { wch: 12 }, { wch: 11 }, { wch: 12 }, { wch: 10 }, { wch: 9 }, { wch: 7 }]
+      const wb = XLSX.utils.book_new()
+      wb.Workbook = { Views: [{ RTL: true }] }
+      XLSX.utils.book_append_sheet(wb, ws, 'مقارنة الربحية')
+      XLSX.writeFile(wb, `مقارنة_ربحية_الباكجات_${new Date().toISOString().slice(0, 10)}.xlsx`)
+      toast.success('✅ تم تنزيل تقرير Excel بأعمدة الفئات العمرية')
+    } catch (e) { toast.error('خطأ في التصدير: ' + e.message) }
+  }
   return (
     <Dialog open onOpenChange={onClose}>
       <DialogContent dir="rtl" className="max-w-5xl max-h-[90vh] overflow-y-auto">
@@ -7601,7 +7624,10 @@ function PackageCompareDialog({ initialPeriod = 'all', onClose }) {
                 </Button>
               ))}
             </div>
-            <Button size="sm" variant="outline" onClick={printReport} className="gap-1"><ReceiptText className="w-3 h-3" /> طباعة</Button>
+            <div className="flex gap-1">
+              <Button size="sm" variant="outline" onClick={exportExcel} className="gap-1 border-emerald-300 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-3 h-3" /> تصدير Excel</Button>
+              <Button size="sm" variant="outline" onClick={printReport} className="gap-1"><ReceiptText className="w-3 h-3" /> طباعة</Button>
+            </div>
           </div>
           <div className="text-xs text-slate-500">الفترة: <b className="text-slate-700">{periodLabel}</b> • {rows.filter(r => r.bookings > 0).length} باكج نشط من أصل {rows.length}</div>
           {/* Summary KPIs */}
@@ -8670,6 +8696,56 @@ function MeraajStoreScreen() {
               <Card className={(health.stats?.outbound_failed_24h || 0) > 0 ? 'border-amber-300 bg-amber-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(health.stats?.outbound_failed_24h || 0) > 0 ? 'text-amber-600' : 'text-slate-400'}`}>{health.stats?.outbound_failed_24h ?? 0}</div><div className="text-[10px] text-slate-500">📤 صادرة فاشلة (24 ساعة)</div></CardContent></Card>
               <Card><CardContent className="p-3 text-center"><div className="text-xs font-black text-slate-700 pt-1.5">{health.stats?.last_accepted_at ? new Date(health.stats.last_accepted_at).toLocaleString('en-GB') : '—'}</div><div className="text-[10px] text-slate-500 mt-1">🕐 آخر حجز وارد مقبول</div></CardContent></Card>
             </div>
+            {/* v3.60 — 7-day accepted vs rejected trend chart */}
+            {Array.isArray(health.trend) && health.trend.length > 0 && (() => {
+              const maxV = Math.max(1, ...health.trend.map(t => Math.max(t.accepted, t.rejected)))
+              const dayName = (ds) => new Date(ds + 'T12:00:00').toLocaleDateString('ar', { weekday: 'short' })
+              return (
+                <Card>
+                  <CardHeader className="py-2 px-4 flex-row items-center justify-between space-y-0">
+                    <CardTitle className="text-sm">📊 اتجاه آخر 7 أيام</CardTitle>
+                    <div className="flex items-center gap-3 text-[10px]">
+                      <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block" /> مقبولة</span>
+                      <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-rose-500 inline-block" /> مرفوضة</span>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="p-3">
+                    <div className="grid grid-cols-7 gap-2 items-end" style={{ height: '110px' }}>
+                      {health.trend.map(t => (
+                        <div key={t.date} className="flex flex-col items-center justify-end h-full gap-0.5">
+                          <div className="flex items-end gap-0.5 flex-1 w-full justify-center">
+                            <div className="w-3 rounded-t bg-emerald-500/80" title={`مقبولة: ${t.accepted}`} style={{ height: `${Math.round((t.accepted / maxV) * 100)}%`, minHeight: t.accepted > 0 ? '4px' : '1px' }} />
+                            <div className="w-3 rounded-t bg-rose-500/80" title={`مرفوضة: ${t.rejected}`} style={{ height: `${Math.round((t.rejected / maxV) * 100)}%`, minHeight: t.rejected > 0 ? '4px' : '1px' }} />
+                          </div>
+                          <div className="text-[9px] font-bold text-slate-600">{t.accepted}<span className="text-slate-300 mx-0.5">/</span><span className="text-rose-500">{t.rejected}</span></div>
+                          <div className="text-[9px] text-slate-400">{dayName(t.date)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )
+            })()}
+            {/* v3.60 — Buyer office insights */}
+            <Card>
+              <CardHeader className="py-2 px-4"><CardTitle className="text-sm">🏢 أكثر المكاتب حجزاً عبر معراج ({(health.buyers || []).length})</CardTitle></CardHeader>
+              <CardContent className="p-0">
+                {(health.buyers || []).length === 0 ? <div className="p-6 text-center text-xs text-slate-400">لا توجد حجوزات من مكاتب بعد</div> : (
+                  <Table>
+                    <TableHeader><TableRow><TableHead className="text-xs">المكتب المشتري</TableHead><TableHead className="text-xs">حجوزات</TableHead><TableHead className="text-xs">معتمدة</TableHead><TableHead className="text-xs">مقاعد</TableHead><TableHead className="text-xs">الإيراد</TableHead><TableHead className="text-xs">صافي لك</TableHead><TableHead className="text-xs">آخر حجز</TableHead></TableRow></TableHeader>
+                    <TableBody>{(health.buyers || []).map((b, i) => (<TableRow key={b.office} className={i === 0 ? 'bg-amber-50/40' : ''}>
+                      <TableCell className="text-[11px] font-black">{i === 0 && '🏆 '}{b.office}</TableCell>
+                      <TableCell className="text-[11px]">{b.bookings}</TableCell>
+                      <TableCell className="text-[11px] text-emerald-700 font-bold">{b.approved}</TableCell>
+                      <TableCell className="text-[11px]">{b.seats}</TableCell>
+                      <TableCell className="text-[11px] font-mono">{b.revenue.toLocaleString('en-US')} {b.currency}</TableCell>
+                      <TableCell className="text-[11px] font-mono text-emerald-700 font-bold">{b.net_to_seller.toLocaleString('en-US')} {b.currency}</TableCell>
+                      <TableCell className="text-[10px] text-slate-400 whitespace-nowrap">{b.last_at ? new Date(b.last_at).toLocaleDateString('en-GB') : '—'}</TableCell>
+                    </TableRow>))}</TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
             {/* Latest ACCEPTED incoming webhooks */}
             <Card>
               <CardHeader className="py-2 px-4"><CardTitle className="text-sm">📥 آخر الواردة المقبولة ({(health.incoming || []).length})</CardTitle></CardHeader>
@@ -10867,6 +10943,21 @@ function TenantApp() {
       await refreshBellCount()
     } catch (e) { toast.error(e.message) } finally { setBellBusy(null) }
   }
+  // v3.59 — reject from bell panel with a REQUIRED reason (sent back to Meraaj buyer)
+  const [bellRejectId, setBellRejectId] = useState(null)
+  const [bellRejectReason, setBellRejectReason] = useState('')
+  const rejectFromBell = async (id) => {
+    const reason = bellRejectReason.trim()
+    if (!reason) { toast.error('سبب الرفض إلزامي — سيظهر للمكتب المشتري في معراج'); return }
+    setBellBusy(id)
+    try {
+      await api(`/meraaj/inbound-bookings/${id}/reject`, { method: 'POST', body: { reason } })
+      toast.success('⛔ تم رفض الحجز وإشعار معراج بالسبب — أُعيدت المقاعد للسوق')
+      setBellList(l => (l || []).filter(x => x.id !== id))
+      setBellRejectId(null); setBellRejectReason('')
+      await refreshBellCount()
+    } catch (e) { toast.error(e.message) } finally { setBellBusy(null) }
+  }
 
   useEffect(() => {
     // Load announcements
@@ -10933,16 +11024,33 @@ function TenantApp() {
                       ) : bellList.length === 0 ? (
                         <div className="p-5 text-center text-xs text-emerald-600 font-bold">✅ لا توجد حجوزات معلقة — تم اعتماد الكل</div>
                       ) : bellList.map(b => (
-                        <div key={b.id} className="p-2.5 flex items-center gap-2 hover:bg-amber-50/40">
-                          <div className="flex-1 min-w-0">
-                            <div className="text-[11px] font-black text-slate-800 truncate">{b.package_name}</div>
-                            <div className="text-[10px] text-slate-500 truncate">{b.buyer_office_name} • {b.seats} مقاعد • {(Number(b.total_price) || 0).toLocaleString('en-US')} {b.currency}</div>
-                            <div className="text-[9px] text-slate-400">{new Date(b.created_at).toLocaleString('en-GB')}</div>
+                        <div key={b.id} className="p-2.5 hover:bg-amber-50/40">
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[11px] font-black text-slate-800 truncate">{b.package_name}</div>
+                              <div className="text-[10px] text-slate-500 truncate">{b.buyer_office_name} • {b.seats} مقاعد • {(Number(b.total_price) || 0).toLocaleString('en-US')} {b.currency}</div>
+                              <div className="text-[9px] text-slate-400">{new Date(b.created_at).toLocaleString('en-GB')}</div>
+                            </div>
+                            <Button size="sm" onClick={() => approveFromBell(b.id)} disabled={bellBusy === b.id}
+                              className="h-7 text-[10px] gap-1 bg-emerald-600 hover:bg-emerald-700 shrink-0">
+                              {bellBusy === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '✅'} اعتماد
+                            </Button>
+                            <Button size="sm" variant="outline" onClick={() => { setBellRejectId(bellRejectId === b.id ? null : b.id); setBellRejectReason('') }} disabled={bellBusy === b.id}
+                              className="h-7 text-[10px] px-2 border-rose-300 text-rose-600 hover:bg-rose-50 shrink-0" title="رفض الحجز مع إرسال السبب لمعراج">⛔</Button>
                           </div>
-                          <Button size="sm" onClick={() => approveFromBell(b.id)} disabled={bellBusy === b.id}
-                            className="h-7 text-[10px] gap-1 bg-emerald-600 hover:bg-emerald-700 shrink-0">
-                            {bellBusy === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '✅'} اعتماد
-                          </Button>
+                          {/* v3.59 — inline required-reason input for rejection */}
+                          {bellRejectId === b.id && (
+                            <div className="mt-2 flex items-center gap-1.5 bg-rose-50 border border-rose-200 rounded-lg p-1.5">
+                              <Input value={bellRejectReason} onChange={e => setBellRejectReason(e.target.value)}
+                                placeholder="سبب الرفض (إلزامي — يظهر للمكتب المشتري)" autoFocus
+                                onKeyDown={e => { if (e.key === 'Enter') rejectFromBell(b.id) }}
+                                className="h-7 text-[10px] bg-white flex-1" />
+                              <Button size="sm" onClick={() => rejectFromBell(b.id)} disabled={bellBusy === b.id || !bellRejectReason.trim()}
+                                className="h-7 text-[10px] bg-rose-600 hover:bg-rose-700 shrink-0">
+                                {bellBusy === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : 'تأكيد الرفض'}
+                              </Button>
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
