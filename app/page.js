@@ -1500,6 +1500,11 @@ function Dashboard({ setTab }) {
     const y = digest.yesterday || {}, t = digest.today || {}
     let msg = `🌅 ملخص معراج الصباحي — ${new Date().toLocaleDateString('en-GB')}\n\n📅 أمس:\n• الحجوزات: ${y.bookings || 0}\n• المقاعد: ${y.seats || 0}\n• صافي الإيراد: ${(y.net_to_seller || 0).toLocaleString('en-US')}\n\n📆 اليوم حتى الآن:\n• الحجوزات: ${t.bookings || 0} — صافي: ${(t.net_to_seller || 0).toLocaleString('en-US')}\n\n🔔 بانتظار الاعتماد: ${digest.pending || 0}`
     if (digest.alert) msg += `\n\n🚨 تحذير: ${digest.rejected_today} ويبهوك مرفوض اليوم (الحد: ${digest.reject_alert_threshold})`
+    // v3.65 — weekly comparison line in the WhatsApp digest
+    if (digest.week) {
+      const g = digest.week.growth_pct
+      msg += `\n\n📈 هذا الأسبوع: ${digest.week.this_week?.bookings || 0} حجز — صافي ${(digest.week.this_week?.net_to_seller || 0).toLocaleString('en-US')}\n(الأسبوع السابق: ${digest.week.prev_week?.bookings || 0} حجز — ${(digest.week.prev_week?.net_to_seller || 0).toLocaleString('en-US')})${g === null ? ' ✨ نشاط جديد' : g > 0 ? ` ▲ +${g}%` : g < 0 ? ` ▼ ${g}%` : ''}`
+    }
     if ((digest.capacity_warnings || []).length > 0) msg += `\n\n⚠️ باكجات تقترب من نفاد المقاعد:\n` + digest.capacity_warnings.map(w => `• ${w.name}: ${w.remaining} متبقٍ من ${w.seats_allocated} (${w.pct}%)`).join('\n')
     window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
   }
@@ -1572,6 +1577,18 @@ function Dashboard({ setTab }) {
                 <div className="text-[10px] text-slate-500">اليوم حتى الآن (حجوزات / صافي)</div>
               </div>
             </div>
+            {/* v3.65 — week-over-week Meraaj sales comparison (same accounting source as digest) */}
+            {digest.week && (
+              <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-bold bg-white border border-indigo-100 rounded-lg px-2.5 py-1.5">
+                <span className="text-indigo-900 font-black">📈 هذا الأسبوع:</span>
+                <span>{digest.week.this_week?.bookings ?? 0} حجز • صافي <span className="font-mono">{(digest.week.this_week?.net_to_seller ?? 0).toLocaleString('en-US')}</span></span>
+                <span className="text-slate-400">الأسبوع السابق: {digest.week.prev_week?.bookings ?? 0} حجز • <span className="font-mono">{(digest.week.prev_week?.net_to_seller ?? 0).toLocaleString('en-US')}</span></span>
+                {digest.week.growth_pct === null ? <span className="text-emerald-600 font-black">✨ نشاط جديد هذا الأسبوع</span>
+                  : digest.week.growth_pct > 0 ? <span className="text-emerald-600 font-black">▲ +{digest.week.growth_pct}%</span>
+                  : digest.week.growth_pct < 0 ? <span className="text-rose-600 font-black">▼ {digest.week.growth_pct}%</span>
+                  : <span className="text-slate-400 font-black">— ثابت</span>}
+              </div>
+            )}
             {/* v3.62 — seat capacity warnings for shared packages close to selling out */}
             {(digest.capacity_warnings || []).length > 0 && (
               <div className="mt-3 space-y-1.5">
@@ -8602,6 +8619,17 @@ function MeraajStoreScreen() {
   // v3.64 — quick seat refill from the shared-packages table (reuses v3.63 add-seats endpoint)
   const [storeRefillBusy, setStoreRefillBusy] = useState(null)
   const [officeTags, setOfficeTags] = useState({}) // v3.64 — office → tag map for bookings tab
+  // v3.65 — one-tap retry for failed outbound events (idempotent: same event id re-sent)
+  const [retryBusy, setRetryBusy] = useState(null)
+  const retryEvent = async (ev) => {
+    setRetryBusy(ev.id)
+    try {
+      const r = await api(`/meraaj/events/${ev.id}/retry`, { method: 'POST' })
+      if (r.status === 'sent') toast.success('✅ أُعيد إرسال الحدث لمعراج بنجاح')
+      else toast.error(`⚠️ فشلت إعادة المحاولة (${r.last_error || 'خطأ اتصال'}) — المحاولة #${r.attempts}`)
+      setHealth(h => ({ ...h, outbound: (h.outbound || []).map(x => x.id === ev.id ? { ...x, status: r.status, attempts: r.attempts, last_error: r.last_error || null } : x) }))
+    } catch (e) { toast.error(e.message) } finally { setRetryBusy(null) }
+  }
   const storeRefill = async (p) => {
     setStoreRefillBusy(p.id)
     try {
@@ -8686,8 +8714,11 @@ function MeraajStoreScreen() {
   const EVT_LABELS = { 'inventory.updated': '📊 تحديث مخزون', 'package.shared': '🕋 مشاركة باكج', 'package.updated': '✏️ تحديث باكج', 'package.deactivated': '⛔ إيقاف باكج' }
   // v3.26 — approve inbound booking into a real accounting booking
   const [approving, setApproving] = useState(null)
+  // v3.65 — count inbound registrants missing a passport number (flag-only, never blocks approval)
+  const missingPassports = (b) => (b.registrants || []).filter(r => !String(r?.passport_no || '').trim()).length
   const approveBooking = async (b) => {
-    if (!(await askConfirm({ title: `اعتماد حجز "${b.buyer_office_name}"`, desc: `اعتماد الحجز (${b.seats} مقعد) وتحويله لحجز محاسبي فعلي؟\n\nسيُنشأ: عميل باسم المكتب المشتري (إن لم يوجد) + حجز في الباكج + قيد يومية متوازن${canProfit ? ` بصافي ${(b.net_to_seller_total || 0).toLocaleString('en-US')} ${b.currency}` : ''}`, icon: '✅', confirmLabel: 'اعتماد وتحويل' }))) return
+    const noPass = missingPassports(b)
+    if (!(await askConfirm({ title: `اعتماد حجز "${b.buyer_office_name}"`, desc: `اعتماد الحجز (${b.seats} مقعد) وتحويله لحجز محاسبي فعلي؟\n\nسيُنشأ: عميل باسم المكتب المشتري (إن لم يوجد) + حجز في الباكج + قيد يومية متوازن${canProfit ? ` بصافي ${(b.net_to_seller_total || 0).toLocaleString('en-US')} ${b.currency}` : ''}${noPass > 0 ? `\n\n🛂 تنبيه: ${noPass} من المسجّلين بلا رقم جواز — يمكنك الاعتماد الآن واستكمال الجوازات لاحقاً من شاشة التسجيل` : ''}`, icon: noPass > 0 ? '🛂' : '✅', confirmLabel: 'اعتماد وتحويل' }))) return
     try {
       setApproving(b.id)
       const res = await api(`/meraaj/inbound-bookings/${b.id}/approve`, { method: 'POST' })
@@ -8868,6 +8899,12 @@ function MeraajStoreScreen() {
               <TableCell className="text-xs">
                 <div>👨 {b.pax_adults ?? b.seats} • 🧒 {b.pax_children ?? 0} • 👶 {b.pax_infants ?? 0}</div>
                 <div className="text-[9px] text-slate-400">{(b.registrants || []).map(r => r.name).slice(0, 2).join('، ')}{(b.registrants || []).length > 2 ? '...' : ''}</div>
+                {/* v3.65 — passport completeness flag before approval */}
+                {missingPassports(b) > 0 ? (
+                  <span className="inline-block mt-0.5 text-[9px] font-black bg-amber-100 text-amber-700 border border-amber-300 rounded-full px-1.5 py-0" title="مسجّلون بلا رقم جواز — يمكن الاعتماد واستكمالها لاحقاً">🛂 {missingPassports(b)} بلا جواز</span>
+                ) : (b.registrants || []).length > 0 && (
+                  <span className="inline-block mt-0.5 text-[9px] font-bold text-emerald-600" title="جميع المسجّلين لديهم أرقام جوازات">🛂 الجوازات مكتملة</span>
+                )}
               </TableCell>
               <TableCell className="text-xs">{fmt(b.total_price || 0, b.currency)}</TableCell>
               <TableCell className="text-[10px] text-slate-400">{b.meraaj_booking_ref || '—'}</TableCell>
@@ -9066,7 +9103,13 @@ function MeraajStoreScreen() {
             </Card>
             {/* Latest OUTBOUND events */}
             <Card>
-              <CardHeader className="py-2 px-4"><CardTitle className="text-sm">📤 آخر الصادرة لمعراج ({(health.outbound || []).length})</CardTitle></CardHeader>
+              <CardHeader className="py-2 px-4 flex-row items-center justify-between space-y-0">
+                <CardTitle className="text-sm">📤 آخر الصادرة لمعراج ({(health.outbound || []).length})</CardTitle>
+                {/* v3.65 — total failed outbound counter */}
+                {(health.stats?.outbound_failed_total || 0) > 0 && (
+                  <span className="text-[10px] font-black bg-rose-100 text-rose-700 border border-rose-200 rounded-full px-2 py-0.5">⚠️ {health.stats.outbound_failed_total.toLocaleString('en-US')} فاشلة إجمالاً</span>
+                )}
+              </CardHeader>
               <CardContent className="p-0">
                 {(health.outbound || []).length === 0 ? <div className="p-6 text-center text-xs text-slate-400">لا توجد أحداث صادرة بعد</div> : (
                   <Table>
@@ -9074,7 +9117,19 @@ function MeraajStoreScreen() {
                     <TableBody>{(health.outbound || []).map(ev => (<TableRow key={ev.id}>
                       <TableCell className="text-[11px] whitespace-nowrap">{new Date(ev.at).toLocaleString('en-GB')}</TableCell>
                       <TableCell className="text-[11px]">{EVT_LABELS[ev.type] || ev.type}</TableCell>
-                      <TableCell><Badge className={ev.status === 'sent' ? 'bg-emerald-100 text-emerald-700 text-[9px]' : ev.status === 'failed' ? 'bg-rose-100 text-rose-700 text-[9px]' : 'bg-amber-100 text-amber-700 text-[9px]'}>{ev.status === 'sent' ? '✅ أُرسل' : ev.status === 'failed' ? '⚠️ فشل' : '⏳ معلّق'}</Badge>{ev.last_error && <span className="text-[9px] text-slate-400 block truncate max-w-[200px]" title={ev.last_error}>{ev.last_error}</span>}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1.5">
+                          <Badge className={ev.status === 'sent' ? 'bg-emerald-100 text-emerald-700 text-[9px]' : ev.status === 'failed' ? 'bg-rose-100 text-rose-700 text-[9px]' : 'bg-amber-100 text-amber-700 text-[9px]'}>{ev.status === 'sent' ? '✅ أُرسل' : ev.status === 'failed' ? `⚠️ فشل${ev.attempts ? ` (${ev.attempts})` : ''}` : '⏳ معلّق'}</Badge>
+                          {/* v3.65 — one-tap retry (idempotent: same event id re-sent, no duplicates) */}
+                          {ev.status !== 'sent' && (
+                            <Button size="sm" variant="outline" onClick={() => retryEvent(ev)} disabled={retryBusy === ev.id}
+                              className="h-6 text-[10px] px-2 gap-1 border-blue-300 text-blue-700 hover:bg-blue-50" title="إعادة إرسال نفس الحدث لمعراج (بنفس المعرف — لا تكرار)">
+                              {retryBusy === ev.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '🔁'} إعادة
+                            </Button>
+                          )}
+                        </div>
+                        {ev.last_error && <span className="text-[9px] text-slate-400 block truncate max-w-[200px]" title={ev.last_error}>{ev.last_error}</span>}
+                      </TableCell>
                     </TableRow>))}</TableBody>
                   </Table>
                 )}
@@ -11310,7 +11365,12 @@ function TenantApp() {
                             <div className="flex-1 min-w-0">
                               <div className="text-[11px] font-black text-slate-800 truncate">{b.package_name}</div>
                               <div className="text-[10px] text-slate-500 truncate">{b.buyer_office_name} • {b.seats} مقاعد • {(Number(b.total_price) || 0).toLocaleString('en-US')} {b.currency}</div>
-                              <div className="text-[9px] text-slate-400">{new Date(b.created_at).toLocaleString('en-GB')}</div>
+                              <div className="text-[9px] text-slate-400">{new Date(b.created_at).toLocaleString('en-GB')}
+                                {/* v3.65 — passport completeness flag in the bell panel */}
+                                {(b.registrants || []).filter(r => !String(r?.passport_no || '').trim()).length > 0 && (
+                                  <span className="mr-1.5 font-black text-amber-700">🛂 {(b.registrants || []).filter(r => !String(r?.passport_no || '').trim()).length} بلا جواز</span>
+                                )}
+                              </div>
                             </div>
                             <Button size="sm" onClick={() => approveFromBell(b.id)} disabled={bellBusy === b.id}
                               className="h-7 text-[10px] gap-1 bg-emerald-600 hover:bg-emerald-700 shrink-0">

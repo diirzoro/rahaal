@@ -1580,6 +1580,15 @@ async function handleRoute(request, { params }) {
       }
       const yesterday = await sumRange(startYesterday, startToday)
       const today = await sumRange(startToday, endToday)
+      // v3.65 — week-over-week comparison from the SAME accounting source (net_to_seller_total):
+      // this week = last 7 days including today; previous week = the 7 days before that.
+      const weekStart = new Date(endToday.getTime() - 7 * 24 * 3600 * 1000)
+      const prevWeekStart = new Date(weekStart.getTime() - 7 * 24 * 3600 * 1000)
+      const thisWeek = await sumRange(weekStart, endToday)
+      const prevWeek = await sumRange(prevWeekStart, weekStart)
+      const growthPct = prevWeek.net_to_seller > 0
+        ? +(((thisWeek.net_to_seller - prevWeek.net_to_seller) / prevWeek.net_to_seller) * 100).toFixed(1)
+        : (thisWeek.net_to_seller > 0 ? null : 0) // null = new activity with no baseline
       const pending = await db.collection('meraaj_inbound_bookings').countDocuments({ ...tf, status: 'new' })
       const rejectedToday = await db.collection('meraaj_webhook_log').countDocuments({ ok: false, at: { $gte: startToday } })
       const cfgDoc = await db.collection('tenant_settings').findOne(tf)
@@ -1600,6 +1609,7 @@ async function handleRoute(request, { params }) {
         reject_alert_threshold: threshold,
         alert: threshold > 0 && rejectedToday >= threshold,
         capacity_warnings, // v3.62
+        week: { this_week: thisWeek, prev_week: prevWeek, growth_pct: growthPct }, // v3.65
       })
     }
     // v3.62 — MONTHLY MERAAJ REPORT (owner-only): per-package + per-buyer-office activity for a month.
@@ -1954,6 +1964,40 @@ async function handleRoute(request, { params }) {
     if (route === '/meraaj/events' && method === 'GET') {
       return ok(clean(await db.collection('meraaj_events').find(tf).sort({ created_at: -1 }).limit(100).toArray()))
     }
+    // v3.65 — ONE-TAP RETRY of a failed/pending outbound event (owner only). IDEMPOTENT BY DESIGN:
+    // re-sends the SAME event id in the body (Meraaj dedups inbound by event id) and NEVER creates
+    // a new event document — only status/attempts/last_error are updated on the existing doc.
+    // emitMeraajEvent and webhook processing logic are untouched.
+    const evtRetryMatch = route.match(/^\/meraaj\/events\/([^/]+)\/retry$/)
+    if (evtRetryMatch && method === 'POST') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const ev = await db.collection('meraaj_events').findOne({ id: evtRetryMatch[1], tenant_id: T })
+      if (!ev) return bad('الحدث غير موجود', 404)
+      if (ev.status === 'sent') return bad('الحدث مُرسل مسبقاً — لا حاجة لإعادة المحاولة')
+      const retryUrl = process.env.MERAAJ_WEBHOOK_URL || (meraajApiBase() ? `${meraajApiBase()}/api/integrations/rahal/webhooks` : '')
+      if (!retryUrl || !meraajSecret()) return bad('رابط معراج غير مُهيأ — أضف MERAAJ_API_BASE_URL ثم أعد المحاولة')
+      const attempts = (Number(ev.attempts) || 0) + 1
+      try {
+        const ts = Math.floor(Date.now() / 1000)
+        const body = JSON.stringify({ id: ev.id, type: ev.type, timestamp: ts, data: ev.payload })
+        const res = await fetch(retryUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Rahal-Signature': meraajSign(body) },
+          body,
+          signal: AbortSignal.timeout(8000),
+        })
+        if (res.ok) {
+          await db.collection('meraaj_events').updateOne({ id: ev.id }, { $set: { status: 'sent', sent_at: new Date(), attempts, last_error: null } })
+          return ok({ status: 'sent', attempts })
+        }
+        await db.collection('meraaj_events').updateOne({ id: ev.id }, { $set: { status: 'failed', attempts, last_error: `HTTP ${res.status}` } })
+        return ok({ status: 'failed', attempts, last_error: `HTTP ${res.status}` })
+      } catch (e) {
+        const le = String(e.message || e).slice(0, 200)
+        await db.collection('meraaj_events').updateOne({ id: ev.id }, { $set: { status: 'failed', attempts, last_error: le } })
+        return ok({ status: 'failed', attempts, last_error: le })
+      }
+    }
     // v3.57 — WEBHOOK HEALTH DASHBOARD (owner only): latest accepted/rejected inbound webhooks
     // + outbound sync events so the office spots Meraaj sync problems instantly.
     // READ-ONLY: does not touch webhook processing logic. Rejected log entries are global
@@ -1990,6 +2034,7 @@ async function handleRoute(request, { params }) {
       // Outbound sync events (outbox)
       const outboundDocs = await db.collection('meraaj_events').find(tf).sort({ created_at: -1 }).limit(15).toArray()
       const outboundFailed24 = await db.collection('meraaj_events').countDocuments({ ...tf, status: 'failed', created_at: { $gte: h24 } })
+      const outboundFailedTotal = await db.collection('meraaj_events').countDocuments({ ...tf, status: 'failed' }) // v3.65
       // v3.60 — 7-day accepted vs rejected trend (per calendar day, oldest→newest)
       const dayKey = (d) => new Date(d).toISOString().slice(0, 10)
       const trendMap = {}
@@ -2030,6 +2075,7 @@ async function handleRoute(request, { params }) {
           accepted_24h: accepted24, accepted_7d: accepted7d,
           rejected_24h: rejected24, rejected_7d: rejected7d,
           outbound_failed_24h: outboundFailed24,
+          outbound_failed_total: outboundFailedTotal, // v3.65
           last_accepted_at: incoming[0]?.created_at || null,
           last_rejected_at: rawRejected[0]?.at || null,
         },
