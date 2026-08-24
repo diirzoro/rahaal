@@ -703,7 +703,12 @@ async function handleRoute(request, { params }) {
     if (route === '/meraaj/webhooks' && method === 'POST') {
       const rawBody = await request.text()
       const sig = request.headers.get('x-meraaj-signature')
-      if (!meraajVerify(rawBody, sig)) return bad('توقيع غير صالح — Invalid HMAC signature', 401)
+      if (!meraajVerify(rawBody, sig)) {
+        // v3.52 — diagnostic trail: secret mismatches on LIVE were silent; now every rejected
+        // webhook is logged so the office/Meraaj team can detect delivery failures instantly.
+        try { await db.collection('meraaj_webhook_log').insertOne({ id: uuidv4(), ok: false, reason: 'invalid_signature', has_signature: !!sig, body_head: String(rawBody || '').slice(0, 400), at: new Date() }) } catch {}
+        return bad('توقيع غير صالح — Invalid HMAC signature', 401)
+      }
       let evt
       try { evt = JSON.parse(rawBody) } catch { return bad('JSON غير صالح') }
       const type = evt.type
@@ -2422,15 +2427,27 @@ async function handleRoute(request, { params }) {
       const wantArchived = q.archived === '1' || q.archived === 'true'
       const pkgFilter = { ...tf, ...(wantArchived ? { archived: true } : { archived: { $ne: true } }) }
       const list = await db.collection('packages').find(pkgFilter).sort({ created_at: -1 }).toArray()
+      // v3.52 — pending Meraaj bookings must be VISIBLE immediately (not hidden until approval)
+      const pendingAgg = await db.collection('meraaj_inbound_bookings').aggregate([
+        { $match: { tenant_id: T, status: 'new' } },
+        { $group: { _id: '$package_id', seats: { $sum: '$seats' }, count: { $sum: 1 } } },
+      ]).toArray()
+      const pendingMap = {}
+      for (const x of pendingAgg) pendingMap[x._id] = x
       // Enrich each with counts
       const enriched = await Promise.all(list.map(async p => {
         const [comps, books] = await Promise.all([
           db.collection('package_components').countDocuments({ tenant_id: T, package_id: p.id }),
           db.collection('package_bookings').countDocuments({ tenant_id: T, package_id: p.id }),
         ])
-        return { ...p, _id: undefined, components_count: comps, bookings_count: books }
+        return { ...p, _id: undefined, components_count: comps, bookings_count: books, meraaj_pending_seats: pendingMap[p.id]?.seats || 0, meraaj_pending_count: pendingMap[p.id]?.count || 0 }
       }))
       return ok(enriched)
+    }
+    // v3.52 — Package-scoped inbound Meraaj bookings (visible from the registrants tab without mod_meraaj)
+    const pkgInboundMatch = route.match(/^\/packages\/([^/]+)\/inbound-bookings$/)
+    if (pkgInboundMatch && method === 'GET') {
+      return ok(clean(await db.collection('meraaj_inbound_bookings').find({ tenant_id: T, package_id: pkgInboundMatch[1] }).sort({ created_at: -1 }).limit(100).toArray()))
     }
     // v3.7 — Packages profitability comparison (leaderboard) with optional period filter
     if (route === '/packages/comparison' && method === 'GET') {

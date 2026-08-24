@@ -20,6 +20,13 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 - Meraaj E2E 15/15 test (blocked on Meraaj team configuring temp secret)
 - Package Comparison feature (deferred by user)
 
+## v3.52 (completed) — Meraaj booking sync visibility fix
+- Root cause of "3 seats booked but 0 registrants": the design requires manual approval (v3.26) and pending inbound bookings were INVISIBLE outside the Meraaj screen's inbound tab. Registrant data itself was always received/stored correctly (verified E2E).
+- New: GET /packages returns meraaj_pending_seats/meraaj_pending_count; GET /packages/:id/inbound-bookings (package-scoped, works with mod_packages only); rejected webhooks (bad HMAC) now logged in meraaj_webhook_log {ok:false, reason:'invalid_signature', body_head} for LIVE delivery diagnosis.
+- FE: amber pulse badge on package card ("N مقعد من معراج بانتظار الاعتماد"), registrants tab shows pending Meraaj bookings with ALL registrant names/categories/rooms + one-click "اعتماد وإظهار المسجلين" (mod_meraaj/owner; others see waiting note), +N badge on tab title.
+- Tested 9/9 E2E: signed webhook → immediate visibility → approve → names in bookings; invalid signature 401 + logged; idempotent duplicates.
+- LIVE diagnosis guidance: if bookings still missing on LIVE, check meraaj_webhook_log (secret mismatch) and meraaj_inbound_bookings.
+
 ## v3.51 (completed) — Supplier on page 1 + tab rename + RBAC Phase 3
 - Package form page 1: supplier SearchPick (f.supplier_id, saved in one shot via POST/PATCH; internal field — NOT in Meraaj payload, verified). Card button renamed "المكونات والتسجيل" → "التسجيل والمواصلات".
 - RBAC Phase 3: new perms fin_statements / fin_partner_summary (accountant template both, sales_manager partner only). allowed_box_ids per user (empty = all): GET /boxes filtered for restricted staff (server-enforced), POST /vouchers + cash booking box guard 403, discount>0 requires owner/apply_discount 403. Route guards: /reports/statement + /bulk-statement/generate → fin_statements; /partners/statements → fin_partner_summary. FE: ReportsScreen statement tab hidden, packages كشف الشريك gated by fin_partner_summary, PermissionsDialog boxes multi-select (name_ar labels) + 2 new keys in التقارير group.

@@ -8607,6 +8607,12 @@ function PkgCard({ p, onOpen, onClose, onEdit, onDelete, onReopen, onReport, onE
         <div className="text-xs text-slate-500 space-y-0.5">
           {p?.start_date && <div>📅 من {fmtDate(p.start_date)} {p?.end_date && `→ ${fmtDate(p.end_date)}`}</div>}
           <div>🧩 {p?.components_count || 0} مكوّن • 👥 {p?.bookings_count || 0} مسجل {p?.has_image ? '• 📷' : ''}</div>
+          {/* v3.52 — pending Meraaj bookings are never invisible anymore */}
+          {Number(p?.meraaj_pending_seats) > 0 && (
+            <div className="text-[11px] font-black text-amber-700 bg-amber-50 border border-amber-300 rounded-md px-2 py-1 animate-pulse">
+              🕋 {p.meraaj_pending_seats} مقعد من معراج بانتظار الاعتماد — افتح "التسجيل والمواصلات"
+            </div>
+          )}
         </div>
         {/* v3.23 — Feature chips preview */}
         {Array.isArray(p?.features) && p.features.length > 0 && (
@@ -9288,12 +9294,24 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
   const [boxes, setBoxes] = useState([])
   const [newComp, setNewComp] = useState({ name: '', component_type: 'ticket', supplier_id: '', cost_per_pax: '', sale_per_pax: '', notes: '', pricing_type: 'flat', include_infants: false, nights: '', city: '', cost_adult: '', cost_child: '', cost_infant: '', sale_adult: '', sale_child: '', sale_infant: '', room_rates: {} })
   const [newBooking, setNewBooking] = useState({ client_id: '', pilgrim_name: '', passport_no: '', pax_adults: 1, pax_children: 0, pax_infants: 0, birth_date: '', payment_method: 'credit', box_id: '', transport_id: '', notes: '', registrants: [], discount: '', discount_reason: '' })
+  const [inbound, setInbound] = useState([]) // v3.52 — pending Meraaj bookings visible in the registrants tab
   const load = () => Promise.all([
     api(`/packages/${pkg.id}/components`).then(setComps),
     api(`/packages/${pkg.id}/bookings`).then(setBookings),
     api(`/packages/${pkg.id}/transports`).then(setTransports).catch(() => setTransports([])),
+    api(`/packages/${pkg.id}/inbound-bookings`).then(r => setInbound((r || []).filter(x => x.status === 'new'))).catch(() => setInbound([])),
     api('/suppliers').then(setSuppliers), api('/clients').then(setClients), api('/boxes').then(setBoxes),
   ]).catch(e => toast.error(e.message))
+  // v3.52 — approve a pending Meraaj booking directly from the registrants tab
+  const canApproveMeraaj = pdUser?.role === 'owner' || pdUser?.permissions?.mod_meraaj === true
+  const approveInbound = async (ib) => {
+    if (!(await askConfirm({ title: `اعتماد حجز "${ib.buyer_office_name}"`, desc: `اعتماد الحجز (${ib.seats} مقعد — ${(ib.registrants || []).length} مسافر) وتحويله لحجز فعلي؟ ستظهر أسماء المسافرين فوراً في قائمة المسجلين.`, icon: '✅', confirmLabel: 'اعتماد وإظهار المسجلين' }))) return
+    try {
+      await api(`/meraaj/inbound-bookings/${ib.id}/approve`, { method: 'POST' })
+      toast.success('✅ تم الاعتماد — المسافرون الآن في قائمة المسجلين')
+      await load(); onChanged && onChanged()
+    } catch (e) { toast.error(e.message) }
+  }
   useEffect(() => { load() }, [pkg.id])
   // v3.39 — UNIFIED PRICING: direct mode = package room table is THE price source; components = details only
   const pkgIsDirect = (pkg.pricing_mode || ((pkg.room_pricing || []).length > 0 ? 'direct' : 'components')) === 'direct'
@@ -9374,7 +9392,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
         <div className="flex gap-2 mb-3 border-b flex-wrap">
           {canProfit && <button onClick={() => setTab('components')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'components' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500'}`}>🧩 المكونات ({comps.length})</button>}
           {canProfit && <button onClick={() => setTab('transports')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'transports' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500'}`}>🚌 وسائل النقل ({transports.length})</button>}
-          <button onClick={() => setTab('bookings')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'bookings' ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-slate-500'}`}>👥 المسجلون ({bookings.length})</button>
+          <button onClick={() => setTab('bookings')} className={`px-4 py-2 text-sm font-bold border-b-2 ${tab === 'bookings' ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-slate-500'}`}>👥 المسجلون ({bookings.length}){inbound.length > 0 && <span className="ms-1 text-[10px] bg-amber-500 text-white rounded-full px-1.5 py-0.5">🕋 +{inbound.length}</span>}</button>
           <button onClick={printRoomingList} className="px-4 py-2 text-sm font-bold text-indigo-600 hover:text-indigo-800 ms-auto">🖨️ كشف التسكين</button>
         </div>
         {canProfit && tab === 'components' && (
@@ -9573,6 +9591,33 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
 
         {tab === 'bookings' && (
           <div className="space-y-3">
+            {/* v3.52 — Pending Meraaj bookings: registrant names visible IMMEDIATELY, approval one click away */}
+            {inbound.length > 0 && (
+              <div className="border-2 border-amber-300 bg-amber-50/70 rounded-xl p-3 space-y-2">
+                <div className="font-black text-sm text-amber-800">🕋 حجوزات واردة من معراج بانتظار الاعتماد ({inbound.reduce((s, x) => s + (Number(x.seats) || 0), 0)} مقعد)</div>
+                {inbound.map(ib => (
+                  <div key={ib.id} className="bg-white rounded-lg border border-amber-200 p-3">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="min-w-0">
+                        <div className="font-bold text-sm text-slate-800">🏢 {ib.buyer_office_name} <span className="text-xs text-slate-500">— {ib.seats} مقعد • {new Date(ib.created_at).toLocaleDateString('en-GB')}</span></div>
+                        <div className="flex flex-wrap gap-1.5 mt-2">
+                          {(ib.registrants || []).map((r, i) => (
+                            <span key={i} className="text-[11px] bg-slate-100 border rounded-full px-2 py-0.5">
+                              👤 {r.name} <span className="text-slate-400">({r.age_category === 'adult' ? 'بالغ' : r.age_category === 'child' ? 'طفل' : 'رضيع'}{r.room_type ? ` • ${r.room_type}` : ''})</span>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      {canApproveMeraaj ? (
+                        <Button size="sm" onClick={() => approveInbound(ib)} className="bg-emerald-600 hover:bg-emerald-700 text-white gap-1 h-8 text-xs shrink-0">✅ اعتماد وإظهار المسجلين</Button>
+                      ) : (
+                        <span className="text-[11px] text-slate-500 bg-slate-100 rounded-md px-2 py-1 shrink-0">بانتظار اعتماد المدير/المالك</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
             {pkg.status !== 'closed' && (
               <div className="p-3 bg-emerald-50 rounded-lg border border-emerald-200 space-y-3">
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
