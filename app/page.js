@@ -8637,6 +8637,46 @@ function MeraajStoreScreen() {
   // v3.66 — retry ALL failed in sequential batches with live progress (stoppable)
   const [retryAll, setRetryAll] = useState(null) // {running, total, processed, succeeded, failed, remaining}
   const retryAllStopRef = useRef(false)
+  // v3.69 — unified alerts center + month-over-month office comparison
+  const [alertsCenter, setAlertsCenter] = useState(null)
+  const [comparison, setComparison] = useState(null)
+  const [compMonth, setCompMonth] = useState(new Date().toISOString().slice(0, 7))
+  const [compBusy, setCompBusy] = useState(false)
+  const [alertRefillBusy, setAlertRefillBusy] = useState(null)
+  const loadAlertsCenter = () => api('/meraaj/alerts-center').then(setAlertsCenter).catch(() => {})
+  const loadComparison = async (m = compMonth) => {
+    setCompBusy(true)
+    try { setComparison(await api(`/meraaj/office-comparison?month=${m}`)) } catch (e) { toast.error(e.message) } finally { setCompBusy(false) }
+  }
+  const alertsRefill = async (w) => {
+    setAlertRefillBusy(w.id)
+    try {
+      const r = await api(`/meraaj/packages/${w.id}/add-seats`, { method: 'POST', body: { add: 5 } })
+      toast.success(`✅ أُضيفت ${r.added} مقاعد لـ«${w.name}» — المتاح ${r.remaining} من ${r.seats_allocated} (تم إشعار معراج)`)
+      loadAlertsCenter()
+      api('/packages').then(list => setSharedPkgs((list || []).filter(p => p?.meraaj?.shared))).catch(() => {})
+    } catch (e) { toast.error(e.message) } finally { setAlertRefillBusy(null) }
+  }
+  const exportComparison = () => {
+    try {
+      const r = comparison
+      if (!r || (r.offices || []).length === 0) { toast.error('لا توجد بيانات للتصدير'); return }
+      const g = (v) => v === null ? 'جديد' : `${v}%`
+      const ws = XLSX.utils.aoa_to_sheet([
+        [`مقارنة أداء المكاتب — ${r.month} مقابل ${r.prev_month}`], [],
+        ['المكتب', `حجوزات ${r.month}`, `معتمدة ${r.month}`, `مقاعد ${r.month}`, `إيراد ${r.month}`, `صافي ${r.month}`, `حجوزات ${r.prev_month}`, `صافي ${r.prev_month}`, 'النمو %'],
+        ...r.offices.map(o => [o.office, o.current.bookings, o.current.approved, o.current.seats, o.current.revenue, o.current.net_to_seller, o.previous.bookings, o.previous.net_to_seller, g(o.growth_pct)]),
+        [],
+        ['الإجمالي', r.totals.current.bookings, r.totals.current.approved, r.totals.current.seats, r.totals.current.revenue, r.totals.current.net_to_seller, r.totals.previous.bookings, r.totals.previous.net_to_seller, g(r.totals.growth_pct)],
+      ])
+      ws['!cols'] = [{ wch: 26 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 10 }]
+      const wb = XLSX.utils.book_new()
+      wb.Workbook = { Views: [{ RTL: true }] }
+      XLSX.utils.book_append_sheet(wb, ws, 'مقارنة المكاتب')
+      XLSX.writeFile(wb, `مقارنة_المكاتب_${r.month}.xlsx`)
+      toast.success(`✅ تم تنزيل مقارنة المكاتب لشهر ${r.month}`)
+    } catch (e) { toast.error(e.message) }
+  }
   const runRetryAll = async () => {
     retryAllStopRef.current = false
     let agg = { running: true, total: null, processed: 0, succeeded: 0, failed: 0, remaining: null }
@@ -8749,6 +8789,7 @@ function MeraajStoreScreen() {
     api('/meraaj/inbound-bookings').then(setInbound).catch(() => {})
     api('/meraaj/events').then(setEvents).catch(() => {})
     if (isOwner) api('/meraaj/webhook-health').then(setHealth).catch(() => {}) // v3.57
+    if (isOwner) api('/meraaj/alerts-center').then(setAlertsCenter).catch(() => {}) // v3.69
     api('/meraaj/office-tags').then(list => setOfficeTags(Object.fromEntries((list || []).map(t => [t.office, t.tag])))).catch(() => {}) // v3.64
     api('/packages').then(list => setSharedPkgs((list || []).filter(p => p?.meraaj?.shared))).catch(() => {})
   }
@@ -8782,6 +8823,43 @@ function MeraajStoreScreen() {
     } catch (e) { toast.error(e.message) }
   }
   const openPassReport = () => { setPassReportOpen(true); setPassReportPkg(''); setPassReportOffice(''); setPassReport(null); loadPassReport('', '') }
+  // v3.68 — Excel export of the missing-passports report (current filter scope)
+  const exportPassReport = () => {
+    try {
+      const rows = passReport?.rows || []
+      if (rows.length === 0) { toast.error('لا توجد صفوف للتصدير ضمن هذا النطاق'); return }
+      const ws = XLSX.utils.aoa_to_sheet([
+        [`تقرير الجوازات الناقصة — ${new Date().toLocaleDateString('en-GB')}${passReportOffice ? ` — ${passReportOffice}` : ''}`], [],
+        ['#', 'المسافر', 'العمر', 'الباكج', 'المكتب المشتري', 'مرجع معراج'],
+        ...rows.map((r, i) => [i + 1, r.name, r.age ?? '', r.package_name, r.office, r.booking_ref || '']),
+      ])
+      ws['!cols'] = [{ wch: 4 }, { wch: 24 }, { wch: 6 }, { wch: 30 }, { wch: 22 }, { wch: 16 }]
+      const wb = XLSX.utils.book_new()
+      wb.Workbook = { Views: [{ RTL: true }] }
+      XLSX.utils.book_append_sheet(wb, ws, 'الجوازات الناقصة')
+      XLSX.writeFile(wb, `تقرير_الجوازات_الناقصة_${new Date().toISOString().slice(0, 10)}.xlsx`)
+      toast.success('✅ تم تنزيل تقرير الجوازات الناقصة')
+    } catch (e) { toast.error('خطأ في التصدير: ' + e.message) }
+  }
+  // v3.68 — ready WhatsApp reminder asking a buyer office for its missing passports
+  const sendPassReminder = () => {
+    const office = passReportOffice
+    if (!office) { toast.error('اختر مكتباً من فلتر المكاتب أولاً لتوليد رسالة التذكير'); return }
+    const rows = (passReport?.rows || []).filter(r => r.office === office)
+    if (rows.length === 0) { toast.error('لا توجد جوازات ناقصة لهذا المكتب') }
+    let msg = `السلام عليكم «${office}» 🌹\n\nنأمل تزويدنا بأرقام جوازات المسافرين التالية أسماؤهم لاستكمال إجراءات حجوزاتكم عبر معراج:\n\n`
+    const byRef = {}
+    for (const r of rows) {
+      const key = `${r.package_name}${r.booking_ref ? ` — ${r.booking_ref}` : ''}`
+      byRef[key] = byRef[key] || []
+      byRef[key].push(r)
+    }
+    for (const [key, list] of Object.entries(byRef)) {
+      msg += `📦 ${key}:\n` + list.map(r => `   • ${r.name}${r.age != null ? ` (${r.age} سنة)` : ''}`).join('\n') + '\n'
+    }
+    msg += `\nإجمالي المطلوب: ${rows.length} جواز 🛂\nشاكرين تعاونكم — ${new Date().toLocaleDateString('en-GB')}`
+    window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
+  }
   // v3.67 — auto-retry schedule toggle (owner)
   const toggleAutoRetry = async () => {
     try {
@@ -8958,6 +9036,8 @@ function MeraajStoreScreen() {
         <Button size="sm" variant={view === 'bookings' ? 'default' : 'outline'} onClick={() => setView('bookings')} className="h-8 text-xs">📥 حجوزات معراج ({inbound.length})</Button>
         <Button size="sm" variant={view === 'events' ? 'default' : 'outline'} onClick={() => setView('events')} className="h-8 text-xs">🔄 سجل المزامنة</Button>
         {isOwner && <Button size="sm" variant={view === 'health' ? 'default' : 'outline'} onClick={() => setView('health')} className="h-8 text-xs">🩺 صحة المزامنة{(health?.stats?.rejected_24h || 0) > 0 ? <span className="mr-1 px-1.5 rounded-full bg-rose-100 text-rose-700 text-[10px] font-black">{health.stats.rejected_24h}</span> : null}</Button>}
+        {isOwner && <Button size="sm" variant={view === 'alerts' ? 'default' : 'outline'} onClick={() => { setView('alerts'); loadAlertsCenter() }} className="h-8 text-xs">🔔 مركز التنبيهات{(alertsCenter?.counts?.total || 0) > 0 ? <span className="mr-1 px-1.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-black">{alertsCenter.counts.total}</span> : null}</Button>}
+        {isOwner && <Button size="sm" variant={view === 'comparison' ? 'default' : 'outline'} onClick={() => { setView('comparison'); if (!comparison) loadComparison() }} className="h-8 text-xs">📊 مقارنة المكاتب</Button>}
         {/* v3.67 — owner read-only passport report */}
         {isOwner && <Button size="sm" variant="outline" onClick={openPassReport} className="h-8 text-xs border-amber-300 text-amber-700 hover:bg-amber-50">🛂 تقرير الجوازات الناقصة</Button>}
       </div>
@@ -9139,6 +9219,13 @@ function MeraajStoreScreen() {
                     {passReport.total_missing > 0 ? `⚠️ ${passReport.total_missing} مسافر بلا جواز` : '✅ كل الجوازات مكتملة'}
                   </span>
                   <span className="text-[10px] text-slate-400">({passReport.scanned_bookings} حجز معتمد مفحوص)</span>
+                  {/* v3.68 — export + WhatsApp reminder */}
+                  <div className="flex items-center gap-1.5 mr-auto">
+                    <Button size="sm" variant="outline" onClick={exportPassReport} className="h-7 text-[10px] gap-1 border-emerald-300 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-3 h-3" /> تصدير Excel</Button>
+                    <Button size="sm" variant="outline" onClick={sendPassReminder} disabled={!passReportOffice}
+                      title={passReportOffice ? `توليد رسالة تذكير لـ«${passReportOffice}»` : 'اختر مكتباً من الفلتر أولاً'}
+                      className="h-7 text-[10px] gap-1 border-blue-300 text-blue-700 hover:bg-blue-50 disabled:opacity-40">📱 تذكير واتساب</Button>
+                  </div>
                 </div>
                 <div className="max-h-[50vh] overflow-y-auto border rounded-lg">
                   {(passReport.rows || []).length === 0 ? <div className="p-6 text-center text-xs text-emerald-600 font-bold">✅ لا توجد جوازات ناقصة ضمن هذا النطاق</div> : (
@@ -9177,6 +9264,156 @@ function MeraajStoreScreen() {
             </TableRow>))}</TableBody>
           </Table></CardContent></Card>
         )
+      )}
+      {/* v3.69 — UNIFIED ALERTS CENTER (owner only) */}
+      {view === 'alerts' && isOwner && (
+        !alertsCenter ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">جارٍ تحميل التنبيهات...</CardContent></Card> : (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-sm font-black text-slate-700">🔔 مركز التنبيهات الموحد — كل التحذيرات التشغيلية في مكان واحد</div>
+              <Button size="sm" variant="outline" onClick={loadAlertsCenter} className="h-7 text-xs gap-1"><RefreshCw className="w-3 h-3" /> تحديث</Button>
+            </div>
+            {/* summary count cards */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+              <Card className={(alertsCenter.counts?.failed_events || 0) > 0 ? 'border-rose-300 bg-rose-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.failed_events || 0) > 0 ? 'text-rose-600' : 'text-slate-400'}`}>{alertsCenter.counts?.failed_events ?? 0}</div><div className="text-[10px] text-slate-500">📤 أحداث صادرة فاشلة</div></CardContent></Card>
+              <Card className={(alertsCenter.counts?.pending_bookings || 0) > 0 ? 'border-blue-300 bg-blue-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.pending_bookings || 0) > 0 ? 'text-blue-600' : 'text-slate-400'}`}>{alertsCenter.counts?.pending_bookings ?? 0}</div><div className="text-[10px] text-slate-500">📥 حجوزات بانتظار الاعتماد</div></CardContent></Card>
+              <Card className={(alertsCenter.counts?.capacity_warnings || 0) > 0 ? 'border-amber-300 bg-amber-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.capacity_warnings || 0) > 0 ? 'text-amber-600' : 'text-slate-400'}`}>{alertsCenter.counts?.capacity_warnings ?? 0}</div><div className="text-[10px] text-slate-500">💺 باكجات مقاعدها شبه ممتلئة</div></CardContent></Card>
+              <Card className={(alertsCenter.counts?.missing_passports || 0) > 0 ? 'border-orange-300 bg-orange-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.missing_passports || 0) > 0 ? 'text-orange-600' : 'text-slate-400'}`}>{alertsCenter.counts?.missing_passports ?? 0}</div><div className="text-[10px] text-slate-500">🛂 جوازات ناقصة (معتمدة)</div></CardContent></Card>
+              <Card className={alertsCenter.reject_alert ? 'border-rose-400 bg-rose-50/60' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${alertsCenter.reject_alert ? 'text-rose-700' : 'text-slate-400'}`}>{alertsCenter.rejected_today ?? 0}</div><div className="text-[10px] text-slate-500">🚫 ويبهوك مرفوض اليوم{(alertsCenter.reject_alert_threshold || 0) > 0 ? ` (الحد ${alertsCenter.reject_alert_threshold})` : ''}</div></CardContent></Card>
+            </div>
+            {(alertsCenter.counts?.total || 0) === 0 ? (
+              <Card className="border-emerald-200"><CardContent className="p-8 text-center"><div className="text-3xl mb-2">✅</div><div className="text-sm font-black text-emerald-700">كل شيء سليم — لا توجد تنبيهات تشغيلية حالياً</div></CardContent></Card>
+            ) : (
+              <div className="space-y-3">
+                {alertsCenter.reject_alert && (
+                  <div className="flex items-center gap-2 bg-rose-50 border-2 border-rose-300 rounded-xl p-2.5">
+                    <span className="text-xl">🚨</span>
+                    <div className="text-xs font-black text-rose-700">تحذير: {alertsCenter.rejected_today} ويبهوك مرفوض اليوم (الحد: {alertsCenter.reject_alert_threshold}) — تحقق من مفتاح الربط HMAC مع معراج</div>
+                  </div>
+                )}
+                {(alertsCenter.counts?.failed_events || 0) > 0 && (
+                  <Card className="border-rose-200">
+                    <CardHeader className="py-2 px-4 flex-row items-center justify-between space-y-0">
+                      <CardTitle className="text-sm">📤 أحداث صادرة فاشلة ({alertsCenter.counts.failed_events})</CardTitle>
+                      <div className="flex items-center gap-1.5">
+                        {retryAll?.running && <span className="text-[10px] font-bold text-amber-600">جارٍ إعادة المحاولة... {retryAll.processed}/{retryAll.total ?? '؟'}</span>}
+                        <Button size="sm" onClick={async () => { await runRetryAll(); loadAlertsCenter() }} disabled={retryAll?.running} className="h-6 text-[10px] px-2 gap-1 bg-rose-600 hover:bg-rose-700">{retryAll?.running ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />} إعادة محاولة الكل</Button>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="p-0"><Table>
+                      <TableHeader><TableRow><TableHead className="text-xs">الوقت</TableHead><TableHead className="text-xs">الحدث</TableHead><TableHead className="text-xs">محاولات</TableHead><TableHead className="text-xs">آخر خطأ</TableHead></TableRow></TableHeader>
+                      <TableBody>{(alertsCenter.failed_events || []).map(ev => (<TableRow key={ev.id} className="bg-rose-50/30">
+                        <TableCell className="text-[10px] whitespace-nowrap">{new Date(ev.created_at).toLocaleString('en-GB')}</TableCell>
+                        <TableCell className="text-[11px]">{EVT_LABELS[ev.type] || ev.type}</TableCell>
+                        <TableCell className="text-[11px] font-mono">{ev.attempts ?? 0}</TableCell>
+                        <TableCell className="text-[10px] text-rose-600 max-w-[220px] truncate" title={ev.last_error || ''}>{ev.last_error || '—'}</TableCell>
+                      </TableRow>))}</TableBody>
+                    </Table></CardContent>
+                  </Card>
+                )}
+                {(alertsCenter.counts?.pending_bookings || 0) > 0 && (
+                  <Card className="border-blue-200">
+                    <CardHeader className="py-2 px-4 flex-row items-center justify-between space-y-0">
+                      <CardTitle className="text-sm">📥 حجوزات بانتظار الاعتماد ({alertsCenter.counts.pending_bookings})</CardTitle>
+                      <Button size="sm" variant="outline" onClick={() => setView('bookings')} className="h-6 text-[10px] px-2 border-blue-300 text-blue-700 hover:bg-blue-50">فتح الحجوزات ←</Button>
+                    </CardHeader>
+                    <CardContent className="p-0"><Table>
+                      <TableHeader><TableRow><TableHead className="text-xs">التاريخ</TableHead><TableHead className="text-xs">الباكج</TableHead><TableHead className="text-xs">المكتب</TableHead><TableHead className="text-xs">مقاعد</TableHead><TableHead className="text-xs">الإجمالي</TableHead></TableRow></TableHeader>
+                      <TableBody>{(alertsCenter.pending_bookings || []).map(b => (<TableRow key={b.id}>
+                        <TableCell className="text-[10px] whitespace-nowrap">{new Date(b.created_at).toLocaleDateString('en-GB')}</TableCell>
+                        <TableCell className="text-[11px] font-bold">{b.package_name}</TableCell>
+                        <TableCell className="text-[11px]">{b.buyer_office_name || '—'}</TableCell>
+                        <TableCell className="text-[11px]">{b.seats}</TableCell>
+                        <TableCell className="text-[11px] font-mono">{(Number(b.total_price) || 0).toLocaleString('en-US')} {b.currency}</TableCell>
+                      </TableRow>))}</TableBody>
+                    </Table></CardContent>
+                  </Card>
+                )}
+                {(alertsCenter.counts?.capacity_warnings || 0) > 0 && (
+                  <Card className="border-amber-200">
+                    <CardHeader className="py-2 px-4"><CardTitle className="text-sm">💺 تحذيرات سعة المقاعد ({alertsCenter.counts.capacity_warnings}) <span className="text-[10px] font-normal text-slate-400">— اضغط «+5 مقاعد» للتعبئة الفورية وإشعار معراج</span></CardTitle></CardHeader>
+                    <CardContent className="p-0"><Table>
+                      <TableHeader><TableRow><TableHead className="text-xs">الباكج</TableHead><TableHead className="text-xs">المخصص</TableHead><TableHead className="text-xs">المباع</TableHead><TableHead className="text-xs">المتبقي</TableHead><TableHead className="text-xs">الامتلاء</TableHead><TableHead className="text-xs"></TableHead></TableRow></TableHeader>
+                      <TableBody>{(alertsCenter.capacity_warnings || []).map(w => (<TableRow key={w.id} className={w.remaining <= 1 ? 'bg-rose-50/40' : 'bg-amber-50/30'}>
+                        <TableCell className="text-[11px] font-bold">{w.name}</TableCell>
+                        <TableCell className="text-[11px]">{w.seats_allocated}</TableCell>
+                        <TableCell className="text-[11px]">{w.seats_sold}</TableCell>
+                        <TableCell className={`text-[11px] font-black ${w.remaining <= 1 ? 'text-rose-600' : 'text-amber-600'}`}>{w.remaining}</TableCell>
+                        <TableCell className="text-[11px] font-mono">{w.pct}%</TableCell>
+                        <TableCell><Button size="sm" onClick={() => alertsRefill(w)} disabled={alertRefillBusy === w.id} className="h-6 text-[10px] px-2 gap-1 bg-amber-600 hover:bg-amber-700">{alertRefillBusy === w.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '➕'} +5 مقاعد</Button></TableCell>
+                      </TableRow>))}</TableBody>
+                    </Table></CardContent>
+                  </Card>
+                )}
+                {(alertsCenter.counts?.missing_passports || 0) > 0 && (
+                  <Card className="border-orange-200">
+                    <CardHeader className="py-2 px-4 flex-row items-center justify-between space-y-0">
+                      <CardTitle className="text-sm">🛂 جوازات ناقصة في حجوزات معتمدة ({alertsCenter.counts.missing_passports})</CardTitle>
+                      <Button size="sm" variant="outline" onClick={openPassReport} className="h-6 text-[10px] px-2 border-orange-300 text-orange-700 hover:bg-orange-50">التقرير الكامل ←</Button>
+                    </CardHeader>
+                    <CardContent className="p-0"><Table>
+                      <TableHeader><TableRow><TableHead className="text-xs">المسافر</TableHead><TableHead className="text-xs">الباكج</TableHead><TableHead className="text-xs">المكتب المشتري</TableHead></TableRow></TableHeader>
+                      <TableBody>{(alertsCenter.missing_passports?.sample || []).map((r, i) => (<TableRow key={i}>
+                        <TableCell className="text-[11px] font-bold">{r.name}</TableCell>
+                        <TableCell className="text-[11px]">{r.package_name}</TableCell>
+                        <TableCell className="text-[11px]">{r.office}</TableCell>
+                      </TableRow>))}</TableBody>
+                    </Table>
+                    {(alertsCenter.missing_passports?.total || 0) > (alertsCenter.missing_passports?.sample || []).length && <div className="p-2 text-center text-[10px] text-slate-400">و {(alertsCenter.missing_passports.total - alertsCenter.missing_passports.sample.length)} آخرون — افتح التقرير الكامل</div>}
+                    </CardContent>
+                  </Card>
+                )}
+              </div>
+            )}
+          </div>
+        )
+      )}
+      {/* v3.69 — OFFICE PERFORMANCE COMPARISON month-over-month (owner only) */}
+      {view === 'comparison' && isOwner && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-black text-slate-700">📊 مقارنة أداء المكاتب — شهر مقابل شهر (صافي لك بعد العمولة)</div>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1 bg-white border rounded-lg px-2 py-1">
+                <Input type="month" value={compMonth} onChange={e => setCompMonth(e.target.value)} className="h-6 w-32 text-xs font-bold" />
+                <Button size="sm" onClick={() => loadComparison(compMonth)} disabled={compBusy} className="h-6 text-[10px] px-2 gap-1">{compBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />} عرض</Button>
+              </div>
+              <Button size="sm" onClick={exportComparison} disabled={!comparison || (comparison.offices || []).length === 0} className="h-7 text-xs gap-1 bg-emerald-600 hover:bg-emerald-700"><FileSpreadsheet className="w-3 h-3" /> تصدير Excel</Button>
+            </div>
+          </div>
+          {!comparison ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">{compBusy ? 'جارٍ تحميل المقارنة...' : 'اختر شهراً واضغط «عرض»'}</CardContent></Card> : (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <Card className="border-emerald-200"><CardContent className="p-3 text-center"><div className="text-lg font-black text-emerald-700 font-mono">{(comparison.totals?.current?.net_to_seller ?? 0).toLocaleString('en-US')}</div><div className="text-[10px] text-slate-500">صافي {comparison.month} {comparison.totals?.current?.currency || ''}</div></CardContent></Card>
+                <Card><CardContent className="p-3 text-center"><div className="text-lg font-black text-slate-600 font-mono">{(comparison.totals?.previous?.net_to_seller ?? 0).toLocaleString('en-US')}</div><div className="text-[10px] text-slate-500">صافي {comparison.prev_month} {comparison.totals?.previous?.currency || ''}</div></CardContent></Card>
+                <Card><CardContent className="p-3 text-center">{(() => {
+                  const g = comparison.totals?.growth_pct
+                  return <><div className={`text-lg font-black ${g === null ? 'text-blue-600' : g > 0 ? 'text-emerald-600' : g < 0 ? 'text-rose-600' : 'text-slate-400'}`}>{g === null ? '🆕 جديد' : g > 0 ? `▲ ${g}%` : g < 0 ? `▼ ${Math.abs(g)}%` : '—'}</div><div className="text-[10px] text-slate-500">نمو الصافي</div></>
+                })()}</CardContent></Card>
+                <Card><CardContent className="p-3 text-center"><div className="text-lg font-black text-slate-700">{comparison.totals?.current?.bookings ?? 0} <span className="text-xs text-slate-400">/ {comparison.totals?.previous?.bookings ?? 0}</span></div><div className="text-[10px] text-slate-500">حجوزات (الحالي / السابق)</div></CardContent></Card>
+              </div>
+              <Card>
+                <CardHeader className="py-2 px-4"><CardTitle className="text-sm">🏢 المكاتب ({(comparison.offices || []).length})</CardTitle></CardHeader>
+                <CardContent className="p-0">
+                  {(comparison.offices || []).length === 0 ? <div className="p-6 text-center text-xs text-slate-400">لا توجد حجوزات في الشهرين المختارين</div> : (
+                    <Table>
+                      <TableHeader><TableRow><TableHead className="text-xs">المكتب</TableHead><TableHead className="text-xs">حجوزات {comparison.month}</TableHead><TableHead className="text-xs">مقاعد</TableHead><TableHead className="text-xs">إيراد {comparison.month}</TableHead><TableHead className="text-xs">صافي {comparison.month}</TableHead><TableHead className="text-xs">صافي {comparison.prev_month}</TableHead><TableHead className="text-xs">النمو</TableHead></TableRow></TableHeader>
+                      <TableBody>{(comparison.offices || []).map((o, i) => (<TableRow key={o.office} className={i === 0 ? 'bg-amber-50/40' : ''}>
+                        <TableCell className="text-[11px] font-black">{i === 0 && '🏆 '}{o.office}</TableCell>
+                        <TableCell className="text-[11px]">{o.current.bookings}</TableCell>
+                        <TableCell className="text-[11px]">{o.current.seats}</TableCell>
+                        <TableCell className="text-[11px] font-mono">{o.current.revenue.toLocaleString('en-US')} {o.current.currency}</TableCell>
+                        <TableCell className="text-[11px] font-mono text-emerald-700 font-bold">{o.current.net_to_seller.toLocaleString('en-US')}</TableCell>
+                        <TableCell className="text-[11px] font-mono text-slate-500">{o.previous.net_to_seller.toLocaleString('en-US')}</TableCell>
+                        <TableCell>{o.growth_pct === null ? <Badge className="bg-blue-100 text-blue-700 text-[9px]">🆕 جديد</Badge> : o.growth_pct > 0 ? <Badge className="bg-emerald-100 text-emerald-700 text-[9px]">▲ {o.growth_pct}%</Badge> : o.growth_pct < 0 ? <Badge className="bg-rose-100 text-rose-700 text-[9px]">▼ {Math.abs(o.growth_pct)}%</Badge> : <Badge className="bg-slate-100 text-slate-500 text-[9px]">—</Badge>}</TableCell>
+                      </TableRow>))}</TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
+            </>
+          )}
+        </div>
       )}
       {/* v3.57 — WEBHOOK HEALTH DASHBOARD (owner only) */}
       {view === 'health' && isOwner && (
@@ -11501,6 +11738,7 @@ function TenantApp() {
   const [meraajPending, setMeraajPending] = useState(0)
   const meraajPendingRef = useRef(0)
   const meraajInitRef = useRef(false)
+  const autoRetrySeenRef = useRef(null) // v3.68 — last auto-retry run timestamp already toasted
   useEffect(() => {
     if (!canModule(user, 'meraaj')) return
     let stop = false
@@ -11512,10 +11750,17 @@ function TenantApp() {
         if (!meraajInitRef.current) {
           // First poll after login: gentle reminder toast if there are pending bookings (no sound)
           if (n > 0) toast.success(`🕋 لديك ${n} حجز معراج بانتظار الاعتماد`, { duration: 8000 })
+          // v3.68 — don't toast about auto-retry runs that happened before this session
+          autoRetrySeenRef.current = r?.auto_retry_last?.at || null
         } else if (n > meraajPendingRef.current) {
           // A NEW booking arrived while working: toast + short chime (v3.54)
           toast.success(`🕋 حجز جديد من معراج! لديك ${n} حجز بانتظار الاعتماد`, { duration: 10000 })
           playMeraajChime()
+        }
+        // v3.68 — background auto-retry success notice (new successful run since last seen)
+        if (meraajInitRef.current && r?.auto_retry_last?.at && r.auto_retry_last.at !== autoRetrySeenRef.current && (r.auto_retry_last.succeeded || 0) > 0) {
+          toast.success(`🔄 الإعادة التلقائية: أُرسل ${r.auto_retry_last.succeeded} من الأحداث الفاشلة لمعراج بنجاح`, { duration: 8000 })
+          autoRetrySeenRef.current = r.auto_retry_last.at
         }
         meraajInitRef.current = true
         meraajPendingRef.current = n

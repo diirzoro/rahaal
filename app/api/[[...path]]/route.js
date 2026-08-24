@@ -1563,7 +1563,14 @@ async function handleRoute(request, { params }) {
       // v3.67 — opportunistic AUTO-RETRY hook: fire-and-forget (never blocks/affects this response).
       // Internally guarded by an atomic 10-min interval claim + attempts backoff — see helper.
       maybeAutoRetryMeraajEvents(db, T).catch(() => {})
-      return ok({ pending: await db.collection('meraaj_inbound_bookings').countDocuments({ tenant_id: T, status: 'new' }) })
+      // v3.68 — expose the last SUCCESSFUL auto-retry summary so the UI can toast about it
+      // (only when the feature is enabled and the last run actually sent something).
+      const arS = await db.collection('tenant_settings').findOne(tf, { projection: { meraaj_auto_retry: 1, meraaj_auto_retry_last: 1 } })
+      const autoRetryLast = (arS?.meraaj_auto_retry && (arS?.meraaj_auto_retry_last?.succeeded || 0) > 0) ? arS.meraaj_auto_retry_last : null
+      return ok({
+        pending: await db.collection('meraaj_inbound_bookings').countDocuments({ tenant_id: T, status: 'new' }),
+        auto_retry_last: autoRetryLast, // v3.68 — additive, backward-compatible
+      })
     }
     // v3.61 — OWNER DAILY DIGEST: yesterday/today Meraaj bookings + revenue + pending approvals
     // + rejected-webhooks alert (UTC day boundaries, consistent with the health trend chart).
@@ -1665,6 +1672,119 @@ async function handleRoute(request, { params }) {
         totals: round2(totals),
         rejected_webhooks: rejectedWebhooks,
         outbound_events: outboundEvents,
+      })
+    }
+    // v3.69 — UNIFIED ALERTS CENTER (owner-only): one endpoint aggregating every operational
+    // warning — failed outbound events, pending inbound bookings, seat capacity warnings,
+    // missing passports (approved bookings) and today's rejected webhooks vs threshold.
+    // READ-ONLY: never modifies any document.
+    if (route === '/meraaj/alerts-center' && method === 'GET') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      // 1) failed outbound events (total + latest 5)
+      const failedTotal = await db.collection('meraaj_events').countDocuments({ ...tf, status: 'failed' })
+      const failedLatest = await db.collection('meraaj_events').find({ ...tf, status: 'failed' }).sort({ created_at: -1 }).limit(5).project({ _id: 0, id: 1, type: 1, attempts: 1, last_error: 1, created_at: 1 }).toArray()
+      // 2) pending inbound bookings (total + latest 5)
+      const pendingTotal = await db.collection('meraaj_inbound_bookings').countDocuments({ ...tf, status: 'new' })
+      const pendingLatest = await db.collection('meraaj_inbound_bookings').find({ ...tf, status: 'new' }).sort({ created_at: -1 }).limit(5).project({ _id: 0, id: 1, package_name: 1, buyer_office_name: 1, seats: 1, total_price: 1, currency: 1, created_at: 1 }).toArray()
+      // 3) seat capacity warnings — SAME rule as daily-digest (pct>=80 OR remaining<=1)
+      const sharedOpenA = await db.collection('packages').find({ ...tf, 'meraaj.shared': true, status: 'open' }).project({ id: 1, name: 1, meraaj: 1 }).toArray()
+      const capacityWarningsA = sharedOpenA.map(p => {
+        const alloc = Number(p.meraaj?.seats_allocated) || 0
+        const sold = Number(p.meraaj?.seats_sold) || 0
+        if (alloc <= 0) return null
+        const remaining = Math.max(0, alloc - sold)
+        const pct = Math.round((sold / alloc) * 100)
+        return (pct >= 80 || remaining <= 1) ? { id: p.id, name: p.name, seats_allocated: alloc, seats_sold: sold, remaining, pct } : null
+      }).filter(Boolean).sort((a, b) => b.pct - a.pct)
+      // 4) missing passports on APPROVED inbound bookings (authoritative = linked booking registrants)
+      const apprInb = await db.collection('meraaj_inbound_bookings').find({ ...tf, status: 'approved' }).sort({ created_at: -1 }).limit(300).project({ _id: 0, id: 1, booking_id: 1, package_name: 1, buyer_office_name: 1, registrants: 1 }).toArray()
+      const apprBids = apprInb.map(i => i.booking_id).filter(Boolean)
+      const apprBk = apprBids.length ? await db.collection('package_bookings').find({ id: { $in: apprBids }, tenant_id: T }).project({ _id: 0, id: 1, registrants: 1 }).toArray() : []
+      const apprBMap = {}
+      for (const bk of apprBk) apprBMap[bk.id] = bk
+      let missingTotal = 0
+      const missingSample = []
+      for (const inb of apprInb) {
+        const regs = (inb.booking_id && apprBMap[inb.booking_id]?.registrants) ? apprBMap[inb.booking_id].registrants : (inb.registrants || [])
+        for (const r of regs) {
+          if (!String(r?.passport_no || '').trim()) {
+            missingTotal++
+            if (missingSample.length < 5) missingSample.push({ name: r?.name || 'مسافر', package_name: inb.package_name, office: inb.buyer_office_name || 'غير معروف' })
+          }
+        }
+      }
+      // 5) today's rejected webhooks vs configured threshold
+      const startTodayA = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z')
+      const rejectedTodayA = await db.collection('meraaj_webhook_log').countDocuments({ ok: false, at: { $gte: startTodayA } })
+      const cfgA = await db.collection('tenant_settings').findOne(tf)
+      const thresholdA = Number.isFinite(cfgA?.meraaj_reject_alert_threshold) ? cfgA.meraaj_reject_alert_threshold : 5
+      const rejectAlertA = thresholdA > 0 && rejectedTodayA >= thresholdA
+      return ok({
+        generated_at: new Date().toISOString(),
+        counts: {
+          failed_events: failedTotal,
+          pending_bookings: pendingTotal,
+          capacity_warnings: capacityWarningsA.length,
+          missing_passports: missingTotal,
+          rejected_today: rejectedTodayA,
+          total: failedTotal + pendingTotal + capacityWarningsA.length + missingTotal + (rejectAlertA ? 1 : 0),
+        },
+        failed_events: failedLatest,
+        pending_bookings: pendingLatest,
+        capacity_warnings: capacityWarningsA,
+        missing_passports: { total: missingTotal, sample: missingSample },
+        rejected_today: rejectedTodayA,
+        reject_alert_threshold: thresholdA,
+        reject_alert: rejectAlertA,
+      })
+    }
+    // v3.69 — OFFICE PERFORMANCE COMPARISON (owner-only): month-over-month buyer-office
+    // aggregates. SAME exclusion semantics as monthly-report (rejected/cancelled counted in
+    // bookings + rejected but EXCLUDED from seats/revenue/net sums). UTC month boundaries.
+    // growth_pct is computed on net_to_seller: prev>0 → pct; prev=0 & cur>0 → null (new); else 0.
+    if (route === '/meraaj/office-comparison' && method === 'GET') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const monthC = url.searchParams.get('month') || new Date().toISOString().slice(0, 7)
+      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthC)) return bad('صيغة الشهر غير صحيحة — استخدم YYYY-MM')
+      const curStart = new Date(monthC + '-01T00:00:00.000Z')
+      const curEnd = new Date(Date.UTC(curStart.getUTCFullYear(), curStart.getUTCMonth() + 1, 1))
+      const prevStart = new Date(Date.UTC(curStart.getUTCFullYear(), curStart.getUTCMonth() - 1, 1))
+      const prevMonthC = prevStart.toISOString().slice(0, 7)
+      const mkAggC = () => ({ bookings: 0, approved: 0, rejected: 0, seats: 0, revenue: 0, net_to_seller: 0, currency: '' })
+      const addToC = (agg, d) => {
+        agg.bookings++
+        if (d.status === 'approved') agg.approved++
+        if (d.status === 'rejected' || d.status === 'cancelled') { agg.rejected++; return }
+        agg.seats += Number(d.seats) || 0
+        agg.revenue += Number(d.total_price) || 0
+        agg.net_to_seller += Number(d.net_to_seller_total) || 0
+        if (!agg.currency && d.currency) agg.currency = d.currency
+      }
+      const aggRangeC = async (from, to) => {
+        const docs = await db.collection('meraaj_inbound_bookings').find({ ...tf, created_at: { $gte: from, $lt: to } }).project({ buyer_office_name: 1, seats: 1, total_price: 1, net_to_seller_total: 1, status: 1, currency: 1 }).toArray()
+        const by = {}, tot = mkAggC()
+        for (const d of docs) {
+          const of = (d.buyer_office_name || 'غير معروف').trim() || 'غير معروف'
+          by[of] = by[of] || mkAggC(); addToC(by[of], d); addToC(tot, d)
+        }
+        return { by, tot }
+      }
+      const curC = await aggRangeC(curStart, curEnd)
+      const prevC = await aggRangeC(prevStart, curStart)
+      const round2C = (a) => ({ ...a, revenue: +a.revenue.toFixed(2), net_to_seller: +a.net_to_seller.toFixed(2) })
+      const growthC = (c, p) => p > 0 ? +(((c - p) / p) * 100).toFixed(1) : (c > 0 ? null : 0)
+      const officeNames = [...new Set([...Object.keys(curC.by), ...Object.keys(prevC.by)])]
+      const officesC = officeNames.map(office => {
+        const c = round2C(curC.by[office] || mkAggC())
+        const p = round2C(prevC.by[office] || mkAggC())
+        return { office, current: c, previous: p, growth_pct: growthC(c.net_to_seller, p.net_to_seller) }
+      }).sort((a, b) => b.current.revenue - a.current.revenue || b.previous.revenue - a.previous.revenue)
+      const totCur = round2C(curC.tot), totPrev = round2C(prevC.tot)
+      return ok({
+        month: monthC,
+        prev_month: prevMonthC,
+        offices: officesC,
+        totals: { current: totCur, previous: totPrev, growth_pct: growthC(totCur.net_to_seller, totPrev.net_to_seller) },
       })
     }
     // v3.43 — SELF-SERVICE STORE ACTIVATION (Subscribe / Activate) — instant, no manual steps.
