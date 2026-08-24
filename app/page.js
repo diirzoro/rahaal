@@ -1349,6 +1349,29 @@ const IDLE_TIMEOUT_MINUTES = 15
 // always lands on the Dashboard (tab state is in-memory only), keeping both behaviors separate.
 const IDLE_RESUME_KEY = 'rahaal_idle_resume_tab'
 
+// v3.54 — Short pleasant two-tone chime for new Meraaj bookings (Web Audio — no external file)
+const playMeraajChime = () => {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext
+    if (!Ctx) return
+    if (!globalThis.__rahaalAudioCtx) globalThis.__rahaalAudioCtx = new Ctx()
+    const ctx = globalThis.__rahaalAudioCtx
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {})
+    const t0 = ctx.currentTime
+    ;[[880, 0], [1174.66, 0.14]].forEach(([freq, delay]) => {
+      const o = ctx.createOscillator()
+      const g = ctx.createGain()
+      o.type = 'sine'
+      o.frequency.value = freq
+      g.gain.setValueAtTime(0.0001, t0 + delay)
+      g.gain.exponentialRampToValueAtTime(0.18, t0 + delay + 0.02)
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + delay + 0.35)
+      o.connect(g); g.connect(ctx.destination)
+      o.start(t0 + delay); o.stop(t0 + delay + 0.4)
+    })
+  } catch { /* autoplay blocked — silent fallback, toast still shows */ }
+}
+
 function Sidebar({ current, onChange }) {
   const { tenant, settings, user } = useAuth()
   return (
@@ -10661,6 +10684,7 @@ function TenantApp() {
   // v3.53 — Meraaj booking notification bell (polls every 60s for users with Meraaj access)
   const [meraajPending, setMeraajPending] = useState(0)
   const meraajPendingRef = useRef(0)
+  const meraajInitRef = useRef(false)
   useEffect(() => {
     if (!canModule(user, 'meraaj')) return
     let stop = false
@@ -10669,9 +10693,15 @@ function TenantApp() {
         const r = await api('/meraaj/inbound-count')
         if (stop) return
         const n = Number(r?.pending) || 0
-        if (n > meraajPendingRef.current && meraajPendingRef.current >= 0 && n > 0) {
-          if (meraajPendingRef.current !== 0 || n > 0) toast.success(`🕋 لديك ${n} حجز معراج بانتظار الاعتماد`, { duration: 8000 })
+        if (!meraajInitRef.current) {
+          // First poll after login: gentle reminder toast if there are pending bookings (no sound)
+          if (n > 0) toast.success(`🕋 لديك ${n} حجز معراج بانتظار الاعتماد`, { duration: 8000 })
+        } else if (n > meraajPendingRef.current) {
+          // A NEW booking arrived while working: toast + short chime (v3.54)
+          toast.success(`🕋 حجز جديد من معراج! لديك ${n} حجز بانتظار الاعتماد`, { duration: 10000 })
+          playMeraajChime()
         }
+        meraajInitRef.current = true
         meraajPendingRef.current = n
         setMeraajPending(n)
       } catch { /* silent — module may be blocked or offline */ }

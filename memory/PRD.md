@@ -20,6 +20,11 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 - Meraaj E2E 15/15 test (blocked on Meraaj team configuring temp secret)
 - Package Comparison feature (deferred by user)
 
+## v3.54 (completed) — Meraaj booking notification chime
+- playMeraajChime() module helper (Web Audio API, two-tone 880Hz→1174Hz sine chime, ~0.5s, no external file, cached AudioContext, silent fallback if autoplay blocked).
+- Poll logic refined with meraajInitRef: first poll after login → reminder toast only (NO sound); subsequent count INCREASE → toast + chime. Verified: audio API path ok, 0 console errors.
+- Deferred by user: activity log, per-age profit report, webhook health panel.
+
 ## v3.53 (completed) — Per-age costs/commissions + auto-sync + notifications + auto-approve
 - Room pricing rows: cost_adult/cost_child/cost_infant (nullable, sanitized). Form shows a rose costs sub-row per room (owner/show_profit only) with live per-category profit hints.
 - Per-age commission: computeMeraajMarketPricing(rows, mode, value, direction, childValue, infantValue) — empty = same as adult; all 4 call sites pass meraaj.buyer_commission_child_value/infant_value; share endpoint accepts+stores them; share dialog has 🧒/👶 inputs with live per-age preview.
