@@ -1584,11 +1584,61 @@ async function handleRoute(request, { params }) {
       const rejectedToday = await db.collection('meraaj_webhook_log').countDocuments({ ok: false, at: { $gte: startToday } })
       const cfgDoc = await db.collection('tenant_settings').findOne(tf)
       const threshold = Number.isFinite(cfgDoc?.meraaj_reject_alert_threshold) ? cfgDoc.meraaj_reject_alert_threshold : 5
+      // v3.62 — seat capacity warnings: shared open packages at >=80% of allocated seats (or <=1 left)
+      const sharedOpen = await db.collection('packages').find({ ...tf, 'meraaj.shared': true, status: 'open' }).project({ id: 1, name: 1, meraaj: 1 }).toArray()
+      const capacity_warnings = sharedOpen.map(p => {
+        const alloc = Number(p.meraaj?.seats_allocated) || 0
+        const sold = Number(p.meraaj?.seats_sold) || 0
+        if (alloc <= 0) return null
+        const remaining = Math.max(0, alloc - sold)
+        const pct = Math.round((sold / alloc) * 100)
+        return (pct >= 80 || remaining <= 1) ? { id: p.id, name: p.name, seats_allocated: alloc, seats_sold: sold, remaining, pct } : null
+      }).filter(Boolean).sort((a, b) => b.pct - a.pct)
       return ok({
         yesterday, today, pending,
         rejected_today: rejectedToday,
         reject_alert_threshold: threshold,
         alert: threshold > 0 && rejectedToday >= threshold,
+        capacity_warnings, // v3.62
+      })
+    }
+    // v3.62 — MONTHLY MERAAJ REPORT (owner-only): per-package + per-buyer-office activity for a month.
+    // Same exclusion semantics as digest: rejected/cancelled counted in bookings, excluded from sums.
+    if (route === '/meraaj/monthly-report' && method === 'GET') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const month = url.searchParams.get('month') || new Date().toISOString().slice(0, 7)
+      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return bad('صيغة الشهر غير صحيحة — استخدم YYYY-MM')
+      const start = new Date(month + '-01T00:00:00.000Z')
+      const end = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1))
+      const docs = await db.collection('meraaj_inbound_bookings').find({ ...tf, created_at: { $gte: start, $lt: end } }).project({ package_id: 1, package_name: 1, buyer_office_name: 1, seats: 1, total_price: 1, net_to_seller_total: 1, status: 1, currency: 1 }).toArray()
+      const mkAgg = () => ({ bookings: 0, approved: 0, rejected: 0, seats: 0, revenue: 0, net_to_seller: 0, currency: '' })
+      const addTo = (agg, d) => {
+        agg.bookings++
+        if (d.status === 'approved') agg.approved++
+        if (d.status === 'rejected' || d.status === 'cancelled') { agg.rejected++; return }
+        agg.seats += Number(d.seats) || 0
+        agg.revenue += Number(d.total_price) || 0
+        agg.net_to_seller += Number(d.net_to_seller_total) || 0
+        if (!agg.currency && d.currency) agg.currency = d.currency
+      }
+      const byPkg = {}, byOffice = {}, totals = mkAgg()
+      for (const d of docs) {
+        const pk = d.package_name || d.package_id || 'غير معروف'
+        const of = (d.buyer_office_name || 'غير معروف').trim() || 'غير معروف'
+        byPkg[pk] = byPkg[pk] || mkAgg(); addTo(byPkg[pk], d)
+        byOffice[of] = byOffice[of] || mkAgg(); addTo(byOffice[of], d)
+        addTo(totals, d)
+      }
+      const round2 = (a) => ({ ...a, revenue: +a.revenue.toFixed(2), net_to_seller: +a.net_to_seller.toFixed(2) })
+      const rejectedWebhooks = await db.collection('meraaj_webhook_log').countDocuments({ ok: false, at: { $gte: start, $lt: end } })
+      const outboundEvents = await db.collection('meraaj_events').countDocuments({ ...tf, created_at: { $gte: start, $lt: end } })
+      return ok({
+        month,
+        packages: Object.entries(byPkg).map(([name, a]) => ({ name, ...round2(a) })).sort((a, b) => b.revenue - a.revenue),
+        offices: Object.entries(byOffice).map(([office, a]) => ({ office, ...round2(a) })).sort((a, b) => b.revenue - a.revenue),
+        totals: round2(totals),
+        rejected_webhooks: rejectedWebhooks,
+        outbound_events: outboundEvents,
       })
     }
     // v3.43 — SELF-SERVICE STORE ACTIVATION (Subscribe / Activate) — instant, no manual steps.

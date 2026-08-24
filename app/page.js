@@ -1482,6 +1482,16 @@ function Dashboard({ setTab }) {
     openWhatsApp(phone, msg)
   }
 
+  // v3.62 — one-tap WhatsApp share of the morning Meraaj digest
+  const sendDigestWhatsApp = () => {
+    if (!digest) return
+    const y = digest.yesterday || {}, t = digest.today || {}
+    let msg = `🌅 ملخص معراج الصباحي — ${new Date().toLocaleDateString('en-GB')}\n\n📅 أمس:\n• الحجوزات: ${y.bookings || 0}\n• المقاعد: ${y.seats || 0}\n• صافي الإيراد: ${(y.net_to_seller || 0).toLocaleString('en-US')}\n\n📆 اليوم حتى الآن:\n• الحجوزات: ${t.bookings || 0} — صافي: ${(t.net_to_seller || 0).toLocaleString('en-US')}\n\n🔔 بانتظار الاعتماد: ${digest.pending || 0}`
+    if (digest.alert) msg += `\n\n🚨 تحذير: ${digest.rejected_today} ويبهوك مرفوض اليوم (الحد: ${digest.reject_alert_threshold})`
+    if ((digest.capacity_warnings || []).length > 0) msg += `\n\n⚠️ باكجات تقترب من نفاد المقاعد:\n` + digest.capacity_warnings.map(w => `• ${w.name}: ${w.remaining} متبقٍ من ${w.seats_allocated} (${w.pct}%)`).join('\n')
+    window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
+  }
+
   return (
     <div className="space-y-6">
       <TopBar title="لوحة التحكم" subtitle="نظرة سريعة على أداء المكتب اليوم"
@@ -1510,11 +1520,15 @@ function Dashboard({ setTab }) {
           <CardContent className="p-4">
             <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
               <div className="text-sm font-black text-indigo-900">🌅 ملخص معراج الصباحي</div>
-              {digest.pending > 0 ? (
-                <Button size="sm" onClick={() => setTab('meraaj')} className="h-7 text-[11px] gap-1 bg-amber-500 hover:bg-amber-600">🔔 {digest.pending} حجز بانتظار الاعتماد ←</Button>
-              ) : (
-                <span className="text-[11px] font-bold text-emerald-600">✅ لا حجوزات معلقة</span>
-              )}
+              <div className="flex items-center gap-1.5">
+                {/* v3.62 — one-tap WhatsApp share */}
+                <Button size="sm" variant="outline" onClick={sendDigestWhatsApp} className="h-7 text-[11px] gap-1 border-emerald-300 text-emerald-700 hover:bg-emerald-50">📱 إرسال واتساب</Button>
+                {digest.pending > 0 ? (
+                  <Button size="sm" onClick={() => setTab('meraaj')} className="h-7 text-[11px] gap-1 bg-amber-500 hover:bg-amber-600">🔔 {digest.pending} حجز بانتظار الاعتماد ←</Button>
+                ) : (
+                  <span className="text-[11px] font-bold text-emerald-600">✅ لا حجوزات معلقة</span>
+                )}
+              </div>
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               <div className="bg-white border border-indigo-100 rounded-lg p-2.5 text-center">
@@ -1534,6 +1548,24 @@ function Dashboard({ setTab }) {
                 <div className="text-[10px] text-slate-500">اليوم حتى الآن (حجوزات / صافي)</div>
               </div>
             </div>
+            {/* v3.62 — seat capacity warnings for shared packages close to selling out */}
+            {(digest.capacity_warnings || []).length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                <div className="text-[11px] font-black text-amber-700">⚠️ باكجات تقترب من نفاد المقاعد المخصصة لمعراج:</div>
+                {digest.capacity_warnings.map(w => (
+                  <div key={w.id} className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                    <div className="flex-1 min-w-0">
+                      <span className="text-[11px] font-black text-slate-800">{w.name}</span>
+                      <span className="text-[10px] text-amber-700 font-bold mr-2">{w.seats_sold}/{w.seats_allocated} مقعد — متبقٍ {w.remaining}</span>
+                    </div>
+                    <div className="w-24 h-2 bg-amber-100 rounded-full overflow-hidden shrink-0">
+                      <div className={`h-full rounded-full ${w.pct >= 95 ? 'bg-rose-500' : 'bg-amber-500'}`} style={{ width: `${Math.min(100, w.pct)}%` }} />
+                    </div>
+                    <span className={`text-[10px] font-black shrink-0 ${w.pct >= 95 ? 'text-rose-600' : 'text-amber-700'}`}>{w.pct}%</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
@@ -8535,6 +8567,41 @@ function MeraajStoreScreen() {
   // v3.61 — rejected-webhooks alert threshold config + buyer office drill-down filter
   const [thresholdVal, setThresholdVal] = useState('')
   const [officeFilter, setOfficeFilter] = useState(null)
+  // v3.62 — monthly Meraaj Excel report
+  const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7))
+  const [reportBusy, setReportBusy] = useState(false)
+  const downloadMonthlyReport = async () => {
+    setReportBusy(true)
+    try {
+      const r = await api(`/meraaj/monthly-report?month=${reportMonth}`)
+      const hdr = ['الاسم', 'حجوزات', 'معتمدة', 'مرفوضة/ملغاة', 'مقاعد', 'الإيراد', 'صافي لك', 'العملة']
+      const row = (name, a) => [name, a.bookings, a.approved, a.rejected, a.seats, a.revenue, a.net_to_seller, a.currency || '']
+      const tot = row('الإجمالي', r.totals || {})
+      const wsSum = XLSX.utils.aoa_to_sheet([
+        [`تقرير معراج الشهري — ${r.month}`], [],
+        ['إجمالي الحجوزات الواردة', r.totals?.bookings ?? 0],
+        ['المعتمدة', r.totals?.approved ?? 0],
+        ['المرفوضة/الملغاة', r.totals?.rejected ?? 0],
+        ['إجمالي المقاعد', r.totals?.seats ?? 0],
+        ['إجمالي الإيراد', r.totals?.revenue ?? 0],
+        ['صافي لك بعد العمولة', r.totals?.net_to_seller ?? 0],
+        ['ويبهوك مرفوضة (توقيع)', r.rejected_webhooks ?? 0],
+        ['أحداث مزامنة صادرة', r.outbound_events ?? 0],
+      ])
+      wsSum['!cols'] = [{ wch: 26 }, { wch: 14 }]
+      const wsPkg = XLSX.utils.aoa_to_sheet([[`حسب الباكج — ${r.month}`], [], hdr, ...(r.packages || []).map(p => row(p.name, p)), tot])
+      const wsOff = XLSX.utils.aoa_to_sheet([[`حسب المكتب المشتري — ${r.month}`], [], hdr, ...(r.offices || []).map(o => row(o.office, o)), tot])
+      const cols = [{ wch: 34 }, { wch: 8 }, { wch: 8 }, { wch: 12 }, { wch: 8 }, { wch: 12 }, { wch: 12 }, { wch: 7 }]
+      wsPkg['!cols'] = cols; wsOff['!cols'] = cols
+      const wb = XLSX.utils.book_new()
+      wb.Workbook = { Views: [{ RTL: true }] }
+      XLSX.utils.book_append_sheet(wb, wsSum, 'الملخص')
+      XLSX.utils.book_append_sheet(wb, wsPkg, 'حسب الباكج')
+      XLSX.utils.book_append_sheet(wb, wsOff, 'حسب المكتب')
+      XLSX.writeFile(wb, `تقرير_معراج_${r.month}.xlsx`)
+      toast.success(`✅ تم تنزيل تقرير معراج لشهر ${r.month}`)
+    } catch (e) { toast.error(e.message) } finally { setReportBusy(false) }
+  }
   useEffect(() => { if (config) setThresholdVal(String(config.reject_alert_threshold ?? 5)) }, [config])
   const saveThreshold = async () => {
     try {
@@ -8745,6 +8812,11 @@ function MeraajStoreScreen() {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="text-sm font-black text-slate-700">🩺 صحة مزامنة معراج — آخر الأحداث الواردة والمرفوضة والصادرة</div>
               <div className="flex items-center gap-2">
+                {/* v3.62 — monthly Excel report */}
+                <div className="flex items-center gap-1 bg-white border rounded-lg px-2 py-1">
+                  <Input type="month" value={reportMonth} onChange={e => setReportMonth(e.target.value)} className="h-6 w-32 text-xs font-bold" />
+                  <Button size="sm" onClick={downloadMonthlyReport} disabled={reportBusy} className="h-6 text-[10px] px-2 gap-1 bg-emerald-600 hover:bg-emerald-700">{reportBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileSpreadsheet className="w-3 h-3" />} تقرير شهري</Button>
+                </div>
                 {/* v3.61 — daily rejected-webhooks alert threshold */}
                 <div className="flex items-center gap-1 bg-white border rounded-lg px-2 py-1">
                   <span className="text-[10px] font-bold text-slate-500 whitespace-nowrap">🚨 حد تنبيه الرفض/يوم:</span>
