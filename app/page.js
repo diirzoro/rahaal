@@ -10835,6 +10835,38 @@ function TenantApp() {
     return () => { stop = true; clearInterval(iv) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+  // v3.58 — Bell quick panel: list pending Meraaj bookings with one-tap approve
+  const [bellOpen, setBellOpen] = useState(false)
+  const [bellList, setBellList] = useState(null) // null = loading
+  const [bellBusy, setBellBusy] = useState(null)
+  const refreshBellCount = async () => {
+    try {
+      const r = await api('/meraaj/inbound-count')
+      const n = Number(r?.pending) || 0
+      meraajPendingRef.current = n
+      setMeraajPending(n)
+    } catch { /* silent */ }
+  }
+  const toggleBellPanel = async () => {
+    const next = !bellOpen
+    setBellOpen(next)
+    if (next) {
+      setBellList(null)
+      try {
+        const list = await api('/meraaj/inbound-bookings')
+        setBellList((list || []).filter(b => b.status === 'new'))
+      } catch { setBellList([]) }
+    }
+  }
+  const approveFromBell = async (id) => {
+    setBellBusy(id)
+    try {
+      await api(`/meraaj/inbound-bookings/${id}/approve`, { method: 'POST' })
+      toast.success('✅ تم اعتماد الحجز وتحويله لحجز فعلي بقيد محاسبي')
+      setBellList(l => (l || []).filter(x => x.id !== id))
+      await refreshBellCount()
+    } catch (e) { toast.error(e.message) } finally { setBellBusy(null) }
+  }
 
   useEffect(() => {
     // Load announcements
@@ -10877,14 +10909,47 @@ function TenantApp() {
           </div>
         )}
         <div className="flex justify-end items-center gap-2 mb-2">
-          {/* v3.56 — Meraaj pending bell moved INLINE next to logout (was fixed top-3 left-3 and
-              covered/blocked the logout button whenever pending bookings existed) */}
+          {/* v3.56 — Meraaj pending bell inline next to logout. v3.58 — click opens a quick panel
+              listing each pending booking with one-tap approve (instead of navigating away) */}
           {meraajPending > 0 && canModule(user, 'meraaj') && (
-            <button onClick={() => setTab('meraaj')} title="حجوزات معراج بانتظار الاعتماد"
-              className="flex items-center gap-1.5 bg-white border-2 border-amber-400 shadow-md rounded-full px-3 py-1.5 hover:bg-amber-50 transition">
-              <span className="animate-pulse">🔔</span>
-              <span className="text-xs font-black text-amber-700">{meraajPending} حجز معراج جديد</span>
-            </button>
+            <div className="relative">
+              <button onClick={toggleBellPanel} title="حجوزات معراج بانتظار الاعتماد"
+                className="flex items-center gap-1.5 bg-white border-2 border-amber-400 shadow-md rounded-full px-3 py-1.5 hover:bg-amber-50 transition">
+                <span className="animate-pulse">🔔</span>
+                <span className="text-xs font-black text-amber-700">{meraajPending} حجز معراج جديد</span>
+              </button>
+              {bellOpen && (
+                <>
+                  {/* click-away backdrop */}
+                  <div className="fixed inset-0 z-40" onClick={() => setBellOpen(false)} />
+                  <div className="absolute left-0 top-full mt-2 z-50 w-[340px] max-w-[90vw] bg-white border border-slate-200 rounded-xl shadow-2xl overflow-hidden">
+                    <div className="px-3 py-2 bg-gradient-to-l from-amber-50 to-white border-b flex items-center justify-between">
+                      <span className="text-xs font-black text-amber-800">🕋 حجوزات معراج المعلقة</span>
+                      <button onClick={() => { setBellOpen(false); setTab('meraaj') }} className="text-[10px] font-bold text-blue-600 hover:underline">فتح متجر معراج ←</button>
+                    </div>
+                    <div className="max-h-[320px] overflow-y-auto divide-y divide-slate-100">
+                      {bellList === null ? (
+                        <div className="p-5 text-center text-xs text-slate-400"><Loader2 className="w-4 h-4 animate-spin inline ml-1" /> جارٍ التحميل...</div>
+                      ) : bellList.length === 0 ? (
+                        <div className="p-5 text-center text-xs text-emerald-600 font-bold">✅ لا توجد حجوزات معلقة — تم اعتماد الكل</div>
+                      ) : bellList.map(b => (
+                        <div key={b.id} className="p-2.5 flex items-center gap-2 hover:bg-amber-50/40">
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[11px] font-black text-slate-800 truncate">{b.package_name}</div>
+                            <div className="text-[10px] text-slate-500 truncate">{b.buyer_office_name} • {b.seats} مقاعد • {(Number(b.total_price) || 0).toLocaleString('en-US')} {b.currency}</div>
+                            <div className="text-[9px] text-slate-400">{new Date(b.created_at).toLocaleString('en-GB')}</div>
+                          </div>
+                          <Button size="sm" onClick={() => approveFromBell(b.id)} disabled={bellBusy === b.id}
+                            className="h-7 text-[10px] gap-1 bg-emerald-600 hover:bg-emerald-700 shrink-0">
+                            {bellBusy === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '✅'} اعتماد
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
           )}
           <Button variant="ghost" onClick={logout} className="gap-2 text-slate-500 hover:text-rose-600"><LogOut className="w-4 h-4" /> خروج</Button>
         </div>
