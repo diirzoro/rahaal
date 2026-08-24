@@ -1587,6 +1587,19 @@ function Dashboard({ setTab }) {
                   : digest.week.growth_pct > 0 ? <span className="text-emerald-600 font-black">▲ +{digest.week.growth_pct}%</span>
                   : digest.week.growth_pct < 0 ? <span className="text-rose-600 font-black">▼ {digest.week.growth_pct}%</span>
                   : <span className="text-slate-400 font-black">— ثابت</span>}
+                {/* v3.66 — 4-week net revenue sparkline (same accounting source) */}
+                {Array.isArray(digest.week.weeks) && digest.week.weeks.length > 0 && (() => {
+                  const maxN = Math.max(1, ...digest.week.weeks.map(w => w.net_to_seller || 0))
+                  return (
+                    <span className="flex items-end gap-0.5 h-5 mr-1" title="صافي إيراد معراج لآخر 4 أسابيع (الأقدم → الأحدث)">
+                      {digest.week.weeks.map((w, i) => (
+                        <span key={w.start} title={`أسبوع ${w.start}: ${(w.net_to_seller || 0).toLocaleString('en-US')} صافي • ${w.bookings || 0} حجز`}
+                          className={`w-2 rounded-t ${i === digest.week.weeks.length - 1 ? 'bg-indigo-600' : 'bg-indigo-300'}`}
+                          style={{ height: `${Math.max(10, Math.round(((w.net_to_seller || 0) / maxN) * 100))}%` }} />
+                      ))}
+                    </span>
+                  )
+                })()}
               </div>
             )}
             {/* v3.62 — seat capacity warnings for shared packages close to selling out */}
@@ -8621,6 +8634,36 @@ function MeraajStoreScreen() {
   const [officeTags, setOfficeTags] = useState({}) // v3.64 — office → tag map for bookings tab
   // v3.65 — one-tap retry for failed outbound events (idempotent: same event id re-sent)
   const [retryBusy, setRetryBusy] = useState(null)
+  // v3.66 — retry ALL failed in sequential batches with live progress (stoppable)
+  const [retryAll, setRetryAll] = useState(null) // {running, total, processed, succeeded, failed, remaining}
+  const retryAllStopRef = useRef(false)
+  const runRetryAll = async () => {
+    retryAllStopRef.current = false
+    let agg = { running: true, total: null, processed: 0, succeeded: 0, failed: 0, remaining: null }
+    setRetryAll({ ...agg })
+    try {
+      let cursor = null // v3.66b — each event attempted exactly once per run, in order
+      for (let i = 0; i < 100; i++) { // safety cap
+        if (retryAllStopRef.current) break
+        const r = await api('/meraaj/events/retry-all-failed', { method: 'POST', body: { limit: 5, ...(cursor ? { after: cursor } : {}) } })
+        agg = {
+          running: true,
+          total: agg.total === null ? r.total : agg.total,
+          processed: agg.processed + r.processed,
+          succeeded: agg.succeeded + r.succeeded,
+          failed: agg.failed + r.failed,
+          remaining: r.remaining,
+        }
+        setRetryAll({ ...agg })
+        cursor = r.cursor || cursor
+        if (r.remaining === 0 || r.processed === 0) break
+      }
+      toast[agg.failed > 0 ? 'error' : 'success'](`انتهت إعادة المحاولة: ${agg.succeeded} نجحت • ${agg.failed} فشلت • ${agg.remaining ?? 0} متبقية`)
+      api('/meraaj/webhook-health').then(setHealth).catch(() => {})
+    } catch (e) { toast.error(e.message) } finally {
+      setRetryAll(s => s ? { ...s, running: false } : null)
+    }
+  }
   const retryEvent = async (ev) => {
     setRetryBusy(ev.id)
     try {
@@ -8716,6 +8759,28 @@ function MeraajStoreScreen() {
   const [approving, setApproving] = useState(null)
   // v3.65 — count inbound registrants missing a passport number (flag-only, never blocks approval)
   const missingPassports = (b) => (b.registrants || []).filter(r => !String(r?.passport_no || '').trim()).length
+  // v3.66 — passport completion dialog (fill-only: empty passports of the selected inbound booking)
+  const [passFor, setPassFor] = useState(null)
+  const [passInputs, setPassInputs] = useState({})
+  const [passBusy, setPassBusy] = useState(false)
+  const openPassports = (b) => {
+    setPassFor(b)
+    setPassInputs({})
+  }
+  const savePassports = async () => {
+    const entries = Object.entries(passInputs).filter(([, v]) => String(v || '').trim())
+    if (entries.length === 0) { toast.error('أدخل رقم جواز واحداً على الأقل'); return }
+    for (const [, v] of entries) {
+      if (!/^[A-Za-z0-9]{5,15}$/.test(String(v).trim())) { toast.error(`رقم جواز غير صالح: ${v} — أحرف إنجليزية وأرقام فقط (5-15 خانة)`); return }
+    }
+    setPassBusy(true)
+    try {
+      const r = await api(`/meraaj/inbound-bookings/${passFor.id}/passports`, { method: 'POST', body: { passports: entries.map(([index, passport_no]) => ({ index: Number(index), passport_no })) } })
+      toast.success(`✅ حُفظت ${r.updated} جوازات${r.booking_synced ? ' — وتم تحديث الحجز الفعلي المعتمد أيضاً' : ''}`)
+      setInbound(list => (list || []).map(x => x.id === passFor.id ? { ...x, registrants: r.registrants } : x))
+      setPassFor(null)
+    } catch (e) { toast.error(e.message) } finally { setPassBusy(false) }
+  }
   const approveBooking = async (b) => {
     const noPass = missingPassports(b)
     if (!(await askConfirm({ title: `اعتماد حجز "${b.buyer_office_name}"`, desc: `اعتماد الحجز (${b.seats} مقعد) وتحويله لحجز محاسبي فعلي؟\n\nسيُنشأ: عميل باسم المكتب المشتري (إن لم يوجد) + حجز في الباكج + قيد يومية متوازن${canProfit ? ` بصافي ${(b.net_to_seller_total || 0).toLocaleString('en-US')} ${b.currency}` : ''}${noPass > 0 ? `\n\n🛂 تنبيه: ${noPass} من المسجّلين بلا رقم جواز — يمكنك الاعتماد الآن واستكمال الجوازات لاحقاً من شاشة التسجيل` : ''}`, icon: noPass > 0 ? '🛂' : '✅', confirmLabel: 'اعتماد وتحويل' }))) return
@@ -8899,9 +8964,9 @@ function MeraajStoreScreen() {
               <TableCell className="text-xs">
                 <div>👨 {b.pax_adults ?? b.seats} • 🧒 {b.pax_children ?? 0} • 👶 {b.pax_infants ?? 0}</div>
                 <div className="text-[9px] text-slate-400">{(b.registrants || []).map(r => r.name).slice(0, 2).join('، ')}{(b.registrants || []).length > 2 ? '...' : ''}</div>
-                {/* v3.65 — passport completeness flag before approval */}
+                {/* v3.65 — passport completeness flag before approval. v3.66 — fill-only completion */}
                 {missingPassports(b) > 0 ? (
-                  <span className="inline-block mt-0.5 text-[9px] font-black bg-amber-100 text-amber-700 border border-amber-300 rounded-full px-1.5 py-0" title="مسجّلون بلا رقم جواز — يمكن الاعتماد واستكمالها لاحقاً">🛂 {missingPassports(b)} بلا جواز</span>
+                  <button onClick={() => openPassports(b)} className="inline-block mt-0.5 text-[9px] font-black bg-amber-100 text-amber-700 border border-amber-300 rounded-full px-1.5 py-0 hover:bg-amber-200 transition" title="انقر لاستكمال أرقام الجوازات الناقصة">🛂 {missingPassports(b)} بلا جواز — استكمال</button>
                 ) : (b.registrants || []).length > 0 && (
                   <span className="inline-block mt-0.5 text-[9px] font-bold text-emerald-600" title="جميع المسجّلين لديهم أرقام جوازات">🛂 الجوازات مكتملة</span>
                 )}
@@ -8921,6 +8986,38 @@ function MeraajStoreScreen() {
             </TableRow>))}</TableBody>
           </Table></CardContent></Card>
         )
+      )}
+      {/* v3.66 — passport completion dialog (fill-only) */}
+      {passFor && (
+        <Dialog open onOpenChange={() => setPassFor(null)}>
+          <DialogContent className="max-w-md" onInteractOutside={e => e.preventDefault()}>
+            <DialogHeader>
+              <DialogTitle className="text-base">🛂 استكمال جوازات «{passFor.buyer_office_name}»</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-2">
+              <div className="text-[11px] text-slate-500">تُعبّأ الجوازات الناقصة فقط — الجوازات المسجلة مسبقاً لا تتغير، ولا يتأثر أي حقل آخر أو حالة الاعتماد{passFor.booking_id ? '، وسيُحدَّث الحجز الفعلي المعتمد تلقائياً' : ''}.</div>
+              {(passFor.registrants || []).map((r, idx) => String(r?.passport_no || '').trim() ? (
+                <div key={idx} className="flex items-center justify-between bg-emerald-50/50 border border-emerald-100 rounded-lg px-2.5 py-1.5">
+                  <span className="text-[11px] font-bold text-slate-700">{r.name} <span className="text-[9px] text-slate-400">({r.age} سنة)</span></span>
+                  <span className="text-[10px] font-mono font-bold text-emerald-700">✓ {r.passport_no}</span>
+                </div>
+              ) : (
+                <div key={idx} className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                  <span className="text-[11px] font-bold text-slate-700 flex-1 min-w-0 truncate">{r.name} <span className="text-[9px] text-slate-400">({r.age} سنة)</span></span>
+                  <Input value={passInputs[idx] || ''} onChange={e => setPassInputs(m => ({ ...m, [idx]: e.target.value.toUpperCase() }))}
+                    placeholder="رقم الجواز (A1234567)" dir="ltr" maxLength={15}
+                    className="h-7 w-44 text-xs font-mono bg-white" />
+                </div>
+              ))}
+              <div className="flex justify-end gap-2 pt-1">
+                <Button variant="outline" size="sm" onClick={() => setPassFor(null)}>إلغاء</Button>
+                <Button size="sm" onClick={savePassports} disabled={passBusy} className="gap-1 bg-emerald-600 hover:bg-emerald-700">
+                  {passBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : '💾'} حفظ الجوازات
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
       )}
       {view === 'events' && (
         events.length === 0 ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">لا توجد أحداث مزامنة بعد — تُسجل هنا كل التحديثات الصادرة لمعراج (Outbox)</CardContent></Card> : (
@@ -9105,11 +9202,37 @@ function MeraajStoreScreen() {
             <Card>
               <CardHeader className="py-2 px-4 flex-row items-center justify-between space-y-0">
                 <CardTitle className="text-sm">📤 آخر الصادرة لمعراج ({(health.outbound || []).length})</CardTitle>
-                {/* v3.65 — total failed outbound counter */}
-                {(health.stats?.outbound_failed_total || 0) > 0 && (
-                  <span className="text-[10px] font-black bg-rose-100 text-rose-700 border border-rose-200 rounded-full px-2 py-0.5">⚠️ {health.stats.outbound_failed_total.toLocaleString('en-US')} فاشلة إجمالاً</span>
-                )}
+                {/* v3.65 — total failed outbound counter. v3.66 — retry all with live progress */}
+                <div className="flex items-center gap-1.5">
+                  {(health.stats?.outbound_failed_total || 0) > 0 && (
+                    <span className="text-[10px] font-black bg-rose-100 text-rose-700 border border-rose-200 rounded-full px-2 py-0.5">⚠️ {health.stats.outbound_failed_total.toLocaleString('en-US')} فاشلة إجمالاً</span>
+                  )}
+                  {(health.stats?.outbound_failed_total || 0) > 0 && !retryAll?.running && (
+                    <Button size="sm" onClick={runRetryAll} className="h-6 text-[10px] px-2 gap-1 bg-blue-600 hover:bg-blue-700" title="إعادة إرسال كل الأحداث الفاشلة بالترتيب (الأقدم أولاً) — بنفس المعرفات، لا تكرار">🔁 إعادة الكل</Button>
+                  )}
+                  {retryAll?.running && (
+                    <Button size="sm" variant="outline" onClick={() => { retryAllStopRef.current = true }} className="h-6 text-[10px] px-2 border-rose-300 text-rose-600">⏹ إيقاف</Button>
+                  )}
+                </div>
               </CardHeader>
+              {/* v3.66 — live retry-all progress bar */}
+              {retryAll && (
+                <div className="px-4 pb-1">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] font-bold">
+                    {retryAll.running && <Loader2 className="w-3 h-3 animate-spin text-blue-600" />}
+                    <span>الإجمالي: {retryAll.total ?? '—'}</span>
+                    <span>عولج: {retryAll.processed}</span>
+                    <span className="text-emerald-600">نجح: {retryAll.succeeded}</span>
+                    <span className="text-rose-600">فشل: {retryAll.failed}</span>
+                    <span className="text-slate-500">متبقٍ: {retryAll.remaining ?? '—'}</span>
+                  </div>
+                  {retryAll.total > 0 && (
+                    <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-1">
+                      <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${Math.min(100, Math.round((retryAll.processed / retryAll.total) * 100))}%` }} />
+                    </div>
+                  )}
+                </div>
+              )}
               <CardContent className="p-0">
                 {(health.outbound || []).length === 0 ? <div className="p-6 text-center text-xs text-slate-400">لا توجد أحداث صادرة بعد</div> : (
                   <Table>

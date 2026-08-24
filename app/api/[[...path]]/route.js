@@ -1589,6 +1589,14 @@ async function handleRoute(request, { params }) {
       const growthPct = prevWeek.net_to_seller > 0
         ? +(((thisWeek.net_to_seller - prevWeek.net_to_seller) / prevWeek.net_to_seller) * 100).toFixed(1)
         : (thisWeek.net_to_seller > 0 ? null : 0) // null = new activity with no baseline
+      // v3.66 — 4-week sparkline data (oldest→newest), same net_to_seller source
+      const weeks = []
+      for (let i = 3; i >= 0; i--) {
+        const wEnd = new Date(endToday.getTime() - i * 7 * 24 * 3600 * 1000)
+        const wStart = new Date(wEnd.getTime() - 7 * 24 * 3600 * 1000)
+        const s = await sumRange(wStart, wEnd)
+        weeks.push({ start: wStart.toISOString().slice(0, 10), bookings: s.bookings, net_to_seller: s.net_to_seller })
+      }
       const pending = await db.collection('meraaj_inbound_bookings').countDocuments({ ...tf, status: 'new' })
       const rejectedToday = await db.collection('meraaj_webhook_log').countDocuments({ ok: false, at: { $gte: startToday } })
       const cfgDoc = await db.collection('tenant_settings').findOne(tf)
@@ -1609,7 +1617,7 @@ async function handleRoute(request, { params }) {
         reject_alert_threshold: threshold,
         alert: threshold > 0 && rejectedToday >= threshold,
         capacity_warnings, // v3.62
-        week: { this_week: thisWeek, prev_week: prevWeek, growth_pct: growthPct }, // v3.65
+        week: { this_week: thisWeek, prev_week: prevWeek, growth_pct: growthPct, weeks }, // v3.65 + v3.66 sparkline
       })
     }
     // v3.62 — MONTHLY MERAAJ REPORT (owner-only): per-package + per-buyer-office activity for a month.
@@ -1751,6 +1759,42 @@ async function handleRoute(request, { params }) {
     // Marketplace bookings received from Meraaj (inbound)
     if (route === '/meraaj/inbound-bookings' && method === 'GET') {
       return ok(clean(await db.collection('meraaj_inbound_bookings').find(tf).sort({ created_at: -1 }).limit(200).toArray()))
+    }
+    // v3.66 — PASSPORT COMPLETION (fill-only): sets ONLY currently-EMPTY passport_no fields on
+    // inbound registrants, and mirrors them into the linked real booking (same index order) when
+    // approved. Never overwrites an existing passport, never touches any other field or the
+    // approval state. Same screen access as inbound bookings (staff with Meraaj module can fill).
+    const passCompleteMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/passports$/)
+    if (passCompleteMatch && method === 'POST') {
+      const inb = await db.collection('meraaj_inbound_bookings').findOne({ id: passCompleteMatch[1], tenant_id: T })
+      if (!inb) return bad('الحجز الوارد غير موجود', 404)
+      const b = await request.json().catch(() => ({}))
+      const items = Array.isArray(b.passports) ? b.passports : []
+      if (items.length === 0) return bad('لا توجد جوازات للحفظ')
+      const regs = Array.isArray(inb.registrants) ? [...inb.registrants] : []
+      const updated = []
+      for (const it of items) {
+        const idx = Number(it.index)
+        if (!Number.isInteger(idx) || idx < 0 || idx >= regs.length) return bad(`فهرس مسجّل غير صالح`)
+        if (String(regs[idx]?.passport_no || '').trim()) return bad(`المسجّل «${regs[idx].name}» لديه جواز مسجّل مسبقاً — لا يمكن استبداله من هنا`)
+        const pass = String(it.passport_no || '').trim().toUpperCase()
+        if (!/^[A-Z0-9]{5,15}$/.test(pass)) return bad(`رقم جواز غير صالح للمسجّل «${regs[idx]?.name || idx + 1}» — أحرف إنجليزية وأرقام فقط (5-15 خانة)`)
+        regs[idx] = { ...regs[idx], passport_no: pass }
+        updated.push({ index: idx, passport_no: pass })
+      }
+      await db.collection('meraaj_inbound_bookings').updateOne({ id: inb.id, tenant_id: T }, { $set: { registrants: regs, passports_completed_at: new Date(), passports_completed_by: sess.user.id } })
+      // Mirror into the linked approved booking (fill-only there too)
+      let bookingSynced = false
+      if (inb.booking_id) {
+        const bk = await db.collection('package_bookings').findOne({ id: inb.booking_id, tenant_id: T })
+        if (bk && Array.isArray(bk.registrants) && bk.registrants.length === regs.length) {
+          const bregs = [...bk.registrants]
+          for (const u of updated) if (!String(bregs[u.index]?.passport_no || '').trim()) bregs[u.index] = { ...bregs[u.index], passport_no: u.passport_no }
+          await db.collection('package_bookings').updateOne({ id: bk.id, tenant_id: T }, { $set: { registrants: bregs } })
+          bookingSynced = true
+        }
+      }
+      return ok({ updated: updated.length, booking_synced: bookingSynced, registrants: regs })
     }
     // v3.63 — ONE-TAP SEAT REFILL (owner): raise a shared package's allocated Meraaj seats
     // directly from the dashboard capacity warning. Emits the standard package.updated event
@@ -1963,6 +2007,55 @@ async function handleRoute(request, { params }) {
     // Outbox / sync log
     if (route === '/meraaj/events' && method === 'GET') {
       return ok(clean(await db.collection('meraaj_events').find(tf).sort({ created_at: -1 }).limit(100).toArray()))
+    }
+    // v3.66 — RETRY ALL FAILED (owner): processes failed outbound events in controlled order
+    // (oldest first) in small batches; the frontend loops until remaining=0 showing live progress.
+    // Same idempotency as single retry: SAME event id re-sent, SAME doc updated, no new docs.
+    // A failure in one event never stops the rest (per-event try/catch).
+    if (route === '/meraaj/events/retry-all-failed' && method === 'POST') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const retryUrl = process.env.MERAAJ_WEBHOOK_URL || (meraajApiBase() ? `${meraajApiBase()}/api/integrations/rahal/webhooks` : '')
+      if (!retryUrl || !meraajSecret()) return bad('رابط معراج غير مُهيأ — أضف MERAAJ_API_BASE_URL ثم أعد المحاولة')
+      const b = await request.json().catch(() => ({}))
+      const limit = Math.min(20, Math.max(1, parseInt(b.limit, 10) || 5))
+      // v3.66b — progress cursor: guarantees each failed event is attempted EXACTLY ONCE per run
+      // (in order), even when deliveries keep failing — batches never re-fetch already-tried docs.
+      const after = b.after ? new Date(b.after) : null
+      const failedQ = { ...tf, status: 'failed' }
+      if (after && !isNaN(after.getTime())) failedQ.created_at = { $gt: after }
+      const totalFailed = await db.collection('meraaj_events').countDocuments({ ...tf, status: 'failed' })
+      const batch = await db.collection('meraaj_events').find(failedQ).sort({ created_at: 1 }).limit(limit).toArray()
+      const results = []
+      let succeeded = 0, failed = 0
+      for (const ev of batch) {
+        const attempts = (Number(ev.attempts) || 0) + 1
+        try {
+          const body = JSON.stringify({ id: ev.id, type: ev.type, timestamp: Math.floor(Date.now() / 1000), data: ev.payload })
+          const res = await fetch(retryUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Rahal-Signature': meraajSign(body) },
+            body,
+            signal: AbortSignal.timeout(6000),
+          })
+          if (res.ok) {
+            await db.collection('meraaj_events').updateOne({ id: ev.id }, { $set: { status: 'sent', sent_at: new Date(), attempts, last_error: null } })
+            succeeded++
+            results.push({ id: ev.id, type: ev.type, status: 'sent', attempts })
+          } else {
+            await db.collection('meraaj_events').updateOne({ id: ev.id }, { $set: { attempts, last_error: `HTTP ${res.status}` } })
+            failed++
+            results.push({ id: ev.id, type: ev.type, status: 'failed', attempts, last_error: `HTTP ${res.status}` })
+          }
+        } catch (e) {
+          const le = String(e.message || e).slice(0, 200)
+          await db.collection('meraaj_events').updateOne({ id: ev.id }, { $set: { attempts, last_error: le } })
+          failed++
+          results.push({ id: ev.id, type: ev.type, status: 'failed', attempts, last_error: le })
+        }
+      }
+      const remaining = await db.collection('meraaj_events').countDocuments({ ...tf, status: 'failed' })
+      const cursor = batch.length > 0 ? new Date(batch[batch.length - 1].created_at).toISOString() : null // v3.66b
+      return ok({ total: totalFailed, processed: batch.length, succeeded, failed, remaining, cursor, results })
     }
     // v3.65 — ONE-TAP RETRY of a failed/pending outbound event (owner only). IDEMPOTENT BY DESIGN:
     // re-sends the SAME event id in the body (Meraaj dedups inbound by event id) and NEVER creates
