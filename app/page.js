@@ -1458,16 +1458,18 @@ function Dashboard({ setTab }) {
   const [data, setData] = useState(null)
   const [tomorrow, setTomorrow] = useState([])
   const [monAlerts, setMonAlerts] = useState(null)
+  const [digest, setDigest] = useState(null) // v3.61 — owner Meraaj daily digest (null for staff/errors)
   const [loading, setLoading] = useState(true)
   const load = useCallback(async () => {
     try {
       setLoading(true)
-      const [d, tw, ma] = await Promise.all([
+      const [d, tw, ma, dg] = await Promise.all([
         api('/dashboard'),
         api('/dashboard/tomorrow-travelers').catch(() => []),
         api('/visa-monitor/alerts').catch(() => null),
+        api('/meraaj/daily-digest').catch(() => null), // owner-only; staff → null → card hidden
       ])
-      setData(d); setTomorrow(tw || []); setMonAlerts(ma)
+      setData(d); setTomorrow(tw || []); setMonAlerts(ma); setDigest(dg)
     } catch (e) { toast.error(e.message) } finally { setLoading(false) }
   }, [])
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t) }, [load])
@@ -1491,6 +1493,50 @@ function Dashboard({ setTab }) {
         <QuickAction icon={Package} label="الباقات" grad="grad-teal" onClick={() => setTab('packages')} />
         <QuickAction icon={Briefcase} label="الخدمات" grad="grad-gold" onClick={() => setTab('services')} />
       </div>
+      {/* v3.61 — Rejected-webhooks alert banner (owner, threshold configurable in متجر معراج → صحة المزامنة) */}
+      {digest?.alert && (
+        <div className="flex items-center gap-3 bg-rose-50 border-2 border-rose-300 rounded-xl p-3">
+          <span className="text-2xl">🚨</span>
+          <div className="flex-1">
+            <div className="text-sm font-black text-rose-700">تحذير: {digest.rejected_today} ويبهوك مرفوض اليوم (الحد المسموح: {digest.reject_alert_threshold})</div>
+            <div className="text-[11px] text-rose-600">قد يشير هذا لمشكلة في مفتاح الربط (HMAC) مع معراج — راجع تبويب صحة المزامنة</div>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => setTab('meraaj')} className="border-rose-300 text-rose-700 hover:bg-rose-100 text-xs shrink-0">فحص الصحة ←</Button>
+        </div>
+      )}
+      {/* v3.61 — Owner morning digest: yesterday's Meraaj bookings, revenue, pending approvals */}
+      {digest && (
+        <Card className="border-indigo-200 bg-gradient-to-l from-indigo-50/60 via-white to-white">
+          <CardContent className="p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <div className="text-sm font-black text-indigo-900">🌅 ملخص معراج الصباحي</div>
+              {digest.pending > 0 ? (
+                <Button size="sm" onClick={() => setTab('meraaj')} className="h-7 text-[11px] gap-1 bg-amber-500 hover:bg-amber-600">🔔 {digest.pending} حجز بانتظار الاعتماد ←</Button>
+              ) : (
+                <span className="text-[11px] font-bold text-emerald-600">✅ لا حجوزات معلقة</span>
+              )}
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div className="bg-white border border-indigo-100 rounded-lg p-2.5 text-center">
+                <div className="text-xl font-black text-indigo-700">{digest.yesterday?.bookings ?? 0}</div>
+                <div className="text-[10px] text-slate-500">حجوزات أمس</div>
+              </div>
+              <div className="bg-white border border-indigo-100 rounded-lg p-2.5 text-center">
+                <div className="text-xl font-black text-indigo-700">{digest.yesterday?.seats ?? 0}</div>
+                <div className="text-[10px] text-slate-500">مقاعد أمس</div>
+              </div>
+              <div className="bg-white border border-emerald-100 rounded-lg p-2.5 text-center">
+                <div className="text-lg font-black text-emerald-700 font-mono">{(digest.yesterday?.net_to_seller ?? 0).toLocaleString('en-US')}</div>
+                <div className="text-[10px] text-slate-500">صافي إيراد أمس</div>
+              </div>
+              <div className="bg-white border border-blue-100 rounded-lg p-2.5 text-center">
+                <div className="text-lg font-black text-blue-700">{digest.today?.bookings ?? 0} <span className="text-[10px] font-bold text-slate-400">حجز</span> <span className="font-mono text-sm">{(digest.today?.net_to_seller ?? 0).toLocaleString('en-US')}</span></div>
+                <div className="text-[10px] text-slate-500">اليوم حتى الآن (حجوزات / صافي)</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <KpiCard title="مبيعات اليوم" icon={DollarSign} grad="grad-brand"
           values={CURRENCIES.map(c => ({ label: c, value: fmt(data?.kpi?.sales_today?.[c] || 0, c) }))} loading={loading} />
@@ -8486,6 +8532,17 @@ function MeraajStoreScreen() {
   const [sharedPkgs, setSharedPkgs] = useState([])
   const [health, setHealth] = useState(null) // v3.57 — webhook health dashboard (owner)
   const [view, setView] = useState('shared') // shared | bookings | events | health
+  // v3.61 — rejected-webhooks alert threshold config + buyer office drill-down filter
+  const [thresholdVal, setThresholdVal] = useState('')
+  const [officeFilter, setOfficeFilter] = useState(null)
+  useEffect(() => { if (config) setThresholdVal(String(config.reject_alert_threshold ?? 5)) }, [config])
+  const saveThreshold = async () => {
+    try {
+      const r = await api('/meraaj/settings', { method: 'POST', body: { reject_alert_threshold: Math.max(0, parseInt(thresholdVal, 10) || 0) } })
+      setConfig(c => ({ ...c, reject_alert_threshold: r.reject_alert_threshold }))
+      toast.success(r.reject_alert_threshold === 0 ? '🔕 تم تعطيل تنبيه الرفض اليومي' : `🚨 حد التنبيه: ${r.reject_alert_threshold} رفض/يوم`)
+    } catch (e) { toast.error(e.message) }
+  }
   useEffect(() => { load() }, [])
   const load = async () => {
     try {
@@ -8685,10 +8742,25 @@ function MeraajStoreScreen() {
       {view === 'health' && isOwner && (
         !health ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">جارٍ تحميل بيانات الصحة...</CardContent></Card> : (
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="text-sm font-black text-slate-700">🩺 صحة مزامنة معراج — آخر الأحداث الواردة والمرفوضة والصادرة</div>
-              <Button size="sm" variant="outline" onClick={() => api('/meraaj/webhook-health').then(setHealth).catch(e => toast.error(e.message))} className="h-7 text-xs gap-1"><RefreshCw className="w-3 h-3" /> تحديث</Button>
+              <div className="flex items-center gap-2">
+                {/* v3.61 — daily rejected-webhooks alert threshold */}
+                <div className="flex items-center gap-1 bg-white border rounded-lg px-2 py-1">
+                  <span className="text-[10px] font-bold text-slate-500 whitespace-nowrap">🚨 حد تنبيه الرفض/يوم:</span>
+                  <Input type="number" min="0" max="1000" value={thresholdVal} onChange={e => setThresholdVal(e.target.value)} className="h-6 w-16 text-xs text-center font-black" title="0 = تعطيل التنبيه" />
+                  <Button size="sm" onClick={saveThreshold} className="h-6 text-[10px] px-2">حفظ</Button>
+                </div>
+                <Button size="sm" variant="outline" onClick={() => api('/meraaj/webhook-health').then(setHealth).catch(e => toast.error(e.message))} className="h-7 text-xs gap-1"><RefreshCw className="w-3 h-3" /> تحديث</Button>
+              </div>
             </div>
+            {/* v3.61 — red banner when today's rejections reach the threshold */}
+            {(Number(config?.reject_alert_threshold) || 0) > 0 && (health.stats?.rejected_24h || 0) >= Number(config.reject_alert_threshold) && (
+              <div className="flex items-center gap-2 bg-rose-50 border-2 border-rose-300 rounded-xl p-2.5">
+                <span className="text-xl">🚨</span>
+                <div className="text-xs font-black text-rose-700">تحذير: {health.stats.rejected_24h} ويبهوك مرفوض خلال 24 ساعة (الحد: {config.reject_alert_threshold}) — تحقق من مفتاح الربط HMAC مع معراج</div>
+              </div>
+            )}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
               <Card className="border-emerald-200"><CardContent className="p-3 text-center"><div className="text-2xl font-black text-emerald-700">{health.stats?.accepted_24h ?? 0}</div><div className="text-[10px] text-slate-500">✅ مقبولة (24 ساعة)</div></CardContent></Card>
               <Card className="border-emerald-100"><CardContent className="p-3 text-center"><div className="text-2xl font-black text-emerald-600">{health.stats?.accepted_7d ?? 0}</div><div className="text-[10px] text-slate-500">✅ مقبولة (7 أيام)</div></CardContent></Card>
@@ -8728,13 +8800,13 @@ function MeraajStoreScreen() {
             })()}
             {/* v3.60 — Buyer office insights */}
             <Card>
-              <CardHeader className="py-2 px-4"><CardTitle className="text-sm">🏢 أكثر المكاتب حجزاً عبر معراج ({(health.buyers || []).length})</CardTitle></CardHeader>
+              <CardHeader className="py-2 px-4"><CardTitle className="text-sm">🏢 أكثر المكاتب حجزاً عبر معراج ({(health.buyers || []).length}) <span className="text-[10px] font-normal text-slate-400">— انقر على مكتب لعرض كل حجوزاته</span></CardTitle></CardHeader>
               <CardContent className="p-0">
                 {(health.buyers || []).length === 0 ? <div className="p-6 text-center text-xs text-slate-400">لا توجد حجوزات من مكاتب بعد</div> : (
                   <Table>
                     <TableHeader><TableRow><TableHead className="text-xs">المكتب المشتري</TableHead><TableHead className="text-xs">حجوزات</TableHead><TableHead className="text-xs">معتمدة</TableHead><TableHead className="text-xs">مقاعد</TableHead><TableHead className="text-xs">الإيراد</TableHead><TableHead className="text-xs">صافي لك</TableHead><TableHead className="text-xs">آخر حجز</TableHead></TableRow></TableHeader>
-                    <TableBody>{(health.buyers || []).map((b, i) => (<TableRow key={b.office} className={i === 0 ? 'bg-amber-50/40' : ''}>
-                      <TableCell className="text-[11px] font-black">{i === 0 && '🏆 '}{b.office}</TableCell>
+                    <TableBody>{(health.buyers || []).map((b, i) => (<TableRow key={b.office} onClick={() => setOfficeFilter(b.office)} className={`cursor-pointer hover:bg-blue-50/60 ${i === 0 ? 'bg-amber-50/40' : ''}`} title="عرض حجوزات هذا المكتب">
+                      <TableCell className="text-[11px] font-black text-blue-700 hover:underline">{i === 0 && '🏆 '}{b.office}</TableCell>
                       <TableCell className="text-[11px]">{b.bookings}</TableCell>
                       <TableCell className="text-[11px] text-emerald-700 font-bold">{b.approved}</TableCell>
                       <TableCell className="text-[11px]">{b.seats}</TableCell>
@@ -8746,6 +8818,47 @@ function MeraajStoreScreen() {
                 )}
               </CardContent>
             </Card>
+            {/* v3.61 — Buyer office drill-down: all bookings of the selected office across packages */}
+            {officeFilter && (
+              <Dialog open onOpenChange={() => setOfficeFilter(null)}>
+                <DialogContent className="max-w-2xl" onInteractOutside={e => e.preventDefault()}>
+                  <DialogHeader>
+                    <DialogTitle className="text-base">🏢 حجوزات «{officeFilter}» عبر معراج</DialogTitle>
+                  </DialogHeader>
+                  {(() => {
+                    const list = (inbound || []).filter(x => ((x.buyer_office_name || 'غير معروف').trim() || 'غير معروف') === officeFilter)
+                    const active = list.filter(x => x.status !== 'rejected' && x.status !== 'cancelled')
+                    const seats = active.reduce((s, x) => s + (Number(x.seats) || 0), 0)
+                    const rev = active.reduce((s, x) => s + (Number(x.total_price) || 0), 0)
+                    return (
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap gap-2 text-[11px] font-bold">
+                          <span className="bg-slate-100 rounded-full px-2.5 py-1">{list.length} حجز إجمالاً</span>
+                          <span className="bg-emerald-50 text-emerald-700 rounded-full px-2.5 py-1">{seats} مقعد فعّال</span>
+                          <span className="bg-blue-50 text-blue-700 rounded-full px-2.5 py-1 font-mono">{rev.toLocaleString('en-US')} {list[0]?.currency || ''} إيراد</span>
+                        </div>
+                        <div className="max-h-[50vh] overflow-y-auto border rounded-lg">
+                          {list.length === 0 ? <div className="p-6 text-center text-xs text-slate-400">لا توجد حجوزات لهذا المكتب</div> : (
+                            <Table>
+                              <TableHeader><TableRow><TableHead className="text-xs">التاريخ</TableHead><TableHead className="text-xs">الباكج</TableHead><TableHead className="text-xs">مرجع معراج</TableHead><TableHead className="text-xs">مقاعد</TableHead><TableHead className="text-xs">الإجمالي</TableHead><TableHead className="text-xs">الحالة</TableHead></TableRow></TableHeader>
+                              <TableBody>{list.map(x => (<TableRow key={x.id} className={x.status === 'rejected' || x.status === 'cancelled' ? 'opacity-50' : ''}>
+                                <TableCell className="text-[10px] whitespace-nowrap">{new Date(x.created_at).toLocaleDateString('en-GB')}</TableCell>
+                                <TableCell className="text-[11px] font-bold">{x.package_name}</TableCell>
+                                <TableCell className="text-[10px] font-mono">{x.meraaj_booking_ref || '—'}</TableCell>
+                                <TableCell className="text-[11px]">{x.seats}</TableCell>
+                                <TableCell className="text-[11px] font-mono">{(Number(x.total_price) || 0).toLocaleString('en-US')} {x.currency}</TableCell>
+                                <TableCell>{x.status === 'approved' ? <Badge className="bg-emerald-100 text-emerald-700 text-[9px]">✅ معتمد</Badge> : x.status === 'rejected' ? <Badge className="bg-slate-200 text-slate-600 text-[9px]">🚫 مرفوض</Badge> : x.status === 'cancelled' ? <Badge className="bg-rose-100 text-rose-700 text-[9px]">⛔ ملغى</Badge> : <Badge className="bg-blue-100 text-blue-700 text-[9px]">🔵 جديد</Badge>}</TableCell>
+                              </TableRow>))}</TableBody>
+                            </Table>
+                          )}
+                        </div>
+                        <div className="flex justify-end"><Button variant="outline" size="sm" onClick={() => setOfficeFilter(null)}>إغلاق</Button></div>
+                      </div>
+                    )
+                  })()}
+                </DialogContent>
+              </Dialog>
+            )}
             {/* Latest ACCEPTED incoming webhooks */}
             <Card>
               <CardHeader className="py-2 px-4"><CardTitle className="text-sm">📥 آخر الواردة المقبولة ({(health.incoming || []).length})</CardTitle></CardHeader>

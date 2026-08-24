@@ -1533,18 +1533,63 @@ async function handleRoute(request, { params }) {
         store_activated_at: settingsCfg?.meraaj_store?.activated_at || null,
         // v3.53 — optional auto-approval of inbound marketplace bookings
         auto_approve: !!settingsCfg?.meraaj_auto_approve,
+        // v3.61 — daily rejected-webhooks alert threshold (0 = disabled, default 5)
+        reject_alert_threshold: Number.isFinite(settingsCfg?.meraaj_reject_alert_threshold) ? settingsCfg.meraaj_reject_alert_threshold : 5,
       })
     }
     // v3.53 — Meraaj behavior settings (owner only): auto-approve toggle
+    // v3.61 — also accepts reject_alert_threshold (int 0..1000, 0 = alert disabled)
     if (route === '/meraaj/settings' && method === 'POST') {
       if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
       const b = await request.json()
-      await db.collection('tenant_settings').updateOne(tf, { $set: { meraaj_auto_approve: !!b.auto_approve } }, { upsert: true })
-      return ok({ auto_approve: !!b.auto_approve })
+      const set = {}
+      if ('auto_approve' in b) set.meraaj_auto_approve = !!b.auto_approve
+      if ('reject_alert_threshold' in b) set.meraaj_reject_alert_threshold = Math.max(0, Math.min(1000, parseInt(b.reject_alert_threshold, 10) || 0))
+      if (Object.keys(set).length === 0) return bad('لا توجد إعدادات لتحديثها')
+      await db.collection('tenant_settings').updateOne(tf, { $set: set }, { upsert: true })
+      const cfgDoc = await db.collection('tenant_settings').findOne(tf)
+      return ok({
+        auto_approve: !!cfgDoc?.meraaj_auto_approve,
+        reject_alert_threshold: Number.isFinite(cfgDoc?.meraaj_reject_alert_threshold) ? cfgDoc.meraaj_reject_alert_threshold : 5,
+      })
     }
     // v3.53 — Lightweight pending-bookings counter (for the header notification bell)
     if (route === '/meraaj/inbound-count' && method === 'GET') {
       return ok({ pending: await db.collection('meraaj_inbound_bookings').countDocuments({ tenant_id: T, status: 'new' }) })
+    }
+    // v3.61 — OWNER DAILY DIGEST: yesterday/today Meraaj bookings + revenue + pending approvals
+    // + rejected-webhooks alert (UTC day boundaries, consistent with the health trend chart).
+    // Rejected/cancelled bookings are excluded from seats/revenue/net sums (counted in bookings).
+    if (route === '/meraaj/daily-digest' && method === 'GET') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const startToday = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z')
+      const startYesterday = new Date(startToday.getTime() - 24 * 3600 * 1000)
+      const endToday = new Date(startToday.getTime() + 24 * 3600 * 1000)
+      const sumRange = async (from, to) => {
+        const docs = await db.collection('meraaj_inbound_bookings').find({ ...tf, created_at: { $gte: from, $lt: to } }).project({ seats: 1, total_price: 1, net_to_seller_total: 1, status: 1 }).toArray()
+        const s = { bookings: docs.length, seats: 0, revenue: 0, net_to_seller: 0 }
+        for (const d of docs) {
+          if (d.status === 'rejected' || d.status === 'cancelled') continue
+          s.seats += Number(d.seats) || 0
+          s.revenue += Number(d.total_price) || 0
+          s.net_to_seller += Number(d.net_to_seller_total) || 0
+        }
+        s.revenue = +s.revenue.toFixed(2)
+        s.net_to_seller = +s.net_to_seller.toFixed(2)
+        return s
+      }
+      const yesterday = await sumRange(startYesterday, startToday)
+      const today = await sumRange(startToday, endToday)
+      const pending = await db.collection('meraaj_inbound_bookings').countDocuments({ ...tf, status: 'new' })
+      const rejectedToday = await db.collection('meraaj_webhook_log').countDocuments({ ok: false, at: { $gte: startToday } })
+      const cfgDoc = await db.collection('tenant_settings').findOne(tf)
+      const threshold = Number.isFinite(cfgDoc?.meraaj_reject_alert_threshold) ? cfgDoc.meraaj_reject_alert_threshold : 5
+      return ok({
+        yesterday, today, pending,
+        rejected_today: rejectedToday,
+        reject_alert_threshold: threshold,
+        alert: threshold > 0 && rejectedToday >= threshold,
+      })
     }
     // v3.43 — SELF-SERVICE STORE ACTIVATION (Subscribe / Activate) — instant, no manual steps.
     // Stores the subscription flag per office; best-effort notifies Meraaj via the outbox
