@@ -8670,13 +8670,53 @@ function MeraajStoreScreen() {
         ['الإجمالي', r.totals.current.bookings, r.totals.current.approved, r.totals.current.seats, r.totals.current.revenue, r.totals.current.net_to_seller, r.totals.previous.bookings, r.totals.previous.net_to_seller, g(r.totals.growth_pct)],
       ])
       ws['!cols'] = [{ wch: 26 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 10 }]
+      // v3.70 — second sheet: month-over-month comparison per PACKAGE
+      const wsPkgCmp = XLSX.utils.aoa_to_sheet([
+        [`مقارنة أداء الباكجات — ${r.month} مقابل ${r.prev_month}`], [],
+        ['الباكج', `حجوزات ${r.month}`, `معتمدة ${r.month}`, `مقاعد ${r.month}`, `إيراد ${r.month}`, `صافي ${r.month}`, `حجوزات ${r.prev_month}`, `صافي ${r.prev_month}`, 'النمو %'],
+        ...(r.packages || []).map(p => [p.name, p.current.bookings, p.current.approved, p.current.seats, p.current.revenue, p.current.net_to_seller, p.previous.bookings, p.previous.net_to_seller, g(p.growth_pct)]),
+        [],
+        ['الإجمالي', r.totals.current.bookings, r.totals.current.approved, r.totals.current.seats, r.totals.current.revenue, r.totals.current.net_to_seller, r.totals.previous.bookings, r.totals.previous.net_to_seller, g(r.totals.growth_pct)],
+      ])
+      wsPkgCmp['!cols'] = [{ wch: 34 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 10 }]
       const wb = XLSX.utils.book_new()
       wb.Workbook = { Views: [{ RTL: true }] }
       XLSX.utils.book_append_sheet(wb, ws, 'مقارنة المكاتب')
+      XLSX.utils.book_append_sheet(wb, wsPkgCmp, 'مقارنة الباكجات')
       XLSX.writeFile(wb, `مقارنة_المكاتب_${r.month}.xlsx`)
       toast.success(`✅ تم تنزيل مقارنة المكاتب لشهر ${r.month}`)
     } catch (e) { toast.error(e.message) }
   }
+  // v3.70 — one-tap WhatsApp share of the alerts-center summary (client-side wa.me, no backend)
+  const shareAlertsWhatsApp = () => {
+    const a = alertsCenter
+    if (!a) { toast.error('لم تُحمَّل التنبيهات بعد'); return }
+    const c = a.counts || {}
+    const lines = [
+      `🔔 *ملخص تنبيهات معراج — ${new Date().toLocaleDateString('en-GB')}*`,
+      '',
+      (c.total || 0) === 0 ? '✅ كل شيء سليم — لا توجد تنبيهات تشغيلية' : `⚠️ إجمالي التنبيهات: ${c.total}`,
+    ]
+    if ((c.failed_events || 0) > 0) lines.push(`📤 أحداث صادرة فاشلة: ${c.failed_events}`)
+    if ((c.pending_bookings || 0) > 0) {
+      lines.push(`📥 حجوزات بانتظار الاعتماد: ${c.pending_bookings}`)
+      for (const b of (a.pending_bookings || []).slice(0, 3)) lines.push(`   • ${b.package_name} — ${b.buyer_office_name || 'مكتب'} (${b.seats} مقاعد)`)
+    }
+    if ((c.capacity_warnings || 0) > 0) {
+      lines.push(`💺 باكجات شبه ممتلئة: ${c.capacity_warnings}`)
+      for (const w of (a.capacity_warnings || []).slice(0, 3)) lines.push(`   • ${w.name}: متبقي ${w.remaining} من ${w.seats_allocated} (${w.pct}%)`)
+    }
+    if ((c.missing_passports || 0) > 0) lines.push(`🛂 جوازات ناقصة (حجوزات معتمدة): ${c.missing_passports}`)
+    if (a.reject_alert) lines.push(`🚨 ويبهوك مرفوض اليوم: ${a.rejected_today} (الحد ${a.reject_alert_threshold}) — تحقق من مفتاح HMAC`)
+    lines.push('', '— نظام رحّال ERP')
+    window.open(`https://wa.me/?text=${encodeURIComponent(lines.join('\n'))}`, '_blank')
+  }
+  // v3.70 — silent auto-refresh of the alerts badge every 3 minutes (owner only, no reload)
+  useEffect(() => {
+    if (!isOwner) return
+    const iv = setInterval(() => { api('/meraaj/alerts-center').then(setAlertsCenter).catch(() => {}) }, 180000)
+    return () => clearInterval(iv)
+  }, [isOwner])
   const runRetryAll = async () => {
     retryAllStopRef.current = false
     let agg = { running: true, total: null, processed: 0, succeeded: 0, failed: 0, remaining: null }
@@ -9271,7 +9311,10 @@ function MeraajStoreScreen() {
           <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="text-sm font-black text-slate-700">🔔 مركز التنبيهات الموحد — كل التحذيرات التشغيلية في مكان واحد</div>
-              <Button size="sm" variant="outline" onClick={loadAlertsCenter} className="h-7 text-xs gap-1"><RefreshCw className="w-3 h-3" /> تحديث</Button>
+              <div className="flex items-center gap-2">
+                <Button size="sm" onClick={shareAlertsWhatsApp} className="h-7 text-xs gap-1 bg-emerald-600 hover:bg-emerald-700">💬 مشاركة واتساب</Button>
+                <Button size="sm" variant="outline" onClick={loadAlertsCenter} className="h-7 text-xs gap-1"><RefreshCw className="w-3 h-3" /> تحديث</Button>
+              </div>
             </div>
             {/* summary count cards */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
@@ -9406,6 +9449,26 @@ function MeraajStoreScreen() {
                         <TableCell className="text-[11px] font-mono text-emerald-700 font-bold">{o.current.net_to_seller.toLocaleString('en-US')}</TableCell>
                         <TableCell className="text-[11px] font-mono text-slate-500">{o.previous.net_to_seller.toLocaleString('en-US')}</TableCell>
                         <TableCell>{o.growth_pct === null ? <Badge className="bg-blue-100 text-blue-700 text-[9px]">🆕 جديد</Badge> : o.growth_pct > 0 ? <Badge className="bg-emerald-100 text-emerald-700 text-[9px]">▲ {o.growth_pct}%</Badge> : o.growth_pct < 0 ? <Badge className="bg-rose-100 text-rose-700 text-[9px]">▼ {Math.abs(o.growth_pct)}%</Badge> : <Badge className="bg-slate-100 text-slate-500 text-[9px]">—</Badge>}</TableCell>
+                      </TableRow>))}</TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
+              {/* v3.70 — month-over-month comparison per PACKAGE */}
+              <Card>
+                <CardHeader className="py-2 px-4"><CardTitle className="text-sm">📦 الباكجات ({(comparison.packages || []).length})</CardTitle></CardHeader>
+                <CardContent className="p-0">
+                  {(comparison.packages || []).length === 0 ? <div className="p-6 text-center text-xs text-slate-400">لا توجد حجوزات على باكجات في الشهرين المختارين</div> : (
+                    <Table>
+                      <TableHeader><TableRow><TableHead className="text-xs">الباكج</TableHead><TableHead className="text-xs">حجوزات {comparison.month}</TableHead><TableHead className="text-xs">مقاعد</TableHead><TableHead className="text-xs">إيراد {comparison.month}</TableHead><TableHead className="text-xs">صافي {comparison.month}</TableHead><TableHead className="text-xs">صافي {comparison.prev_month}</TableHead><TableHead className="text-xs">النمو</TableHead></TableRow></TableHeader>
+                      <TableBody>{(comparison.packages || []).map((p, i) => (<TableRow key={p.name} className={i === 0 ? 'bg-amber-50/40' : ''}>
+                        <TableCell className="text-[11px] font-black">{i === 0 && '🏆 '}{p.name}</TableCell>
+                        <TableCell className="text-[11px]">{p.current.bookings}</TableCell>
+                        <TableCell className="text-[11px]">{p.current.seats}</TableCell>
+                        <TableCell className="text-[11px] font-mono">{p.current.revenue.toLocaleString('en-US')} {p.current.currency}</TableCell>
+                        <TableCell className="text-[11px] font-mono text-emerald-700 font-bold">{p.current.net_to_seller.toLocaleString('en-US')}</TableCell>
+                        <TableCell className="text-[11px] font-mono text-slate-500">{p.previous.net_to_seller.toLocaleString('en-US')}</TableCell>
+                        <TableCell>{p.growth_pct === null ? <Badge className="bg-blue-100 text-blue-700 text-[9px]">🆕 جديد</Badge> : p.growth_pct > 0 ? <Badge className="bg-emerald-100 text-emerald-700 text-[9px]">▲ {p.growth_pct}%</Badge> : p.growth_pct < 0 ? <Badge className="bg-rose-100 text-rose-700 text-[9px]">▼ {Math.abs(p.growth_pct)}%</Badge> : <Badge className="bg-slate-100 text-slate-500 text-[9px]">—</Badge>}</TableCell>
                       </TableRow>))}</TableBody>
                     </Table>
                   )}

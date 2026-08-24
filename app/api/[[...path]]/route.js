@@ -1760,14 +1760,18 @@ async function handleRoute(request, { params }) {
         agg.net_to_seller += Number(d.net_to_seller_total) || 0
         if (!agg.currency && d.currency) agg.currency = d.currency
       }
+      // v3.70 — aggregate by buyer office AND by package in one pass (packages[] is additive)
       const aggRangeC = async (from, to) => {
-        const docs = await db.collection('meraaj_inbound_bookings').find({ ...tf, created_at: { $gte: from, $lt: to } }).project({ buyer_office_name: 1, seats: 1, total_price: 1, net_to_seller_total: 1, status: 1, currency: 1 }).toArray()
-        const by = {}, tot = mkAggC()
+        const docs = await db.collection('meraaj_inbound_bookings').find({ ...tf, created_at: { $gte: from, $lt: to } }).project({ buyer_office_name: 1, package_id: 1, package_name: 1, seats: 1, total_price: 1, net_to_seller_total: 1, status: 1, currency: 1 }).toArray()
+        const by = {}, byPkg = {}, tot = mkAggC()
         for (const d of docs) {
           const of = (d.buyer_office_name || 'غير معروف').trim() || 'غير معروف'
-          by[of] = by[of] || mkAggC(); addToC(by[of], d); addToC(tot, d)
+          const pk = d.package_name || d.package_id || 'غير معروف'
+          by[of] = by[of] || mkAggC(); addToC(by[of], d)
+          byPkg[pk] = byPkg[pk] || mkAggC(); addToC(byPkg[pk], d)
+          addToC(tot, d)
         }
-        return { by, tot }
+        return { by, byPkg, tot }
       }
       const curC = await aggRangeC(curStart, curEnd)
       const prevC = await aggRangeC(prevStart, curStart)
@@ -1779,11 +1783,19 @@ async function handleRoute(request, { params }) {
         const p = round2C(prevC.by[office] || mkAggC())
         return { office, current: c, previous: p, growth_pct: growthC(c.net_to_seller, p.net_to_seller) }
       }).sort((a, b) => b.current.revenue - a.current.revenue || b.previous.revenue - a.previous.revenue)
+      // v3.70 — month-over-month per-package comparison (union of both months, same growth semantics)
+      const pkgNamesC = [...new Set([...Object.keys(curC.byPkg), ...Object.keys(prevC.byPkg)])]
+      const packagesC = pkgNamesC.map(name => {
+        const c = round2C(curC.byPkg[name] || mkAggC())
+        const p = round2C(prevC.byPkg[name] || mkAggC())
+        return { name, current: c, previous: p, growth_pct: growthC(c.net_to_seller, p.net_to_seller) }
+      }).sort((a, b) => b.current.revenue - a.current.revenue || b.previous.revenue - a.previous.revenue)
       const totCur = round2C(curC.tot), totPrev = round2C(prevC.tot)
       return ok({
         month: monthC,
         prev_month: prevMonthC,
         offices: officesC,
+        packages: packagesC, // v3.70
         totals: { current: totCur, previous: totPrev, growth_pct: growthC(totCur.net_to_seller, totPrev.net_to_seller) },
       })
     }
