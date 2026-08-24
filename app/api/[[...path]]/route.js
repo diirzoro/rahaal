@@ -1815,6 +1815,55 @@ async function handleRoute(request, { params }) {
     if (route === '/meraaj/events' && method === 'GET') {
       return ok(clean(await db.collection('meraaj_events').find(tf).sort({ created_at: -1 }).limit(100).toArray()))
     }
+    // v3.57 — WEBHOOK HEALTH DASHBOARD (owner only): latest accepted/rejected inbound webhooks
+    // + outbound sync events so the office spots Meraaj sync problems instantly.
+    // READ-ONLY: does not touch webhook processing logic. Rejected log entries are global
+    // (tenant can't be resolved on a bad signature) — payloads parseable to ANOTHER tenant's
+    // package are excluded, and raw body content is never returned (only parsed type/refs).
+    if (route === '/meraaj/webhook-health' && method === 'GET') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — لوحة صحة المزامنة للمالك فقط', 403)
+      const nowMs = Date.now()
+      const h24 = new Date(nowMs - 24 * 3600 * 1000)
+      const d7 = new Date(nowMs - 7 * 24 * 3600 * 1000)
+      // Accepted incoming = this tenant's inbound bookings (each = an accepted booking webhook)
+      const incoming = await db.collection('meraaj_inbound_bookings').find(tf).sort({ created_at: -1 }).limit(15).toArray()
+      const accepted24 = await db.collection('meraaj_inbound_bookings').countDocuments({ ...tf, created_at: { $gte: h24 } })
+      const accepted7d = await db.collection('meraaj_inbound_bookings').countDocuments({ ...tf, created_at: { $gte: d7 } })
+      // Rejected webhooks (diagnostic log written on invalid HMAC)
+      const rawRejected = await db.collection('meraaj_webhook_log').find({ ok: false }).sort({ at: -1 }).limit(60).toArray()
+      const refs = []
+      const parsedRej = rawRejected.map(w => {
+        let p = null
+        try { p = JSON.parse(w.body_head) } catch {}
+        const ref = p?.data?.package_ref ? String(p.data.package_ref) : null
+        if (ref) refs.push(ref)
+        return { w, type: p?.type || null, booking_ref: p?.data?.booking_ref ? String(p.data.booking_ref).slice(0, 60) : null, package_ref: ref }
+      })
+      const refPkgs = refs.length ? await db.collection('packages').find({ id: { $in: refs } }).project({ id: 1, tenant_id: 1, name: 1 }).toArray() : []
+      const refMap = {}
+      for (const rp of refPkgs) refMap[rp.id] = rp
+      const rejected = parsedRej
+        .filter(x => !x.package_ref || !refMap[x.package_ref] || refMap[x.package_ref].tenant_id === T)
+        .slice(0, 15)
+        .map(x => ({ id: x.w.id, at: x.w.at, reason: x.w.reason || 'unknown', has_signature: !!x.w.has_signature, event_type: x.type, booking_ref: x.booking_ref, package_name: (x.package_ref && refMap[x.package_ref]) ? refMap[x.package_ref].name : null }))
+      const rejected24 = await db.collection('meraaj_webhook_log').countDocuments({ ok: false, at: { $gte: h24 } })
+      const rejected7d = await db.collection('meraaj_webhook_log').countDocuments({ ok: false, at: { $gte: d7 } })
+      // Outbound sync events (outbox)
+      const outboundDocs = await db.collection('meraaj_events').find(tf).sort({ created_at: -1 }).limit(15).toArray()
+      const outboundFailed24 = await db.collection('meraaj_events').countDocuments({ ...tf, status: 'failed', created_at: { $gte: h24 } })
+      return ok({
+        stats: {
+          accepted_24h: accepted24, accepted_7d: accepted7d,
+          rejected_24h: rejected24, rejected_7d: rejected7d,
+          outbound_failed_24h: outboundFailed24,
+          last_accepted_at: incoming[0]?.created_at || null,
+          last_rejected_at: rawRejected[0]?.at || null,
+        },
+        incoming: incoming.map(b => ({ id: b.id, at: b.created_at, package_name: b.package_name, buyer_office_name: b.buyer_office_name, seats: b.seats, total_price: b.total_price, currency: b.currency, status: b.status, price_check: b.price_check || 'not_sent', booking_ref: b.meraaj_booking_ref || null })),
+        rejected,
+        outbound: outboundDocs.map(ev => ({ id: ev.id, at: ev.created_at, type: ev.type, status: ev.status, attempts: ev.attempts ?? null, last_error: ev.last_error ? String(ev.last_error).slice(0, 140) : null })),
+      })
+    }
 
     // Tenant Users
     if (route === '/tenant/users' && method === 'GET') {
@@ -2382,17 +2431,47 @@ async function handleRoute(request, { params }) {
       const bookingsQ = { tenant_id: T }
       if (startFilter) bookingsQ.created_at = { $gte: startFilter }
       const allBookings = await db.collection('package_bookings').find(bookingsQ).toArray()
+      // v3.57 — per-age tier profit: room+age lookup maps (direct pricing packages only)
+      const pkgById = {}
+      for (const p of pkgs) pkgById[p.id] = p
       const byPkg = {}
       for (const b of allBookings) {
-        byPkg[b.package_id] = byPkg[b.package_id] || { revenue: 0, cost: 0, profit: 0, pax: 0, bookings: 0 }
-        byPkg[b.package_id].revenue += b.total_sale || 0
-        byPkg[b.package_id].cost += b.total_cost || 0
-        byPkg[b.package_id].profit += b.commission || 0
-        byPkg[b.package_id].pax += b.pax_count || 0
-        byPkg[b.package_id].bookings += 1
+        byPkg[b.package_id] = byPkg[b.package_id] || { revenue: 0, cost: 0, profit: 0, pax: 0, bookings: 0, tiers: { counts: { adult: 0, child: 0, infant: 0 }, profit: { adult: 0, child: 0, infant: 0 }, priced: 0 } }
+        const agg = byPkg[b.package_id]
+        agg.revenue += b.total_sale || 0
+        agg.cost += b.total_cost || 0
+        agg.profit += b.commission || 0
+        agg.pax += b.pax_count || 0
+        agg.bookings += 1
+        // v3.57 — per-age tier realized profit from registrants (sale-cost per room+age),
+        // mirrors editor semantics: empty child sale = adult, empty infant sale = 0, empty costs = 0.
+        const pkgDoc = pkgById[b.package_id]
+        const isDirect = pkgDoc ? ((pkgDoc.pricing_mode || ((pkgDoc.room_pricing || []).length > 0 ? 'direct' : 'components')) === 'direct') : false
+        const roomMap = {}
+        if (isDirect) for (const rp of (pkgDoc.room_pricing || [])) roomMap[rp.type] = rp
+        const regs = Array.isArray(b.registrants) ? b.registrants : []
+        if (regs.length > 0) {
+          for (const r of regs) {
+            const cat = ageCategoryOf(r.age)
+            agg.tiers.counts[cat]++
+            const rp = roomMap[r.room_type]
+            if (isDirect && rp) {
+              const sale = cat === 'adult' ? (Number(rp.sale_per_pax) || 0)
+                : cat === 'child' ? ((rp.sale_child === null || rp.sale_child === undefined) ? (Number(rp.sale_per_pax) || 0) : (Number(rp.sale_child) || 0))
+                : (Number(rp.sale_infant) || 0)
+              const cost = Number(rp[`cost_${cat}`]) || 0
+              agg.tiers.profit[cat] += (sale - cost)
+              agg.tiers.priced++
+            }
+          }
+        } else {
+          agg.tiers.counts.adult += Number(b.pax_adults) || 0
+          agg.tiers.counts.child += Number(b.pax_children) || 0
+          agg.tiers.counts.infant += Number(b.pax_infants) || 0
+        }
       }
       const rows = pkgs.map(p => {
-        const s = byPkg[p.id] || { revenue: 0, cost: 0, profit: 0, pax: 0, bookings: 0 }
+        const s = byPkg[p.id] || { revenue: 0, cost: 0, profit: 0, pax: 0, bookings: 0, tiers: { counts: { adult: 0, child: 0, infant: 0 }, profit: { adult: 0, child: 0, infant: 0 }, priced: 0 } }
         const margin_pct = s.revenue > 0 ? +((s.profit / s.revenue) * 100).toFixed(2) : 0
         return {
           package_id: p.id,
@@ -2408,6 +2487,12 @@ async function handleRoute(request, { params }) {
           margin_pct,
           pax: s.pax,
           bookings: s.bookings,
+          // v3.57 — per-age tier breakdown (computable only for direct pricing with matched rooms)
+          tiers: {
+            counts: s.tiers.counts,
+            profit: { adult: +s.tiers.profit.adult.toFixed(2), child: +s.tiers.profit.child.toFixed(2), infant: +s.tiers.profit.infant.toFixed(2) },
+            computable: s.tiers.priced > 0,
+          },
         }
       }).sort((a, b) => b.profit - a.profit)
       const top = rows.find(r => r.bookings > 0) || null

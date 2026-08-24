@@ -10,7 +10,7 @@ import {
   Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
   Building, Settings, Upload, Download, FileSpreadsheet, CheckCircle2, XCircle,
   AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key, Pencil,
-  ArrowLeftRight, Briefcase, CalendarClock, LogIn, Package, Copy,
+  ArrowLeftRight, Briefcase, CalendarClock, LogIn, Package, Copy, RefreshCw,
 } from 'lucide-react'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTip, ResponsiveContainer,
@@ -7575,6 +7575,15 @@ function PackageCompareDialog({ initialPeriod = 'all', onClose }) {
   useEffect(() => { load() }, [period])
   const rows = data?.rows || []
   const totals = data?.totals || { revenue: 0, cost: 0, profit: 0, margin_pct: 0, bookings: 0, pax: 0 }
+  // v3.57 — per-age tier totals (only rows where tier profit is computable)
+  const tierTotals = rows.reduce((acc, r) => {
+    if (r.tiers?.computable) {
+      acc.adult += r.tiers.profit?.adult || 0
+      acc.child += r.tiers.profit?.child || 0
+      acc.infant += r.tiers.profit?.infant || 0
+    }
+    return acc
+  }, { adult: 0, child: 0, infant: 0 })
   const periodLabel = { all: 'كل الفترات', month: 'الشهر الحالي', year: 'السنة الحالية' }[period]
   const printReport = () => window.print()
   return (
@@ -7633,6 +7642,9 @@ function PackageCompareDialog({ initialPeriod = 'all', onClose }) {
                     <th className="p-2 text-left">الإيرادات</th>
                     <th className="p-2 text-left">التكاليف</th>
                     <th className="p-2 text-left">صافي الربح</th>
+                    <th className="p-2 text-left">👨 ربح البالغين</th>
+                    <th className="p-2 text-left">🧒 ربح الأطفال</th>
+                    <th className="p-2 text-left">👶 ربح الرضع</th>
                     <th className="p-2 text-center">الهامش %</th>
                   </tr>
                 </thead>
@@ -7650,6 +7662,18 @@ function PackageCompareDialog({ initialPeriod = 'all', onClose }) {
                       <td className="p-2 text-left font-mono text-emerald-700">{r.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                       <td className="p-2 text-left font-mono text-orange-700">{r.cost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                       <td className={`p-2 text-left font-mono font-bold ${r.profit >= 0 ? 'text-blue-700' : 'text-rose-700'}`}>{r.profit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      {/* v3.57 — per-age tier realized profit (direct pricing packages) */}
+                      {['adult', 'child', 'infant'].map(cat => {
+                        const cnt = r.tiers?.counts?.[cat] || 0
+                        const val = r.tiers?.computable ? (r.tiers?.profit?.[cat] || 0) : null
+                        return (
+                          <td key={cat} className="p-2 text-left font-mono text-xs whitespace-nowrap">
+                            {cnt === 0 ? <span className="text-slate-300">—</span>
+                              : val === null ? <span className="text-slate-400" title="تسعير مكوّنات — الربح حسب الفئة غير متاح">{cnt} مسافر</span>
+                              : <span className={val >= 0 ? 'text-emerald-700' : 'text-rose-600'}>{val.toLocaleString('en-US')} <span className="text-[9px] text-slate-400">({cnt})</span></span>}
+                          </td>
+                        )
+                      })}
                       <td className="p-2 text-center font-mono">
                         <span className={`px-2 py-0.5 rounded ${r.margin_pct >= 20 ? 'bg-emerald-100 text-emerald-700' : r.margin_pct >= 10 ? 'bg-amber-100 text-amber-700' : r.margin_pct > 0 ? 'bg-slate-100 text-slate-600' : 'bg-rose-100 text-rose-600'}`}>{r.margin_pct}%</span>
                       </td>
@@ -7664,6 +7688,9 @@ function PackageCompareDialog({ initialPeriod = 'all', onClose }) {
                     <td className="p-2 text-left font-mono">{totals.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                     <td className="p-2 text-left font-mono">{totals.cost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                     <td className="p-2 text-left font-mono">{totals.profit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    <td className={`p-2 text-left font-mono text-xs ${tierTotals.adult >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>{tierTotals.adult.toLocaleString('en-US')}</td>
+                    <td className={`p-2 text-left font-mono text-xs ${tierTotals.child >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>{tierTotals.child.toLocaleString('en-US')}</td>
+                    <td className={`p-2 text-left font-mono text-xs ${tierTotals.infant >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>{tierTotals.infant.toLocaleString('en-US')}</td>
                     <td className="p-2 text-center font-mono">{totals.margin_pct}%</td>
                   </tr>
                 </tfoot>
@@ -8431,7 +8458,8 @@ function MeraajStoreScreen() {
   const [inbound, setInbound] = useState([])
   const [events, setEvents] = useState([])
   const [sharedPkgs, setSharedPkgs] = useState([])
-  const [view, setView] = useState('shared') // shared | bookings | events
+  const [health, setHealth] = useState(null) // v3.57 — webhook health dashboard (owner)
+  const [view, setView] = useState('shared') // shared | bookings | events | health
   useEffect(() => { load() }, [])
   const load = async () => {
     try {
@@ -8446,6 +8474,7 @@ function MeraajStoreScreen() {
     } catch { }
     api('/meraaj/inbound-bookings').then(setInbound).catch(() => {})
     api('/meraaj/events').then(setEvents).catch(() => {})
+    if (isOwner) api('/meraaj/webhook-health').then(setHealth).catch(() => {}) // v3.57
     api('/packages').then(list => setSharedPkgs((list || []).filter(p => p?.meraaj?.shared))).catch(() => {})
   }
   const newBookings = inbound.filter(b => b.status === 'new')
@@ -8559,6 +8588,7 @@ function MeraajStoreScreen() {
         <Button size="sm" variant={view === 'shared' ? 'default' : 'outline'} onClick={() => setView('shared')} className="h-8 text-xs">🕋 الباكجات المُشارَكة ({sharedPkgs.length})</Button>
         <Button size="sm" variant={view === 'bookings' ? 'default' : 'outline'} onClick={() => setView('bookings')} className="h-8 text-xs">📥 حجوزات معراج ({inbound.length})</Button>
         <Button size="sm" variant={view === 'events' ? 'default' : 'outline'} onClick={() => setView('events')} className="h-8 text-xs">🔄 سجل المزامنة</Button>
+        {isOwner && <Button size="sm" variant={view === 'health' ? 'default' : 'outline'} onClick={() => setView('health')} className="h-8 text-xs">🩺 صحة المزامنة{(health?.stats?.rejected_24h || 0) > 0 ? <span className="mr-1 px-1.5 rounded-full bg-rose-100 text-rose-700 text-[10px] font-black">{health.stats.rejected_24h}</span> : null}</Button>}
       </div>
       {view === 'shared' && (
         sharedPkgs.length === 0 ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">لا توجد باقات مُشارَكة — من قسم الباكجات اضغط زر "🕋 معراج" على أي باقة</CardContent></Card> : (
@@ -8623,6 +8653,77 @@ function MeraajStoreScreen() {
               <TableCell><Badge className={ev.status === 'sent' ? 'bg-emerald-100 text-emerald-700' : ev.status === 'failed' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}>{ev.status === 'sent' ? '✅ أُرسل' : ev.status === 'failed' ? '⚠️ فشل' : '⏳ بانتظار ربط معراج'}</Badge></TableCell>
             </TableRow>))}</TableBody>
           </Table></CardContent></Card>
+        )
+      )}
+      {/* v3.57 — WEBHOOK HEALTH DASHBOARD (owner only) */}
+      {view === 'health' && isOwner && (
+        !health ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">جارٍ تحميل بيانات الصحة...</CardContent></Card> : (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-black text-slate-700">🩺 صحة مزامنة معراج — آخر الأحداث الواردة والمرفوضة والصادرة</div>
+              <Button size="sm" variant="outline" onClick={() => api('/meraaj/webhook-health').then(setHealth).catch(e => toast.error(e.message))} className="h-7 text-xs gap-1"><RefreshCw className="w-3 h-3" /> تحديث</Button>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+              <Card className="border-emerald-200"><CardContent className="p-3 text-center"><div className="text-2xl font-black text-emerald-700">{health.stats?.accepted_24h ?? 0}</div><div className="text-[10px] text-slate-500">✅ مقبولة (24 ساعة)</div></CardContent></Card>
+              <Card className="border-emerald-100"><CardContent className="p-3 text-center"><div className="text-2xl font-black text-emerald-600">{health.stats?.accepted_7d ?? 0}</div><div className="text-[10px] text-slate-500">✅ مقبولة (7 أيام)</div></CardContent></Card>
+              <Card className={(health.stats?.rejected_24h || 0) > 0 ? 'border-rose-300 bg-rose-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(health.stats?.rejected_24h || 0) > 0 ? 'text-rose-600' : 'text-slate-400'}`}>{health.stats?.rejected_24h ?? 0}</div><div className="text-[10px] text-slate-500">🚫 مرفوضة (24 ساعة)</div></CardContent></Card>
+              <Card className={(health.stats?.outbound_failed_24h || 0) > 0 ? 'border-amber-300 bg-amber-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(health.stats?.outbound_failed_24h || 0) > 0 ? 'text-amber-600' : 'text-slate-400'}`}>{health.stats?.outbound_failed_24h ?? 0}</div><div className="text-[10px] text-slate-500">📤 صادرة فاشلة (24 ساعة)</div></CardContent></Card>
+              <Card><CardContent className="p-3 text-center"><div className="text-xs font-black text-slate-700 pt-1.5">{health.stats?.last_accepted_at ? new Date(health.stats.last_accepted_at).toLocaleString('en-GB') : '—'}</div><div className="text-[10px] text-slate-500 mt-1">🕐 آخر حجز وارد مقبول</div></CardContent></Card>
+            </div>
+            {/* Latest ACCEPTED incoming webhooks */}
+            <Card>
+              <CardHeader className="py-2 px-4"><CardTitle className="text-sm">📥 آخر الواردة المقبولة ({(health.incoming || []).length})</CardTitle></CardHeader>
+              <CardContent className="p-0">
+                {(health.incoming || []).length === 0 ? <div className="p-6 text-center text-xs text-slate-400">لا توجد حجوزات واردة بعد</div> : (
+                  <Table>
+                    <TableHeader><TableRow><TableHead className="text-xs">الوقت</TableHead><TableHead className="text-xs">الباكج</TableHead><TableHead className="text-xs">المكتب</TableHead><TableHead className="text-xs">مقاعد</TableHead><TableHead className="text-xs">الإجمالي</TableHead><TableHead className="text-xs">تطابق السعر</TableHead><TableHead className="text-xs">الحالة</TableHead></TableRow></TableHeader>
+                    <TableBody>{(health.incoming || []).map(w => (<TableRow key={w.id}>
+                      <TableCell className="text-[11px] whitespace-nowrap">{new Date(w.at).toLocaleString('en-GB')}</TableCell>
+                      <TableCell className="text-[11px] font-bold">{w.package_name}</TableCell>
+                      <TableCell className="text-[11px]">{w.buyer_office_name}</TableCell>
+                      <TableCell className="text-[11px]">{w.seats}</TableCell>
+                      <TableCell className="text-[11px] font-mono">{(Number(w.total_price) || 0).toLocaleString('en-US')} {w.currency}</TableCell>
+                      <TableCell>{w.price_check === 'match' ? <Badge className="bg-emerald-100 text-emerald-700 text-[9px]">✓ مطابق</Badge> : w.price_check === 'mismatch' ? <Badge className="bg-rose-100 text-rose-700 text-[9px]">⚠ غير مطابق</Badge> : <Badge className="bg-slate-100 text-slate-500 text-[9px]">لم يُرسل</Badge>}</TableCell>
+                      <TableCell>{w.status === 'approved' ? <Badge className="bg-emerald-100 text-emerald-700 text-[9px]">✅ معتمد</Badge> : w.status === 'cancelled' ? <Badge className="bg-rose-100 text-rose-700 text-[9px]">⛔ ملغى</Badge> : w.status === 'rejected' ? <Badge className="bg-slate-200 text-slate-600 text-[9px]">🚫 مرفوض</Badge> : <Badge className="bg-blue-100 text-blue-700 text-[9px]">🔵 جديد</Badge>}</TableCell>
+                    </TableRow>))}</TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+            {/* Latest REJECTED webhooks */}
+            <Card className={(health.rejected || []).length > 0 ? 'border-rose-200' : ''}>
+              <CardHeader className="py-2 px-4"><CardTitle className="text-sm">🚫 آخر الواردة المرفوضة ({(health.rejected || []).length})</CardTitle></CardHeader>
+              <CardContent className="p-0">
+                {(health.rejected || []).length === 0 ? <div className="p-6 text-center text-xs text-emerald-600 font-bold">✅ لا توجد Webhooks مرفوضة — التوقيع والمزامنة سليمة</div> : (
+                  <Table>
+                    <TableHeader><TableRow><TableHead className="text-xs">الوقت</TableHead><TableHead className="text-xs">سبب الرفض</TableHead><TableHead className="text-xs">نوع الحدث</TableHead><TableHead className="text-xs">الباكج / المرجع</TableHead></TableRow></TableHeader>
+                    <TableBody>{(health.rejected || []).map(w => (<TableRow key={w.id} className="bg-rose-50/30">
+                      <TableCell className="text-[11px] whitespace-nowrap">{new Date(w.at).toLocaleString('en-GB')}</TableCell>
+                      <TableCell><Badge className="bg-rose-100 text-rose-700 text-[9px]">{w.reason === 'invalid_signature' ? '🔐 توقيع HMAC غير صالح' : w.reason}</Badge>{!w.has_signature && <span className="text-[9px] text-slate-400 block">بدون توقيع أصلاً</span>}</TableCell>
+                      <TableCell className="text-[11px]">{w.event_type || '—'}</TableCell>
+                      <TableCell className="text-[11px]">{w.package_name || w.booking_ref || '—'}</TableCell>
+                    </TableRow>))}</TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+            {/* Latest OUTBOUND events */}
+            <Card>
+              <CardHeader className="py-2 px-4"><CardTitle className="text-sm">📤 آخر الصادرة لمعراج ({(health.outbound || []).length})</CardTitle></CardHeader>
+              <CardContent className="p-0">
+                {(health.outbound || []).length === 0 ? <div className="p-6 text-center text-xs text-slate-400">لا توجد أحداث صادرة بعد</div> : (
+                  <Table>
+                    <TableHeader><TableRow><TableHead className="text-xs">الوقت</TableHead><TableHead className="text-xs">الحدث</TableHead><TableHead className="text-xs">الحالة</TableHead></TableRow></TableHeader>
+                    <TableBody>{(health.outbound || []).map(ev => (<TableRow key={ev.id}>
+                      <TableCell className="text-[11px] whitespace-nowrap">{new Date(ev.at).toLocaleString('en-GB')}</TableCell>
+                      <TableCell className="text-[11px]">{EVT_LABELS[ev.type] || ev.type}</TableCell>
+                      <TableCell><Badge className={ev.status === 'sent' ? 'bg-emerald-100 text-emerald-700 text-[9px]' : ev.status === 'failed' ? 'bg-rose-100 text-rose-700 text-[9px]' : 'bg-amber-100 text-amber-700 text-[9px]'}>{ev.status === 'sent' ? '✅ أُرسل' : ev.status === 'failed' ? '⚠️ فشل' : '⏳ معلّق'}</Badge>{ev.last_error && <span className="text-[9px] text-slate-400 block truncate max-w-[200px]" title={ev.last_error}>{ev.last_error}</span>}</TableCell>
+                    </TableRow>))}</TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </div>
         )
       )}
     </div>
