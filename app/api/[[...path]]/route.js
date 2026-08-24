@@ -1535,6 +1535,9 @@ async function handleRoute(request, { params }) {
         auto_approve: !!settingsCfg?.meraaj_auto_approve,
         // v3.61 — daily rejected-webhooks alert threshold (0 = disabled, default 5)
         reject_alert_threshold: Number.isFinite(settingsCfg?.meraaj_reject_alert_threshold) ? settingsCfg.meraaj_reject_alert_threshold : 5,
+        // v3.67 — opportunistic auto-retry of failed outbound events (OFF by default)
+        auto_retry: !!settingsCfg?.meraaj_auto_retry,
+        auto_retry_last: settingsCfg?.meraaj_auto_retry_last || null,
       })
     }
     // v3.53 — Meraaj behavior settings (owner only): auto-approve toggle
@@ -1545,16 +1548,21 @@ async function handleRoute(request, { params }) {
       const set = {}
       if ('auto_approve' in b) set.meraaj_auto_approve = !!b.auto_approve
       if ('reject_alert_threshold' in b) set.meraaj_reject_alert_threshold = Math.max(0, Math.min(1000, parseInt(b.reject_alert_threshold, 10) || 0))
+      if ('auto_retry' in b) set.meraaj_auto_retry = !!b.auto_retry // v3.67
       if (Object.keys(set).length === 0) return bad('لا توجد إعدادات لتحديثها')
       await db.collection('tenant_settings').updateOne(tf, { $set: set }, { upsert: true })
       const cfgDoc = await db.collection('tenant_settings').findOne(tf)
       return ok({
         auto_approve: !!cfgDoc?.meraaj_auto_approve,
         reject_alert_threshold: Number.isFinite(cfgDoc?.meraaj_reject_alert_threshold) ? cfgDoc.meraaj_reject_alert_threshold : 5,
+        auto_retry: !!cfgDoc?.meraaj_auto_retry, // v3.67
       })
     }
     // v3.53 — Lightweight pending-bookings counter (for the header notification bell)
     if (route === '/meraaj/inbound-count' && method === 'GET') {
+      // v3.67 — opportunistic AUTO-RETRY hook: fire-and-forget (never blocks/affects this response).
+      // Internally guarded by an atomic 10-min interval claim + attempts backoff — see helper.
+      maybeAutoRetryMeraajEvents(db, T).catch(() => {})
       return ok({ pending: await db.collection('meraaj_inbound_bookings').countDocuments({ tenant_id: T, status: 'new' }) })
     }
     // v3.61 — OWNER DAILY DIGEST: yesterday/today Meraaj bookings + revenue + pending approvals
@@ -1759,6 +1767,49 @@ async function handleRoute(request, { params }) {
     // Marketplace bookings received from Meraaj (inbound)
     if (route === '/meraaj/inbound-bookings' && method === 'GET') {
       return ok(clean(await db.collection('meraaj_inbound_bookings').find(tf).sort({ created_at: -1 }).limit(200).toArray()))
+    }
+    // v3.67 — REGISTRANT PASSPORT REPORT (owner-only, READ-ONLY): approved Meraaj registrants
+    // still missing a passport, from the AUTHORITATIVE linked package_bookings registrants
+    // (falls back to the inbound copy only if the link is missing). Filters: package_id, office.
+    if (route === '/meraaj/passport-report' && method === 'GET') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const fPkg = url.searchParams.get('package_id') || ''
+      const fOffice = url.searchParams.get('office') || ''
+      const q = { ...tf, status: 'approved' }
+      if (fPkg) q.package_id = fPkg
+      if (fOffice) q.buyer_office_name = fOffice
+      const inbounds = await db.collection('meraaj_inbound_bookings').find(q).sort({ created_at: -1 }).limit(500).toArray()
+      // authoritative registrants from linked bookings (batch fetch)
+      const bIds = inbounds.map(i => i.booking_id).filter(Boolean)
+      const bookings = bIds.length ? await db.collection('package_bookings').find({ id: { $in: bIds }, tenant_id: T }).project({ id: 1, registrants: 1 }).toArray() : []
+      const bMap = {}
+      for (const bk of bookings) bMap[bk.id] = bk
+      const rows = []
+      const pkgSet = new Map(), officeSet = new Set()
+      for (const inb of inbounds) {
+        pkgSet.set(inb.package_id, inb.package_name)
+        officeSet.add(inb.buyer_office_name || 'غير معروف')
+        const regs = (inb.booking_id && bMap[inb.booking_id]?.registrants) ? bMap[inb.booking_id].registrants : (inb.registrants || [])
+        regs.forEach((r, idx) => {
+          if (!String(r?.passport_no || '').trim()) {
+            rows.push({
+              inbound_id: inb.id, booking_id: inb.booking_id || null,
+              package_id: inb.package_id, package_name: inb.package_name,
+              office: inb.buyer_office_name || 'غير معروف',
+              booking_ref: inb.meraaj_booking_ref || null,
+              registrant_index: idx, name: r?.name || `مسافر ${idx + 1}`, age: r?.age ?? null,
+              approved_at: inb.approved_at || inb.created_at,
+            })
+          }
+        })
+      }
+      return ok({
+        total_missing: rows.length,
+        scanned_bookings: inbounds.length,
+        rows,
+        packages: [...pkgSet.entries()].map(([id, name]) => ({ id, name })),
+        offices: [...officeSet],
+      })
     }
     // v3.66 — PASSPORT COMPLETION (fill-only): sets ONLY currently-EMPTY passport_no fields on
     // inbound registrants, and mirrors them into the linked real booking (same index order) when
@@ -5539,6 +5590,59 @@ function meraajAvailability(pkg) {
 }
 // Outbox pattern: persist the event, then best-effort deliver (signed) if Meraaj endpoint is configured.
 // v3.32 — returns delivery status: 'sent' | 'failed' | 'pending' (pending = no endpoint configured yet)
+// v3.67 — AUTO RETRY SCHEDULE (opportunistic, no cron/infra): called fire-and-forget from the
+// 60s bell poll. Safety design:
+//  • OFF by default (tenant_settings.meraaj_auto_retry must be true)
+//  • Atomic interval claim via findOneAndUpdate — one run per tenant per 10 minutes, no overlap
+//  • Small batch (3) + short timeout (4s) + per-event backoff: events with attempts >= 8 are skipped
+//  • Same idempotency as manual retry: SAME event id re-sent, SAME doc updated, no new docs
+//  • Run summary stored in tenant_settings.meraaj_auto_retry_last for owner visibility
+async function maybeAutoRetryMeraajEvents(db, T) {
+  const now = new Date()
+  const cutoff = new Date(now.getTime() - 10 * 60 * 1000)
+  const claim = await db.collection('tenant_settings').findOneAndUpdate(
+    {
+      tenant_id: T,
+      meraaj_auto_retry: true,
+      $or: [{ meraaj_auto_retry_last_run: { $lt: cutoff } }, { meraaj_auto_retry_last_run: { $exists: false } }, { meraaj_auto_retry_last_run: null }],
+    },
+    { $set: { meraaj_auto_retry_last_run: now } },
+  )
+  if (!claim) return
+  const retryUrl = process.env.MERAAJ_WEBHOOK_URL || (meraajApiBase() ? `${meraajApiBase()}/api/integrations/rahal/webhooks` : '')
+  if (!retryUrl || !meraajSecret()) return
+  const batch = await db.collection('meraaj_events')
+    .find({ tenant_id: T, status: 'failed', $or: [{ attempts: { $lt: 8 } }, { attempts: { $exists: false } }, { attempts: null }] })
+    .sort({ created_at: 1 }).limit(3).toArray()
+  let succeeded = 0, failed = 0
+  for (const ev of batch) {
+    const attempts = (Number(ev.attempts) || 0) + 1
+    try {
+      const body = JSON.stringify({ id: ev.id, type: ev.type, timestamp: Math.floor(Date.now() / 1000), data: ev.payload })
+      const res = await fetch(retryUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Rahal-Signature': meraajSign(body) },
+        body,
+        signal: AbortSignal.timeout(4000),
+      })
+      if (res.ok) {
+        await db.collection('meraaj_events').updateOne({ id: ev.id }, { $set: { status: 'sent', sent_at: new Date(), attempts, last_error: null, auto_retried_at: now } })
+        succeeded++
+      } else {
+        await db.collection('meraaj_events').updateOne({ id: ev.id }, { $set: { attempts, last_error: `HTTP ${res.status}`, auto_retried_at: now } })
+        failed++
+      }
+    } catch (e) {
+      await db.collection('meraaj_events').updateOne({ id: ev.id }, { $set: { attempts, last_error: String(e.message || e).slice(0, 200), auto_retried_at: now } })
+      failed++
+    }
+  }
+  await db.collection('tenant_settings').updateOne(
+    { tenant_id: T },
+    { $set: { meraaj_auto_retry_last: { at: now, processed: batch.length, succeeded, failed } } },
+  )
+}
+
 async function emitMeraajEvent(db, tenantId, type, payload) {
   // v3.34 — CRITICAL: enrich every package event with the FULL identity so Meraaj can
   // match its own record regardless of which key its handler uses:

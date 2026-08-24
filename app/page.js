@@ -8766,6 +8766,29 @@ function MeraajStoreScreen() {
   const openPassports = (b) => {
     setPassFor(b)
     setPassInputs({})
+    setImportOpen(false); setImportText(''); setImportResult(null) // v3.67
+  }
+  // v3.67 — owner passport report (read-only) with package/office filters
+  const [passReport, setPassReport] = useState(null)
+  const [passReportOpen, setPassReportOpen] = useState(false)
+  const [passReportPkg, setPassReportPkg] = useState('')
+  const [passReportOffice, setPassReportOffice] = useState('')
+  const loadPassReport = async (pkg = passReportPkg, office = passReportOffice) => {
+    try {
+      const qs = new URLSearchParams()
+      if (pkg) qs.set('package_id', pkg)
+      if (office) qs.set('office', office)
+      setPassReport(await api(`/meraaj/passport-report${qs.toString() ? `?${qs}` : ''}`))
+    } catch (e) { toast.error(e.message) }
+  }
+  const openPassReport = () => { setPassReportOpen(true); setPassReportPkg(''); setPassReportOffice(''); setPassReport(null); loadPassReport('', '') }
+  // v3.67 — auto-retry schedule toggle (owner)
+  const toggleAutoRetry = async () => {
+    try {
+      const r = await api('/meraaj/settings', { method: 'POST', body: { auto_retry: !config?.auto_retry } })
+      setConfig(c => ({ ...c, auto_retry: r.auto_retry }))
+      toast.success(r.auto_retry ? '🔄 فُعّلت الإعادة التلقائية — كل 10 دقائق، 3 أحداث كحد أقصى، وتتوقف بعد 8 محاولات للحدث' : '⏸ أُوقفت الإعادة التلقائية')
+    } catch (e) { toast.error(e.message) }
   }
   const savePassports = async () => {
     const entries = Object.entries(passInputs).filter(([, v]) => String(v || '').trim())
@@ -8779,7 +8802,53 @@ function MeraajStoreScreen() {
       toast.success(`✅ حُفظت ${r.updated} جوازات${r.booking_synced ? ' — وتم تحديث الحجز الفعلي المعتمد أيضاً' : ''}`)
       setInbound(list => (list || []).map(x => x.id === passFor.id ? { ...x, registrants: r.registrants } : x))
       setPassFor(null)
+      setImportResult(null)
     } catch (e) { toast.error(e.message) } finally { setPassBusy(false) }
+  }
+  // v3.67 — PASTE/UPLOAD passport import (per booking): parses lines/sheets of «name , passport»,
+  // matches ONLY exact registrant names that are missing a passport, prefills the inputs and shows
+  // an explicit per-row result — nothing is skipped silently, saving still goes through validation.
+  const [importOpen, setImportOpen] = useState(false)
+  const [importText, setImportText] = useState('')
+  const [importResult, setImportResult] = useState(null)
+  const runImport = (rowsRaw) => {
+    const regs = passFor?.registrants || []
+    const results = []
+    const fills = {}
+    const usedIdx = new Set()
+    const rows = rowsRaw.map(r => r.map(c => String(c ?? '').trim()).filter(Boolean)).filter(r => r.length > 0)
+    if (rows.length === 0) { toast.error('لا توجد صفوف صالحة — الصيغة: الاسم ، رقم الجواز (سطر لكل مسافر)'); return }
+    for (const r of rows) {
+      const name = r[0]
+      const pass = String(r[1] || '').toUpperCase()
+      if (!r[1]) { results.push({ name, ok: false, why: 'لا يوجد رقم جواز في الصف' }); continue }
+      const idx = regs.findIndex((g, i) => String(g?.name || '').trim() === name && !usedIdx.has(i))
+      if (idx === -1) { results.push({ name, ok: false, why: 'لا يطابق أي مسافر في هذا الحجز (الاسم يجب أن يطابق تماماً)' }); continue }
+      if (String(regs[idx]?.passport_no || '').trim()) { results.push({ name, ok: false, why: `لديه جواز مسجّل مسبقاً (${regs[idx].passport_no})` }); continue }
+      if (!/^[A-Z0-9]{5,15}$/.test(pass)) { results.push({ name, ok: false, why: `رقم غير صالح: ${pass} (أحرف إنجليزية وأرقام 5-15)` }); continue }
+      usedIdx.add(idx)
+      fills[idx] = pass
+      results.push({ name, ok: true, why: `سيُحفظ: ${pass}` })
+    }
+    setPassInputs(m => ({ ...m, ...fills }))
+    setImportResult({ results, matched: Object.keys(fills).length })
+    if (Object.keys(fills).length > 0) toast.success(`تمت مطابقة ${Object.keys(fills).length} — راجع النتائج ثم اضغط حفظ الجوازات`)
+  }
+  const importFromText = () => {
+    const rows = importText.split(/\r?\n/).map(line => {
+      const parts = line.split(/\t|,|،/)
+      return parts.length >= 2 ? [parts[0], parts.slice(1).join('').replace(/\s+/g, '')] : [line]
+    })
+    runImport(rows)
+  }
+  const importFromFile = async (file) => {
+    try {
+      const buf = await file.arrayBuffer()
+      const wb = XLSX.read(buf, { type: 'array' })
+      const ws = wb.Sheets[wb.SheetNames[0]]
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' })
+      runImport(rows)
+    } catch (e) { toast.error('تعذر قراءة الملف: ' + e.message) }
   }
   const approveBooking = async (b) => {
     const noPass = missingPassports(b)
@@ -8889,6 +8958,8 @@ function MeraajStoreScreen() {
         <Button size="sm" variant={view === 'bookings' ? 'default' : 'outline'} onClick={() => setView('bookings')} className="h-8 text-xs">📥 حجوزات معراج ({inbound.length})</Button>
         <Button size="sm" variant={view === 'events' ? 'default' : 'outline'} onClick={() => setView('events')} className="h-8 text-xs">🔄 سجل المزامنة</Button>
         {isOwner && <Button size="sm" variant={view === 'health' ? 'default' : 'outline'} onClick={() => setView('health')} className="h-8 text-xs">🩺 صحة المزامنة{(health?.stats?.rejected_24h || 0) > 0 ? <span className="mr-1 px-1.5 rounded-full bg-rose-100 text-rose-700 text-[10px] font-black">{health.stats.rejected_24h}</span> : null}</Button>}
+        {/* v3.67 — owner read-only passport report */}
+        {isOwner && <Button size="sm" variant="outline" onClick={openPassReport} className="h-8 text-xs border-amber-300 text-amber-700 hover:bg-amber-50">🛂 تقرير الجوازات الناقصة</Button>}
       </div>
       {view === 'shared' && (
         sharedPkgs.length === 0 ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">لا توجد باقات مُشارَكة — من قسم الباكجات اضغط زر "🕋 معراج" على أي باقة</CardContent></Card> : (
@@ -9010,12 +9081,88 @@ function MeraajStoreScreen() {
                 </div>
               ))}
               <div className="flex justify-end gap-2 pt-1">
+                {/* v3.67 — paste/upload multi-passport import */}
+                <Button variant="outline" size="sm" onClick={() => setImportOpen(o => !o)} className="ml-auto gap-1 text-[11px]">📋 لصق / رفع ملف</Button>
                 <Button variant="outline" size="sm" onClick={() => setPassFor(null)}>إلغاء</Button>
                 <Button size="sm" onClick={savePassports} disabled={passBusy} className="gap-1 bg-emerald-600 hover:bg-emerald-700">
                   {passBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : '💾'} حفظ الجوازات
                 </Button>
               </div>
+              {importOpen && (
+                <div className="bg-slate-50 border rounded-lg p-2.5 space-y-2">
+                  <div className="text-[10px] text-slate-500 font-bold">الصق سطراً لكل مسافر بصيغة: <span className="font-mono bg-white border rounded px-1">الاسم ، رقم الجواز</span> — المطابقة بالاسم الكامل تماماً، ولن يُتخطى أي صف دون توضيح</div>
+                  <textarea value={importText} onChange={e => setImportText(e.target.value)} rows={3} dir="rtl"
+                    placeholder={'فهد سالم ، B2222222\nنورة فهد ، C3333333'}
+                    className="w-full text-xs font-mono border rounded-lg p-2 bg-white" />
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" onClick={importFromText} className="h-7 text-[10px] bg-blue-600 hover:bg-blue-700">مطابقة الملصق</Button>
+                    <label className="h-7 inline-flex items-center gap-1 text-[10px] font-bold border rounded-md px-2 cursor-pointer bg-white hover:bg-slate-50">
+                      📎 رفع ملف (Excel/CSV)
+                      <input type="file" accept=".xlsx,.xls,.csv,.txt" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) importFromFile(f); e.target.value = '' }} />
+                    </label>
+                  </div>
+                  {importResult && (
+                    <div className="space-y-1 max-h-36 overflow-y-auto">
+                      <div className="text-[10px] font-black">{importResult.matched > 0 ? `✅ تمت مطابقة ${importResult.matched} — اضغط «حفظ الجوازات» لاعتمادها` : '⚠️ لم تتم مطابقة أي صف'}</div>
+                      {importResult.results.map((r, i) => (
+                        <div key={i} className={`text-[10px] font-bold rounded px-2 py-0.5 ${r.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-600'}`}>
+                          {r.ok ? '✓' : '✗'} {r.name} — {r.why}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
+          </DialogContent>
+        </Dialog>
+      )}
+      {/* v3.67 — owner read-only passport report dialog */}
+      {passReportOpen && (
+        <Dialog open onOpenChange={() => setPassReportOpen(false)}>
+          <DialogContent className="max-w-3xl" onInteractOutside={e => e.preventDefault()}>
+            <DialogHeader>
+              <DialogTitle className="text-base">🛂 تقرير المسجّلين المعتمدين بلا جوازات</DialogTitle>
+            </DialogHeader>
+            {!passReport ? <div className="p-6 text-center text-xs text-slate-400"><Loader2 className="w-4 h-4 animate-spin inline ml-1" /> جارٍ التحميل...</div> : (
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <select value={passReportPkg} onChange={e => { setPassReportPkg(e.target.value); loadPassReport(e.target.value, passReportOffice) }} className="h-7 text-[11px] border rounded-md px-2 bg-white font-bold">
+                    <option value="">كل الباكجات</option>
+                    {(passReport.packages || []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  <select value={passReportOffice} onChange={e => { setPassReportOffice(e.target.value); loadPassReport(passReportPkg, e.target.value) }} className="h-7 text-[11px] border rounded-md px-2 bg-white font-bold">
+                    <option value="">كل المكاتب</option>
+                    {(passReport.offices || []).map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                  <span className={`text-[11px] font-black rounded-full px-2.5 py-1 ${passReport.total_missing > 0 ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                    {passReport.total_missing > 0 ? `⚠️ ${passReport.total_missing} مسافر بلا جواز` : '✅ كل الجوازات مكتملة'}
+                  </span>
+                  <span className="text-[10px] text-slate-400">({passReport.scanned_bookings} حجز معتمد مفحوص)</span>
+                </div>
+                <div className="max-h-[50vh] overflow-y-auto border rounded-lg">
+                  {(passReport.rows || []).length === 0 ? <div className="p-6 text-center text-xs text-emerald-600 font-bold">✅ لا توجد جوازات ناقصة ضمن هذا النطاق</div> : (
+                    <Table>
+                      <TableHeader><TableRow><TableHead className="text-xs">المسافر</TableHead><TableHead className="text-xs">العمر</TableHead><TableHead className="text-xs">الباكج</TableHead><TableHead className="text-xs">المكتب</TableHead><TableHead className="text-xs">مرجع معراج</TableHead><TableHead className="text-xs"></TableHead></TableRow></TableHeader>
+                      <TableBody>{passReport.rows.map((r, i) => (<TableRow key={`${r.inbound_id}-${r.registrant_index}`} className={i % 2 ? 'bg-slate-50/50' : ''}>
+                        <TableCell className="text-[11px] font-black">{r.name}</TableCell>
+                        <TableCell className="text-[11px]">{r.age ?? '—'}</TableCell>
+                        <TableCell className="text-[11px]">{r.package_name}</TableCell>
+                        <TableCell className="text-[11px]">{r.office}</TableCell>
+                        <TableCell className="text-[10px] font-mono">{r.booking_ref || '—'}</TableCell>
+                        <TableCell>
+                          {(() => {
+                            const inb = (inbound || []).find(x => x.id === r.inbound_id)
+                            return inb ? <Button size="sm" variant="outline" onClick={() => { setPassReportOpen(false); openPassports(inb) }} className="h-6 text-[10px] px-2 border-amber-300 text-amber-700 hover:bg-amber-50">🛂 استكمال</Button> : null
+                          })()}
+                        </TableCell>
+                      </TableRow>))}</TableBody>
+                    </Table>
+                  )}
+                </div>
+                <div className="flex justify-end"><Button variant="outline" size="sm" onClick={() => setPassReportOpen(false)}>إغلاق</Button></div>
+              </div>
+            )}
           </DialogContent>
         </Dialog>
       )}
@@ -9204,6 +9351,16 @@ function MeraajStoreScreen() {
                 <CardTitle className="text-sm">📤 آخر الصادرة لمعراج ({(health.outbound || []).length})</CardTitle>
                 {/* v3.65 — total failed outbound counter. v3.66 — retry all with live progress */}
                 <div className="flex items-center gap-1.5">
+                  {/* v3.67 — auto-retry schedule toggle (10 min interval, batch 3, backoff at 8 attempts) */}
+                  <button onClick={toggleAutoRetry} title="إعادة تلقائية للأحداث الفاشلة كل 10 دقائق (3 أحداث كحد أقصى، تتوقف بعد 8 محاولات للحدث الواحد)"
+                    className={`text-[10px] font-black border rounded-full px-2 py-0.5 transition ${config?.auto_retry ? 'bg-emerald-100 text-emerald-700 border-emerald-300' : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200'}`}>
+                    {config?.auto_retry ? '🔄 إعادة تلقائية: مفعّلة' : '⏸ إعادة تلقائية: متوقفة'}
+                  </button>
+                  {config?.auto_retry_last?.at && (
+                    <span className="text-[9px] text-slate-400 font-bold whitespace-nowrap" title="نتيجة آخر تشغيل تلقائي">
+                      آخر تشغيل {new Date(config.auto_retry_last.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}: {config.auto_retry_last.processed} عولج / <span className="text-emerald-600">{config.auto_retry_last.succeeded} نجح</span> / <span className="text-rose-500">{config.auto_retry_last.failed} فشل</span>
+                    </span>
+                  )}
                   {(health.stats?.outbound_failed_total || 0) > 0 && (
                     <span className="text-[10px] font-black bg-rose-100 text-rose-700 border border-rose-200 rounded-full px-2 py-0.5">⚠️ {health.stats.outbound_failed_total.toLocaleString('en-US')} فاشلة إجمالاً</span>
                   )}
