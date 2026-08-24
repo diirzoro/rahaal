@@ -8599,6 +8599,17 @@ function MeraajStoreScreen() {
   // v3.62 — monthly Meraaj Excel report
   const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7))
   const [reportBusy, setReportBusy] = useState(false)
+  // v3.64 — quick seat refill from the shared-packages table (reuses v3.63 add-seats endpoint)
+  const [storeRefillBusy, setStoreRefillBusy] = useState(null)
+  const [officeTags, setOfficeTags] = useState({}) // v3.64 — office → tag map for bookings tab
+  const storeRefill = async (p) => {
+    setStoreRefillBusy(p.id)
+    try {
+      const r = await api(`/meraaj/packages/${p.id}/add-seats`, { method: 'POST', body: { add: 5 } })
+      toast.success(`✅ أُضيفت ${r.added} مقاعد لـ«${p.name}» — المتاح ${r.remaining} من ${r.seats_allocated} (تم إشعار معراج)`)
+      setSharedPkgs(list => list.map(x => x.id === p.id ? { ...x, meraaj: { ...x.meraaj, seats_allocated: r.seats_allocated } } : x))
+    } catch (e) { toast.error(e.message) } finally { setStoreRefillBusy(null) }
+  }
   // v3.63 — buyer office rating tags: click cycles — → ممتاز → جيد → متأخر بالدفع → —
   const OFFICE_TAGS = { '': { label: 'بدون تقييم', cls: 'bg-slate-100 text-slate-400 border-slate-200' }, excellent: { label: '⭐ ممتاز', cls: 'bg-emerald-100 text-emerald-700 border-emerald-200' }, good: { label: '👍 جيد', cls: 'bg-blue-100 text-blue-700 border-blue-200' }, late_payment: { label: '⏰ متأخر بالدفع', cls: 'bg-rose-100 text-rose-700 border-rose-200' } }
   const cycleOfficeTag = async (b, e) => {
@@ -8608,6 +8619,7 @@ function MeraajStoreScreen() {
     try {
       await api('/meraaj/office-tag', { method: 'POST', body: { office: b.office, tag: next } })
       setHealth(h => ({ ...h, buyers: (h.buyers || []).map(x => x.office === b.office ? { ...x, tag: next } : x) }))
+      setOfficeTags(m => { const n = { ...m }; if (next === '') delete n[b.office]; else n[b.office] = next; return n }) // v3.64 — keep bookings tab in sync
       toast.success(next === '' ? `أُزيل تقييم «${b.office}»` : `تقييم «${b.office}»: ${OFFICE_TAGS[next].label}`)
     } catch (err) { toast.error(err.message) }
   }
@@ -8666,6 +8678,7 @@ function MeraajStoreScreen() {
     api('/meraaj/inbound-bookings').then(setInbound).catch(() => {})
     api('/meraaj/events').then(setEvents).catch(() => {})
     if (isOwner) api('/meraaj/webhook-health').then(setHealth).catch(() => {}) // v3.57
+    api('/meraaj/office-tags').then(list => setOfficeTags(Object.fromEntries((list || []).map(t => [t.office, t.tag])))).catch(() => {}) // v3.64
     api('/packages').then(list => setSharedPkgs((list || []).filter(p => p?.meraaj?.shared))).catch(() => {})
   }
   const newBookings = inbound.filter(b => b.status === 'new')
@@ -8799,8 +8812,38 @@ function MeraajStoreScreen() {
                   {m.buyer_commission_mode === 'percent' ? `${m.buyer_commission_value}%` : fmt(m.buyer_commission_value || 0, p.currency)}
                   <span className="text-[9px] text-slate-400 block">{m.commission_direction === 'added' ? '➕ فوق السعر' : '➖ من السعر'}</span>
                 </TableCell>}
-                <TableCell className="text-xs">{m.seats_sold || 0} / {m.seats_allocated || 0}</TableCell>
-                <TableCell><Badge className={avail > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}>{avail > 0 ? `${avail} متاح` : 'نفدت'}</Badge></TableCell>
+                <TableCell className="text-xs">
+                  {/* v3.64 — seats progress bar with capacity coloring */}
+                  {(() => {
+                    const alloc = Number(m.seats_allocated) || 0
+                    const sold = Number(m.seats_sold) || 0
+                    const pct = alloc > 0 ? Math.min(100, Math.round((sold / alloc) * 100)) : 0
+                    const barCls = pct >= 95 ? 'bg-rose-500' : pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500'
+                    return (
+                      <div className="min-w-[110px]">
+                        <div className="flex items-center justify-between text-[10px] font-bold mb-0.5">
+                          <span>{sold} / {alloc}</span>
+                          <span className={pct >= 95 ? 'text-rose-600' : pct >= 80 ? 'text-amber-600' : 'text-slate-400'}>{pct}%</span>
+                        </div>
+                        <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                          <div className={`h-full rounded-full ${barCls}`} style={{ width: `${pct}%` }} />
+                        </div>
+                      </div>
+                    )
+                  })()}
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-1.5">
+                    <Badge className={avail > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}>{avail > 0 ? `${avail} متاح` : 'نفدت'}</Badge>
+                    {/* v3.64 — quick +5 seats when close to selling out (owner, open packages) */}
+                    {isOwner && p.status === 'open' && (avail <= 1 || ((Number(m.seats_allocated) || 0) > 0 && (Number(m.seats_sold) || 0) / (Number(m.seats_allocated) || 1) >= 0.8)) && (
+                      <Button size="sm" onClick={() => storeRefill(p)} disabled={storeRefillBusy === p.id}
+                        className="h-6 text-[10px] px-2 gap-1 bg-amber-600 hover:bg-amber-700" title="زيادة 5 مقاعد وإشعار معراج فوراً">
+                        {storeRefillBusy === p.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '➕'} 5
+                      </Button>
+                    )}
+                  </div>
+                </TableCell>
               </TableRow>)
             })}</TableBody>
           </Table></CardContent></Card>
@@ -8813,7 +8856,15 @@ function MeraajStoreScreen() {
             <TableBody>{inbound.map(b => (<TableRow key={b.id}>
               <TableCell className="text-xs whitespace-nowrap">{new Date(b.created_at).toLocaleDateString('en-GB')}</TableCell>
               <TableCell className="text-xs font-bold">{b.package_name}</TableCell>
-              <TableCell className="text-xs">{b.buyer_office_name}</TableCell>
+              <TableCell className="text-xs">
+                {b.buyer_office_name}
+                {/* v3.64 — office rating visible while approving */}
+                {officeTags[(b.buyer_office_name || '').trim()] && (
+                  <span className={`block w-fit mt-0.5 text-[9px] font-black border rounded-full px-1.5 py-0 ${(OFFICE_TAGS[officeTags[(b.buyer_office_name || '').trim()]] || OFFICE_TAGS['']).cls}`}>
+                    {(OFFICE_TAGS[officeTags[(b.buyer_office_name || '').trim()]] || OFFICE_TAGS['']).label}
+                  </span>
+                )}
+              </TableCell>
               <TableCell className="text-xs">
                 <div>👨 {b.pax_adults ?? b.seats} • 🧒 {b.pax_children ?? 0} • 👶 {b.pax_infants ?? 0}</div>
                 <div className="text-[9px] text-slate-400">{(b.registrants || []).map(r => r.name).slice(0, 2).join('، ')}{(b.registrants || []).length > 2 ? '...' : ''}</div>

@@ -1781,6 +1781,11 @@ async function handleRoute(request, { params }) {
       }
       return ok({ office, tag: b.tag })
     }
+    // v3.64 — list buyer-office rating tags (read-only; same screen access as inbound bookings,
+    // so the rating is visible while approving incoming bookings)
+    if (route === '/meraaj/office-tags' && method === 'GET') {
+      return ok(await db.collection('meraaj_office_tags').find(tf).project({ _id: 0, office: 1, tag: 1 }).toArray())
+    }
     // v3.26 — APPROVE inbound Meraaj booking → real package_booking + balanced Journal Entry
     // v3.53 — logic extracted to approveMeraajInboundBooking() (shared with the optional auto-approve setting)
     const meraajApproveMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/approve$/)
