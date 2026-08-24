@@ -773,9 +773,19 @@ async function handleRoute(request, { params }) {
         }
         await db.collection('meraaj_inbound_bookings').insertOne(inbound)
         await db.collection('packages').updateOne({ id: pkg.id }, { $inc: { 'meraaj.seats_sold': seats } })
+        // v3.53 — Optional AUTO-APPROVE (per-office setting): converts the booking instantly.
+        // Failure NEVER rejects the webhook — the booking simply stays pending for manual approval.
+        let autoApproved = false
+        try {
+          const tsAuto = await db.collection('tenant_settings').findOne({ tenant_id: pkg.tenant_id })
+          if (tsAuto?.meraaj_auto_approve) {
+            await approveMeraajInboundBooking(db, pkg.tenant_id, inbound)
+            autoApproved = true
+          }
+        } catch (autoErr) { console.error('[MERAAJ] auto-approve failed (booking stays pending):', autoErr?.message) }
         await maybeEmitMeraajInventory(db, pkg.tenant_id, pkg.id)
         const { _id, ...rest } = inbound
-        return ok({ received: true, inbound_booking: rest, seats_remaining: meraajAvailability({ ...pkg, meraaj: { ...pkg.meraaj, seats_sold: (Number(pkg.meraaj.seats_sold) || 0) + seats } }) })
+        return ok({ received: true, inbound_booking: rest, auto_approved: autoApproved, seats_remaining: meraajAvailability({ ...pkg, meraaj: { ...pkg.meraaj, seats_sold: (Number(pkg.meraaj.seats_sold) || 0) + seats } }) })
       }
       if (type === 'meraaj.booking.cancelled') {
         const inbound = await db.collection('meraaj_inbound_bookings').findOne({ meraaj_booking_ref: String(data.booking_ref || ''), status: { $ne: 'cancelled' } })
@@ -1483,7 +1493,7 @@ async function handleRoute(request, { params }) {
       for (const pkg of sharedPkgs) {
         try {
           const m = pkg.meraaj || {}
-          const fresh = computeMeraajMarketPricing(pkg.room_pricing || [], m.buyer_commission_mode || 'amount', Number(m.buyer_commission_value) || 0, m.commission_direction || 'deducted')
+          const fresh = computeMeraajMarketPricing(pkg.room_pricing || [], m.buyer_commission_mode || 'amount', Number(m.buyer_commission_value) || 0, m.commission_direction || 'deducted', m.buyer_commission_child_value ?? null, m.buyer_commission_infant_value ?? null)
           if (fresh.length > 0) {
             await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { 'meraaj.market_pricing': fresh, 'meraaj.market_pricing_updated_at': new Date() } })
           }
@@ -1521,7 +1531,20 @@ async function handleRoute(request, { params }) {
         // v3.43 — per-office self-service store subscription state
         store_active: !!settingsCfg?.meraaj_store?.active,
         store_activated_at: settingsCfg?.meraaj_store?.activated_at || null,
+        // v3.53 — optional auto-approval of inbound marketplace bookings
+        auto_approve: !!settingsCfg?.meraaj_auto_approve,
       })
+    }
+    // v3.53 — Meraaj behavior settings (owner only): auto-approve toggle
+    if (route === '/meraaj/settings' && method === 'POST') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const b = await request.json()
+      await db.collection('tenant_settings').updateOne(tf, { $set: { meraaj_auto_approve: !!b.auto_approve } }, { upsert: true })
+      return ok({ auto_approve: !!b.auto_approve })
+    }
+    // v3.53 — Lightweight pending-bookings counter (for the header notification bell)
+    if (route === '/meraaj/inbound-count' && method === 'GET') {
+      return ok({ pending: await db.collection('meraaj_inbound_bookings').countDocuments({ tenant_id: T, status: 'new' }) })
     }
     // v3.43 — SELF-SERVICE STORE ACTIVATION (Subscribe / Activate) — instant, no manual steps.
     // Stores the subscription flag per office; best-effort notifies Meraaj via the outbox
@@ -1569,7 +1592,10 @@ async function handleRoute(request, { params }) {
       // 'added'  → الوكيل يضيف عمولته فوق سعرنا (نقبض سعرنا كاملاً)
       // 'deducted' → سعر السوق ثابت وتُقتطع العمولة من هامشنا
       const commissionDirection = b.commission_direction === 'added' ? 'added' : 'deducted'
-      const marketPricing = computeMeraajMarketPricing(roomPricing, commissionMode, commissionValue, commissionDirection)
+      // v3.53 — optional per-age commission overrides (فارغ = نفس عمولة البالغ)
+      const commissionChild = (b.buyer_commission_child_value === undefined || b.buyer_commission_child_value === null || b.buyer_commission_child_value === '') ? null : Math.max(0, Number(b.buyer_commission_child_value) || 0)
+      const commissionInfant = (b.buyer_commission_infant_value === undefined || b.buyer_commission_infant_value === null || b.buyer_commission_infant_value === '') ? null : Math.max(0, Number(b.buyer_commission_infant_value) || 0)
+      const marketPricing = computeMeraajMarketPricing(roomPricing, commissionMode, commissionValue, commissionDirection, commissionChild, commissionInfant)
       // Sanity: in 'deducted' mode the commission must not consume the full price
       if (commissionDirection === 'deducted') {
         const badRow = marketPricing.find(r => r.base.adult > 0 && r.net.adult <= 0)
@@ -1585,6 +1611,8 @@ async function handleRoute(request, { params }) {
         pricing_source: 'auto_room_pricing', // v3.25 — prices always mirror the package itself
         buyer_commission_mode: commissionMode,
         buyer_commission_value: commissionValue,
+        buyer_commission_child_value: commissionChild,   // v3.53
+        buyer_commission_infant_value: commissionInfant, // v3.53
         commission_direction: commissionDirection,
         market_pricing: marketPricing,
         seats_allocated: seatsAllocated,
@@ -1620,123 +1648,17 @@ async function handleRoute(request, { params }) {
       return ok(clean(await db.collection('meraaj_inbound_bookings').find(tf).sort({ created_at: -1 }).limit(200).toArray()))
     }
     // v3.26 — APPROVE inbound Meraaj booking → real package_booking + balanced Journal Entry
+    // v3.53 — logic extracted to approveMeraajInboundBooking() (shared with the optional auto-approve setting)
     const meraajApproveMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/approve$/)
     if (meraajApproveMatch && method === 'POST') {
       const inbound = await db.collection('meraaj_inbound_bookings').findOne({ id: meraajApproveMatch[1], tenant_id: T })
       if (!inbound) return bad('الحجز الوارد غير موجود', 404)
       if (inbound.status === 'approved') return bad('هذا الحجز معتمد مسبقاً')
       if (inbound.status === 'cancelled') return bad('لا يمكن اعتماد حجز ملغى')
-      const pkg = await db.collection('packages').findOne({ id: inbound.package_id, tenant_id: T })
-      if (!pkg) return bad('الباكج غير موجود', 404)
-      // 1) Buyer office as a credit client (auto-create once, reused afterwards)
-      const clientName = `معراج — ${inbound.buyer_office_name}`.slice(0, 120)
-      let cli = await db.collection('clients').findOne({ tenant_id: T, name: clientName })
-      if (!cli) {
-        let accountInfo = {}
-        try { accountInfo = await generateSubAccountCode(db, T, '1301') } catch (e) { return bad(e.message) }
-        cli = {
-          id: uuidv4(), tenant_id: T, name: clientName, phone: '', whatsapp: '',
-          address: '', email: '', notes: `عميل آلي — مكتب مشترٍ عبر معراج نتورك`, parent_code: '1301', ...accountInfo,
-          credit_limit: 0, credit_currency: inbound.currency, is_frozen: false,
-          balances: emptyBalances(), created_at: new Date(),
-        }
-        await db.collection('clients').insertOne(cli)
-      }
-      const cur = inbound.currency
-      const registrants = inbound.registrants || []
-      const adults = Number(inbound.pax_adults) || 0
-      const children = Number(inbound.pax_children) || 0
-      const infants = Number(inbound.pax_infants) || 0
-      const paxBilled = adults + children
-      const totalPax = registrants.length || (paxBilled + infants)
-      // 2) Cost side from package components (dual pricing engine — same as internal bookings)
-      const comps = await db.collection('package_components').find({ package_id: pkg.id, tenant_id: T }).toArray()
-      const compTotals = comps.map(c => computeComponentTotals(c, registrants, paxBilled, totalPax))
-      const total_cost = +compTotals.reduce((s, t) => s + t.cost_total, 0).toFixed(2)
-      // 3) Sale side = what the buyer office owes us (net of the agent commission — valid for both directions)
-      const total_sale = +(Number(inbound.net_to_seller_total) || 0).toFixed(2)
-      const commission = +(total_sale - total_cost).toFixed(2)
-      let rooms_summary = null
-      if (registrants.length > 0) {
-        rooms_summary = {}
-        for (const r of registrants) if (r.room_type) rooms_summary[r.room_type] = (rooms_summary[r.room_type] || 0) + 1
-        if (Object.keys(rooms_summary).length === 0) rooms_summary = null
-      }
-      const bookingDoc = {
-        id: uuidv4(), tenant_id: T, package_id: pkg.id,
-        client_id: cli.id, pilgrim_name: clientName,
-        pax_count: totalPax, pax_adults: adults, pax_children: children, pax_infants: infants,
-        pax_billed: paxBilled, pax_seats: paxBilled,
-        registrants, rooms_summary,
-        currency: cur, total_cost, total_sale, commission,
-        discount: 0, discount_reason: '', discount_apply_cost: false,
-        commission_partner_type: null, commission_partner_id: null, commission_partner_name: '',
-        commission_share_mode: 'amount', commission_share_value: 0, commission_share_amount: 0,
-        payment_method: 'credit', box_id: null,
-        source: 'meraaj', meraaj_inbound_id: inbound.id, meraaj_booking_ref: inbound.meraaj_booking_ref,
-        meraaj_customer_total: Number(inbound.total_price) || 0,
-        meraaj_agent_commission: Number(inbound.agent_commission_total) || 0,
-        component_snapshots: comps.map((c, i) => ({
-          id: c.id, name: c.name, supplier_id: c.supplier_id, supplier_name: c.supplier_name,
-          cost_per_pax: c.cost_per_pax, sale_per_pax: c.sale_per_pax,
-          pricing_type: c.pricing_type || 'flat', include_infants: !!c.include_infants,
-          ...(c.pricing_type === 'per_age' ? { cost_adult: c.cost_adult, cost_child: c.cost_child, cost_infant: c.cost_infant, sale_adult: c.sale_adult, sale_child: c.sale_child, sale_infant: c.sale_infant } : {}),
-          ...(c.pricing_type === 'room_age' ? { room_rates: c.room_rates || [] } : {}),
-          cost_total: compTotals[i].cost_total,
-          sale_total: compTotals[i].sale_total,
-        })),
-        created_at: new Date(),
-      }
-      // 4) Balances: client owes total_sale; suppliers are owed their costs
-      await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
-      for (let i = 0; i < comps.length; i++) {
-        if (compTotals[i].cost_total > 0) await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, compTotals[i].cost_total)
-      }
-      // 5) Balanced Journal Entry: debit client = credit suppliers + revenue
-      const lines = [{ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 }]
-      const supGrouped = {}
-      for (let i = 0; i < comps.length; i++) {
-        const c = comps[i]
-        if (!compTotals[i].cost_total) continue
-        supGrouped[c.supplier_id] = supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }
-        supGrouped[c.supplier_id].amount += compTotals[i].cost_total
-      }
-      let supSum = 0
-      for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
-      const revenueNet = +(total_sale - supSum).toFixed(2)
-      if (revenueNet !== 0) lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name} — معراج`, debit: 0, credit: revenueNet })
-      let je = null
       try {
-        je = await createJournalEntry(db, T, {
-          date: new Date(),
-          description: `اعتماد حجز معراج ${inbound.meraaj_booking_ref || ''} — ${inbound.buyer_office_name} في ${pkg.name} (${totalPax} فرد، صافي ${total_sale} ${cur})`,
-          ref_type: 'package_booking', ref_id: bookingDoc.id, currency: cur, lines,
-        })
-      } catch (jeErr) {
-        // roll back balances if the JE was blocked (e.g. quota exceeded)
-        await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, -total_sale)
-        for (let i = 0; i < comps.length; i++) {
-          if (compTotals[i].cost_total > 0) await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, -compTotals[i].cost_total)
-        }
-        return bad(jeErr.message || 'تعذر إنشاء القيد المحاسبي')
-      }
-      await db.collection('package_bookings').insertOne(bookingDoc)
-      await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, { $set: { status: 'approved', approved_at: new Date(), booking_id: bookingDoc.id, client_id: cli.id, client_name: cli.name } })
-      // v3.27 — Notify Meraaj: booking accepted (closes the communication loop with the buyer office)
-      await emitMeraajEvent(db, T, 'booking.approved', {
-        booking_ref: inbound.meraaj_booking_ref,
-        package_ref: pkg.id,
-        inbound_id: inbound.id,
-        buyer_office_name: inbound.buyer_office_name,
-        seats: inbound.seats,
-        pax: { adults: adults, children, infants },
-        net_to_seller_total: total_sale,
-        currency: cur,
-        approved_at: new Date(),
-      })
-      await maybeEmitMeraajInventory(db, T, pkg.id)
-      const { _id, ...rest } = bookingDoc
-      return ok({ approved: true, booking: rest, client: { id: cli.id, name: cli.name }, journal_balanced: true })
+        const res = await approveMeraajInboundBooking(db, T, inbound)
+        return ok({ approved: true, ...res, journal_balanced: true })
+      } catch (e) { return bad(e.message || 'تعذر اعتماد الحجز') }
     }
     // v3.27 — REJECT inbound Meraaj booking: releases seats + notifies Meraaj with the reason
     const meraajRejectMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/reject$/)
@@ -2568,7 +2490,7 @@ async function handleRoute(request, { params }) {
             // v3.25 — room prices changed → auto-recompute marketplace pricing (always mirrors Rahaal)
             if (upd.room_pricing !== undefined) {
               const m = pkgAfter.meraaj
-              const newMarket = computeMeraajMarketPricing(pkgAfter.room_pricing, m.buyer_commission_mode || 'amount', Number(m.buyer_commission_value) || 0, m.commission_direction || 'deducted')
+              const newMarket = computeMeraajMarketPricing(pkgAfter.room_pricing, m.buyer_commission_mode || 'amount', Number(m.buyer_commission_value) || 0, m.commission_direction || 'deducted', m.buyer_commission_child_value ?? null, m.buyer_commission_infant_value ?? null)
               await db.collection('packages').updateOne({ id: pkgAfter.id, tenant_id: T }, { $set: { 'meraaj.market_pricing': newMarket, 'meraaj.updated_at': new Date() } })
               pkgAfter.meraaj.market_pricing = newMarket
             }
@@ -4906,6 +4828,10 @@ function sanitizeRoomPricing(arr) {  return (Array.isArray(arr) ? arr : [])
       sale_per_pax: Math.max(0, Number(r.sale_per_pax) || 0),
       sale_child: (r.sale_child === undefined || r.sale_child === null || r.sale_child === '') ? null : Math.max(0, Number(r.sale_child) || 0),
       sale_infant: (r.sale_infant === undefined || r.sale_infant === null || r.sale_infant === '') ? null : Math.max(0, Number(r.sale_infant) || 0),
+      // v3.53 — per-age COST fields (فارغ = 0) for accurate per-category profit
+      cost_adult: (r.cost_adult === undefined || r.cost_adult === null || r.cost_adult === '') ? null : Math.max(0, Number(r.cost_adult) || 0),
+      cost_child: (r.cost_child === undefined || r.cost_child === null || r.cost_child === '') ? null : Math.max(0, Number(r.cost_child) || 0),
+      cost_infant: (r.cost_infant === undefined || r.cost_infant === null || r.cost_infant === '') ? null : Math.max(0, Number(r.cost_infant) || 0),
     }))
 }
 // v3.49 — Hotels quick-details on the package itself (name + city + nights) for program display
@@ -5058,11 +4984,18 @@ function meraajVerifyRequest(request, route) {
   return meraajVerify(`${ts}.${route}`, sig)
 }
 // v3.25 — Compute marketplace pricing table from package room pricing + agent commission config
-function computeMeraajMarketPricing(roomPricingArr, mode, value, direction) {
+function computeMeraajMarketPricing(roomPricingArr, mode, value, direction, childValue = null, infantValue = null) {
   const rows = (Array.isArray(roomPricingArr) ? roomPricingArr : []).filter(r => (Number(r.sale_per_pax) || 0) > 0)
-  const commFor = (base) => {
+  // v3.53 — per-age commission: child/infant can have their own commission value (فارغ = نفس عمولة البالغ)
+  const valFor = (cat) => {
+    if (cat === 'child' && childValue !== null && childValue !== undefined && childValue !== '') return Number(childValue) || 0
+    if (cat === 'infant' && infantValue !== null && infantValue !== undefined && infantValue !== '') return Number(infantValue) || 0
+    return Number(value) || 0
+  }
+  const commFor = (base, cat) => {
     if (!(base > 0)) return 0
-    return mode === 'percent' ? +(base * value / 100).toFixed(2) : +(+value).toFixed(2)
+    const v = valFor(cat)
+    return mode === 'percent' ? +(base * v / 100).toFixed(2) : +(+v).toFixed(2)
   }
   return rows.map(rp => {
     const baseAdult = +(Number(rp.sale_per_pax) || 0).toFixed(2)
@@ -5071,7 +5004,7 @@ function computeMeraajMarketPricing(roomPricingArr, mode, value, direction) {
     const row = { room_type: rp.type, base: { adult: baseAdult, child: baseChild, infant: baseInfant }, commission: {}, customer: {}, net: {} }
     for (const cat of ['adult', 'child', 'infant']) {
       const base = row.base[cat]
-      const comm = commFor(base)
+      const comm = commFor(base, cat)
       row.commission[cat] = comm
       if (direction === 'added') { row.customer[cat] = +(base + comm).toFixed(2); row.net[cat] = base }
       else { row.customer[cat] = base; row.net[cat] = +(base - comm).toFixed(2) }
@@ -5079,6 +5012,124 @@ function computeMeraajMarketPricing(roomPricingArr, mode, value, direction) {
     return row
   })
 }
+
+// v3.53 — Shared Meraaj booking approval engine: converts an inbound marketplace booking into a
+// real package booking + balanced journal entry. Used by BOTH the manual approve endpoint and
+// the optional per-office AUTO-APPROVE setting (tenant_settings.meraaj_auto_approve).
+async function approveMeraajInboundBooking(db, T, inbound) {
+  const pkg = await db.collection('packages').findOne({ id: inbound.package_id, tenant_id: T })
+  if (!pkg) throw new Error('الباكج غير موجود')
+  // 1) Buyer office as a credit client (auto-create once, reused afterwards)
+  const clientName = `معراج — ${inbound.buyer_office_name}`.slice(0, 120)
+  let cli = await db.collection('clients').findOne({ tenant_id: T, name: clientName })
+  if (!cli) {
+    let accountInfo = {}
+    try { accountInfo = await generateSubAccountCode(db, T, '1301') } catch (e) { throw new Error(e.message) }
+    cli = {
+      id: uuidv4(), tenant_id: T, name: clientName, phone: '', whatsapp: '',
+      address: '', email: '', notes: `عميل آلي — مكتب مشترٍ عبر معراج نتورك`, parent_code: '1301', ...accountInfo,
+      credit_limit: 0, credit_currency: inbound.currency, is_frozen: false,
+      balances: emptyBalances(), created_at: new Date(),
+    }
+    await db.collection('clients').insertOne(cli)
+  }
+  const cur = inbound.currency
+  const registrants = inbound.registrants || []
+  const adults = Number(inbound.pax_adults) || 0
+  const children = Number(inbound.pax_children) || 0
+  const infants = Number(inbound.pax_infants) || 0
+  const paxBilled = adults + children
+  const totalPax = registrants.length || (paxBilled + infants)
+  // 2) Cost side from package components (dual pricing engine — same as internal bookings)
+  const comps = await db.collection('package_components').find({ package_id: pkg.id, tenant_id: T }).toArray()
+  const compTotals = comps.map(c => computeComponentTotals(c, registrants, paxBilled, totalPax))
+  const total_cost = +compTotals.reduce((s, t) => s + t.cost_total, 0).toFixed(2)
+  // 3) Sale side = what the buyer office owes us (net of the agent commission — valid for both directions)
+  const total_sale = +(Number(inbound.net_to_seller_total) || 0).toFixed(2)
+  const commission = +(total_sale - total_cost).toFixed(2)
+  let rooms_summary = null
+  if (registrants.length > 0) {
+    rooms_summary = {}
+    for (const r of registrants) if (r.room_type) rooms_summary[r.room_type] = (rooms_summary[r.room_type] || 0) + 1
+    if (Object.keys(rooms_summary).length === 0) rooms_summary = null
+  }
+  const bookingDoc = {
+    id: uuidv4(), tenant_id: T, package_id: pkg.id,
+    client_id: cli.id, pilgrim_name: clientName,
+    pax_count: totalPax, pax_adults: adults, pax_children: children, pax_infants: infants,
+    pax_billed: paxBilled, pax_seats: paxBilled,
+    registrants, rooms_summary,
+    currency: cur, total_cost, total_sale, commission,
+    discount: 0, discount_reason: '', discount_apply_cost: false,
+    commission_partner_type: null, commission_partner_id: null, commission_partner_name: '',
+    commission_share_mode: 'amount', commission_share_value: 0, commission_share_amount: 0,
+    payment_method: 'credit', box_id: null,
+    source: 'meraaj', meraaj_inbound_id: inbound.id, meraaj_booking_ref: inbound.meraaj_booking_ref,
+    meraaj_customer_total: Number(inbound.total_price) || 0,
+    meraaj_agent_commission: Number(inbound.agent_commission_total) || 0,
+    component_snapshots: comps.map((c, i) => ({
+      id: c.id, name: c.name, supplier_id: c.supplier_id, supplier_name: c.supplier_name,
+      cost_per_pax: c.cost_per_pax, sale_per_pax: c.sale_per_pax,
+      pricing_type: c.pricing_type || 'flat', include_infants: !!c.include_infants,
+      ...(c.pricing_type === 'per_age' ? { cost_adult: c.cost_adult, cost_child: c.cost_child, cost_infant: c.cost_infant, sale_adult: c.sale_adult, sale_child: c.sale_child, sale_infant: c.sale_infant } : {}),
+      ...(c.pricing_type === 'room_age' ? { room_rates: c.room_rates || [] } : {}),
+      cost_total: compTotals[i].cost_total,
+      sale_total: compTotals[i].sale_total,
+    })),
+    created_at: new Date(),
+  }
+  // 4) Balances: client owes total_sale; suppliers are owed their costs
+  await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
+  for (let i = 0; i < comps.length; i++) {
+    if (compTotals[i].cost_total > 0) await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, compTotals[i].cost_total)
+  }
+  // 5) Balanced Journal Entry: debit client = credit suppliers + revenue
+  const lines = [{ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 }]
+  const supGrouped = {}
+  for (let i = 0; i < comps.length; i++) {
+    const c = comps[i]
+    if (!compTotals[i].cost_total) continue
+    supGrouped[c.supplier_id] = supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }
+    supGrouped[c.supplier_id].amount += compTotals[i].cost_total
+  }
+  let supSum = 0
+  for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
+  const revenueNet = +(total_sale - supSum).toFixed(2)
+  if (revenueNet !== 0) lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name} — معراج`, debit: 0, credit: revenueNet })
+  let je = null
+  try {
+    je = await createJournalEntry(db, T, {
+      date: new Date(),
+      description: `اعتماد حجز معراج ${inbound.meraaj_booking_ref || ''} — ${inbound.buyer_office_name} في ${pkg.name} (${totalPax} فرد، صافي ${total_sale} ${cur})`,
+      ref_type: 'package_booking', ref_id: bookingDoc.id, currency: cur, lines,
+    })
+  } catch (jeErr) {
+    // roll back balances if the JE was blocked (e.g. quota exceeded)
+    await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, -total_sale)
+    for (let i = 0; i < comps.length; i++) {
+      if (compTotals[i].cost_total > 0) await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, -compTotals[i].cost_total)
+    }
+    throw new Error(jeErr.message || 'تعذر إنشاء القيد المحاسبي')
+  }
+  await db.collection('package_bookings').insertOne(bookingDoc)
+  await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, { $set: { status: 'approved', approved_at: new Date(), booking_id: bookingDoc.id, client_id: cli.id, client_name: cli.name } })
+  // v3.27 — Notify Meraaj: booking accepted (closes the communication loop with the buyer office)
+  await emitMeraajEvent(db, T, 'booking.approved', {
+    booking_ref: inbound.meraaj_booking_ref,
+    package_ref: pkg.id,
+    inbound_id: inbound.id,
+    buyer_office_name: inbound.buyer_office_name,
+    seats: inbound.seats,
+    pax: { adults: adults, children, infants },
+    net_to_seller_total: total_sale,
+    currency: cur,
+    approved_at: new Date(),
+  })
+  await maybeEmitMeraajInventory(db, T, pkg.id)
+  const { _id, ...rest } = bookingDoc
+  return { booking: rest, client: { id: cli.id, name: cli.name } }
+}
+
 // Availability of a shared package in the marketplace (allocated - sold)
 function meraajAvailability(pkg) {
   const m = pkg?.meraaj || {}
@@ -5230,7 +5281,7 @@ async function meraajContractPayload(db, T, pkg, comps, meraajOverride = null) {
   // recompute it live from room_pricing + stored commission settings (values only — same structure).
   const marketRows = (Array.isArray(m.market_pricing) && m.market_pricing.length > 0)
     ? m.market_pricing
-    : computeMeraajMarketPricing(pkg.room_pricing || [], m.buyer_commission_mode || 'amount', Number(m.buyer_commission_value) || 0, m.commission_direction || 'deducted')
+    : computeMeraajMarketPricing(pkg.room_pricing || [], m.buyer_commission_mode || 'amount', Number(m.buyer_commission_value) || 0, m.commission_direction || 'deducted', m.buyer_commission_child_value ?? null, m.buyer_commission_infant_value ?? null)
   // Representative per-seat pricing = cheapest adult row of the market pricing table
   const rows = marketRows.filter(r => (Number(r.customer?.adult) || 0) > 0)
   const cheapest = rows.slice().sort((a, b) => a.customer.adult - b.customer.adult)[0] || null

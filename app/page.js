@@ -7967,18 +7967,25 @@ function MeraajShareDialog({ pkg, onClose, onSaved }) {
   const [form, setForm] = useState({
     buyer_commission_mode: pkg?.meraaj?.buyer_commission_mode || 'amount',
     buyer_commission_value: pkg?.meraaj?.buyer_commission_value ?? '',
+    buyer_commission_child_value: pkg?.meraaj?.buyer_commission_child_value ?? '',   // v3.53
+    buyer_commission_infant_value: pkg?.meraaj?.buyer_commission_infant_value ?? '', // v3.53
     commission_direction: pkg?.meraaj?.commission_direction || 'deducted',
     seats_allocated: pkg?.meraaj?.seats_allocated ?? '',
   })
   const [saving, setSaving] = useState(false)
-  // Live preview: mirrors the backend computeMeraajMarketPricing logic
+  // Live preview: mirrors the backend computeMeraajMarketPricing logic (v3.53: per-age commission)
   const cv = Number(form.buyer_commission_value) || 0
-  const commFor = (base) => !(base > 0) ? 0 : (form.buyer_commission_mode === 'percent' ? +(base * cv / 100).toFixed(2) : +cv.toFixed(2))
+  const cvFor = (cat) => {
+    if (cat === 'child' && form.buyer_commission_child_value !== '') return Number(form.buyer_commission_child_value) || 0
+    if (cat === 'infant' && form.buyer_commission_infant_value !== '') return Number(form.buyer_commission_infant_value) || 0
+    return cv
+  }
+  const commFor = (base, cat) => !(base > 0) ? 0 : (form.buyer_commission_mode === 'percent' ? +(base * cvFor(cat) / 100).toFixed(2) : +cvFor(cat).toFixed(2))
   const preview = roomRows.map(rp => {
     const base = { adult: Number(rp.sale_per_pax) || 0, child: (rp.sale_child === null || rp.sale_child === undefined) ? (Number(rp.sale_per_pax) || 0) : (Number(rp.sale_child) || 0), infant: Number(rp.sale_infant) || 0 }
     const out = { room_type: rp.type, base, customer: {}, net: {} }
     for (const cat of ['adult', 'child', 'infant']) {
-      const c = commFor(base[cat])
+      const c = commFor(base[cat], cat)
       if (form.commission_direction === 'added') { out.customer[cat] = +(base[cat] + c).toFixed(2); out.net[cat] = base[cat] }
       else { out.customer[cat] = base[cat]; out.net[cat] = +(base[cat] - c).toFixed(2) }
     }
@@ -8034,6 +8041,13 @@ function MeraajShareDialog({ pkg, onClose, onSaved }) {
               </Field>
               <Field label={form.buyer_commission_mode === 'percent' ? 'النسبة %' : `المبلغ (${pkg?.currency})`}>
                 <Input type="number" min="0" step="0.01" value={form.buyer_commission_value} onChange={e => setForm({ ...form, buyer_commission_value: e.target.value })} className="font-bold" />
+              </Field>
+              {/* v3.53 — per-age commission overrides */}
+              <Field label={`🧒 عمولة الطفل${form.buyer_commission_mode === 'percent' ? ' %' : ''} (فارغ = كالبالغ)`}>
+                <Input type="number" min="0" step="0.01" value={form.buyer_commission_child_value} onChange={e => setForm({ ...form, buyer_commission_child_value: e.target.value })} placeholder="كالبالغ" />
+              </Field>
+              <Field label={`👶 عمولة الرضيع${form.buyer_commission_mode === 'percent' ? ' %' : ''} (فارغ = كالبالغ)`}>
+                <Input type="number" min="0" step="0.01" value={form.buyer_commission_infant_value} onChange={e => setForm({ ...form, buyer_commission_infant_value: e.target.value })} placeholder="كالبالغ" />
               </Field>
               <Field label="المقاعد المخصصة للسوق" required>
                 <Input type="number" min="1" value={form.seats_allocated} onChange={e => setForm({ ...form, seats_allocated: e.target.value })} />
@@ -8460,6 +8474,15 @@ function MeraajStoreScreen() {
       await load()
     } catch (e) { toast.error(e.message) } finally { setResyncing(false) }
   }
+  // v3.53 — Auto-approve toggle (owner only)
+  const toggleAutoApprove = async (val) => {
+    if (val && !(await askConfirm({ title: 'تفعيل الاعتماد التلقائي', desc: 'أي حجز يصل من سوق معراج سيتحول فوراً لحجز فعلي: عميل + تسجيل بأسماء المسافرين + قيد محاسبي متوازن — دون أي تدخل يدوي.\n\nيمكنك إيقافه في أي وقت.', icon: '⚡', confirmLabel: 'تفعيل الاعتماد التلقائي' }))) return
+    try {
+      await api('/meraaj/settings', { method: 'POST', body: { auto_approve: val } })
+      toast.success(val ? '⚡ الاعتماد التلقائي مفعّل — الحجوزات الواردة ستتحول فوراً' : 'تم إيقاف الاعتماد التلقائي — عاد الاعتماد اليدوي')
+      await load()
+    } catch (e) { toast.error(e.message) }
+  }
   return (
     <div>
       <TopBar title="🕋 متجر معراج نتورك" subtitle="سوق B2B لبيع وشراء برامج العمرة والسياحة بين المكاتب" right={<div className="flex gap-2 items-center flex-wrap">
@@ -8467,6 +8490,16 @@ function MeraajStoreScreen() {
         {isOwner && sharedPkgs.length > 0 && <Button size="sm" onClick={resyncAll} disabled={resyncing} className="gap-1 text-xs h-8 bg-purple-700 hover:bg-purple-800 text-white">{resyncing ? <Loader2 className="w-3 h-3 animate-spin" /> : '🔄'} تحديث كل الباقات في معراج</Button>}
         <Button variant="outline" onClick={load} className="gap-1 text-xs h-8">🔄 تحديث</Button>
       </div>} />
+      {/* v3.53 — Auto-approve setting (owner only) */}
+      {isOwner && config && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border-2 border-purple-200 bg-purple-50/50 px-4 py-2.5 mb-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="font-bold text-sm text-purple-900">⚡ الاعتماد التلقائي لحجوزات معراج الواردة {config.auto_approve ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 ms-1">مفعّل</Badge> : <Badge variant="outline" className="ms-1">متوقف</Badge>}</div>
+            <div className="text-[11px] text-slate-500 mt-0.5">عند التفعيل: أي حجز يصل من السوق يتحول فوراً لحجز فعلي بقيده المحاسبي وتظهر أسماء المسافرين مباشرة في قائمة المسجلين — دون أي ضغط يدوي.</div>
+          </div>
+          <Switch checked={!!config.auto_approve} onCheckedChange={toggleAutoApprove} />
+        </div>
+      )}
       {iframeUrl && storeActive ? (
         <div className="rounded-xl overflow-hidden border-2 border-purple-200 shadow-lg bg-white" style={{ height: 'calc(100vh - 160px)' }}>
           <iframe src={iframeUrl} title="متجر معراج نتورك" className="w-full h-full border-0" allow="clipboard-write" />
@@ -8838,6 +8871,9 @@ const compressImage = (file, maxDim = 1200, quality = 0.78) => new Promise((reso
 })
 
 function PackageDialog({ open, onOpenChange, record, onSaved }) {
+  // v3.53 — per-age costs visible only to owner / show_profit holders
+  const { user: pfUser } = useAuth()
+  const pfCanProfit = pfUser?.role === 'owner' || pfUser?.permissions?.show_profit === true
   // v3.9.6 — Dynamic Package Builder: items list + live totals + supplier per item
   // v3.20 — Dual pricing: 'direct' (room+age matrix, B2B) | 'components' (assembled)
   const [f, setF] = useState({ name: '', package_type: 'umrah', currency: 'SAR', start_date: '', end_date: '', notes: '', pricing_mode: 'direct', supplier_id: '' })
@@ -8927,7 +8963,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
     }
     try {
       setSaving(true)
-      const roomPricing = rooms.filter(r => String(r.type || '').trim()).map(r => ({ type: r.type, sale_per_pax: Number(r.sale_per_pax) || 0, sale_child: r.sale_child === '' || r.sale_child === null || r.sale_child === undefined ? null : Number(r.sale_child) || 0, sale_infant: r.sale_infant === '' || r.sale_infant === null || r.sale_infant === undefined ? null : Number(r.sale_infant) || 0 }))
+      const roomPricing = rooms.filter(r => String(r.type || '').trim()).map(r => ({ type: r.type, sale_per_pax: Number(r.sale_per_pax) || 0, sale_child: r.sale_child === '' || r.sale_child === null || r.sale_child === undefined ? null : Number(r.sale_child) || 0, sale_infant: r.sale_infant === '' || r.sale_infant === null || r.sale_infant === undefined ? null : Number(r.sale_infant) || 0, cost_adult: r.cost_adult === '' || r.cost_adult === null || r.cost_adult === undefined ? null : Number(r.cost_adult) || 0, cost_child: r.cost_child === '' || r.cost_child === null || r.cost_child === undefined ? null : Number(r.cost_child) || 0, cost_infant: r.cost_infant === '' || r.cost_infant === null || r.cost_infant === undefined ? null : Number(r.cost_infant) || 0 }))
       const hotelsClean = hotels.filter(h => String(h.name || '').trim()).map(h => ({ name: h.name.trim(), city: String(h.city || '').trim(), nights: Number(h.nights) || 0 })) // v3.49
       let savedId = record?.id
       if (record) {
@@ -9073,7 +9109,8 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
                 ℹ️ تُرسل الأسعار لمعراج <b>مكتملة دائماً</b>: الطفل الفارغ يُرسل بسعر البالغ، والرضيع الفارغ يُرسل 0 — لا قيم فارغة تسبب NaN.
               </div>
               {rooms.map((r, i) => (
-                <div key={i} className="grid grid-cols-2 md:grid-cols-12 gap-2 items-center bg-white rounded-lg border p-2">
+                <div key={i} className="bg-white rounded-lg border p-2 space-y-1.5">
+                  <div className="grid grid-cols-2 md:grid-cols-12 gap-2 items-center">
                   <Input value={r.type} onChange={e => updRoom(i, 'type', e.target.value)} placeholder="نوع الغرفة (ثنائي...)" className="h-8 text-xs md:col-span-3" />
                   <Input type="number" min="0" value={r.sale_per_pax} onChange={e => updRoom(i, 'sale_per_pax', e.target.value)} placeholder="سعر البالغ" className="h-8 text-xs font-bold md:col-span-3" />
                   <Input type="number" min="0" value={r.sale_child ?? ''} onChange={e => updRoom(i, 'sale_child', e.target.value)} placeholder="سعر الطفل" className="h-8 text-xs md:col-span-3" />
@@ -9082,6 +9119,23 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
                     <span className="text-[10px] text-slate-400 whitespace-nowrap">{f.currency}</span>
                     <Button size="sm" variant="ghost" onClick={() => rmRoom(i)} className="h-7 w-7 p-0 text-rose-500"><Trash2 className="w-3 h-3" /></Button>
                   </div>
+                  </div>
+                  {/* v3.53 — per-age COSTS row (owner/show_profit only) for accurate per-category profit */}
+                  {pfCanProfit && (
+                    <div className="grid grid-cols-3 md:grid-cols-12 gap-2 items-center bg-rose-50/40 border border-rose-100 rounded-md p-1.5">
+                      <div className="hidden md:block md:col-span-3 text-[10px] font-bold text-rose-700">💸 التكلفة لكل فئة:</div>
+                      <Input type="number" min="0" value={r.cost_adult ?? ''} onChange={e => updRoom(i, 'cost_adult', e.target.value)} placeholder="تكلفة البالغ" className="h-7 text-[11px] md:col-span-3" />
+                      <Input type="number" min="0" value={r.cost_child ?? ''} onChange={e => updRoom(i, 'cost_child', e.target.value)} placeholder="تكلفة الطفل" className="h-7 text-[11px] md:col-span-3" />
+                      <Input type="number" min="0" value={r.cost_infant ?? ''} onChange={e => updRoom(i, 'cost_infant', e.target.value)} placeholder="تكلفة الرضيع" className="h-7 text-[11px] md:col-span-3" />
+                      {(Number(r.sale_per_pax) || 0) > 0 && (Number(r.cost_adult) || 0) > 0 && (
+                        <div className="col-span-3 md:col-span-12 text-[10px] font-bold text-emerald-700">
+                          📈 ربح البالغ: {((Number(r.sale_per_pax) || 0) - (Number(r.cost_adult) || 0)).toLocaleString('en-US')}
+                          {(Number(r.cost_child) || 0) > 0 && <> • ربح الطفل: {(((r.sale_child ?? '') === '' ? (Number(r.sale_per_pax) || 0) : (Number(r.sale_child) || 0)) - (Number(r.cost_child) || 0)).toLocaleString('en-US')}</>}
+                          {(Number(r.cost_infant) || 0) > 0 && <> • ربح الرضيع: {((Number(r.sale_infant) || 0) - (Number(r.cost_infant) || 0)).toLocaleString('en-US')}</>} {f.currency}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -10604,6 +10658,29 @@ function TenantApp() {
   // v3.21 — Installment alert (proactive cash-flow reminder)
   const [instAlert, setInstAlert] = useState(null)
   const [instAlertDismissed, setInstAlertDismissed] = useState(false)
+  // v3.53 — Meraaj booking notification bell (polls every 60s for users with Meraaj access)
+  const [meraajPending, setMeraajPending] = useState(0)
+  const meraajPendingRef = useRef(0)
+  useEffect(() => {
+    if (!canModule(user, 'meraaj')) return
+    let stop = false
+    const poll = async () => {
+      try {
+        const r = await api('/meraaj/inbound-count')
+        if (stop) return
+        const n = Number(r?.pending) || 0
+        if (n > meraajPendingRef.current && meraajPendingRef.current >= 0 && n > 0) {
+          if (meraajPendingRef.current !== 0 || n > 0) toast.success(`🕋 لديك ${n} حجز معراج بانتظار الاعتماد`, { duration: 8000 })
+        }
+        meraajPendingRef.current = n
+        setMeraajPending(n)
+      } catch { /* silent — module may be blocked or offline */ }
+    }
+    poll()
+    const iv = setInterval(poll, 60000)
+    return () => { stop = true; clearInterval(iv) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     // Load announcements
@@ -10665,6 +10742,14 @@ function TenantApp() {
             </div>
             <button onClick={() => { setInstAlertDismissed(true); sessionStorage.setItem(`rahaal_inst_alert_${instAlert.no}_${instAlert.due_date}`, '1') }} className="text-white/80 hover:text-white text-lg leading-none px-1" title="إخفاء (لهذه الجلسة)">✕</button>
           </div>
+        )}
+        {/* v3.53 — Meraaj pending bookings bell (fixed, click → Meraaj screen) */}
+        {meraajPending > 0 && canModule(user, 'meraaj') && (
+          <button onClick={() => setTab('meraaj')} title="حجوزات معراج بانتظار الاعتماد"
+            className="fixed top-3 left-3 z-40 flex items-center gap-1.5 bg-white border-2 border-amber-400 shadow-lg rounded-full px-3 py-1.5 hover:bg-amber-50 transition">
+            <span className="animate-pulse">🔔</span>
+            <span className="text-xs font-black text-amber-700">{meraajPending} حجز معراج جديد</span>
+          </button>
         )}
         {/* v3.45 — RBAC module guard (server also enforces on API level) */}
         {!tabAllowed && (

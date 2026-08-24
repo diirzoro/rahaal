@@ -20,6 +20,14 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 - Meraaj E2E 15/15 test (blocked on Meraaj team configuring temp secret)
 - Package Comparison feature (deferred by user)
 
+## v3.53 (completed) — Per-age costs/commissions + auto-sync + notifications + auto-approve
+- Room pricing rows: cost_adult/cost_child/cost_infant (nullable, sanitized). Form shows a rose costs sub-row per room (owner/show_profit only) with live per-category profit hints.
+- Per-age commission: computeMeraajMarketPricing(rows, mode, value, direction, childValue, infantValue) — empty = same as adult; all 4 call sites pass meraaj.buyer_commission_child_value/infant_value; share endpoint accepts+stores them; share dialog has 🧒/👶 inputs with live per-age preview.
+- Auto-sync: verified existing — PATCH room_pricing/commission recomputes market_pricing + emits package.updated; components/transports/image also emit. Manual resync button remains as bulk fallback.
+- Notification bell: GET /meraaj/inbound-count (mod_meraaj guarded); TenantApp polls 60s, fixed amber bell top-left with pending count → click opens Meraaj tab; toast on new arrivals.
+- Auto-approve: approveMeraajInboundBooking() extracted (shared engine); webhook auto-approves when tenant_settings.meraaj_auto_approve (failure → stays pending, webhook still 200, response auto_approved flag). POST /meraaj/settings (owner only) + config.auto_approve + Switch UI in Meraaj screen with confirm dialog.
+- Tested 8/8 backend (key: commission.adult=100/child=50/infant=0, fallback child→adult, auto-approve E2E with balanced JE 1700=1700) + UI screenshots.
+
 ## v3.52 (completed) — Meraaj booking sync visibility fix
 - Root cause of "3 seats booked but 0 registrants": the design requires manual approval (v3.26) and pending inbound bookings were INVISIBLE outside the Meraaj screen's inbound tab. Registrant data itself was always received/stored correctly (verified E2E).
 - New: GET /packages returns meraaj_pending_seats/meraaj_pending_count; GET /packages/:id/inbound-bookings (package-scoped, works with mod_packages only); rejected webhooks (bad HMAC) now logged in meraaj_webhook_log {ok:false, reason:'invalid_signature', body_head} for LIVE delivery diagnosis.
