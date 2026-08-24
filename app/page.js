@@ -10775,7 +10775,16 @@ function TenantApp() {
             {banner.link_url && <a href={banner.link_url} target="_blank" rel="noopener" className="text-xs underline">تفاصيل</a>}
           </div>
         )}
-        <div className="flex justify-end mb-2">
+        <div className="flex justify-end items-center gap-2 mb-2">
+          {/* v3.56 — Meraaj pending bell moved INLINE next to logout (was fixed top-3 left-3 and
+              covered/blocked the logout button whenever pending bookings existed) */}
+          {meraajPending > 0 && canModule(user, 'meraaj') && (
+            <button onClick={() => setTab('meraaj')} title="حجوزات معراج بانتظار الاعتماد"
+              className="flex items-center gap-1.5 bg-white border-2 border-amber-400 shadow-md rounded-full px-3 py-1.5 hover:bg-amber-50 transition">
+              <span className="animate-pulse">🔔</span>
+              <span className="text-xs font-black text-amber-700">{meraajPending} حجز معراج جديد</span>
+            </button>
+          )}
           <Button variant="ghost" onClick={logout} className="gap-2 text-slate-500 hover:text-rose-600"><LogOut className="w-4 h-4" /> خروج</Button>
         </div>
         <QuotaBanner quota={tenant?.journal_quota} />
@@ -10796,14 +10805,7 @@ function TenantApp() {
             <button onClick={() => { setInstAlertDismissed(true); sessionStorage.setItem(`rahaal_inst_alert_${instAlert.no}_${instAlert.due_date}`, '1') }} className="text-white/80 hover:text-white text-lg leading-none px-1" title="إخفاء (لهذه الجلسة)">✕</button>
           </div>
         )}
-        {/* v3.53 — Meraaj pending bookings bell (fixed, click → Meraaj screen) */}
-        {meraajPending > 0 && canModule(user, 'meraaj') && (
-          <button onClick={() => setTab('meraaj')} title="حجوزات معراج بانتظار الاعتماد"
-            className="fixed top-3 left-3 z-40 flex items-center gap-1.5 bg-white border-2 border-amber-400 shadow-lg rounded-full px-3 py-1.5 hover:bg-amber-50 transition">
-            <span className="animate-pulse">🔔</span>
-            <span className="text-xs font-black text-amber-700">{meraajPending} حجز معراج جديد</span>
-          </button>
-        )}
+        {/* v3.53 Meraaj pending bell — v3.56: moved inline into the header row above (no fixed overlay) */}
         {/* v3.45 — RBAC module guard (server also enforces on API level) */}
         {!tabAllowed && (
           <Card className="border-2 border-rose-200 bg-rose-50/40"><CardContent className="p-12 text-center">

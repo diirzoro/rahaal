@@ -1,0 +1,232 @@
+
+================================================================================
+FULL E2E BACKEND REGRESSION TEST - Rahaal ERP
+READ-ONLY VERIFICATION RUN
+================================================================================
+
+================================================================================
+SECTION 1: AUTH
+================================================================================
+
+✅ [AUTH] Owner login
+   Session established
+
+✅ [AUTH] Staff login
+   Session established
+
+✅ [AUTH] Super admin login (smoke)
+   Session established
+
+✅ [AUTH] Owner /auth/me
+   Email: owner@demo.com, Role: owner
+
+✅ [AUTH] Staff /auth/me (all required fields)
+   19 mod_* keys present, allowed_box_ids: [], fin_statements: False, fin_partner_summary: False
+
+✅ [AUTH] Public /health endpoint
+   Response: {'status': 'ok', 'timestamp': '2026-08-24T12:48:07.339Z', 'uptime_sec': 2818, 'service': 'rahaal-erp', 'version': '3.9.28', 'db': 'connected'}
+
+================================================================================
+SECTION 2: RBAC (ALL PHASES)
+================================================================================
+
+✅ [RBAC] Staff GET /tickets (denied for registrar)
+
+✅ [RBAC] Staff GET /packages (allowed)
+
+✅ [RBAC] Staff GET /reports/trial-balance (denied)
+
+✅ [RBAC] Staff GET /journal-entries (denied)
+
+✅ [RBAC] Staff GET /meraaj/events (denied)
+
+✅ [RBAC] Owner GET /rbac/templates
+   5 templates returned: ['registrar', 'sales', 'sales_manager', 'accountant', 'full_manager']
+
+✅ [RBAC] Staff GET /rbac/templates (denied)
+
+✅ [RBAC] Staff GET /reports/statement (fin_statements guard)
+
+✅ [RBAC] Staff GET /partners/statements (fin_partner_summary guard)
+
+✅ [RBAC] Staff POST booking with discount>0 (denied)
+
+✅ [RBAC] Staff POST booking with discount=0 (passes discount guard)
+   Status: 200 (not 403, discount guard passed)
+
+✅ [RBAC] Owner GET /reports/trial-balance (bypass)
+
+✅ [RBAC] Owner GET /journal-entries (bypass)
+
+✅ [RBAC] Owner GET /meraaj/events (bypass)
+
+================================================================================
+SECTION 3: PACKAGES (CRUD)
+================================================================================
+
+✅ [PACKAGES] POST /packages with full data
+   Package ID: 3939637d-e79b-43c4-8f32-875823cbcbd4
+
+✅ [PACKAGES] Verify room_pricing with costs
+   cost_adult=700, cost_child=600, cost_infant=100, nulls preserved
+
+✅ [PACKAGES] Verify hotels persistence
+   2 hotels: فندق مكة الاختباري, فندق المدينة الاختباري
+
+✅ [PACKAGES] Verify supplier_id persistence
+   supplier_id=sup-regression-001
+
+✅ [PACKAGES] PATCH /packages/:id (update)
+
+✅ [PACKAGES] Verify PATCH updates
+   sale_per_pax=1200, supplier_id=None
+
+✅ [PACKAGES] Hotels sanitization
+   Max 10 hotels enforced, nights capped at 60
+
+================================================================================
+SECTION 4: IMAGES
+================================================================================
+
+✅ [IMAGES] POST /packages/:id/image with optimization
+   Format: webp, Size: 1200x750, Optimized: 1684 bytes
+
+✅ [IMAGES] Verify MongoDB storage
+   content_type=image/webp, width=1200, height=750
+
+✅ [IMAGES] GET /packages/:id/image (authenticated)
+   Valid WebP image served
+
+✅ [IMAGES] Public GET /meraaj/packages/:id/image (not shared)
+   404 as expected
+
+✅ [IMAGES] Public GET /meraaj/packages/:id/image (shared)
+   Valid WebP image served publicly
+
+✅ [IMAGES] Invalid input handling
+   data:text/plain rejected with 400
+
+================================================================================
+SECTION 5: MERAAJ CONFIG/SHARE/PRICING
+================================================================================
+
+✅ [MERAAJ] GET /meraaj/config
+   store_active=True
+
+✅ [MERAAJ] Per-age commission computation
+   commission: adult=100, child=50, infant=0; net: adult=900, child=750, infant=0; no nulls/NaN
+
+✅ [MERAAJ] Commission fallback logic
+   child commission fell back to adult (100), infant commission = 0
+
+✅ [MERAAJ] Market pricing computation complete
+   All pricing fields computed correctly with per-age commissions and fallbacks
+
+================================================================================
+SECTION 6: PACKAGE LIFECYCLE EVENTS
+================================================================================
+
+❌ [EVENTS] Verify package.updated event
+   No package.updated event found
+
+================================================================================
+SECTION 7: RESYNC-ALL
+================================================================================
+
+✅ [RESYNC] Staff POST /meraaj/resync-all (denied)
+
+✅ [RESYNC] Owner POST /meraaj/resync-all
+   total=30, synced=30, failed=0
+
+✅ [RESYNC] Verify market_pricing recomputed
+   Stale data removed, room_type='ثنائي', base.adult=1500
+
+❌ [RESYNC] Verify package.updated event after resync
+   No event found
+
+================================================================================
+SECTION 8: WEBHOOKS
+================================================================================
+
+✅ [WEBHOOKS] Valid signed webhook
+   Response: {'received': True, 'inbound_booking': {'id': '360c0799-882a-45ce-b820-b8d512423dbc', 'tenant_id': 'd89bc41d-e19b-430f-be93-e3f8ca6d404a', 'package_id': '95f0a17f-3876-4cff-85e7-7c32e7f55511', 'package_name': 'REGRESSION TEST WEBHOOKS', 'meraaj_booking_ref': 'MRJ-REG-1787575697', 'buyer_office_name': 'مكتب الاختبار الشامل', 'registrants': [{'name': 'مسافر بالغ أول', 'passport_no': '', 'age': 35, 'room_type': 'ثنائي', 'age_category': 'adult', 'price': 1000}, {'name': 'مسافر بالغ ثانٍ', 'passport_no': '', 'age': 40, 'room_type': 'ثنائي', 'age_category': 'adult', 'price': 1000}, {'name': 'طفل الاختبار', 'passport_no': '', 'age': 8, 'room_type': 'ثنائي', 'age_category': 'child', 'price': 800}], 'seats': 3, 'pax_adults': 2, 'pax_children': 1, 'pax_infants': 0, 'total_price': 2800, 'sent_total': None, 'price_check': 'not_sent', 'agent_commission_total': 250, 'net_to_seller_total': 2550, 'currency': 'SAR', 'status': 'new', 'created_at': '2026-08-24T12:48:17.415Z'}, 'auto_approved': False, 'seats_remaining': 7}
+
+✅ [WEBHOOKS] Verify inbound booking data
+   3 registrants, total_price=2800, net_to_seller=2550, age_category correct
+
+✅ [WEBHOOKS] Pending aggregation
+   meraaj_pending_seats=3, meraaj_pending_count=1
+
+✅ [WEBHOOKS] GET /packages/:id/inbound-bookings
+   1 inbound booking returned
+
+✅ [WEBHOOKS] Manual approve inbound booking
+   Response: {'approved': True, 'booking': {'id': 'bdf86544-2921-4c19-87cd-24967c2180a8', 'tenant_id': 'd89bc41d-e19b-430f-be93-e3f8ca6d404a', 'package_id': '95f0a17f-3876-4cff-85e7-7c32e7f55511', 'client_id': 'c633c616-2ff9-4f89-9001-5e939bb5ec7d', 'pilgrim_name': 'معراج — مكتب الاختبار الشامل', 'pax_count': 3, 'pax_adults': 2, 'pax_children': 1, 'pax_infants': 0, 'pax_billed': 3, 'pax_seats': 3, 'registrants': [{'name': 'مسافر بالغ أول', 'passport_no': '', 'age': 35, 'room_type': 'ثنائي', 'age_category': 'adult', 'price': 1000}, {'name': 'مسافر بالغ ثانٍ', 'passport_no': '', 'age': 40, 'room_type': 'ثنائي', 'age_category': 'adult', 'price': 1000}, {'name': 'طفل الاختبار', 'passport_no': '', 'age': 8, 'room_type': 'ثنائي', 'age_category': 'child', 'price': 800}], 'rooms_summary': {'ثنائي': 3}, 'currency': 'SAR', 'total_cost': 0, 'total_sale': 2550, 'commission': 2550, 'discount': 0, 'discount_reason': '', 'discount_apply_cost': False, 'commission_partner_type': None, 'commission_partner_id': None, 'commission_partner_name': '', 'commission_share_mode': 'amount', 'commission_share_value': 0, 'commission_share_amount': 0, 'payment_method': 'credit', 'box_id': None, 'source': 'meraaj', 'meraaj_inbound_id': '360c0799-882a-45ce-b820-b8d512423dbc', 'meraaj_booking_ref': 'MRJ-REG-1787575697', 'meraaj_customer_total': 2800, 'meraaj_agent_commission': 250, 'component_snapshots': [], 'created_at': '2026-08-24T12:48:18.003Z'}, 'client': {'id': 'c633c616-2ff9-4f89-9001-5e939bb5ec7d', 'name': 'معراج — مكتب الاختبار الشامل'}, 'journal_balanced': True}
+
+✅ [WEBHOOKS] Verify real booking created
+   source='meraaj', 3 registrants with names preserved
+
+❌ [WEBHOOKS] Verify journal entry created
+   No journal entry found
+
+================================================================================
+SECTION 9: BOOKINGS
+================================================================================
+
+✅ [BOOKINGS] Owner POST booking with discount
+   Booking ID: 0cf305cf-88a2-4ed5-8be9-42512acc5c33, discount=200
+
+✅ [BOOKINGS] Verify discount applied
+   discount=200
+
+✅ [BOOKINGS] Verify registrants
+   2 registrants (adult + child)
+
+✅ [BOOKINGS] DELETE booking
+
+================================================================================
+SECTION 10: CLEANUP
+================================================================================
+⚠️  Failed to delete package 6a3caa41-29db-406f-8444-20a93499b6ec: 400
+✅ Deleted package: 3939637d-e79b-43c4-8f32-875823cbcbd4
+✅ Deleted package: 4b0fb884-ca60-43d1-b756-949cbe979bc2
+⚠️  Failed to delete package d3a84638-33ea-4150-a369-f4fdc8849e4e: 502
+⚠️  Failed to delete package 4d56bd53-6d37-4c34-994d-2e25e6e6b888: 502
+⚠️  Failed to delete package 44dade73-97d3-4e24-9780-29c9afc4d511: 502
+⚠️  Failed to delete package 3fde74e2-a946-4bef-9105-555e3244aacb: 502
+⚠️  Failed to delete package 95f0a17f-3876-4cff-85e7-7c32e7f55511: 400
+✅ Deleted package: c8319b6b-77fc-43f4-ac5a-0b7743b5cb11
+✅ Deleted 1 package images
+✅ Deleted 14 meraaj events
+✅ Reset auto_approve to false
+
+✅ CLEANUP COMPLETE
+
+================================================================================
+SECTION 11: FINAL REGRESSION SMOKE
+================================================================================
+
+✅ [SMOKE] GET /api/packages
+   58 packages
+
+✅ [SMOKE] GET /api/meraaj/events
+   100 events
+
+✅ [SMOKE] GET /api/boxes
+   11 boxes
+
+================================================================================
+REGRESSION TEST SUMMARY
+================================================================================
+✅ PASS - AUTH
+✅ PASS - RBAC
+✅ PASS - PACKAGES
+✅ PASS - IMAGES
+✅ PASS - MERAAJ
+❌ FAIL - EVENTS
+❌ FAIL - RESYNC
+❌ FAIL - WEBHOOKS
+✅ PASS - BOOKINGS
+✅ PASS - SMOKE
+
+❌ SOME REGRESSION TESTS FAILED
