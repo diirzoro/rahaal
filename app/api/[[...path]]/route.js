@@ -768,6 +768,7 @@ async function handleRoute(request, { params }) {
           agent_commission_total: commissionTotal,
           net_to_seller_total: netTotal,
           currency: CURRENCIES.includes(data.currency) ? data.currency : pkg.currency,
+          route: String(data.route || '').trim().slice(0, 200) || null, // v3.72 — trip route from Meraaj
           status: 'new', // new | cancelled | approved (approval into accounting is a manual office step)
           created_at: new Date(),
         }
@@ -784,6 +785,7 @@ async function handleRoute(request, { params }) {
           }
         } catch (autoErr) { console.error('[MERAAJ] auto-approve failed (booking stays pending):', autoErr?.message) }
         await maybeEmitMeraajInventory(db, pkg.tenant_id, pkg.id)
+        await meraajAutoListing(db, pkg.tenant_id, pkg.id) // v3.72 — hide from market if now full
         const { _id, ...rest } = inbound
         return ok({ received: true, inbound_booking: rest, auto_approved: autoApproved, seats_remaining: meraajAvailability({ ...pkg, meraaj: { ...pkg.meraaj, seats_sold: (Number(pkg.meraaj.seats_sold) || 0) + seats } }) })
       }
@@ -793,7 +795,17 @@ async function handleRoute(request, { params }) {
         await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id }, { $set: { status: 'cancelled', cancelled_at: new Date(), cancel_reason: String(data.reason || '').slice(0, 200) } })
         await db.collection('packages').updateOne({ id: inbound.package_id }, { $inc: { 'meraaj.seats_sold': -inbound.seats } })
         await maybeEmitMeraajInventory(db, inbound.tenant_id, inbound.package_id)
+        await meraajAutoListing(db, inbound.tenant_id, inbound.package_id) // v3.72 — relist if seats freed
         return ok({ received: true, released_seats: inbound.seats })
+      }
+      // v3.72 — trip route pushed from the Meraaj dashboard → stored on the package and
+      // displayed in Rahaal screens (data: { package_ref, route }). Idempotent by event id.
+      if (type === 'meraaj.package.route_updated') {
+        const pkgR = await db.collection('packages').findOne({ id: data.package_ref })
+        if (!pkgR) return bad('الباكج غير موجود', 404)
+        const routeStr = String(data.route || '').trim().slice(0, 200)
+        await db.collection('packages').updateOne({ id: pkgR.id }, { $set: { 'meraaj.route': routeStr, 'meraaj.route_updated_at': new Date() } })
+        return ok({ received: true, package_ref: pkgR.id, route: routeStr })
       }
       // v3.38 — REFLECTION: a package created/published/updated on MERAAJ by an office that also exists in Rahaal
       // must be stored in Rahaal and linked to the CORRECT office. Matching is STRICTLY by ids
@@ -2070,11 +2082,44 @@ async function handleRoute(request, { params }) {
       const add = Math.min(1000, Math.max(1, Math.floor(Number(b.add))))
       const newAlloc = Math.min(10000, (Number(pkg.meraaj.seats_allocated) || 0) + add)
       await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { 'meraaj.seats_allocated': newAlloc, 'meraaj.updated_at': new Date() } })
+      // v3.72 — seats freed: clear the sold-out hide flag so the update below relists the package
+      if (pkg.meraaj.hidden_full && newAlloc - (Number(pkg.meraaj.seats_sold) || 0) > 0) {
+        await db.collection('packages').updateOne({ id: pkg.id, tenant_id: T }, { $set: { 'meraaj.hidden_full': false } })
+      }
       const updated = await db.collection('packages').findOne({ id: pkg.id, tenant_id: T })
       const comps = await db.collection('package_components').find({ package_id: pkg.id, tenant_id: T }).toArray()
       await emitMeraajEvent(db, T, 'package.updated', await meraajContractPayload(db, T, updated, comps, updated.meraaj))
       const sold = Number(updated.meraaj?.seats_sold) || 0
       return ok({ seats_allocated: newAlloc, seats_sold: sold, remaining: Math.max(0, newAlloc - sold), added: add })
+    }
+    // v3.72 — تفويج (DISPATCH): manual one-tap hide of a departed package from the Meraaj market.
+    // POST /meraaj/packages/:id/dispatch {dispatched: true|false} (owner only).
+    // dispatched=true → package.deactivated (vanishes from the market until undone).
+    // dispatched=false → relists automatically IF open + not archived + seats available.
+    const dispatchMatch = route.match(/^\/meraaj\/packages\/([^/]+)\/dispatch$/)
+    if (dispatchMatch && method === 'POST') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const pkgD = await db.collection('packages').findOne({ id: dispatchMatch[1], tenant_id: T })
+      if (!pkgD) return bad('الباكج غير موجود', 404)
+      if (!pkgD.meraaj?.shared) return bad('الباكج غير مُشارَك في سوق معراج')
+      const bD = await request.json().catch(() => ({}))
+      const wantDispatch = bD.dispatched !== false
+      if (wantDispatch) {
+        if (pkgD.meraaj.dispatched) return bad('الباقة مُفوَّجة مسبقاً')
+        await db.collection('packages').updateOne({ id: pkgD.id, tenant_id: T }, { $set: { 'meraaj.dispatched': true, 'meraaj.dispatched_at': new Date(), 'meraaj.dispatched_by': sess.user.id } })
+        await emitMeraajEvent(db, T, 'package.deactivated', { package_ref: pkgD.id, reason: 'dispatched', availability: 'غير متاح' })
+        return ok({ dispatched: true })
+      }
+      if (!pkgD.meraaj.dispatched) return bad('الباقة غير مُفوَّجة')
+      await db.collection('packages').updateOne({ id: pkgD.id, tenant_id: T }, { $set: { 'meraaj.dispatched': false, 'meraaj.hidden_full': false }, $unset: { 'meraaj.dispatched_at': '', 'meraaj.dispatched_by': '' } })
+      const freshD = await db.collection('packages').findOne({ id: pkgD.id, tenant_id: T })
+      const remainingD = meraajAvailability(freshD)
+      if (freshD.status === 'open' && !freshD.archived && remainingD > 0) {
+        const compsD = await db.collection('package_components').find({ package_id: pkgD.id, tenant_id: T }).toArray()
+        await emitMeraajEvent(db, T, 'package.updated', await meraajContractPayload(db, T, freshD, compsD, freshD.meraaj))
+        return ok({ dispatched: false, relisted: true, remaining: remainingD })
+      }
+      return ok({ dispatched: false, relisted: false, remaining: remainingD })
     }
     // v3.63 — BUYER OFFICE RATING TAGS (owner): excellent | good | late_payment | '' (remove)
     if (route === '/meraaj/office-tag' && method === 'POST') {
@@ -2130,6 +2175,7 @@ async function handleRoute(request, { params }) {
       )
       // Release the marketplace seats
       await db.collection('packages').updateOne({ id: inbound.package_id, tenant_id: T }, { $inc: { 'meraaj.seats_sold': -inbound.seats } })
+      await meraajAutoListing(db, T, inbound.package_id) // v3.72 — relist if seats freed
       // Notify Meraaj (closes the loop — the buyer sees the rejection + reason)
       await emitMeraajEvent(db, T, 'booking.rejected', {
         booking_ref: inbound.meraaj_booking_ref,
@@ -5853,6 +5899,15 @@ async function maybeAutoRetryMeraajEvents(db, T) {
 }
 
 async function emitMeraajEvent(db, tenantId, type, payload) {
+  // v3.72 — a package hidden from the market (sold out or dispatched/مفوَّجة) must NOT be
+  // relisted by ordinary edits: suppress package.updated while hidden. Relist paths clear
+  // the flags BEFORE emitting, so they pass. deactivated/inventory events still flow.
+  if (type === 'package.updated' && payload?.package_ref) {
+    try {
+      const gp = await db.collection('packages').findOne({ id: payload.package_ref, tenant_id: tenantId }, { projection: { 'meraaj.dispatched': 1, 'meraaj.hidden_full': 1 } })
+      if (gp?.meraaj?.dispatched || gp?.meraaj?.hidden_full) return 'skipped'
+    } catch { /* fall through — never block on guard errors */ }
+  }
   // v3.34 — CRITICAL: enrich every package event with the FULL identity so Meraaj can
   // match its own record regardless of which key its handler uses:
   //   rahal_ref (Meraaj's stored link field) + meraaj_package_id (the id Meraaj itself
@@ -5920,11 +5975,32 @@ async function maybeEmitMeraajInventory(db, tenantId, packageId) {  try {
       seats_allocated: Number(pkg.meraaj.seats_allocated) || 0,
       seats_sold: Number(pkg.meraaj.seats_sold) || 0,
       seats_available: meraajAvailability(pkg),
+      availability: (pkg.meraaj.dispatched || pkg.status !== 'open' || meraajAvailability(pkg) <= 0) ? 'غير متاح' : 'متاح', // v3.72
       internal_bookings: bookingsCount,
       final_price: pkg.meraaj.final_price,
       currency: pkg.currency,
     })
   } catch { /* outbox failure must never break core ops */ }
+}
+// v3.72 — AUTO MARKET LISTING: when a shared package fills up (remaining = 0) it is hidden from
+// the marketplace instantly (package.deactivated, reason: sold_out). When seats free up again
+// (buyer cancellation / office rejection / add-seats) it relists automatically — UNLESS the
+// office manually dispatched it (تفويج), which keeps it hidden until undone. Never throws.
+async function meraajAutoListing(db, tenantId, packageId) {
+  try {
+    const pkg = await db.collection('packages').findOne({ id: packageId, tenant_id: tenantId })
+    if (!pkg?.meraaj?.shared || pkg.meraaj.dispatched) return
+    const remaining = meraajAvailability(pkg)
+    if (remaining <= 0 && !pkg.meraaj.hidden_full) {
+      await db.collection('packages').updateOne({ id: pkg.id, tenant_id: tenantId }, { $set: { 'meraaj.hidden_full': true } })
+      await emitMeraajEvent(db, tenantId, 'package.deactivated', { package_ref: pkg.id, reason: 'sold_out', availability: 'غير متاح' })
+    } else if (remaining > 0 && pkg.meraaj.hidden_full && pkg.status === 'open' && !pkg.archived) {
+      await db.collection('packages').updateOne({ id: pkg.id, tenant_id: tenantId }, { $set: { 'meraaj.hidden_full': false } })
+      const comps = await db.collection('package_components').find({ package_id: pkg.id, tenant_id: tenantId }).toArray()
+      const fresh = { ...pkg, meraaj: { ...pkg.meraaj, hidden_full: false } }
+      await emitMeraajEvent(db, tenantId, 'package.updated', await meraajContractPayload(db, tenantId, fresh, comps))
+    }
+  } catch { /* market listing sync must never break core ops */ }
 }
 // Public payload of a package for the marketplace
 function meraajPackagePayload(pkg, comps = []) {
@@ -5938,6 +6014,8 @@ function meraajPackagePayload(pkg, comps = []) {
     notes: pkg.notes || '',
     features: pkg.features || [],
     has_image: !!pkg.has_image,
+    route: pkg.meraaj?.route || null, // v3.72
+    availability: (pkg.meraaj?.dispatched || pkg.status !== 'open' || meraajAvailability(pkg) <= 0) ? 'غير متاح' : 'متاح', // v3.72
     image_url: pkg.has_image ? `/api/meraaj/packages/${pkg.id}/image` : null,
     pricing_mode: pkg.pricing_mode || 'direct',
     // v3.49 — NaN fix: resolve age-tier fallbacks before sending (empty child = adult price, empty infant = 0)
@@ -6035,6 +6113,9 @@ async function meraajContractPayload(db, T, pkg, comps, meraajOverride = null) {
     // v3.33 — package features must reach the marketplace (share + updates)
     features: Array.isArray(pkg.features) ? pkg.features : [],
     available_seats: Math.max(0, (Number(m.seats_allocated) || 0) - (Number(m.seats_sold) || 0)),
+    // v3.72 — Meraaj UI shows the word only (green "متاح"), no seat numbers in the market
+    availability: (m.dispatched || pkg.status !== 'open' || Math.max(0, (Number(m.seats_allocated) || 0) - (Number(m.seats_sold) || 0)) <= 0) ? 'غير متاح' : 'متاح',
+    route: m.route || null, // v3.72 — trip route (e.g. الشحر - الريان - المكلا - جدة), set from the Meraaj dashboard
     office_ref: T,
     office_name: tenant?.name || '',
     owner_name: owner?.name || '',

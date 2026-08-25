@@ -8631,6 +8631,7 @@ function MeraajStoreScreen() {
   const [reportBusy, setReportBusy] = useState(false)
   // v3.64 — quick seat refill from the shared-packages table (reuses v3.63 add-seats endpoint)
   const [storeRefillBusy, setStoreRefillBusy] = useState(null)
+  const [dispatchBusy, setDispatchBusy] = useState(null) // v3.72 — تفويج
   const [officeTags, setOfficeTags] = useState({}) // v3.64 — office → tag map for bookings tab
   // v3.65 — one-tap retry for failed outbound events (idempotent: same event id re-sent)
   const [retryBusy, setRetryBusy] = useState(null)
@@ -8803,6 +8804,18 @@ function MeraajStoreScreen() {
       toast.success(`✅ أُضيفت ${r.added} مقاعد لـ«${p.name}» — المتاح ${r.remaining} من ${r.seats_allocated} (تم إشعار معراج)`)
       setSharedPkgs(list => list.map(x => x.id === p.id ? { ...x, meraaj: { ...x.meraaj, seats_allocated: r.seats_allocated } } : x))
     } catch (e) { toast.error(e.message) } finally { setStoreRefillBusy(null) }
+  }
+  // v3.72 — تفويج: one-tap dispatch hides the departed package from the Meraaj market (undoable)
+  const storeDispatch = async (p) => {
+    const want = !p?.meraaj?.dispatched
+    if (want && !(await askConfirm({ title: 'تفويج الباقة', desc: `سيتم إخفاء «${p.name}» تماماً من سوق معراج (تفويج الرحلة) — لن تظهر للمكاتب حتى تتراجع عن التفويج.`, icon: '🚌', confirmLabel: 'تفويج وإخفاء من السوق' }))) return
+    setDispatchBusy(p.id)
+    try {
+      const r = await api(`/meraaj/packages/${p.id}/dispatch`, { method: 'POST', body: { dispatched: want } })
+      if (want) toast.success(`🚌 فُوِّجت «${p.name}» واختفت من سوق معراج`)
+      else toast.success(r.relisted ? `↩️ أُلغي التفويج و«${p.name}» عادت للظهور في السوق` : `↩️ أُلغي التفويج — لن تظهر في السوق (${r.remaining > 0 ? 'الباقة مغلقة/مؤرشفة' : 'لا مقاعد متاحة'})`)
+      api('/packages').then(list => setSharedPkgs((list || []).filter(x => x?.meraaj?.shared))).catch(() => {})
+    } catch (e) { toast.error(e.message) } finally { setDispatchBusy(null) }
   }
   // v3.63 — buyer office rating tags: click cycles — → ممتاز → جيد → متأخر بالدفع → —
   const OFFICE_TAGS = { '': { label: 'بدون تقييم', cls: 'bg-slate-100 text-slate-400 border-slate-200' }, excellent: { label: '⭐ ممتاز', cls: 'bg-emerald-100 text-emerald-700 border-emerald-200' }, good: { label: '👍 جيد', cls: 'bg-blue-100 text-blue-700 border-blue-200' }, late_payment: { label: '⏰ متأخر بالدفع', cls: 'bg-rose-100 text-rose-700 border-rose-200' } }
@@ -9132,8 +9145,13 @@ function MeraajStoreScreen() {
               const m = p.meraaj || {}
               const avail = Math.max(0, (Number(m.seats_allocated) || 0) - (Number(m.seats_sold) || 0))
               const mp = m.market_pricing || []
-              return (<TableRow key={p.id}>
-                <TableCell className="font-bold text-xs">{p.name}</TableCell>
+              return (<TableRow key={p.id} className={m.dispatched ? 'opacity-60 bg-slate-50' : ''}>
+                <TableCell className="font-bold text-xs">
+                  {p.name}
+                  {m.route && <span className="block text-[9px] font-normal text-slate-500 mt-0.5">🛣️ {m.route}</span>}
+                  {m.dispatched && <Badge className="bg-slate-200 text-slate-600 text-[9px] mt-0.5">🚌 مُفوَّجة — مخفية من السوق</Badge>}
+                  {!m.dispatched && m.hidden_full && <Badge className="bg-rose-100 text-rose-600 text-[9px] mt-0.5">⛔ مكتملة — مخفية تلقائياً</Badge>}
+                </TableCell>
                 <TableCell className="text-xs">
                   {mp.length === 0 ? '—' : mp.slice(0, 3).map(r => <span key={r.room_type} className="me-2 whitespace-nowrap">🛏️{r.room_type}: <b className="text-purple-700">{(r.customer?.adult || 0).toLocaleString('en-US')}</b></span>)}
                   {mp.length > 3 && <span className="text-slate-400">+{mp.length - 3}</span>}
@@ -9163,13 +9181,21 @@ function MeraajStoreScreen() {
                   })()}
                 </TableCell>
                 <TableCell>
-                  <div className="flex items-center gap-1.5">
-                    <Badge className={avail > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}>{avail > 0 ? `${avail} متاح` : 'نفدت'}</Badge>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <Badge className={m.dispatched ? 'bg-slate-200 text-slate-500' : avail > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}>{m.dispatched ? '🚌 مُفوَّجة' : avail > 0 ? `${avail} متاح` : 'نفدت'}</Badge>
                     {/* v3.64 — quick +5 seats when close to selling out (owner, open packages) */}
-                    {isOwner && p.status === 'open' && (avail <= 1 || ((Number(m.seats_allocated) || 0) > 0 && (Number(m.seats_sold) || 0) / (Number(m.seats_allocated) || 1) >= 0.8)) && (
+                    {isOwner && !m.dispatched && p.status === 'open' && (avail <= 1 || ((Number(m.seats_allocated) || 0) > 0 && (Number(m.seats_sold) || 0) / (Number(m.seats_allocated) || 1) >= 0.8)) && (
                       <Button size="sm" onClick={() => storeRefill(p)} disabled={storeRefillBusy === p.id}
                         className="h-6 text-[10px] px-2 gap-1 bg-amber-600 hover:bg-amber-700" title="زيادة 5 مقاعد وإشعار معراج فوراً">
                         {storeRefillBusy === p.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '➕'} 5
+                      </Button>
+                    )}
+                    {/* v3.72 — تفويج: hide the departed package from the market / undo */}
+                    {isOwner && (
+                      <Button size="sm" variant={m.dispatched ? 'outline' : 'default'} onClick={() => storeDispatch(p)} disabled={dispatchBusy === p.id}
+                        className={m.dispatched ? 'h-6 text-[10px] px-2 gap-1 border-slate-300 text-slate-600' : 'h-6 text-[10px] px-2 gap-1 bg-slate-700 hover:bg-slate-800 text-white'}
+                        title={m.dispatched ? 'إعادة الباقة للظهور في السوق' : 'تفويج الرحلة وإخفاء الباقة من السوق نهائياً'}>
+                        {dispatchBusy === p.id ? <Loader2 className="w-3 h-3 animate-spin" /> : m.dispatched ? '↩️' : '🚌'} {m.dispatched ? 'إلغاء التفويج' : 'تفويج'}
                       </Button>
                     )}
                   </div>
@@ -9185,7 +9211,10 @@ function MeraajStoreScreen() {
             <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>الباكج</TableHead><TableHead>المكتب المشتري</TableHead><TableHead>مسافرون</TableHead><TableHead>الإجمالي</TableHead><TableHead>مرجع معراج</TableHead><TableHead>الحالة</TableHead></TableRow></TableHeader>
             <TableBody>{inbound.map(b => (<TableRow key={b.id}>
               <TableCell className="text-xs whitespace-nowrap">{new Date(b.created_at).toLocaleDateString('en-GB')}</TableCell>
-              <TableCell className="text-xs font-bold">{b.package_name}</TableCell>
+              <TableCell className="text-xs font-bold">
+                {b.package_name}
+                {b.route && <span className="block text-[9px] font-normal text-slate-500 mt-0.5">🛣️ {b.route}</span>}
+              </TableCell>
               <TableCell className="text-xs">
                 {b.buyer_office_name}
                 {/* v3.64 — office rating visible while approving */}
