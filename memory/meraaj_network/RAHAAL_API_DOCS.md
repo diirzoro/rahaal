@@ -232,3 +232,58 @@ Headers مطلوبة:
   "data": { "package_ref": "معرف-الباقة-في-رحال", "route": "الشحر - الريان - المكلا - جدة" } }
 ```
 ← يُخزن ويُعرض في شاشات رحّال. ويمكن أيضاً تمرير `data.route` داخل `meraaj.booking.created` ليظهر مع الحجز.
+
+---
+## v3.73 — دورة الحجز Enterprise (العقود النهائية الحرفية)
+
+### غلاف كل حدث صادر من رحّال (Webhook envelope)
+`POST {MERAAJ}/api/integrations/rahal/webhooks` + ترويسة `X-Rahal-Signature` (HMAC-SHA256 hex على الجسم الخام):
+```json
+{ "id": "uuid-فريد-للحدث", "type": "<النوع>", "timestamp": 1766500000, "data": { ... } }
+```
+
+### booking.approved (data)
+```json
+{ "booking_ref": "مرجع الحجز في معراج", "package_ref": "معرف الباقة في رحال",
+  "rahal_ref": "نفس معرف الباقة", "meraaj_package_id": "remote_id إن وُجد",
+  "inbound_id": "معرف الحجز الوارد في رحال", "buyer_office_name": "...",
+  "seats": 2, "pax": {"adults": 2, "children": 0, "infants": 0},
+  "total_price": 2000, "net_to_seller_total": 1800, "currency": "SAR",
+  "approved_at": "ISO-8601", "approved_by": "اسم المعتمد أو auto_approve" }
+```
+
+### booking.rejected (data)
+```json
+{ "booking_ref": "...", "package_ref": "...", "inbound_id": "...",
+  "buyer_office_name": "...", "reason": "سبب الرفض", "released_seats": 2, "rejected_at": "ISO-8601" }
+```
+
+### booking.cancellation.approved (data) — موافقة صاحب الباكيج على طلب الإلغاء
+```json
+{ "booking_ref": "...", "package_ref": "...", "inbound_id": "...",
+  "buyer_office_name": "...", "released_seats": 2,
+  "refund_note": "ملاحظة الاسترداد أو null", "cancelled_at": "ISO-8601" }
+```
+
+### booking.cancellation.rejected (data) — رفض طلب الإلغاء (الحجز يبقى معتمداً)
+```json
+{ "booking_ref": "...", "package_ref": "...", "inbound_id": "...",
+  "buyer_office_name": "...", "reason": "سبب الرفض", "rejected_at": "ISO-8601" }
+```
+
+### وارد جديد من معراج: meraaj.booking.cancellation_requested
+```json
+{ "id": "uuid-فريد", "type": "meraaj.booking.cancellation_requested",
+  "data": { "booking_ref": "...", "reason": "سبب الإلغاء" } }
+```
+- حجز معتمد ← يُسجل كطلب (الحجز يبقى معتمداً حتى قرار المالك) ثم يصلكم أحد حدثي القرار أعلاه.
+- حجز new ← يُغلق مباشرة (كـ booking.cancelled).
+- ملاحظة: `meraaj.booking.cancelled` على حجز **معتمد** يُحوَّل تلقائياً لطلب إلغاء (لا يُلغى مباشرة أبداً).
+
+### ردود الرفض على booking.created (HTTP 409, machine-readable)
+```json
+{ "error": "price_mismatch", "message": "السعر المرسل لا يطابق السعر الحالي",
+  "sent_total": 1320, "current_total": 2000, "currency": "SAR" }
+{ "error": "package_not_available", "message": "الباكج غير متاح للحجز (مغلق أو مؤرشف أو مُفوَّج)", "package_ref": "..." }
+```
+⚠️ عند 409 لا يُنشأ أي حجز ولا تُحجز مقاعد — صححوا السعر وأعيدوا الإرسال بمعرف حدث جديد.

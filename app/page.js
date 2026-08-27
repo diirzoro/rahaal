@@ -9046,7 +9046,29 @@ function MeraajStoreScreen() {
       load()
     } catch (e) { toast.error(e.message) } finally { setApproving(null) }
   }
-  // v3.43 — Self-service store activation (Subscribe / Activate)
+  // v3.73 — buyer CANCELLATION REQUEST decisions on approved bookings (enterprise flow)
+  const approveCancellation = async (b) => {
+    const note = await askConfirm({ title: 'الموافقة على إلغاء الحجز', desc: `سيُلغى حجز «${b.buyer_office_name}» في «${b.package_name}» نهائياً: تحرير ${b.seats} مقاعد + عكس القيد المحاسبي + إشعار معراج. لا يمكن التراجع.`, icon: '🗑️', variant: 'danger', confirmLabel: 'موافقة على الإلغاء', input: { label: 'ملاحظة/تفاصيل الاسترداد (اختياري — تُرسل لمعراج)', required: false, textarea: true } })
+    if (note === null) return
+    try {
+      setApproving(b.id)
+      const r = await api(`/meraaj/inbound-bookings/${b.id}/cancellation/approve`, { method: 'POST', body: { note: String(note || '').trim() } })
+      toast.success(`✅ أُلغي الحجز — تحررت ${r.released_seats} مقاعد${r.accounting_reversed ? ' وعُكس القيد المحاسبي' : ''} وأُشعر معراج`)
+      if (r.accounting_note) toast.error(`⚠️ محاسبياً: ${r.accounting_note}`, { duration: 12000 })
+      load()
+    } catch (e) { toast.error(e.message) } finally { setApproving(null) }
+  }
+  const rejectCancellation = async (b) => {
+    const reason = await askConfirm({ title: 'رفض طلب الإلغاء', desc: `سيبقى حجز «${b.buyer_office_name}» معتمداً كما هو، ويصل سبب الرفض للمكتب المشتري في معراج.`, icon: '🛡️', confirmLabel: 'رفض طلب الإلغاء', input: { label: 'سبب رفض الإلغاء (سيظهر للمكتب المشتري)', required: true, textarea: true } })
+    if (reason === null) return
+    if (!String(reason).trim()) return toast.error('سبب رفض الإلغاء إلزامي')
+    try {
+      setApproving(b.id)
+      await api(`/meraaj/inbound-bookings/${b.id}/cancellation/reject`, { method: 'POST', body: { reason: String(reason).trim() } })
+      toast.success('🛡️ رُفض طلب الإلغاء — الحجز يبقى معتمداً وسيصل السبب لمعراج')
+      load()
+    } catch (e) { toast.error(e.message) } finally { setApproving(null) }
+  }
   const [activating, setActivating] = useState(false)
   const storeActive = !!config?.store_active
   const activateStore = async () => {
@@ -9237,9 +9259,26 @@ function MeraajStoreScreen() {
               <TableCell className="text-xs">{fmt(b.total_price || 0, b.currency)}</TableCell>
               <TableCell className="text-[10px] text-slate-400">{b.meraaj_booking_ref || '—'}</TableCell>
               <TableCell>
-                {b.status === 'cancelled' ? <Badge className="bg-rose-100 text-rose-700">⛔ ملغى</Badge>
-                  : b.status === 'approved' ? <Badge className="bg-emerald-100 text-emerald-700">✅ معتمد</Badge>
+                {b.status === 'cancelled' ? <Badge className="bg-rose-100 text-rose-700" title={b.cancellation_status === 'approved' ? 'أُلغي بموافقة صاحب الباكيج على طلب المشتري' : b.cancel_reason || ''}>⛔ ملغى</Badge>
+                  : b.status === 'approved' ? (
+                    b.cancellation_status === 'requested' ? (
+                      <div className="space-y-1">
+                        <Badge className="bg-orange-100 text-orange-700 border border-orange-300">📩 طلب إلغاء من معراج</Badge>
+                        {b.cancellation_reason && <div className="text-[9px] text-slate-500 max-w-[180px]">السبب: {b.cancellation_reason}</div>}
+                        <div className="flex items-center gap-1">
+                          <Button size="sm" onClick={() => approveCancellation(b)} disabled={approving === b.id} className="h-6 px-2 text-[10px] bg-rose-600 hover:bg-rose-700 text-white">{approving === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '🗑️ موافقة على الإلغاء'}</Button>
+                          <Button size="sm" variant="outline" onClick={() => rejectCancellation(b)} disabled={approving === b.id} className="h-6 px-2 text-[10px] border-slate-300 text-slate-700 hover:bg-slate-50">🛡️ رفض الطلب</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1 flex-wrap">
+                        <Badge className="bg-emerald-100 text-emerald-700">✅ معتمد</Badge>
+                        {b.cancellation_status === 'rejected' && <Badge className="bg-slate-100 text-slate-500 text-[9px]" title={b.cancellation_reject_reason || ''}>🛡️ رُفض طلب إلغاء سابق</Badge>}
+                      </div>
+                    )
+                  )
                   : b.status === 'rejected' ? <Badge className="bg-slate-200 text-slate-600" title={b.reject_reason}>🚫 مرفوض</Badge>
+                  : b.status === 'approving' ? <Badge className="bg-blue-100 text-blue-600">⏳ قيد الاعتماد...</Badge>
                   : <div className="flex items-center gap-1">
                       <Badge className="bg-blue-100 text-blue-700">🔵 جديد</Badge>
                       <Button size="sm" onClick={() => approveBooking(b)} disabled={approving === b.id} className="h-6 px-2 text-[10px] grad-green text-white">{approving === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '✅ اعتماد'}</Button>
@@ -9395,12 +9434,19 @@ function MeraajStoreScreen() {
                 <Button size="sm" variant="outline" onClick={loadAlertsCenter} className="h-7 text-xs gap-1"><RefreshCw className="w-3 h-3" /> تحديث</Button>
               </div>
             </div>
-            {/* summary count cards */}
+            {/* v3.73 — OPERATIONS (need action) separated from SYNC DIAGNOSTICS */}
+            <div className="text-[10px] font-black text-slate-500 mt-1">🎯 يحتاج إجراء تشغيلي</div>
             <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-              <Card className={(alertsCenter.counts?.failed_events || 0) > 0 ? 'border-rose-300 bg-rose-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.failed_events || 0) > 0 ? 'text-rose-600' : 'text-slate-400'}`}>{alertsCenter.counts?.failed_events ?? 0}</div><div className="text-[10px] text-slate-500">📤 أحداث صادرة فاشلة</div></CardContent></Card>
               <Card className={(alertsCenter.counts?.pending_bookings || 0) > 0 ? 'border-blue-300 bg-blue-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.pending_bookings || 0) > 0 ? 'text-blue-600' : 'text-slate-400'}`}>{alertsCenter.counts?.pending_bookings ?? 0}</div><div className="text-[10px] text-slate-500">📥 حجوزات بانتظار الاعتماد</div></CardContent></Card>
+              <Card className={(alertsCenter.counts?.cancellation_requests || 0) > 0 ? 'border-orange-300 bg-orange-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.cancellation_requests || 0) > 0 ? 'text-orange-600' : 'text-slate-400'}`}>{alertsCenter.counts?.cancellation_requests ?? 0}</div><div className="text-[10px] text-slate-500">📩 طلبات إلغاء تحتاج قرار</div></CardContent></Card>
+              <Card className={(alertsCenter.counts?.stale_pending || 0) > 0 ? 'border-rose-300 bg-rose-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.stale_pending || 0) > 0 ? 'text-rose-600' : 'text-slate-400'}`}>{alertsCenter.counts?.stale_pending ?? 0}</div><div className="text-[10px] text-slate-500">⏰ طلبات تجاوزت 24 ساعة</div></CardContent></Card>
               <Card className={(alertsCenter.counts?.capacity_warnings || 0) > 0 ? 'border-amber-300 bg-amber-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.capacity_warnings || 0) > 0 ? 'text-amber-600' : 'text-slate-400'}`}>{alertsCenter.counts?.capacity_warnings ?? 0}</div><div className="text-[10px] text-slate-500">💺 باكجات مقاعدها شبه ممتلئة</div></CardContent></Card>
               <Card className={(alertsCenter.counts?.missing_passports || 0) > 0 ? 'border-orange-300 bg-orange-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.missing_passports || 0) > 0 ? 'text-orange-600' : 'text-slate-400'}`}>{alertsCenter.counts?.missing_passports ?? 0}</div><div className="text-[10px] text-slate-500">🛂 جوازات ناقصة (معتمدة)</div></CardContent></Card>
+            </div>
+            <div className="text-[10px] font-black text-slate-500 mt-1">🩺 تشخيصات المزامنة (Sync Health)</div>
+            <div className="grid grid-cols-3 gap-2">
+              <Card className={(alertsCenter.counts?.failed_events || 0) > 0 ? 'border-rose-300 bg-rose-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.failed_events || 0) > 0 ? 'text-rose-600' : 'text-slate-400'}`}>{alertsCenter.counts?.failed_events ?? 0}</div><div className="text-[10px] text-slate-500">📤 أحداث صادرة فاشلة</div></CardContent></Card>
+              <Card className={(alertsCenter.counts?.price_mismatch_today || 0) > 0 ? 'border-rose-300 bg-rose-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.price_mismatch_today || 0) > 0 ? 'text-rose-600' : 'text-slate-400'}`}>{alertsCenter.counts?.price_mismatch_today ?? 0}</div><div className="text-[10px] text-slate-500">💰 رفض لعدم تطابق السعر (اليوم)</div></CardContent></Card>
               <Card className={alertsCenter.reject_alert ? 'border-rose-400 bg-rose-50/60' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${alertsCenter.reject_alert ? 'text-rose-700' : 'text-slate-400'}`}>{alertsCenter.rejected_today ?? 0}</div><div className="text-[10px] text-slate-500">🚫 ويبهوك مرفوض اليوم{(alertsCenter.reject_alert_threshold || 0) > 0 ? ` (الحد ${alertsCenter.reject_alert_threshold})` : ''}</div></CardContent></Card>
             </div>
             {/* v3.71 — daily alerts history trend (snapshots written by each alerts-center load) */}
@@ -9475,6 +9521,25 @@ function MeraajStoreScreen() {
                         <TableCell className="text-[11px]">{b.buyer_office_name || '—'}</TableCell>
                         <TableCell className="text-[11px]">{b.seats}</TableCell>
                         <TableCell className="text-[11px] font-mono">{(Number(b.total_price) || 0).toLocaleString('en-US')} {b.currency}</TableCell>
+                      </TableRow>))}</TableBody>
+                    </Table></CardContent>
+                  </Card>
+                )}
+                {(alertsCenter.counts?.cancellation_requests || 0) > 0 && (
+                  <Card className="border-orange-300">
+                    <CardHeader className="py-2 px-4 flex-row items-center justify-between space-y-0">
+                      <CardTitle className="text-sm">📩 طلبات إلغاء حجوزات معتمدة ({alertsCenter.counts.cancellation_requests}) — تحتاج قرارك</CardTitle>
+                      <Button size="sm" variant="outline" onClick={() => setView('bookings')} className="h-6 text-[10px] px-2 border-orange-300 text-orange-700 hover:bg-orange-50">اتخاذ القرار ←</Button>
+                    </CardHeader>
+                    <CardContent className="p-0"><Table>
+                      <TableHeader><TableRow><TableHead className="text-xs">تاريخ الطلب</TableHead><TableHead className="text-xs">الباكج</TableHead><TableHead className="text-xs">المكتب</TableHead><TableHead className="text-xs">مقاعد</TableHead><TableHead className="text-xs">المبلغ</TableHead><TableHead className="text-xs">سبب الإلغاء</TableHead></TableRow></TableHeader>
+                      <TableBody>{(alertsCenter.cancellation_requests || []).map(b => (<TableRow key={b.id} className="bg-orange-50/30">
+                        <TableCell className="text-[10px] whitespace-nowrap">{b.cancellation_requested_at ? new Date(b.cancellation_requested_at).toLocaleString('en-GB') : '—'}</TableCell>
+                        <TableCell className="text-[11px] font-bold">{b.package_name}</TableCell>
+                        <TableCell className="text-[11px]">{b.buyer_office_name || '—'}</TableCell>
+                        <TableCell className="text-[11px]">{b.seats}</TableCell>
+                        <TableCell className="text-[11px] font-mono">{(Number(b.total_price) || 0).toLocaleString('en-US')} {b.currency}</TableCell>
+                        <TableCell className="text-[10px] text-orange-600 max-w-[180px] truncate" title={b.cancellation_reason || ''}>{b.cancellation_reason || '—'}</TableCell>
                       </TableRow>))}</TableBody>
                     </Table></CardContent>
                   </Card>
@@ -11979,6 +12044,8 @@ function TenantApp() {
   // v3.53 — Meraaj booking notification bell (polls every 60s for users with Meraaj access)
   const [meraajPending, setMeraajPending] = useState(0)
   const meraajPendingRef = useRef(0)
+  const [meraajCancReq, setMeraajCancReq] = useState(0) // v3.73 — cancellation requests needing a decision
+  const meraajCancReqRef = useRef(0)
   const meraajInitRef = useRef(false)
   const autoRetrySeenRef = useRef(null) // v3.68 — last auto-retry run timestamp already toasted
   useEffect(() => {
@@ -11989,14 +12056,21 @@ function TenantApp() {
         const r = await api('/meraaj/inbound-count')
         if (stop) return
         const n = Number(r?.pending) || 0
+        const cq = Number(r?.cancellation_requests) || 0 // v3.73
         if (!meraajInitRef.current) {
           // First poll after login: gentle reminder toast if there are pending bookings (no sound)
           if (n > 0) toast.success(`🕋 لديك ${n} حجز معراج بانتظار الاعتماد`, { duration: 8000 })
+          if (cq > 0) toast(`📩 لديك ${cq} طلب إلغاء حجز من معراج يحتاج قرارك`, { duration: 8000 }) // v3.73
           // v3.68 — don't toast about auto-retry runs that happened before this session
           autoRetrySeenRef.current = r?.auto_retry_last?.at || null
         } else if (n > meraajPendingRef.current) {
           // A NEW booking arrived while working: toast + short chime (v3.54)
           toast.success(`🕋 حجز جديد من معراج! لديك ${n} حجز بانتظار الاعتماد`, { duration: 10000 })
+          playMeraajChime()
+        }
+        // v3.73 — a NEW cancellation request arrived while working
+        if (meraajInitRef.current && cq > meraajCancReqRef.current) {
+          toast(`📩 طلب إلغاء حجز جديد من معراج — يحتاج قرارك (موافقة/رفض)`, { duration: 10000 })
           playMeraajChime()
         }
         // v3.68 — background auto-retry success notice (new successful run since last seen)
@@ -12007,6 +12081,8 @@ function TenantApp() {
         meraajInitRef.current = true
         meraajPendingRef.current = n
         setMeraajPending(n)
+        meraajCancReqRef.current = cq // v3.73
+        setMeraajCancReq(cq)
       } catch { /* silent — module may be blocked or offline */ }
     }
     poll()
@@ -12024,6 +12100,9 @@ function TenantApp() {
       const n = Number(r?.pending) || 0
       meraajPendingRef.current = n
       setMeraajPending(n)
+      const cq = Number(r?.cancellation_requests) || 0 // v3.73
+      meraajCancReqRef.current = cq
+      setMeraajCancReq(cq)
     } catch { /* silent */ }
   }
   const toggleBellPanel = async () => {
@@ -12031,11 +12110,38 @@ function TenantApp() {
     setBellOpen(next)
     if (next) {
       setBellList(null)
+      setBellCancList(null) // v3.73
       try {
         const list = await api('/meraaj/inbound-bookings')
         setBellList((list || []).filter(b => b.status === 'new'))
-      } catch { setBellList([]) }
+        setBellCancList((list || []).filter(b => b.status === 'approved' && b.cancellation_status === 'requested')) // v3.73
+      } catch { setBellList([]); setBellCancList([]) }
     }
+  }
+  // v3.73 — cancellation-request decisions from the bell (approve directly / reject with reason)
+  const [bellCancList, setBellCancList] = useState(null)
+  const [bellCancRejectId, setBellCancRejectId] = useState(null)
+  const [bellCancRejectReason, setBellCancRejectReason] = useState('')
+  const approveCancFromBell = async (id) => {
+    setBellBusy(id)
+    try {
+      const r = await api(`/meraaj/inbound-bookings/${id}/cancellation/approve`, { method: 'POST', body: {} })
+      toast.success(`✅ أُلغي الحجز — تحررت ${r.released_seats} مقاعد${r.accounting_reversed ? ' وعُكس القيد' : ''} وأُشعر معراج`)
+      setBellCancList(l => (l || []).filter(x => x.id !== id))
+      await refreshBellCount()
+    } catch (e) { toast.error(e.message) } finally { setBellBusy(null) }
+  }
+  const rejectCancFromBell = async (id) => {
+    const reason = bellCancRejectReason.trim()
+    if (!reason) { toast.error('سبب رفض الإلغاء إلزامي'); return }
+    setBellBusy(id)
+    try {
+      await api(`/meraaj/inbound-bookings/${id}/cancellation/reject`, { method: 'POST', body: { reason } })
+      toast.success('🛡️ رُفض طلب الإلغاء — الحجز يبقى معتمداً')
+      setBellCancList(l => (l || []).filter(x => x.id !== id))
+      setBellCancRejectId(null); setBellCancRejectReason('')
+      await refreshBellCount()
+    } catch (e) { toast.error(e.message) } finally { setBellBusy(null) }
   }
   const approveFromBell = async (id) => {
     setBellBusy(id)
@@ -12105,12 +12211,12 @@ function TenantApp() {
         <div className="flex justify-end items-center gap-2 mb-2">
           {/* v3.56 — Meraaj pending bell inline next to logout. v3.58 — click opens a quick panel
               listing each pending booking with one-tap approve (instead of navigating away) */}
-          {meraajPending > 0 && canModule(user, 'meraaj') && (
+          {(meraajPending > 0 || meraajCancReq > 0) && canModule(user, 'meraaj') && (
             <div className="relative">
-              <button onClick={toggleBellPanel} title="حجوزات معراج بانتظار الاعتماد"
+              <button onClick={toggleBellPanel} title="طلبات معراج تحتاج قرارك"
                 className="flex items-center gap-1.5 bg-white border-2 border-amber-400 shadow-md rounded-full px-3 py-1.5 hover:bg-amber-50 transition">
                 <span className="animate-pulse">🔔</span>
-                <span className="text-xs font-black text-amber-700">{meraajPending} حجز معراج جديد</span>
+                <span className="text-xs font-black text-amber-700">{[meraajPending > 0 ? `${meraajPending} حجز جديد` : null, meraajCancReq > 0 ? `${meraajCancReq} طلب إلغاء` : null].filter(Boolean).join(' • ')} — معراج</span>
               </button>
               {bellOpen && (
                 <>
@@ -12124,8 +12230,8 @@ function TenantApp() {
                     <div className="max-h-[320px] overflow-y-auto divide-y divide-slate-100">
                       {bellList === null ? (
                         <div className="p-5 text-center text-xs text-slate-400"><Loader2 className="w-4 h-4 animate-spin inline ml-1" /> جارٍ التحميل...</div>
-                      ) : bellList.length === 0 ? (
-                        <div className="p-5 text-center text-xs text-emerald-600 font-bold">✅ لا توجد حجوزات معلقة — تم اعتماد الكل</div>
+                      ) : bellList.length === 0 && (bellCancList || []).length === 0 ? (
+                        <div className="p-5 text-center text-xs text-emerald-600 font-bold">✅ لا توجد طلبات معلقة — تم البت في الكل</div>
                       ) : bellList.map(b => (
                         <div key={b.id} className="p-2.5 hover:bg-amber-50/40">
                           <div className="flex items-center gap-2">
@@ -12161,6 +12267,42 @@ function TenantApp() {
                           )}
                         </div>
                       ))}
+                      {/* v3.73 — CANCELLATION REQUESTS group (approved bookings the buyer wants to cancel) */}
+                      {(bellCancList || []).length > 0 && (
+                        <>
+                          <div className="px-3 py-1.5 bg-orange-50 border-y border-orange-200 text-[10px] font-black text-orange-700">📩 طلبات إلغاء حجوزات معتمدة ({bellCancList.length}) — تحتاج قرارك</div>
+                          {bellCancList.map(b => (
+                            <div key={b.id} className="p-2.5 hover:bg-orange-50/40 bg-orange-50/20">
+                              <div className="flex items-center gap-2">
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-[11px] font-black text-slate-800 truncate">{b.package_name}</div>
+                                  <div className="text-[10px] text-slate-500 truncate">{b.buyer_office_name} • {b.seats} مقاعد • {(Number(b.total_price) || 0).toLocaleString('en-US')} {b.currency}</div>
+                                  {b.cancellation_reason && <div className="text-[9px] text-orange-600 truncate">السبب: {b.cancellation_reason}</div>}
+                                  <div className="text-[9px] text-slate-400">{b.cancellation_requested_at ? new Date(b.cancellation_requested_at).toLocaleString('en-GB') : ''} • الحالة: معتمد</div>
+                                </div>
+                                <Button size="sm" onClick={() => approveCancFromBell(b.id)} disabled={bellBusy === b.id}
+                                  className="h-7 text-[10px] gap-1 bg-rose-600 hover:bg-rose-700 shrink-0" title="إلغاء الحجز نهائياً + تحرير المقاعد + عكس القيد">
+                                  {bellBusy === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '🗑️'} موافقة
+                                </Button>
+                                <Button size="sm" variant="outline" onClick={() => { setBellCancRejectId(bellCancRejectId === b.id ? null : b.id); setBellCancRejectReason('') }} disabled={bellBusy === b.id}
+                                  className="h-7 text-[10px] px-2 border-slate-300 text-slate-700 hover:bg-slate-50 shrink-0" title="رفض طلب الإلغاء — يبقى الحجز معتمداً">🛡️</Button>
+                              </div>
+                              {bellCancRejectId === b.id && (
+                                <div className="mt-2 flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg p-1.5">
+                                  <Input value={bellCancRejectReason} onChange={e => setBellCancRejectReason(e.target.value)}
+                                    placeholder="سبب رفض الإلغاء (إلزامي — يظهر للمشتري)" autoFocus
+                                    onKeyDown={e => { if (e.key === 'Enter') rejectCancFromBell(b.id) }}
+                                    className="h-7 text-[10px] bg-white flex-1" />
+                                  <Button size="sm" onClick={() => rejectCancFromBell(b.id)} disabled={bellBusy === b.id || !bellCancRejectReason.trim()}
+                                    className="h-7 text-[10px] bg-slate-700 hover:bg-slate-800 shrink-0">
+                                    {bellBusy === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : 'تأكيد'}
+                                  </Button>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </>
+                      )}
                     </div>
                   </div>
                 </>

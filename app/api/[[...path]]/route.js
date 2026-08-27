@@ -723,6 +723,17 @@ async function handleRoute(request, { params }) {
         const pkg = await db.collection('packages').findOne({ id: data.package_ref })
         if (!pkg) return bad('الباكج غير موجود', 404)
         if (!pkg.meraaj?.shared) return bad('الباكج غير مُشارَك', 403)
+        // v3.73 — ENTERPRISE VALIDATION: bookings are only accepted for live, listed packages
+        if (pkg.status !== 'open' || pkg.archived || pkg.meraaj.dispatched) {
+          try { await db.collection('meraaj_webhook_log').insertOne({ id: uuidv4(), ok: false, reason: 'package_not_available', booking_ref: String(data.booking_ref || '').slice(0, 60), package_ref: pkg.id, at: new Date() }) } catch {}
+          return cors(NextResponse.json({ error: 'package_not_available', message: 'الباكج غير متاح للحجز (مغلق أو مؤرشف أو مُفوَّج)', package_ref: pkg.id }, { status: 409 }))
+        }
+        // v3.73 — duplicate booking_ref belt (idempotency beyond event id): same active ref → ack, no double-create
+        const dupRef = String(data.booking_ref || '').slice(0, 60)
+        if (dupRef) {
+          const dupExisting = await db.collection('meraaj_inbound_bookings').findOne({ meraaj_booking_ref: dupRef, tenant_id: pkg.tenant_id, status: { $in: ['new', 'approved'] } })
+          if (dupExisting) return ok({ received: true, duplicate_booking_ref: true, inbound_id: dupExisting.id, status: dupExisting.status })
+        }
         const registrants = (Array.isArray(data.registrants) ? data.registrants : []).slice(0, 200).map(r => ({
           name: String(r.name || '').trim().slice(0, 80),
           passport_no: String(r.passport_no || '').trim().toUpperCase().slice(0, 30),
@@ -756,6 +767,26 @@ async function handleRoute(request, { params }) {
         const available = meraajAvailability(pkg)
         if (seats > available) return bad(`المقاعد المتاحة غير كافية (متاح: ${available}، مطلوب: ${seats})`, 409)
         const sentTotal = data.total_price !== undefined ? +(Number(data.total_price) || 0).toFixed(2) : null
+        // v3.73 — PRICE MISMATCH = HARD REJECT (409), never a warning. Tolerance: 0.01.
+        // No inbound doc, no seat hold, no approval, no booking.approved — attempt is audit-logged.
+        if (sentTotal !== null && Math.abs(sentTotal - computedTotal) > 0.01) {
+          try {
+            await db.collection('meraaj_webhook_log').insertOne({
+              id: uuidv4(), ok: false, reason: 'price_mismatch',
+              booking_ref: dupRef, package_ref: pkg.id, tenant_id: pkg.tenant_id,
+              sent_total: sentTotal, current_total: computedTotal, currency: pkg.currency,
+              buyer_office_name: String(data.buyer_office_name || '').slice(0, 120), at: new Date(),
+            })
+          } catch {}
+          return cors(NextResponse.json({
+            error: 'price_mismatch',
+            message: 'السعر المرسل لا يطابق السعر الحالي',
+            sent_total: sentTotal,
+            current_total: computedTotal,
+            currency: pkg.currency,
+          }, { status: 409 }))
+        }
+        const nowRcv = new Date()
         const inbound = {
           id: uuidv4(), tenant_id: pkg.tenant_id, package_id: pkg.id, package_name: pkg.name,
           meraaj_booking_ref: String(data.booking_ref || '').slice(0, 60),
@@ -770,7 +801,12 @@ async function handleRoute(request, { params }) {
           currency: CURRENCIES.includes(data.currency) ? data.currency : pkg.currency,
           route: String(data.route || '').trim().slice(0, 200) || null, // v3.72 — trip route from Meraaj
           status: 'new', // new | cancelled | approved (approval into accounting is a manual office step)
-          created_at: new Date(),
+          cancellation_status: null, // v3.73 — null | requested | approved | rejected
+          history: [ // v3.73 — enterprise audit trail: every lifecycle step with timestamp + actor
+            { at: nowRcv, action: 'received', actor: 'meraaj', note: `booking_ref: ${dupRef || '—'}` },
+            { at: nowRcv, action: 'price_validated', actor: 'system', note: sentTotal === null ? 'not_sent' : 'match' },
+          ],
+          created_at: nowRcv,
         }
         await db.collection('meraaj_inbound_bookings').insertOne(inbound)
         await db.collection('packages').updateOne({ id: pkg.id }, { $inc: { 'meraaj.seats_sold': seats } })
@@ -792,11 +828,54 @@ async function handleRoute(request, { params }) {
       if (type === 'meraaj.booking.cancelled') {
         const inbound = await db.collection('meraaj_inbound_bookings').findOne({ meraaj_booking_ref: String(data.booking_ref || ''), status: { $ne: 'cancelled' } })
         if (!inbound) return bad('الحجز غير موجود أو مُلغى مسبقاً', 404)
-        await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id }, { $set: { status: 'cancelled', cancelled_at: new Date(), cancel_reason: String(data.reason || '').slice(0, 200) } })
+        // v3.73 — ENTERPRISE SPLIT: an APPROVED booking is NEVER cancelled directly by the buyer.
+        // It becomes a cancellation REQUEST that the package owner must approve/reject.
+        if (inbound.status === 'approved') {
+          if (inbound.cancellation_status === 'requested') return ok({ received: true, duplicate: true, cancellation_status: 'requested' })
+          await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id }, {
+            $set: { cancellation_status: 'requested', cancellation_requested_at: new Date(), cancellation_reason: String(data.reason || '').slice(0, 300) },
+            $push: { history: { at: new Date(), action: 'cancellation_requested', actor: 'meraaj', note: String(data.reason || '').slice(0, 300) } },
+          })
+          return ok({ received: true, converted_to: 'cancellation_request', note: 'الحجز معتمد — سُجل كطلب إلغاء يحتاج قرار صاحب الباكيج' })
+        }
+        if (inbound.status === 'rejected') return ok({ received: true, note: 'الحجز مرفوض مسبقاً — لا إجراء' })
+        // status === 'new' → direct cancel before approval (release the held seats once)
+        const claimC = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
+          { id: inbound.id, status: 'new' },
+          { $set: { status: 'cancelled', cancelled_at: new Date(), cancel_reason: String(data.reason || '').slice(0, 200) }, $push: { history: { at: new Date(), action: 'cancelled', actor: 'meraaj', note: 'إلغاء قبل الاعتماد' } } },
+        )
+        if (!claimC) return ok({ received: true, duplicate: true })
         await db.collection('packages').updateOne({ id: inbound.package_id }, { $inc: { 'meraaj.seats_sold': -inbound.seats } })
         await maybeEmitMeraajInventory(db, inbound.tenant_id, inbound.package_id)
         await meraajAutoListing(db, inbound.tenant_id, inbound.package_id) // v3.72 — relist if seats freed
         return ok({ received: true, released_seats: inbound.seats })
+      }
+      // v3.73 — explicit cancellation REQUEST for an approved booking (enterprise flow):
+      // recorded only — the booking stays approved until the package owner decides.
+      if (type === 'meraaj.booking.cancellation_requested') {
+        const inbound = await db.collection('meraaj_inbound_bookings').findOne({ meraaj_booking_ref: String(data.booking_ref || '') })
+        if (!inbound) return bad('الحجز غير موجود', 404)
+        if (inbound.status === 'cancelled') return ok({ received: true, note: 'الحجز ملغى مسبقاً' })
+        if (inbound.status === 'rejected') return ok({ received: true, note: 'الحجز مرفوض مسبقاً — لا إجراء' })
+        if (inbound.status === 'new') {
+          // graceful: a pending request is simply closed (same as booking.cancelled before approval)
+          const claimN = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
+            { id: inbound.id, status: 'new' },
+            { $set: { status: 'cancelled', cancelled_at: new Date(), cancel_reason: String(data.reason || '').slice(0, 200) }, $push: { history: { at: new Date(), action: 'cancelled', actor: 'meraaj', note: 'طلب إلغاء وصل قبل الاعتماد — أُغلق مباشرة' } } },
+          )
+          if (claimN) {
+            await db.collection('packages').updateOne({ id: inbound.package_id }, { $inc: { 'meraaj.seats_sold': -inbound.seats } })
+            await maybeEmitMeraajInventory(db, inbound.tenant_id, inbound.package_id)
+            await meraajAutoListing(db, inbound.tenant_id, inbound.package_id)
+          }
+          return ok({ received: true, closed_pending: true })
+        }
+        if (inbound.cancellation_status === 'requested') return ok({ received: true, duplicate: true, cancellation_status: 'requested' })
+        await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id }, {
+          $set: { cancellation_status: 'requested', cancellation_requested_at: new Date(), cancellation_reason: String(data.reason || '').slice(0, 300) },
+          $push: { history: { at: new Date(), action: 'cancellation_requested', actor: 'meraaj', note: String(data.reason || '').slice(0, 300) } },
+        })
+        return ok({ received: true, cancellation_status: 'requested' })
       }
       // v3.72 — trip route pushed from the Meraaj dashboard → stored on the package and
       // displayed in Rahaal screens (data: { package_ref, route }). Idempotent by event id.
@@ -1590,6 +1669,7 @@ async function handleRoute(request, { params }) {
       const autoRetryLast = (arS?.meraaj_auto_retry && (arS?.meraaj_auto_retry_last?.succeeded || 0) > 0) ? arS.meraaj_auto_retry_last : null
       return ok({
         pending: await db.collection('meraaj_inbound_bookings').countDocuments({ tenant_id: T, status: 'new' }),
+        cancellation_requests: await db.collection('meraaj_inbound_bookings').countDocuments({ tenant_id: T, status: 'approved', cancellation_status: 'requested' }), // v3.73
         auto_retry_last: autoRetryLast, // v3.68 — additive, backward-compatible
       })
     }
@@ -1707,6 +1787,15 @@ async function handleRoute(request, { params }) {
       // 2) pending inbound bookings (total + latest 5)
       const pendingTotal = await db.collection('meraaj_inbound_bookings').countDocuments({ ...tf, status: 'new' })
       const pendingLatest = await db.collection('meraaj_inbound_bookings').find({ ...tf, status: 'new' }).sort({ created_at: -1 }).limit(5).project({ _id: 0, id: 1, package_name: 1, buyer_office_name: 1, seats: 1, total_price: 1, currency: 1, created_at: 1 }).toArray()
+      // v3.73 — 2b) cancellation requests awaiting the owner's decision (approved bookings)
+      const cancReqTotal = await db.collection('meraaj_inbound_bookings').countDocuments({ ...tf, status: 'approved', cancellation_status: 'requested' })
+      const cancReqLatest = await db.collection('meraaj_inbound_bookings').find({ ...tf, status: 'approved', cancellation_status: 'requested' }).sort({ cancellation_requested_at: -1 }).limit(5).project({ _id: 0, id: 1, package_name: 1, buyer_office_name: 1, seats: 1, total_price: 1, currency: 1, cancellation_reason: 1, cancellation_requested_at: 1 }).toArray()
+      // v3.73 — 2c) stale pending: new requests older than 24h (need urgent decision)
+      const staleCutoff = new Date(Date.now() - 24 * 3600 * 1000)
+      const stalePendingTotal = await db.collection('meraaj_inbound_bookings').countDocuments({ ...tf, status: 'new', created_at: { $lt: staleCutoff } })
+      // v3.73 — 2d) price-mismatch rejections logged today (diagnostics)
+      const startToday73 = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z')
+      const priceMismatchToday = await db.collection('meraaj_webhook_log').countDocuments({ reason: 'price_mismatch', at: { $gte: startToday73 } })
       // 3) seat capacity warnings — SAME rule as daily-digest (pct>=80 OR remaining<=1)
       const sharedOpenA = await db.collection('packages').find({ ...tf, 'meraaj.shared': true, status: 'open' }).project({ id: 1, name: 1, meraaj: 1 }).toArray()
       const capacityWarningsA = sharedOpenA.map(p => {
@@ -1743,10 +1832,13 @@ async function handleRoute(request, { params }) {
       const countsA = {
         failed_events: failedTotal,
         pending_bookings: pendingTotal,
+        cancellation_requests: cancReqTotal, // v3.73
+        stale_pending: stalePendingTotal, // v3.73
+        price_mismatch_today: priceMismatchToday, // v3.73
         capacity_warnings: capacityWarningsA.length,
         missing_passports: missingTotal,
         rejected_today: rejectedTodayA,
-        total: failedTotal + pendingTotal + capacityWarningsA.length + missingTotal + (rejectAlertA ? 1 : 0),
+        total: failedTotal + pendingTotal + cancReqTotal + capacityWarningsA.length + missingTotal + (rejectAlertA ? 1 : 0),
       }
       // v3.71 — DAILY SNAPSHOT (fire-and-forget, never blocks the response): one doc per
       // tenant per UTC day in meraaj_alerts_history; upsert = last read of the day wins.
@@ -1761,6 +1853,7 @@ async function handleRoute(request, { params }) {
         counts: countsA,
         failed_events: failedLatest,
         pending_bookings: pendingLatest,
+        cancellation_requests: cancReqLatest, // v3.73
         capacity_warnings: capacityWarningsA,
         missing_passports: { total: missingTotal, sample: missingSample },
         rejected_today: rejectedTodayA,
@@ -2149,14 +2242,29 @@ async function handleRoute(request, { params }) {
     // v3.53 — logic extracted to approveMeraajInboundBooking() (shared with the optional auto-approve setting)
     const meraajApproveMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/approve$/)
     if (meraajApproveMatch && method === 'POST') {
-      const inbound = await db.collection('meraaj_inbound_bookings').findOne({ id: meraajApproveMatch[1], tenant_id: T })
-      if (!inbound) return bad('الحجز الوارد غير موجود', 404)
-      if (inbound.status === 'approved') return bad('هذا الحجز معتمد مسبقاً')
-      if (inbound.status === 'cancelled') return bad('لا يمكن اعتماد حجز ملغى')
+      // v3.73 — ATOMIC claim (status new → approving): double-click / concurrent approve safe.
+      const claimA = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
+        { id: meraajApproveMatch[1], tenant_id: T, status: 'new' },
+        { $set: { status: 'approving' } },
+      )
+      if (!claimA) {
+        const cur = await db.collection('meraaj_inbound_bookings').findOne({ id: meraajApproveMatch[1], tenant_id: T })
+        if (!cur) return bad('الحجز الوارد غير موجود', 404)
+        return bad(cur.status === 'approved' ? 'هذا الحجز معتمد مسبقاً' : cur.status === 'cancelled' ? 'لا يمكن اعتماد حجز ملغى' : cur.status === 'rejected' ? 'الحجز مرفوض مسبقاً' : 'الحجز قيد المعالجة حالياً', 409)
+      }
+      // belt: never create a second package_booking for the same inbound
+      if (claimA.booking_id) {
+        await db.collection('meraaj_inbound_bookings').updateOne({ id: claimA.id, tenant_id: T }, { $set: { status: 'approved' } })
+        return bad('هذا الحجز معتمد مسبقاً (حجز محاسبي موجود)', 409)
+      }
       try {
-        const res = await approveMeraajInboundBooking(db, T, inbound)
+        const res = await approveMeraajInboundBooking(db, T, claimA, sess.user)
         return ok({ approved: true, ...res, journal_balanced: true })
-      } catch (e) { return bad(e.message || 'تعذر اعتماد الحجز') }
+      } catch (e) {
+        // revert the claim so the request can be retried
+        await db.collection('meraaj_inbound_bookings').updateOne({ id: claimA.id, tenant_id: T, status: 'approving' }, { $set: { status: 'new' } })
+        return bad(e.message || 'تعذر اعتماد الحجز')
+      }
     }
     // v3.27 — REJECT inbound Meraaj booking: releases seats + notifies Meraaj with the reason
     const meraajRejectMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/reject$/)
@@ -2164,15 +2272,16 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       const reason = String(b.reason || '').trim().slice(0, 300)
       if (!reason) return bad('سبب الرفض إلزامي — سيظهر للمكتب المشتري في معراج')
-      const inbound = await db.collection('meraaj_inbound_bookings').findOne({ id: meraajRejectMatch[1], tenant_id: T })
-      if (!inbound) return bad('الحجز الوارد غير موجود', 404)
-      if (inbound.status === 'approved') return bad('لا يمكن رفض حجز معتمد — احذف الحجز المحاسبي أولاً إن لزم')
-      if (inbound.status === 'cancelled') return bad('الحجز ملغى مسبقاً من المشتري')
-      if (inbound.status === 'rejected') return bad('الحجز مرفوض مسبقاً')
-      await db.collection('meraaj_inbound_bookings').updateOne(
-        { id: inbound.id, tenant_id: T },
-        { $set: { status: 'rejected', rejected_at: new Date(), reject_reason: reason } }
+      // v3.73 — ATOMIC claim (status new → rejected): seats are released EXACTLY once
+      const inbound = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
+        { id: meraajRejectMatch[1], tenant_id: T, status: 'new' },
+        { $set: { status: 'rejected', rejected_at: new Date(), reject_reason: reason, rejected_by: sess.user.id }, $push: { history: { at: new Date(), action: 'rejected', actor: sess.user.name || sess.user.email, note: reason } } },
       )
+      if (!inbound) {
+        const cur = await db.collection('meraaj_inbound_bookings').findOne({ id: meraajRejectMatch[1], tenant_id: T })
+        if (!cur) return bad('الحجز الوارد غير موجود', 404)
+        return bad(cur.status === 'approved' ? 'لا يمكن رفض حجز معتمد — استخدم مسار طلب الإلغاء' : cur.status === 'cancelled' ? 'الحجز ملغى مسبقاً من المشتري' : 'الحجز مرفوض مسبقاً', 409)
+      }
       // Release the marketplace seats
       await db.collection('packages').updateOne({ id: inbound.package_id, tenant_id: T }, { $inc: { 'meraaj.seats_sold': -inbound.seats } })
       await meraajAutoListing(db, T, inbound.package_id) // v3.72 — relist if seats freed
@@ -2188,6 +2297,88 @@ async function handleRoute(request, { params }) {
       })
       await maybeEmitMeraajInventory(db, T, inbound.package_id)
       return ok({ rejected: true, released_seats: inbound.seats, reason })
+    }
+    // v3.73 — APPROVE a buyer CANCELLATION REQUEST on an approved booking (owner action):
+    // status → cancelled, seats released ONCE, linked package_booking cancelled, accounting
+    // reversed via a mirrored Journal Entry, then booking.cancellation.approved → Meraaj.
+    const cancApproveMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/cancellation\/approve$/)
+    if (cancApproveMatch && method === 'POST') {
+      const bCA = await request.json().catch(() => ({}))
+      const noteCA = String(bCA.note || '').trim().slice(0, 300)
+      const inbound = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
+        { id: cancApproveMatch[1], tenant_id: T, status: 'approved', cancellation_status: 'requested' },
+        { $set: { cancellation_status: 'approved', status: 'cancelled', cancelled_at: new Date(), cancelled_by: sess.user.id }, $push: { history: { at: new Date(), action: 'cancellation_approved', actor: sess.user.name || sess.user.email, note: noteCA } } },
+      )
+      if (!inbound) {
+        const cur = await db.collection('meraaj_inbound_bookings').findOne({ id: cancApproveMatch[1], tenant_id: T })
+        if (!cur) return bad('الحجز الوارد غير موجود', 404)
+        return bad(cur.cancellation_status !== 'requested' ? 'لا يوجد طلب إلغاء معلق على هذا الحجز' : 'الحجز ليس بحالة معتمد', 409)
+      }
+      // seats released exactly once (the atomic claim above guarantees single execution)
+      await db.collection('packages').updateOne({ id: inbound.package_id, tenant_id: T }, { $inc: { 'meraaj.seats_sold': -inbound.seats } })
+      // reverse the accounting: mirror the ORIGINAL approval Journal Entry (debit↔credit) + balances
+      let accountingReversed = false, accountingNote = null
+      try {
+        if (inbound.booking_id) {
+          const origJe = await db.collection('journal_entries').findOne({ tenant_id: T, ref_type: 'package_booking', ref_id: inbound.booking_id })
+          if (origJe && Array.isArray(origJe.lines)) {
+            const revLines = origJe.lines.map(l => ({ ...l, debit: Number(l.credit) || 0, credit: Number(l.debit) || 0 }))
+            await createJournalEntry(db, T, {
+              date: new Date(),
+              description: `عكس اعتماد حجز معراج ${inbound.meraaj_booking_ref || ''} — إلغاء معتمد من صاحب الباكيج${noteCA ? ` (${noteCA})` : ''}`,
+              ref_type: 'package_booking_cancellation', ref_id: inbound.booking_id, currency: origJe.currency, lines: revLines,
+            })
+            for (const l of origJe.lines) {
+              const netl = (Number(l.debit) || 0) - (Number(l.credit) || 0)
+              if (l.party_type === 'client' && l.party_id) await updateBalance(db, 'clients', { id: l.party_id, tenant_id: T }, origJe.currency, -netl)
+              if (l.party_type === 'supplier' && l.party_id) await updateBalance(db, 'suppliers', { id: l.party_id, tenant_id: T }, origJe.currency, ((Number(l.credit) || 0) - (Number(l.debit) || 0)) * -1)
+            }
+            accountingReversed = true
+          }
+          await db.collection('package_bookings').updateOne({ id: inbound.booking_id, tenant_id: T }, { $set: { status: 'cancelled', cancelled_at: new Date(), cancel_source: 'meraaj_cancellation_approved' } })
+        }
+      } catch (revErr) {
+        accountingNote = revErr.message || 'فشل عكس القيد المحاسبي — راجعه يدوياً'
+        await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, { $push: { history: { at: new Date(), action: 'accounting_reversal_failed', actor: 'system', note: accountingNote } } })
+      }
+      await meraajAutoListing(db, T, inbound.package_id)
+      await maybeEmitMeraajInventory(db, T, inbound.package_id)
+      await emitMeraajEvent(db, T, 'booking.cancellation.approved', {
+        booking_ref: inbound.meraaj_booking_ref,
+        package_ref: inbound.package_id,
+        inbound_id: inbound.id,
+        buyer_office_name: inbound.buyer_office_name,
+        released_seats: inbound.seats,
+        refund_note: noteCA || null,
+        cancelled_at: new Date(),
+      })
+      return ok({ cancellation_approved: true, released_seats: inbound.seats, accounting_reversed: accountingReversed, accounting_note: accountingNote })
+    }
+    // v3.73 — REJECT a buyer CANCELLATION REQUEST: booking stays approved, request archived,
+    // booking.cancellation.rejected → Meraaj with the reason.
+    const cancRejectMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/cancellation\/reject$/)
+    if (cancRejectMatch && method === 'POST') {
+      const bCR = await request.json()
+      const reasonCR = String(bCR.reason || '').trim().slice(0, 300)
+      if (!reasonCR) return bad('سبب رفض طلب الإلغاء إلزامي — سيظهر للمكتب المشتري')
+      const inbound = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
+        { id: cancRejectMatch[1], tenant_id: T, status: 'approved', cancellation_status: 'requested' },
+        { $set: { cancellation_status: 'rejected', cancellation_rejected_at: new Date(), cancellation_rejected_by: sess.user.id, cancellation_reject_reason: reasonCR }, $push: { history: { at: new Date(), action: 'cancellation_rejected', actor: sess.user.name || sess.user.email, note: reasonCR } } },
+      )
+      if (!inbound) {
+        const cur = await db.collection('meraaj_inbound_bookings').findOne({ id: cancRejectMatch[1], tenant_id: T })
+        if (!cur) return bad('الحجز الوارد غير موجود', 404)
+        return bad('لا يوجد طلب إلغاء معلق على هذا الحجز', 409)
+      }
+      await emitMeraajEvent(db, T, 'booking.cancellation.rejected', {
+        booking_ref: inbound.meraaj_booking_ref,
+        package_ref: inbound.package_id,
+        inbound_id: inbound.id,
+        buyer_office_name: inbound.buyer_office_name,
+        reason: reasonCR,
+        rejected_at: new Date(),
+      })
+      return ok({ cancellation_rejected: true, reason: reasonCR, booking_status: 'approved' })
     }
     // v3.27 — WhatsApp sales log (Mini CRM): record every marketing message sent
     if (route === '/whatsapp-logs' && method === 'POST') {
@@ -5722,7 +5913,8 @@ function computeMeraajMarketPricing(roomPricingArr, mode, value, direction, chil
 // v3.53 — Shared Meraaj booking approval engine: converts an inbound marketplace booking into a
 // real package booking + balanced journal entry. Used by BOTH the manual approve endpoint and
 // the optional per-office AUTO-APPROVE setting (tenant_settings.meraaj_auto_approve).
-async function approveMeraajInboundBooking(db, T, inbound) {
+async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
+  const actorName = actor === null ? 'auto_approve' : (actor.name || actor.email || actor.id || 'owner') // v3.73 — audit
   const pkg = await db.collection('packages').findOne({ id: inbound.package_id, tenant_id: T })
   if (!pkg) throw new Error('الباكج غير موجود')
   // 1) Buyer office as a credit client (auto-create once, reused afterwards)
@@ -5782,7 +5974,14 @@ async function approveMeraajInboundBooking(db, T, inbound) {
       cost_total: compTotals[i].cost_total,
       sale_total: compTotals[i].sale_total,
     })),
+    meraaj_booking_ref: inbound.meraaj_booking_ref || null, // v3.73 — uniqueness guard vs double-approve
+    meraaj_inbound_id: inbound.id, // v3.73
     created_at: new Date(),
+  }
+  // v3.73 — belt: NEVER create a second accounting booking for the same Meraaj booking_ref
+  if (inbound.meraaj_booking_ref) {
+    const dupBk = await db.collection('package_bookings').findOne({ tenant_id: T, meraaj_booking_ref: inbound.meraaj_booking_ref, status: { $ne: 'cancelled' } })
+    if (dupBk) throw new Error('يوجد حجز محاسبي مسبق لنفس مرجع معراج — لن يُنشأ حجز مكرر')
   }
   // 4) Balances: client owes total_sale; suppliers are owed their costs
   await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
@@ -5818,7 +6017,13 @@ async function approveMeraajInboundBooking(db, T, inbound) {
     throw new Error(jeErr.message || 'تعذر إنشاء القيد المحاسبي')
   }
   await db.collection('package_bookings').insertOne(bookingDoc)
-  await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, { $set: { status: 'approved', approved_at: new Date(), booking_id: bookingDoc.id, client_id: cli.id, client_name: cli.name } })
+  await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, {
+    $set: { status: 'approved', approved_at: new Date(), approved_by: actor?.id || 'auto', booking_id: bookingDoc.id, client_id: cli.id, client_name: cli.name },
+    $push: { history: { $each: [ // v3.73 — audit trail
+      { at: new Date(), action: 'approved', actor: actorName, note: `صافي ${total_sale} ${cur}` },
+      { at: new Date(), action: 'package_booking_created', actor: 'system', note: bookingDoc.id },
+    ] } },
+  })
   // v3.27 — Notify Meraaj: booking accepted (closes the communication loop with the buyer office)
   await emitMeraajEvent(db, T, 'booking.approved', {
     booking_ref: inbound.meraaj_booking_ref,
@@ -5827,9 +6032,11 @@ async function approveMeraajInboundBooking(db, T, inbound) {
     buyer_office_name: inbound.buyer_office_name,
     seats: inbound.seats,
     pax: { adults: adults, children, infants },
+    total_price: inbound.total_price, // v3.73 — contract completeness
     net_to_seller_total: total_sale,
     currency: cur,
     approved_at: new Date(),
+    approved_by: actorName, // v3.73
   })
   await maybeEmitMeraajInventory(db, T, pkg.id)
   const { _id, ...rest } = bookingDoc
