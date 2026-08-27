@@ -877,6 +877,133 @@ async function handleRoute(request, { params }) {
         })
         return ok({ received: true, cancellation_status: 'requested' })
       }
+      // v3.74 — ESCROW FINAL DECISION (Meraaj Super Admin) — THE ONLY event that moves seats
+      // and money after approval. Contract-frozen: meraaj.booking.cancellation_finalized.
+      // Settlement equation enforced: refund + seller_compensation + platform_adjustment = original.
+      // Accounting: settlement entries (skipQuota — platform-mandated, signed, idempotent),
+      // dated TODAY (current open period), ref to the original JE. NO blind full mirror:
+      // executed supplier costs already recorded in the ORIGINAL JE are PRESERVED (not reversed,
+      // never re-created) up to min(position costs, recorded costs) — zero double-posting.
+      if (type === 'meraaj.booking.cancellation_finalized') {
+        const inbound = await db.collection('meraaj_inbound_bookings').findOne({ meraaj_booking_ref: String(data.booking_ref || '') })
+        if (!inbound) return bad('الحجز غير موجود', 404)
+        const decision = String(data.decision || '')
+        if (!['cancelled', 'kept'].includes(decision)) return bad('قرار غير معروف — cancelled أو kept فقط')
+        const decidedBy = String(data.decided_by || 'super_admin').slice(0, 120)
+        const platReason = String(data.reason || '').slice(0, 400)
+        if (decision === 'kept') {
+          if (inbound.status !== 'approved') return ok({ received: true, note: `الحجز بحالة ${inbound.status} — قرار الإبقاء لا يغير شيئاً` })
+          await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id }, {
+            $set: { cancellation_status: 'rejected_by_platform', platform_decision: { decision, reason: platReason, decided_by: decidedBy, decided_at: data.decided_at || new Date() } },
+            $push: { history: { at: new Date(), action: 'cancellation_rejected_by_platform', actor: decidedBy, note: platReason } },
+          })
+          return ok({ received: true, decision: 'kept', booking_status: 'approved' })
+        }
+        // decision === 'cancelled' — FINANCIAL VALIDATION FIRST (any mismatch → 409, ZERO effects)
+        if (inbound.status === 'cancelled') return ok({ received: true, note: 'الحجز ملغى مسبقاً — لا تنفيذ مزدوج' })
+        if (inbound.status !== 'approved') return bad(`الحجز بحالة ${inbound.status} — التنفيذ النهائي يخص الحجوزات المعتمدة فقط`, 409)
+        const r2 = (v) => +(Number(v) || 0).toFixed(2)
+        const O74 = r2(data.original_amount), R74 = r2(data.refund_amount), S74 = r2(data.seller_compensation), P74 = r2(data.platform_adjustment)
+        const mismatch = (detail, extra) => cors(NextResponse.json({ error: 'settlement_mismatch', detail, ...extra }, { status: 409 }))
+        if (String(data.currency || '') !== String(inbound.currency || '')) return mismatch('currency', { expected_currency: inbound.currency, received_currency: data.currency || null })
+        if (Math.abs(O74 - r2(inbound.total_price)) > 0.01) return mismatch('original_amount', { expected_original: r2(inbound.total_price), received_original: O74 })
+        if (Math.abs((R74 + S74 + P74) - O74) > 0.01) return mismatch('equation', { expected_total: O74, received_sum: r2(R74 + S74 + P74), refund_amount: R74, seller_compensation: S74, platform_adjustment: P74 })
+        // ATOMIC claim — seats/accounting execute EXACTLY once
+        const nowF = new Date()
+        const settlement = { decision, original_amount: O74, refund_amount: R74, seller_compensation: S74, platform_adjustment: P74, currency: inbound.currency, reason: platReason, decided_by: decidedBy, decided_at: data.decided_at || nowF }
+        const claimF = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
+          { id: inbound.id, status: 'approved' },
+          {
+            $set: { status: 'cancelled', cancellation_status: 'finalized_cancelled', cancelled_at: nowF, cancelled_by: decidedBy, platform_decision: settlement },
+            $push: { history: { at: nowF, action: 'cancellation_finalized', actor: decidedBy, note: `refund ${R74} + تعويض ${S74} + منصة ${P74} = ${O74} ${inbound.currency}` } },
+          },
+        )
+        if (!claimF) return ok({ received: true, note: 'تم التنفيذ مسبقاً — لا أثر مزدوج' })
+        // 1) seats released exactly once + relist logic
+        await db.collection('packages').updateOne({ id: inbound.package_id, tenant_id: inbound.tenant_id }, { $inc: { 'meraaj.seats_sold': -inbound.seats } })
+        await meraajAutoListing(db, inbound.tenant_id, inbound.package_id)
+        await maybeEmitMeraajInventory(db, inbound.tenant_id, inbound.package_id)
+        // 2) package_booking soft-cancel (audit retained)
+        let accountingApplied = false, accountingNote = null, cKept = 0
+        if (inbound.booking_id) {
+          await db.collection('package_bookings').updateOne({ id: inbound.booking_id, tenant_id: inbound.tenant_id }, { $set: { status: 'cancelled', cancelled_at: nowF, cancel_source: 'meraaj_escrow_finalized' } })
+          // 3) SETTLEMENT ACCOUNTING — idempotency belt: one settlement per booking, ever
+          try {
+            const T74 = inbound.tenant_id
+            const priorSet = await db.collection('journal_entries').findOne({ tenant_id: T74, ref_type: 'meraaj_escrow_settlement', ref_id: inbound.booking_id })
+            const priorRev = await db.collection('journal_entries').findOne({ tenant_id: T74, ref_type: 'package_booking_cancellation', ref_id: inbound.booking_id })
+            if (priorSet || priorRev) {
+              accountingNote = 'قيد تسوية/عكس سابق موجود لهذا الحجز — لم يُنشأ قيد مزدوج'
+            } else {
+              const origJe = await db.collection('journal_entries').findOne({ tenant_id: T74, ref_type: 'package_booking', ref_id: inbound.booking_id })
+              if (origJe && Array.isArray(origJe.lines)) {
+                // recorded supplier obligations (from the ORIGINAL entry — the only allowed source)
+                const supLines = origJe.lines.filter(l => l.party_type === 'supplier')
+                const supRecorded = +supLines.reduce((s, l) => s + ((Number(l.credit) || 0) - (Number(l.debit) || 0)), 0).toFixed(2)
+                const posCosts = r2(inbound.meraaj_cancellation_position?.actual_costs_total)
+                // RULE (approved): C_keep = min(position costs, recorded supplier obligations).
+                // Costs claimed but NOT recorded in the original JE are NEVER auto-posted —
+                // they are flagged for manual accounting review instead.
+                cKept = Math.min(posCosts, supRecorded)
+                const settleLines = []
+                let keepRemaining = cKept
+                for (const l of origJe.lines) {
+                  const amtD = Number(l.debit) || 0, amtC = Number(l.credit) || 0
+                  if (l.party_type === 'supplier') {
+                    const obligation = +(amtC - amtD).toFixed(2)
+                    const keepHere = Math.min(keepRemaining, Math.max(0, obligation))
+                    keepRemaining = +(keepRemaining - keepHere).toFixed(2)
+                    const reverseAmt = +(obligation - keepHere).toFixed(2)
+                    if (reverseAmt > 0) settleLines.push({ ...l, debit: reverseAmt, credit: 0 })
+                  } else {
+                    settleLines.push({ ...l, debit: amtC, credit: amtD }) // client + revenue: full mirror
+                  }
+                }
+                if (cKept > 0) settleLines.push({ account_code: '5101', account_name: 'مصاريف تشغيلية', party_type: 'expense', party_id: null, party_name: `خدمات منفذة لحجز معراج ملغى ${inbound.meraaj_booking_ref || ''}`, debit: cKept, credit: 0 })
+                if (S74 > 0) {
+                  const cliLine = origJe.lines.find(l => l.party_type === 'client')
+                  settleLines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cliLine?.party_id || inbound.client_id, party_name: cliLine?.party_name || inbound.client_name, debit: S74, credit: 0 })
+                  settleLines.push({ account_code: '4105', account_name: 'رسوم إلغاء واسترداد', party_type: 'revenue', party_id: null, party_name: `تعويض إلغاء معراج ${inbound.meraaj_booking_ref || ''} — قرار ${decidedBy}`, debit: 0, credit: S74 })
+                }
+                await createJournalEntry(db, T74, {
+                  date: nowF, // current OPEN period — locked periods are never touched (closed_until is always past-dated)
+                  description: `تسوية إلغاء Escrow معراج ${inbound.meraaj_booking_ref || ''} — قرار ${decidedBy}: استرداد ${R74} + تعويض ${S74} + منصة ${P74} = ${O74} ${inbound.currency}`,
+                  ref_type: 'meraaj_escrow_settlement', ref_id: inbound.booking_id, currency: origJe.currency, lines: settleLines,
+                }, { skipQuota: true }) // approved: platform-mandated signed system entry only
+                // balances: client net = -O + S ; suppliers reversed only for the NON-kept portion
+                const cliLine2 = origJe.lines.find(l => l.party_type === 'client')
+                if (cliLine2?.party_id) {
+                  const cliNet74 = +(((Number(cliLine2.debit) || 0) - (Number(cliLine2.credit) || 0))).toFixed(2)
+                  await updateBalance(db, 'clients', { id: cliLine2.party_id, tenant_id: T74 }, origJe.currency, +(S74 - cliNet74).toFixed(2))
+                }
+                let keepRem2 = cKept
+                for (const l of supLines) {
+                  const obligation = +((Number(l.credit) || 0) - (Number(l.debit) || 0)).toFixed(2)
+                  const keepHere = Math.min(keepRem2, Math.max(0, obligation))
+                  keepRem2 = +(keepRem2 - keepHere).toFixed(2)
+                  const reverseAmt = +(obligation - keepHere).toFixed(2)
+                  if (reverseAmt > 0 && l.party_id) await updateBalance(db, 'suppliers', { id: l.party_id, tenant_id: T74 }, origJe.currency, -reverseAmt)
+                }
+                accountingApplied = true
+                if (posCosts > supRecorded + 0.01) {
+                  await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id }, { $push: { history: { at: new Date(), action: 'unrecorded_costs_reported', actor: 'system', note: `المكتب صرّح بتكاليف ${posCosts} والمسجل أصلاً ${supRecorded} — الفارق يحتاج قيداً يدوياً من المحاسب` } } })
+                }
+              } else {
+                accountingNote = 'لا يوجد قيد أصلي مرتبط — لا أثر محاسبي (حجز بلا قيد)'
+              }
+            }
+          } catch (setErr) {
+            accountingNote = setErr.message || 'فشل قيد التسوية — يحتاج معالجة يدوية'
+            await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id }, { $push: { history: { at: new Date(), action: 'settlement_accounting_failed', actor: 'system', note: accountingNote } } })
+          }
+        } else {
+          accountingNote = 'لا يوجد حجز محاسبي مرتبط (booking_id فارغ)'
+        }
+        if (accountingApplied) {
+          await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id }, { $push: { history: { at: new Date(), action: 'settlement_accounting_posted', actor: 'system', note: `عكس مع الإبقاء على تكاليف منفذة ${cKept} + تعويض ${S74}` } } })
+        }
+        return ok({ received: true, decision: 'cancelled', released_seats: inbound.seats, accounting_applied: accountingApplied, kept_executed_costs: cKept, accounting_note: accountingNote })
+      }
       // v3.72 — trip route pushed from the Meraaj dashboard → stored on the package and
       // displayed in Rahaal screens (data: { package_ref, route }). Idempotent by event id.
       if (type === 'meraaj.package.route_updated') {
@@ -1631,6 +1758,8 @@ async function handleRoute(request, { params }) {
         auto_retry_last: settingsCfg?.meraaj_auto_retry_last || null,
         // v3.71 — daily WhatsApp digest reminder time ('HH:MM' or '' = disabled)
         digest_reminder_time: settingsCfg?.meraaj_digest_reminder_time || '',
+        // v3.74 — P2P/Escrow mode: cancellation authority moves to Meraaj Super Admin
+        escrow_mode: !!settingsCfg?.meraaj_escrow_mode,
       })
     }
     // v3.53 — Meraaj behavior settings (owner only): auto-approve toggle
@@ -1643,6 +1772,7 @@ async function handleRoute(request, { params }) {
       if ('auto_approve' in b) set.meraaj_auto_approve = !!b.auto_approve
       if ('reject_alert_threshold' in b) set.meraaj_reject_alert_threshold = Math.max(0, Math.min(1000, parseInt(b.reject_alert_threshold, 10) || 0))
       if ('auto_retry' in b) set.meraaj_auto_retry = !!b.auto_retry // v3.67
+      if ('escrow_mode' in b) set.meraaj_escrow_mode = !!b.escrow_mode // v3.74 — owner-controlled rollout
       if ('digest_reminder_time' in b) { // v3.71
         const t71 = String(b.digest_reminder_time || '').trim()
         if (t71 !== '' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(t71)) return bad('صيغة الوقت غير صحيحة — استخدم HH:MM (24 ساعة)')
@@ -1656,6 +1786,7 @@ async function handleRoute(request, { params }) {
         reject_alert_threshold: Number.isFinite(cfgDoc?.meraaj_reject_alert_threshold) ? cfgDoc.meraaj_reject_alert_threshold : 5,
         auto_retry: !!cfgDoc?.meraaj_auto_retry, // v3.67
         digest_reminder_time: cfgDoc?.meraaj_digest_reminder_time || '', // v3.71
+        escrow_mode: !!cfgDoc?.meraaj_escrow_mode, // v3.74
       })
     }
     // v3.53 — Lightweight pending-bookings counter (for the header notification bell)
@@ -2242,6 +2373,8 @@ async function handleRoute(request, { params }) {
     // v3.53 — logic extracted to approveMeraajInboundBooking() (shared with the optional auto-approve setting)
     const meraajApproveMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/approve$/)
     if (meraajApproveMatch && method === 'POST') {
+      // v3.74 — SERVER-SIDE RBAC (Enterprise): owner OR staff explicitly granted mod_meraaj
+      if (sess.user.role !== 'owner' && !effectivePermissions(sess.user).mod_meraaj) return bad('غير مصرح — يتطلب صلاحية متجر معراج', 403)
       // v3.73 — ATOMIC claim (status new → approving): double-click / concurrent approve safe.
       const claimA = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
         { id: meraajApproveMatch[1], tenant_id: T, status: 'new' },
@@ -2269,6 +2402,8 @@ async function handleRoute(request, { params }) {
     // v3.27 — REJECT inbound Meraaj booking: releases seats + notifies Meraaj with the reason
     const meraajRejectMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/reject$/)
     if (meraajRejectMatch && method === 'POST') {
+      // v3.74 — SERVER-SIDE RBAC (Enterprise): owner OR staff explicitly granted mod_meraaj
+      if (sess.user.role !== 'owner' && !effectivePermissions(sess.user).mod_meraaj) return bad('غير مصرح — يتطلب صلاحية متجر معراج', 403)
       const b = await request.json()
       const reason = String(b.reason || '').trim().slice(0, 300)
       if (!reason) return bad('سبب الرفض إلزامي — سيظهر للمكتب المشتري في معراج')
@@ -2303,6 +2438,12 @@ async function handleRoute(request, { params }) {
     // reversed via a mirrored Journal Entry, then booking.cancellation.approved → Meraaj.
     const cancApproveMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/cancellation\/approve$/)
     if (cancApproveMatch && method === 'POST') {
+      // v3.74 — SERVER-SIDE RBAC: financial decision → owner OR (mod_meraaj + can_refund)
+      const permsCA = effectivePermissions(sess.user)
+      if (sess.user.role !== 'owner' && !(permsCA.mod_meraaj && permsCA.can_refund)) return bad('غير مصرح — يتطلب صلاحية متجر معراج + صلاحية الاسترداد', 403)
+      // v3.74 — ESCROW MODE: the office no longer issues the FINAL cancellation decision.
+      const esCfgA = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { meraaj_escrow_mode: 1 } })
+      if (esCfgA?.meraaj_escrow_mode) return cors(NextResponse.json({ error: 'escrow_mode_active', message: 'وضع Escrow مفعل — قدّم موقف المكتب عبر مسار cancellation/position والقرار النهائي لدى إدارة معراج' }, { status: 409 }))
       const bCA = await request.json().catch(() => ({}))
       const noteCA = String(bCA.note || '').trim().slice(0, 300)
       const inbound = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
@@ -2358,6 +2499,11 @@ async function handleRoute(request, { params }) {
     // booking.cancellation.rejected → Meraaj with the reason.
     const cancRejectMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/cancellation\/reject$/)
     if (cancRejectMatch && method === 'POST') {
+      // v3.74 — SERVER-SIDE RBAC + escrow gate (same authority rules as cancellation/approve)
+      const permsCR = effectivePermissions(sess.user)
+      if (sess.user.role !== 'owner' && !(permsCR.mod_meraaj && permsCR.can_refund)) return bad('غير مصرح — يتطلب صلاحية متجر معراج + صلاحية الاسترداد', 403)
+      const esCfgR = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { meraaj_escrow_mode: 1 } })
+      if (esCfgR?.meraaj_escrow_mode) return cors(NextResponse.json({ error: 'escrow_mode_active', message: 'وضع Escrow مفعل — قدّم موقف المكتب عبر مسار cancellation/position والقرار النهائي لدى إدارة معراج' }, { status: 409 }))
       const bCR = await request.json()
       const reasonCR = String(bCR.reason || '').trim().slice(0, 300)
       if (!reasonCR) return bad('سبب رفض طلب الإلغاء إلزامي — سيظهر للمكتب المشتري')
@@ -2379,6 +2525,70 @@ async function handleRoute(request, { params }) {
         rejected_at: new Date(),
       })
       return ok({ cancellation_rejected: true, reason: reasonCR, booking_status: 'approved' })
+    }
+    // v3.74 — ESCROW P2P: the office submits its POSITION + EVIDENCE on a buyer cancellation
+    // request. NO financial/operational effect locally — the FINAL decision authority is the
+    // Meraaj Super Admin (via meraaj.booking.cancellation_finalized). Contract-frozen event:
+    // booking.cancellation.position. Available ONLY when meraaj_escrow_mode is ON.
+    const cancPositionMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/cancellation\/position$/)
+    if (cancPositionMatch && method === 'POST') {
+      const permsCP = effectivePermissions(sess.user)
+      if (sess.user.role !== 'owner' && !(permsCP.mod_meraaj && permsCP.can_refund)) return bad('غير مصرح — يتطلب صلاحية متجر معراج + صلاحية الاسترداد', 403)
+      const esCfgP = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { meraaj_escrow_mode: 1 } })
+      if (!esCfgP?.meraaj_escrow_mode) return cors(NextResponse.json({ error: 'escrow_mode_inactive', message: 'وضع Escrow غير مفعل — استخدم مساري cancellation/approve أو cancellation/reject' }, { status: 409 }))
+      const bCP = await request.json()
+      const positionVal = String(bCP.position || '').trim()
+      if (!['no_objection', 'objection'].includes(positionVal)) return bad('الموقف إلزامي: no_objection أو objection')
+      // sanitize executed services + evidence references (documents for the Super Admin decision)
+      const svcTypes = ['visa', 'ticket', 'hotel', 'transport', 'other']
+      const svcStatuses = ['issued', 'used', 'partially_used', 'refundable', 'non_refundable']
+      const services = (Array.isArray(bCP.executed_services) ? bCP.executed_services : []).slice(0, 30).map(s => ({
+        type: svcTypes.includes(s?.type) ? s.type : 'other',
+        status: svcStatuses.includes(s?.status) ? s.status : 'issued',
+        ref: String(s?.ref || '').slice(0, 120),
+        cost: Math.max(0, +(Number(s?.cost) || 0).toFixed(2)),
+        currency: String(s?.currency || '').slice(0, 8) || null,
+        note: String(s?.note || '').slice(0, 300),
+        evidence: (Array.isArray(s?.evidence) ? s.evidence : []).slice(0, 10).map(ev73 => ({
+          kind: ev73?.kind === 'file_ref' ? 'file_ref' : 'url',
+          value: String(ev73?.value || '').slice(0, 500),
+          label: String(ev73?.label || '').slice(0, 120),
+        })).filter(ev73 => ev73.value),
+      }))
+      const costsTotal = +services.reduce((s, x) => s + x.cost, 0).toFixed(2) // authoritative server-side sum
+      const notesCP = String(bCP.notes || '').slice(0, 1000)
+      const actorNameCP = sess.user.name || sess.user.email
+      const nowCP = new Date()
+      // ATOMIC single-position claim: requested → position_submitted
+      const inbound = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
+        { id: cancPositionMatch[1], tenant_id: T, status: 'approved', cancellation_status: 'requested' },
+        {
+          $set: {
+            cancellation_status: 'position_submitted',
+            meraaj_cancellation_position: { position: positionVal, executed_services: services, actual_costs_total: costsTotal, notes: notesCP, submitted_by: actorNameCP, submitted_role: sess.user.role, submitted_at: nowCP },
+          },
+          $push: { history: { at: nowCP, action: 'position_submitted', actor: actorNameCP, note: `${positionVal === 'objection' ? 'اعتراض' : 'لا اعتراض'} — تكاليف منفذة ${costsTotal}` } },
+        },
+      )
+      if (!inbound) {
+        const cur = await db.collection('meraaj_inbound_bookings').findOne({ id: cancPositionMatch[1], tenant_id: T })
+        if (!cur) return bad('الحجز الوارد غير موجود', 404)
+        return bad(cur.cancellation_status === 'position_submitted' ? 'الموقف مُقدَّم مسبقاً — بانتظار قرار إدارة معراج' : 'لا يوجد طلب إلغاء معلق على هذا الحجز', 409)
+      }
+      await emitMeraajEvent(db, T, 'booking.cancellation.position', {
+        booking_ref: inbound.meraaj_booking_ref,
+        package_ref: inbound.package_id,
+        inbound_id: inbound.id,
+        position: positionVal,
+        executed_services: services,
+        actual_costs_total: costsTotal,
+        costs_currency: inbound.currency,
+        notes: notesCP,
+        submitted_by: actorNameCP,
+        submitted_role: sess.user.role,
+        submitted_at: nowCP,
+      })
+      return ok({ position_submitted: true, position: positionVal, actual_costs_total: costsTotal, awaiting: 'meraaj_super_admin_decision' })
     }
     // v3.27 — WhatsApp sales log (Mini CRM): record every marketing message sent
     if (route === '/whatsapp-logs' && method === 'POST') {
@@ -3221,7 +3431,7 @@ async function handleRoute(request, { params }) {
       const enriched = await Promise.all(list.map(async p => {
         const [comps, books] = await Promise.all([
           db.collection('package_components').countDocuments({ tenant_id: T, package_id: p.id }),
-          db.collection('package_bookings').countDocuments({ tenant_id: T, package_id: p.id }),
+          db.collection('package_bookings').countDocuments({ tenant_id: T, package_id: p.id, status: { $ne: 'cancelled' } }), // v3.74 — cancelled = audit-only
         ])
         return { ...p, _id: undefined, components_count: comps, bookings_count: books, meraaj_pending_seats: pendingMap[p.id]?.seats || 0, meraaj_pending_count: pendingMap[p.id]?.count || 0 }
       }))
@@ -3240,7 +3450,7 @@ async function handleRoute(request, { params }) {
       if (period === 'month') { startFilter = new Date(now.getFullYear(), now.getMonth(), 1) }
       else if (period === 'year') { startFilter = new Date(now.getFullYear(), 0, 1) }
       const pkgs = await db.collection('packages').find(tf).toArray()
-      const bookingsQ = { tenant_id: T }
+      const bookingsQ = { tenant_id: T, status: { $ne: 'cancelled' } } // v3.74 — soft-cancelled bookings are audit-only, never revenue
       if (startFilter) bookingsQ.created_at = { $gte: startFilter }
       const allBookings = await db.collection('package_bookings').find(bookingsQ).toArray()
       // v3.57 — per-age tier profit: room+age lookup maps (direct pricing packages only)
@@ -5274,7 +5484,7 @@ async function handleRoute(request, { params }) {
           const pkg = await db.collection('packages').findOne({ id, tenant_id: T })
           if (!pkg) { failed++; errors.push({ id, error: 'غير موجود' }); continue }
           // Prevent delete if bookings exist
-          const bookingsCount = await db.collection('package_bookings').countDocuments({ package_id: id, tenant_id: T })
+          const bookingsCount = await db.collection('package_bookings').countDocuments({ package_id: id, tenant_id: T, status: { $ne: 'cancelled' } }) // v3.74
           if (bookingsCount > 0) { failed++; errors.push({ id, error: `يوجد ${bookingsCount} حجز مرتبط — أزلها أولاً` }); continue }
           // v3.30/v3.32 — Meraaj-listed packages: deliver package.deactivated FIRST; if delivery FAILS, skip local delete
           if (pkg.meraaj?.shared || pkg.meraaj?.registered_at) {

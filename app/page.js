@@ -9069,6 +9069,44 @@ function MeraajStoreScreen() {
       load()
     } catch (e) { toast.error(e.message) } finally { setApproving(null) }
   }
+  // v3.75 — ESCROW UI: the office submits its POSITION (executed services + costs + evidence)
+  // on a buyer cancellation request. NO local financial effect — final authority: Meraaj Super Admin.
+  const [posFor, setPosFor] = useState(null)
+  const [posVal, setPosVal] = useState('no_objection')
+  const [posServices, setPosServices] = useState([])
+  const [posNotes, setPosNotes] = useState('')
+  const [posBusy, setPosBusy] = useState(false)
+  const POS_SVC_TYPES = { visa: '🛂 تأشيرة', ticket: '✈️ تذكرة طيران', hotel: '🏨 فندق', transport: '🚌 نقل', other: '📦 أخرى' }
+  const POS_SVC_STATUSES = { issued: 'صادرة', used: 'مستخدمة', partially_used: 'مستخدمة جزئياً', refundable: 'قابلة للاسترداد', non_refundable: 'غير قابلة للاسترداد' }
+  const openPosition = (b) => { setPosFor(b); setPosVal('no_objection'); setPosServices([]); setPosNotes('') }
+  const posTotal = posServices.reduce((s, x) => s + (Number(x.cost) || 0), 0)
+  const addPosService = () => setPosServices(list => list.length >= 30 ? list : [...list, { type: 'visa', status: 'issued', ref: '', cost: '', note: '', evidence: [] }])
+  const updPosService = (i, patch) => setPosServices(list => list.map((x, idx) => idx === i ? { ...x, ...patch } : x))
+  const delPosService = (i) => setPosServices(list => list.filter((_, idx) => idx !== i))
+  const addPosEvidence = (i) => setPosServices(list => list.map((x, idx) => idx === i ? { ...x, evidence: (x.evidence || []).length >= 10 ? x.evidence : [...(x.evidence || []), { kind: 'url', value: '', label: '' }] } : x))
+  const updPosEvidence = (i, j, patch) => setPosServices(list => list.map((x, idx) => idx === i ? { ...x, evidence: (x.evidence || []).map((ev, k) => k === j ? { ...ev, ...patch } : ev) } : x))
+  const delPosEvidence = (i, j) => setPosServices(list => list.map((x, idx) => idx === i ? { ...x, evidence: (x.evidence || []).filter((_, k) => k !== j) } : x))
+  const submitPosition = async () => {
+    if (!posFor) return
+    if (posVal === 'objection' && posServices.length === 0 && !posNotes.trim()) { toast.error('عند الاعتراض أضف خدمة منفذة واحدة على الأقل أو اذكر التفاصيل في الملاحظات'); return }
+    for (const s of posServices) { if (!(Number(s.cost) >= 0)) { toast.error('تكلفة الخدمة يجب أن تكون رقماً صفراً أو أكبر'); return } }
+    setPosBusy(true)
+    try {
+      const body = {
+        position: posVal,
+        executed_services: posServices.map(s => ({
+          type: s.type, status: s.status, ref: String(s.ref || '').trim(), cost: Number(s.cost) || 0,
+          currency: posFor.currency, note: String(s.note || '').trim(),
+          evidence: (s.evidence || []).filter(ev => String(ev.value || '').trim()).map(ev => ({ kind: 'url', value: String(ev.value).trim(), label: String(ev.label || '').trim() })),
+        })),
+        notes: posNotes.trim(),
+      }
+      const r = await api(`/meraaj/inbound-bookings/${posFor.id}/cancellation/position`, { method: 'POST', body })
+      toast.success(`⚖️ قُدِّم موقف المكتب (${r.position === 'objection' ? 'اعتراض' : 'لا اعتراض'}) — تكاليف منفذة ${(r.actual_costs_total || 0).toLocaleString('en-US')} ${posFor.currency} — القرار النهائي لدى إدارة معراج`, { duration: 8000 })
+      setPosFor(null)
+      load()
+    } catch (e) { toast.error(e.message) } finally { setPosBusy(false) }
+  }
   const [activating, setActivating] = useState(false)
   const storeActive = !!config?.store_active
   const activateStore = async () => {
@@ -9100,6 +9138,21 @@ function MeraajStoreScreen() {
       await load()
     } catch (e) { toast.error(e.message) }
   }
+  // v3.75 — Escrow P2P mode toggle (owner only): final cancellation authority → Meraaj Super Admin
+  const toggleEscrow = async (val) => {
+    if (!(await askConfirm({
+      title: val ? 'تفعيل وضع Escrow (P2P)' : 'إيقاف وضع Escrow',
+      desc: val
+        ? 'عند التفعيل:\n• لن يستطيع مكتبك اعتماد أو رفض إلغاءات الحجوزات المعتمدة نهائياً\n• دورك يقتصر على تقديم «موقف المكتب»: الخدمات المنفذة + التكاليف الفعلية + روابط الأدلة\n• القرار المالي النهائي (استرداد كلي/جزئي/إبقاء) يصدر من إدارة معراج ويُنفَّذ تلقائياً بقيود تسوية محاسبية متوازنة\n\nيمكنك إيقافه في أي وقت.'
+        : 'سيعود قرار الموافقة/الرفض على طلبات إلغاء الحجوزات المعتمدة إلى مكتبك (المسار التقليدي)، ويتوقف مسار تقديم الموقف.',
+      icon: '⚖️', confirmLabel: val ? 'تفعيل وضع Escrow' : 'إيقاف الوضع',
+    }))) return
+    try {
+      const r = await api('/meraaj/settings', { method: 'POST', body: { escrow_mode: val } })
+      setConfig(c => ({ ...c, escrow_mode: r.escrow_mode }))
+      toast.success(r.escrow_mode ? '⚖️ وضع Escrow مفعّل — القرار النهائي لإلغاءات الحجوزات المعتمدة لدى إدارة معراج' : 'أُوقف وضع Escrow — عاد قرار الإلغاء لمكتبك')
+    } catch (e) { toast.error(e.message) }
+  }
   return (
     <div>
       <TopBar title="🕋 متجر معراج نتورك" subtitle="سوق B2B لبيع وشراء برامج العمرة والسياحة بين المكاتب" right={<div className="flex gap-2 items-center flex-wrap">
@@ -9115,6 +9168,16 @@ function MeraajStoreScreen() {
             <div className="text-[11px] text-slate-500 mt-0.5">عند التفعيل: أي حجز يصل من السوق يتحول فوراً لحجز فعلي بقيده المحاسبي وتظهر أسماء المسافرين مباشرة في قائمة المسجلين — دون أي ضغط يدوي.</div>
           </div>
           <Switch checked={!!config.auto_approve} onCheckedChange={toggleAutoApprove} />
+        </div>
+      )}
+      {/* v3.75 — Escrow P2P mode (owner only): cancellation authority → Meraaj Super Admin */}
+      {isOwner && config && (
+        <div className={`flex items-center justify-between gap-3 rounded-xl border-2 px-4 py-2.5 mb-4 flex-wrap ${config.escrow_mode ? 'border-indigo-300 bg-indigo-50/60' : 'border-slate-200 bg-slate-50/50'}`}>
+          <div className="min-w-0">
+            <div className="font-bold text-sm text-indigo-900">⚖️ وضع Escrow (P2P) — سلطة الإلغاء النهائية لدى إدارة معراج {config.escrow_mode ? <Badge className="bg-indigo-100 text-indigo-700 hover:bg-indigo-100 ms-1">مفعّل</Badge> : <Badge variant="outline" className="ms-1">متوقف</Badge>}</div>
+            <div className="text-[11px] text-slate-500 mt-0.5">عند التفعيل: مكتبك يقدّم «موقف المكتب» فقط على طلبات إلغاء الحجوزات المعتمدة (خدمات منفذة + تكاليف + أدلة)، والقرار المالي النهائي (استرداد كلي/جزئي/إبقاء) يصدر من إدارة معراج ويُسوّى محاسبياً تلقائياً بقيود متوازنة.</div>
+          </div>
+          <Switch checked={!!config.escrow_mode} onCheckedChange={toggleEscrow} />
         </div>
       )}
       {iframeUrl && storeActive ? (
@@ -9259,21 +9322,44 @@ function MeraajStoreScreen() {
               <TableCell className="text-xs">{fmt(b.total_price || 0, b.currency)}</TableCell>
               <TableCell className="text-[10px] text-slate-400">{b.meraaj_booking_ref || '—'}</TableCell>
               <TableCell>
-                {b.status === 'cancelled' ? <Badge className="bg-rose-100 text-rose-700" title={b.cancellation_status === 'approved' ? 'أُلغي بموافقة صاحب الباكيج على طلب المشتري' : b.cancel_reason || ''}>⛔ ملغى</Badge>
+                {b.status === 'cancelled' ? (
+                  b.cancellation_status === 'finalized_cancelled' && b.platform_decision ? (
+                    <div className="space-y-0.5">
+                      <Badge className="bg-rose-100 text-rose-700 border border-rose-300" title={b.platform_decision.reason || ''}>⚖️ ملغى بقرار معراج النهائي</Badge>
+                      <div className="text-[9px] text-slate-500 leading-4 max-w-[200px]">
+                        استرداد للمشتري {fmt(b.platform_decision.refund_amount || 0, b.currency)} • تعويض مكتبك {fmt(b.platform_decision.seller_compensation || 0, b.currency)}{(b.platform_decision.platform_adjustment || 0) > 0 ? ` • منصة ${fmt(b.platform_decision.platform_adjustment || 0, b.currency)}` : ''}
+                      </div>
+                    </div>
+                  ) : <Badge className="bg-rose-100 text-rose-700" title={b.cancellation_status === 'approved' ? 'أُلغي بموافقة صاحب الباكيج على طلب المشتري' : b.cancel_reason || ''}>⛔ ملغى</Badge>
+                )
                   : b.status === 'approved' ? (
                     b.cancellation_status === 'requested' ? (
                       <div className="space-y-1">
                         <Badge className="bg-orange-100 text-orange-700 border border-orange-300">📩 طلب إلغاء من معراج</Badge>
                         {b.cancellation_reason && <div className="text-[9px] text-slate-500 max-w-[180px]">السبب: {b.cancellation_reason}</div>}
-                        <div className="flex items-center gap-1">
-                          <Button size="sm" onClick={() => approveCancellation(b)} disabled={approving === b.id} className="h-6 px-2 text-[10px] bg-rose-600 hover:bg-rose-700 text-white">{approving === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '🗑️ موافقة على الإلغاء'}</Button>
-                          <Button size="sm" variant="outline" onClick={() => rejectCancellation(b)} disabled={approving === b.id} className="h-6 px-2 text-[10px] border-slate-300 text-slate-700 hover:bg-slate-50">🛡️ رفض الطلب</Button>
-                        </div>
+                        {config?.escrow_mode ? (
+                          <Button size="sm" onClick={() => openPosition(b)} disabled={posBusy} className="h-6 px-2 text-[10px] bg-indigo-600 hover:bg-indigo-700 text-white">⚖️ تقديم موقف المكتب</Button>
+                        ) : (
+                          <div className="flex items-center gap-1">
+                            <Button size="sm" onClick={() => approveCancellation(b)} disabled={approving === b.id} className="h-6 px-2 text-[10px] bg-rose-600 hover:bg-rose-700 text-white">{approving === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '🗑️ موافقة على الإلغاء'}</Button>
+                            <Button size="sm" variant="outline" onClick={() => rejectCancellation(b)} disabled={approving === b.id} className="h-6 px-2 text-[10px] border-slate-300 text-slate-700 hover:bg-slate-50">🛡️ رفض الطلب</Button>
+                          </div>
+                        )}
+                      </div>
+                    ) : b.cancellation_status === 'position_submitted' ? (
+                      <div className="space-y-0.5">
+                        <Badge className="bg-indigo-100 text-indigo-700 border border-indigo-300">⚖️ الموقف مُقدَّم — بانتظار قرار معراج</Badge>
+                        {b.meraaj_cancellation_position && (
+                          <div className="text-[9px] text-slate-500 leading-4" title={b.meraaj_cancellation_position.notes || ''}>
+                            {b.meraaj_cancellation_position.position === 'objection' ? '✋ اعتراض' : '🤝 لا اعتراض'} • تكاليف منفذة {fmt(b.meraaj_cancellation_position.actual_costs_total || 0, b.currency)} • {(b.meraaj_cancellation_position.executed_services || []).length} خدمة
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div className="flex items-center gap-1 flex-wrap">
                         <Badge className="bg-emerald-100 text-emerald-700">✅ معتمد</Badge>
                         {b.cancellation_status === 'rejected' && <Badge className="bg-slate-100 text-slate-500 text-[9px]" title={b.cancellation_reject_reason || ''}>🛡️ رُفض طلب إلغاء سابق</Badge>}
+                        {b.cancellation_status === 'rejected_by_platform' && <Badge className="bg-indigo-50 text-indigo-600 text-[9px] border border-indigo-200" title={b.platform_decision?.reason || ''}>🛡️ أبقت معراج الحجز</Badge>}
                       </div>
                     )
                   )
@@ -9401,6 +9487,80 @@ function MeraajStoreScreen() {
                 <div className="flex justify-end"><Button variant="outline" size="sm" onClick={() => setPassReportOpen(false)}>إغلاق</Button></div>
               </div>
             )}
+          </DialogContent>
+        </Dialog>
+      )}
+      {/* v3.75 — ESCROW: office POSITION submission dialog (evidence + executed costs) */}
+      {posFor && (
+        <Dialog open onOpenChange={() => !posBusy && setPosFor(null)}>
+          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto" onInteractOutside={e => e.preventDefault()}>
+            <DialogHeader>
+              <DialogTitle className="text-base">⚖️ تقديم موقف المكتب — إلغاء حجز «{posFor.buyer_office_name}»</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-3">
+              <div className="rounded-lg bg-indigo-50 border border-indigo-200 px-3 py-2 text-[11px] text-indigo-800 leading-5">
+                القرار المالي النهائي (استرداد كلي/جزئي/إبقاء الحجز) تصدره <b>إدارة معراج</b> بناءً على موقفك والأدلة المرفقة — لن يتغير أي شيء مالياً أو تشغيلياً في نظامك الآن.
+                <div className="mt-1 text-[10px] text-indigo-600">الحجز: {posFor.package_name} • {posFor.seats} مقاعد • {fmt(posFor.total_price || 0, posFor.currency)} • مرجع {posFor.meraaj_booking_ref || '—'}{posFor.cancellation_reason ? ` • سبب طلب الإلغاء: ${posFor.cancellation_reason}` : ''}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-black text-slate-700">موقف المكتب:</span>
+                <button onClick={() => setPosVal('no_objection')} className={`text-xs font-bold rounded-lg border-2 px-3 py-1.5 transition ${posVal === 'no_objection' ? 'border-emerald-400 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}>🤝 لا اعتراض على الإلغاء</button>
+                <button onClick={() => setPosVal('objection')} className={`text-xs font-bold rounded-lg border-2 px-3 py-1.5 transition ${posVal === 'objection' ? 'border-rose-400 bg-rose-50 text-rose-700' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}>✋ اعتراض — نُفذت خدمات وتكاليف</button>
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-black text-slate-700">الخدمات المنفذة فعلياً ({posServices.length}/30)</span>
+                  <Button size="sm" variant="outline" onClick={addPosService} disabled={posServices.length >= 30} className="h-6 text-[10px] gap-1 border-indigo-300 text-indigo-700 hover:bg-indigo-50">＋ إضافة خدمة منفذة</Button>
+                </div>
+                {posServices.length === 0 && <div className="text-[10px] text-slate-400 border border-dashed rounded-lg p-3 text-center">لم تُضف خدمات منفذة — إن كان المكتب قد أصدر تأشيرات/تذاكر أو دفع تكاليف فعلية، أضفها هنا مع الأدلة لتُحتسب في قرار معراج</div>}
+                {posServices.map((s, i) => (
+                  <div key={i} className="border rounded-lg p-2.5 bg-slate-50/60 space-y-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <select value={s.type} onChange={e => updPosService(i, { type: e.target.value })} className="h-7 text-[11px] border rounded-md px-1.5 bg-white font-bold">
+                        {Object.entries(POS_SVC_TYPES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                      </select>
+                      <select value={s.status} onChange={e => updPosService(i, { status: e.target.value })} className="h-7 text-[11px] border rounded-md px-1.5 bg-white font-bold">
+                        {Object.entries(POS_SVC_STATUSES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                      </select>
+                      <Input value={s.ref} onChange={e => updPosService(i, { ref: e.target.value })} placeholder="مرجع (رقم تأشيرة/تذكرة)" className="h-7 w-40 text-[11px] bg-white" maxLength={120} />
+                      <div className="flex items-center gap-1">
+                        <Input type="number" min="0" step="0.01" value={s.cost} onChange={e => updPosService(i, { cost: e.target.value })} placeholder="التكلفة" className="h-7 w-24 text-[11px] bg-white font-bold" dir="ltr" />
+                        <span className="text-[10px] font-bold text-slate-400">{posFor.currency}</span>
+                      </div>
+                      <button onClick={() => delPosService(i)} className="text-rose-500 hover:text-rose-700 text-xs font-black px-1 mr-auto" title="حذف الخدمة">✕</button>
+                    </div>
+                    <Input value={s.note} onChange={e => updPosService(i, { note: e.target.value })} placeholder="ملاحظة على الخدمة (اختياري)" className="h-7 text-[11px] bg-white" maxLength={300} />
+                    <div className="space-y-1">
+                      {(s.evidence || []).map((ev, j) => (
+                        <div key={j} className="flex items-center gap-1.5">
+                          <Input value={ev.value} onChange={e => updPosEvidence(i, j, { value: e.target.value })} placeholder="https://... رابط الدليل (صورة تأشيرة/إيصال)" dir="ltr" className="h-7 flex-1 text-[10px] font-mono bg-white" maxLength={500} />
+                          <Input value={ev.label} onChange={e => updPosEvidence(i, j, { label: e.target.value })} placeholder="وصف الدليل" className="h-7 w-32 text-[10px] bg-white" maxLength={120} />
+                          <button onClick={() => delPosEvidence(i, j)} className="text-rose-400 hover:text-rose-600 text-xs px-1">✕</button>
+                        </div>
+                      ))}
+                      <button onClick={() => addPosEvidence(i)} disabled={(s.evidence || []).length >= 10} className="text-[10px] font-bold text-indigo-600 hover:underline disabled:opacity-40">🔗 إضافة رابط دليل ({(s.evidence || []).length}/10)</button>
+                    </div>
+                  </div>
+                ))}
+                {posServices.length > 0 && (
+                  <div className="flex items-center justify-between rounded-lg bg-amber-50 border border-amber-200 px-3 py-1.5">
+                    <span className="text-[11px] font-black text-amber-800">إجمالي التكاليف المنفذة (يُحتسب نهائياً في الخادم):</span>
+                    <span className="text-sm font-black text-amber-900" dir="ltr">{posTotal.toLocaleString('en-US')} {posFor.currency}</span>
+                  </div>
+                )}
+              </div>
+              <div>
+                <Label className="text-xs font-black text-slate-700">ملاحظات لإدارة معراج (اختياري)</Label>
+                <Textarea value={posNotes} onChange={e => setPosNotes(e.target.value.slice(0, 1000))} rows={2} placeholder="أي تفاصيل إضافية تدعم موقف المكتب..." className="mt-1 text-xs" />
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <Button variant="outline" size="sm" onClick={() => setPosFor(null)} disabled={posBusy}>إلغاء</Button>
+                <Button size="sm" onClick={submitPosition} disabled={posBusy} className="gap-1 bg-indigo-600 hover:bg-indigo-700 text-white">
+                  {posBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : '⚖️'} تقديم الموقف لإدارة معراج
+                </Button>
+              </div>
+              <div className="text-[10px] text-slate-400 text-center">بعد التقديم لا يمكن تعديل الموقف — بانتظار قرار إدارة معراج النهائي الذي سيُنفَّذ تلقائياً</div>
+            </div>
           </DialogContent>
         </Dialog>
       )}
