@@ -92,6 +92,52 @@ const DocDateInput = ({ value, onChange, ...props }) => (
   }} {...props} />
 )
 
+// v3.81 — unified booking-document URL: everything streams same-origin through the proxy
+// (works for locally-stored AND external Meraaj signed docs → reliable preview + print)
+const bookingDocUrl = (d) => d.viewer_url || `/api/document-proxy/${d.id}`
+// v3.81 — PROFESSIONAL DOCUMENT VIEWER: inline passport/visa/evidence preview (image or PDF),
+// print, download, open-in-tab and prev/next navigation across the booking's documents.
+const DocViewer = ({ docs, index, onClose, onNav }) => {
+  const d = docs[index]
+  if (!d) return null
+  const url = bookingDocUrl(d)
+  const isImg = (d.content_type || '').startsWith('image/')
+  const printDoc = () => {
+    const fr = document.createElement('iframe')
+    fr.style.position = 'fixed'; fr.style.right = '-10000px'; fr.style.bottom = '-10000px'
+    fr.src = url
+    fr.onload = () => { try { fr.contentWindow.focus(); fr.contentWindow.print() } catch { window.open(url, '_blank') } setTimeout(() => fr.remove(), 60000) }
+    document.body.appendChild(fr)
+  }
+  const downloadDoc = () => { const a = document.createElement('a'); a.href = url; a.download = d.filename || 'document'; document.body.appendChild(a); a.click(); a.remove() }
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/80 flex flex-col" dir="rtl">
+      <div className="flex items-center gap-2 px-4 py-2.5 bg-slate-900 text-white flex-wrap shrink-0">
+        <span className="font-bold text-sm truncate max-w-[38vw]" dir="ltr">{d.filename || d.label || 'مستند'}</span>
+        {d.registrant_name && <span className="text-[11px] text-slate-300">👤 {d.registrant_name}</span>}
+        {d.passport_no && <span className="text-[11px] font-mono text-amber-300" dir="ltr">🛂 {d.passport_no}</span>}
+        {docs.length > 1 && <span className="text-[10px] text-slate-400 font-mono" dir="ltr">{index + 1} / {docs.length}</span>}
+        <div className="flex-1" />
+        <button onClick={printDoc} className="h-8 px-3 rounded-md bg-slate-700 hover:bg-slate-600 text-xs font-bold">🖨️ طباعة</button>
+        <button onClick={downloadDoc} className="h-8 px-3 rounded-md bg-slate-700 hover:bg-slate-600 text-xs font-bold">⬇️ تنزيل</button>
+        <button onClick={() => window.open(url, '_blank')} className="h-8 px-3 rounded-md bg-slate-700 hover:bg-slate-600 text-xs font-bold">↗️ تبويب</button>
+        <button onClick={onClose} className="h-8 px-3 rounded-md bg-rose-600 hover:bg-rose-500 text-xs font-black">✕ إغلاق</button>
+      </div>
+      <div className="flex-1 relative overflow-auto flex items-center justify-center p-4" onClick={onClose}>
+        <div onClick={e => e.stopPropagation()} className="w-full h-full flex items-center justify-center">
+          {isImg
+            ? <img src={url} alt={d.filename || 'مستند'} className="max-w-full max-h-full object-contain rounded-lg shadow-2xl bg-white" />
+            : <iframe src={url} title={d.filename || 'document'} className="w-full h-full rounded-lg bg-white" />}
+        </div>
+        {docs.length > 1 && (<>
+          <button onClick={e => { e.stopPropagation(); onNav((index + 1) % docs.length) }} title="التالي" className="absolute left-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 hover:bg-white text-slate-800 font-black shadow-lg">‹</button>
+          <button onClick={e => { e.stopPropagation(); onNav((index - 1 + docs.length) % docs.length) }} title="السابق" className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 hover:bg-white text-slate-800 font-black shadow-lg">›</button>
+        </>)}
+      </div>
+    </div>
+  )
+}
+
 // v3.2 — WhatsApp helpers
 // Normalizes a phone: keeps digits only. If starts with 0, replaces with default country code (967 Yemen).
 // If no country code present (< 12 chars) and starts with 5/7 (SA/YE mobile), prefixes 966/967.
@@ -383,6 +429,7 @@ function OfficeVerificationCard() {
   }
   const st = ver?.status || 'unverified'
   const badge = VER_BADGE[st] || VER_BADGE.unverified
+  const [verViewer, setVerViewer] = useState(null) // v3.81 — professional viewer for office docs
   return (
     <Card className="mt-4">
       <CardHeader className="pb-2">
@@ -420,12 +467,13 @@ function OfficeVerificationCard() {
                 <span className="font-bold">{(DOC_TYPE_LABELS[d.doc_type] || DOC_TYPE_LABELS.other)}</span>
                 <span className="text-slate-500 truncate flex-1" dir="ltr">{d.filename}</span>
                 <span className="text-[9px] text-slate-400">{((d.size || 0) / 1024).toFixed(0)}KB • {fmtDate(d.uploaded_at)}</span>
-                <button onClick={() => window.open(`/api/office/verification/documents/${d.id}/download`, '_blank')} className="text-indigo-600 hover:underline text-[10px] font-bold">عرض</button>
+                <button onClick={() => { const list = (ver.documents || []).map(x => ({ ...x, viewer_url: `/api/office/verification/documents/${x.id}/download` })); setVerViewer({ docs: list, index: list.findIndex(x => x.id === d.id) }) }} className="text-indigo-600 hover:underline text-[10px] font-bold">👁️ عرض</button>
                 {isOwner && st !== 'verified' && <button onClick={() => delDoc(d)} className="text-rose-500 hover:text-rose-700 text-xs font-black px-1" title="حذف">✕</button>}
               </div>
             ))}
           </div>
         )}
+        {verViewer && <DocViewer docs={verViewer.docs} index={verViewer.index} onClose={() => setVerViewer(null)} onNav={i => setVerViewer(v => ({ ...v, index: i }))} />}
       </CardContent>
     </Card>
   )
@@ -9307,23 +9355,41 @@ function MeraajStoreScreen() {
   const BK_DOC_LABELS = { passport: '🛂 جواز', visa: '📄 تأشيرة', other: '📎 آخر' }
   const loadDocs = async (b) => { try { const r = await api(`/meraaj/inbound-bookings/${b.id}/documents`); setDocsList(r.documents || []) } catch (e) { toast.error(e.message) } }
   const openDocs = (b) => { setDocsFor(b); setDocsList([]); setDocReg(0); setDocTypeB('passport'); loadDocs(b) }
-  const uploadBookingDoc = async (file) => {
-    if (!file || !docsFor) return
-    if (!DOC_OK_TYPES.includes(file.type)) { toast.error('المسموح: PDF / JPG / PNG / WEBP فقط'); return }
-    if (file.size > 4 * 1024 * 1024) { toast.error('الحد الأقصى لحجم الملف 4MB'); return }
-    setDocsBusy(true)
-    try {
-      const file_base64 = await readFileB64(file)
-      await api(`/meraaj/inbound-bookings/${docsFor.id}/documents`, {
-        method: 'POST',
-        body: { context: 'traveler', registrant_index: docReg, doc_type: docTypeB, label: file.name, filename: file.name, content_type: file.type, file_base64 },
-      })
-      toast.success('📤 رُفع مستند المسافر')
-      loadDocs(docsFor)
-    } catch (e) { toast.error(e.message) } finally { setDocsBusy(false) }
-  }
   const delBookingDoc = async (d) => {
     try { await api(`/meraaj/booking-documents/${d.id}`, { method: 'DELETE' }); toast.success('حُذف المستند'); loadDocs(docsFor) } catch (e) { toast.error(e.message) }
+  }
+  // v3.81 — professional viewer + multi-file upload with progress
+  const [docViewer, setDocViewer] = useState(null) // { docs, index }
+  const openDocViewer = (list, idx) => setDocViewer({ docs: list, index: idx })
+  const [docPendingFiles, setDocPendingFiles] = useState([])
+  const [docUploadProgress, setDocUploadProgress] = useState(null) // { done, total, name }
+  const selectBookingDocs = async (fileList) => {
+    if (!docsFor) return
+    const files = Array.from(fileList || [])
+    const valid = []
+    for (const f of files) {
+      if (!DOC_OK_TYPES.includes(f.type)) { toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`); continue }
+      if (f.size > 4 * 1024 * 1024) { toast.error(`${f.name}: الحد الأقصى 4MB`); continue }
+      valid.push(f)
+    }
+    if (valid.length === 0) return
+    setDocPendingFiles(valid.map(f => f.name))
+    setDocsBusy(true)
+    let okCount = 0
+    for (let i = 0; i < valid.length; i++) {
+      const f = valid[i]
+      setDocUploadProgress({ done: i, total: valid.length, name: f.name })
+      try {
+        const file_base64 = await readFileB64(f)
+        await api(`/meraaj/inbound-bookings/${docsFor.id}/documents`, {
+          method: 'POST',
+          body: { context: 'traveler', registrant_index: docReg, doc_type: docTypeB, label: f.name, filename: f.name, content_type: f.type, file_base64 },
+        })
+        okCount++
+      } catch (e) { toast.error(`${f.name}: ${e.message}`) }
+    }
+    setDocUploadProgress(null); setDocPendingFiles([]); setDocsBusy(false)
+    if (okCount > 0) { toast.success(`📤 رُفع ${okCount} من ${valid.length} مستند`); loadDocs(docsFor) }
   }
   const [activating, setActivating] = useState(false)
   const storeActive = !!config?.store_active
@@ -9780,7 +9846,7 @@ function MeraajStoreScreen() {
                         ev.kind === 'file_ref' ? (
                           <div key={j} className="flex items-center gap-1.5 rounded-md bg-indigo-50 border border-indigo-200 px-2 py-1">
                             <span className="text-[10px] font-bold text-indigo-700 truncate flex-1">📎 {ev.label || 'ملف دليل'}</span>
-                            <button onClick={() => window.open(`/api/meraaj/booking-documents/${ev.value}/download`, '_blank')} className="text-[10px] font-bold text-indigo-600 hover:underline">عرض</button>
+                            <button onClick={() => openDocViewer([{ id: ev.value, filename: ev.label || 'دليل', content_type: '' }], 0)} className="text-[10px] font-bold text-indigo-600 hover:underline">👁️ عرض</button>
                             <button onClick={() => delPosEvidence(i, j)} className="text-rose-400 hover:text-rose-600 text-xs px-1">✕</button>
                           </div>
                         ) : (
@@ -9841,10 +9907,22 @@ function MeraajStoreScreen() {
                   <option value="other">📎 مستند آخر</option>
                 </select>
                 <label className={`h-8 inline-flex items-center gap-1.5 text-xs font-bold border rounded-md px-3 cursor-pointer bg-white hover:bg-slate-100 ${docsBusy ? 'opacity-50 pointer-events-none' : ''}`}>
-                  {docsBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستند للمسافر
-                  <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) uploadBookingDoc(f); e.target.value = '' }} />
+                  {docsBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستندات (متعدد)
+                  <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) selectBookingDocs(e.target.files); e.target.value = '' }} />
                 </label>
-                <span className="text-[9px] text-slate-400 w-full">PDF / JPG / PNG / WEBP — حتى 4MB — مرتبط بـ booking_ref والمسافر المحدد</span>
+                <span className="text-[9px] text-slate-400 w-full">PDF / JPG / PNG / WEBP — حتى 4MB لكل ملف — يمكن اختيار عدة ملفات دفعة واحدة — مرتبطة بـ booking_ref والمسافر المحدد</span>
+                {docUploadProgress && (
+                  <div className="w-full space-y-1">
+                    <div className="flex items-center justify-between text-[10px] text-slate-500">
+                      <span className="truncate max-w-[60%]" dir="ltr">{docUploadProgress.name}</span>
+                      <span className="font-mono" dir="ltr">{docUploadProgress.done + 1} / {docUploadProgress.total}</span>
+                    </div>
+                    <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                      <div className="h-full bg-indigo-500 rounded-full transition-all" style={{ width: `${Math.round(((docUploadProgress.done + 0.5) / docUploadProgress.total) * 100)}%` }} />
+                    </div>
+                    {docPendingFiles.length > 1 && <div className="text-[9px] text-slate-400 truncate" dir="ltr">{docPendingFiles.join(' • ')}</div>}
+                  </div>
+                )}
               </div>
               {docsList.length === 0 ? (
                 <div className="text-[11px] text-slate-400 border border-dashed rounded-lg p-4 text-center">لا مستندات بعد — مستندات المشتري القادمة من معراج تظهر هنا تلقائياً، ويمكن لمكتبك رفع مستندات المسافرين وأدلة الإلغاء</div>
@@ -9857,7 +9935,7 @@ function MeraajStoreScreen() {
                       <span className="text-slate-400 truncate flex-1" dir="ltr">{d.filename || d.label || d.external_url || '—'}</span>
                       <Badge className={d.source === 'meraaj' ? 'bg-purple-100 text-purple-700 text-[9px]' : 'bg-slate-100 text-slate-600 text-[9px]'}>{d.source === 'meraaj' ? 'من معراج' : 'من المكتب'}</Badge>
                       <span className="text-[9px] text-slate-400">{d.size ? `${(d.size / 1024).toFixed(0)}KB` : ''} {fmtDate(d.uploaded_at)}</span>
-                      <button onClick={() => window.open(d.external_url || `/api/meraaj/booking-documents/${d.id}/download`, '_blank')} className="text-indigo-600 hover:underline text-[10px] font-bold">عرض</button>
+                      <button onClick={() => openDocViewer(docsList, docsList.indexOf(d))} className="text-indigo-600 hover:underline text-[10px] font-bold">👁️ عرض</button>
                       {d.source !== 'meraaj' && <button onClick={() => delBookingDoc(d)} className="text-rose-500 hover:text-rose-700 text-xs font-black px-1" title="حذف">✕</button>}
                     </div>
                   ))}
@@ -9868,6 +9946,8 @@ function MeraajStoreScreen() {
           </DialogContent>
         </Dialog>
       )}
+      {/* v3.81 — professional document viewer overlay */}
+      {docViewer && <DocViewer docs={docViewer.docs} index={docViewer.index} onClose={() => setDocViewer(null)} onNav={i => setDocViewer(v => ({ ...v, index: i }))} />}
       {view === 'events' && (
         events.length === 0 ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">لا توجد أحداث مزامنة بعد — تُسجل هنا كل التحديثات الصادرة لمعراج (Outbox)</CardContent></Card> : (
           <Card><CardContent className="p-0"><Table>

@@ -102,3 +102,8 @@ See /app/memory/test_credentials.md
 - NOT restricted (intentionally): travel_date, entry_date, exit_date, visa expiry, package start/end, max_exit_date.
 - Frontend (page.js): DocDateInput component (max=todayISO + toast) used ONLY on issue/voucher/journal/bulk-change date fields (10 sites).
 - Backend-tested: 7/7 core cases passed. Known PRE-EXISTING issue (not v3.80): tickets bulk-edit newBody omits passenger_phone → ticket bulk edits fail with «رقم الجوال مطلوب».
+
+## v3.81 — Document Viewer Restore + v3.80b Bulk-edit Fix (2026-08)
+- GET /api/document-proxy/:docId (tenant-authed): same-origin streaming of booking_documents — local via docStorageGet, external_url via server fetch (15s timeout, 20MB cap). Audit 'viewed' via proxy/proxy_external. Backend-tested 6/6.
+- FE: bookingDocUrl helper + DocViewer professional viewer (img/PDF preview, print via hidden iframe, download, open-in-tab, prev/next) wired in: booking docs dialog, cancellation evidence links, office verification docs. Multi-file upload: selectBookingDocs + docPendingFiles + docUploadProgress bar (sequential, per-file validation). Docs dialog scroll unchanged (max-h-[85vh] overflow-y-auto).
+- v3.80b: bulk-edit newBody now copies passenger_phone/whatsapp/phone AND beneficiary_name/phone/whatsapp with fallback beneficiary_* || passenger_* (visas VALIDATE beneficiary_* but STORE passenger_*). Tickets + visas bulk-edit both verified working; future-date rejection intact.
