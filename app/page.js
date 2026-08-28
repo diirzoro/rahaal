@@ -82,6 +82,15 @@ const readFileB64 = (file) => new Promise((res, rej) => { const r = new FileRead
 const DOC_OK_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
 const fmtTime = (d) => d ? new Date(d).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' }) : '—'
 const todayISO = () => new Date().toISOString().slice(0, 10)
+// v3.80 — UNIFIED document-date input: never accepts a future date (issue/voucher/journal dates).
+// Travel & service dates keep using the plain date input (future allowed).
+const DocDateInput = ({ value, onChange, ...props }) => (
+  <Input type="date" max={todayISO()} value={value} onChange={e => {
+    const v = e.target.value
+    if (v && v > todayISO()) { toast.error('لا يمكن أن يكون تاريخ المستند بعد تاريخ اليوم'); return }
+    onChange(v)
+  }} {...props} />
+)
 
 // v3.2 — WhatsApp helpers
 // Normalizes a phone: keeps digits only. If starts with 0, replaces with default country code (967 Yemen).
@@ -2414,7 +2423,7 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" dir="rtl">
           <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><div className="w-9 h-9 rounded-lg grad-brand flex items-center justify-center"><Plane className="w-4 h-4 text-white -rotate-45" /></div>{isEdit ? '✏️ تعديل تذكرة' : 'حجز تذكرة جديدة'}</DialogTitle><DialogDescription>{isEdit ? 'سيتم عكس القيد المحاسبي القديم وإعادة الترحيل بالقيم الجديدة تلقائياً — دون خصم من حصة القيود' : 'سيتم إنشاء قيد يومية تلقائي — نقد (خصم من الصندوق) أو آجل (على حساب القبض)'}</DialogDescription></DialogHeader>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-2">
-            <Field label="تاريخ الحركة"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
+            <Field label="تاريخ الحركة"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
             <Field label="نوع العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="سعر الصرف"><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
             <Field label="اسم المورد 🔍" required>
@@ -3883,7 +3892,7 @@ function BulkEditDialog({ open, onOpenChange, kind, ids, suppliers, boxes, onDon
                 <input type="checkbox" checked={changeDate} onChange={e => setChangeDate(e.target.checked)} className="w-4 h-4 accent-blue-600" />
                 <span className="font-bold text-sm">تغيير التاريخ</span>
               </label>
-              {changeDate && <Input type="date" value={newDate} onChange={e => setNewDate(e.target.value)} className="mt-2" />}
+              {changeDate && <DocDateInput value={newDate} onChange={v => setNewDate(v)} className="mt-2" />}
             </div>
             {/* Payment */}
             <div className={`p-3 rounded-lg border-2 ${changePayment ? 'border-blue-400 bg-blue-50' : 'border-slate-200 bg-slate-50'}`}>
@@ -4169,7 +4178,7 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" dir="rtl">
           <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><div className="w-9 h-9 rounded-lg grad-green flex items-center justify-center"><FileBadge2 className="w-4 h-4 text-white" /></div>{isEdit ? '✏️ تعديل خدمة / تأشيرة' : 'خدمة / تأشيرة جديدة'}</DialogTitle>{isEdit && <DialogDescription>سيتم عكس القيد المحاسبي القديم وإعادة الترحيل تلقائياً — دون خصم من الحصة</DialogDescription>}</DialogHeader>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
+            <Field label="التاريخ"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
             <Field label="نوع الخدمة"><Select value={form.service_type} onValueChange={v => setForm({ ...form, service_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{VISA_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="المورد 🔍" required><AccountAutocomplete type="supplier" value={form.supplier_id || null} onChange={(sel) => setForm({ ...form, supplier_id: sel?.id || '' })} placeholder="ابحث عن المورد بالاسم أو الكود..." /></Field>
@@ -4503,7 +4512,7 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
           {isEdit && <DialogDescription>سيتم عكس القيد المحاسبي القديم وإعادة الترحيل تلقائياً — دون خصم من الحصة</DialogDescription>}
         </DialogHeader>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
+          <Field label="التاريخ"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
           <Field label="نوع الخدمة">
             <Select value={form.service_type} onValueChange={v => setForm({ ...form, service_type: v })}>
               <SelectTrigger><SelectValue /></SelectTrigger>
@@ -4790,7 +4799,7 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
       <DialogContent className="max-w-2xl" dir="rtl">
         <DialogHeader><DialogTitle>{isEdit ? `✏️ تعديل ${mode === 'receipt' ? 'سند قبض' : 'سند صرف'}` : (mode === 'receipt' ? 'سند قبض جديد' : 'سند صرف جديد')}</DialogTitle>{isEdit && <DialogDescription>سيتم عكس القيد المحاسبي القديم وإعادة الترحيل بالقيم الجديدة تلقائياً</DialogDescription>}</DialogHeader>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
+          <Field label="التاريخ"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
           <Field label="نوع الطرف"><Select value={form.party_type} onValueChange={v => setForm({ ...form, party_type: v, party_id: '', coa_account_code: '' })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="client">عميل</SelectItem><SelectItem value="supplier">مورد</SelectItem>{mode === 'payment' && <SelectItem value="expense">مصروف</SelectItem>}{mode === 'receipt' && <SelectItem value="revenue">إيراد</SelectItem>}</SelectContent></Select></Field>
           {form.party_type === 'expense' || form.party_type === 'revenue' ? (
             <div className="md:col-span-1">
@@ -5988,7 +5997,7 @@ function VisaMonitorDialog({ open, onOpenChange, record, countries, onSaved }) {
           <div className="text-xs font-bold text-slate-500 border-b pb-1">🛂 التأشيرة والمستضيف</div>
           <div className="grid grid-cols-3 gap-3">
             <Field label="رقم التأشيرة" required><Input value={form.visa_no} onChange={e => setForm({ ...form, visa_no: e.target.value })} className="font-mono" /></Field>
-            <Field label="تاريخ إصدار التأشيرة" required><Input type="date" value={form.visa_issue_date} onChange={e => setForm({ ...form, visa_issue_date: e.target.value })} /></Field>
+            <Field label="تاريخ إصدار التأشيرة" required><DocDateInput value={form.visa_issue_date} onChange={v => setForm({ ...form, visa_issue_date: v })} /></Field>
             <Field label="نوع التأشيرة">
               <Select value={form.visa_type} onValueChange={v => setForm({ ...form, visa_type: v })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
@@ -12019,7 +12028,7 @@ function SendToMonitorDialog({ booking, pkg, onClose }) {
             <Field label="اسم الوكيل / المكتب" required><Input value={f.agent_name} onChange={e => setF({ ...f, agent_name: e.target.value })} /></Field>
             <Field label="واتساب الوكيل" required><Input dir="ltr" value={f.agent_phone} onChange={e => setF({ ...f, agent_phone: e.target.value })} placeholder="9677XXXXXXXX" className="font-mono" /></Field>
             <Field label="تاريخ الدخول" required><Input type="date" value={f.entry_date} onChange={e => setF({ ...f, entry_date: e.target.value })} /></Field>
-            <Field label="تاريخ إصدار التأشيرة"><Input type="date" value={f.visa_issue_date} onChange={e => setF({ ...f, visa_issue_date: e.target.value })} /></Field>
+            <Field label="تاريخ إصدار التأشيرة"><DocDateInput value={f.visa_issue_date} onChange={v => setF({ ...f, visa_issue_date: v })} /></Field>
             <Field label="مدة الإقامة (يوم)"><Input type="number" min="1" value={f.allowed_days} onChange={e => setF({ ...f, allowed_days: e.target.value })} className="font-bold" /></Field>
           </div>
           <div className="text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded p-2">💡 سيبدأ العدّاد الآلي فوراً (🟢/🟡/🔴/⚫) وتظهر أزرار واتساب الوكيل في مركز المراقبة ولوحة التحكم.</div>
@@ -13213,7 +13222,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-2">
-          <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
+          <Field label="التاريخ"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
           <Field label="العملة" required><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="المبلغ" required><Input type="number" min="0" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
           <Field label="سعر الصرف" required><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} className="text-lg font-bold" /></Field>
@@ -13383,7 +13392,7 @@ function ManualJournalDialog({ open, onOpenChange, onSaved, record }) {
         {mode === 'single' ? (
           <div className="space-y-3">
             <div className="grid grid-cols-3 gap-3">
-              <Field label="التاريخ"><Input type="date" value={singleForm.date} onChange={e => setSingleForm({ ...singleForm, date: e.target.value })} /></Field>
+              <Field label="التاريخ"><DocDateInput value={singleForm.date} onChange={v => setSingleForm({ ...singleForm, date: v })} /></Field>
               <Field label="العملة"><Select value={singleForm.currency} onValueChange={v => setSingleForm({ ...singleForm, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
               <Field label="البيان"><Input value={singleForm.description} onChange={e => setSingleForm({ ...singleForm, description: e.target.value })} placeholder="سبب القيد" /></Field>
             </div>
@@ -13418,7 +13427,7 @@ function ManualJournalDialog({ open, onOpenChange, onSaved, record }) {
         ) : (
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
-              <Field label="التاريخ"><Input type="date" value={dualForm.date} onChange={e => setDualForm({ ...dualForm, date: e.target.value })} /></Field>
+              <Field label="التاريخ"><DocDateInput value={dualForm.date} onChange={v => setDualForm({ ...dualForm, date: v })} /></Field>
               <Field label="البيان"><Input value={dualForm.description} onChange={e => setDualForm({ ...dualForm, description: e.target.value })} placeholder="مصارفة / تسوية" /></Field>
             </div>
             <div className="grid grid-cols-2 gap-4">

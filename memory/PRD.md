@@ -95,3 +95,10 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 
 ## Test Credentials
 See /app/memory/test_credentials.md
+
+## v3.80 — Future Document/Accounting Date Rule (2026-08)
+- RULE: document/accounting dates can NEVER be in the future (date-only, UTC+3 business timezone). Arabic error: «لا يمكن أن يكون تاريخ المستند بعد تاريخ اليوم».
+- Backend guards (route.js): top of createTicket/createVisa/createService/createVoucher/createFx/createManualJournal (covers POST + PUT since PUT re-creates; PUT has v3.78 restore-on-error). EARLY guards: bulk-edit (before destructive loop) + PUT /journal-entries/:id (no restore mechanism there). Visa-monitor visa_issue_date guarded on create/update/import.
+- NOT restricted (intentionally): travel_date, entry_date, exit_date, visa expiry, package start/end, max_exit_date.
+- Frontend (page.js): DocDateInput component (max=todayISO + toast) used ONLY on issue/voucher/journal/bulk-change date fields (10 sites).
+- Backend-tested: 7/7 core cases passed. Known PRE-EXISTING issue (not v3.80): tickets bulk-edit newBody omits passenger_phone → ticket bulk edits fail with «رقم الجوال مطلوب».

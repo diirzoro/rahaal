@@ -423,6 +423,23 @@ async function ensureReferralCode(db, tenantId) {
 }
 
 // ================= Helpers =================
+// v3.80 — UNIFIED RULE: document/accounting dates can NEVER be in the future.
+// Applies to: ticket/visa/service issue date, receipt/payment voucher date, FX date,
+// manual journal date, visa-monitor issue date, bulk date edits.
+// Travel/service dates (travel_date, entry_date, expected_exit_date, package start/end,
+// visa expiry, ...) are intentionally NOT restricted.
+// Date-only comparison in business timezone UTC+3 (KSA/Yemen) to avoid midnight edge cases.
+const FUTURE_DOC_DATE_MSG = 'لا يمكن أن يكون تاريخ المستند بعد تاريخ اليوم'
+function isFutureDocDate(dateVal) {
+  if (!dateVal) return false
+  const d = new Date(dateVal)
+  if (isNaN(d.getTime())) return false
+  const BIZ_TZ_MS = 3 * 3600 * 1000
+  const todayStr = new Date(Date.now() + BIZ_TZ_MS).toISOString().slice(0, 10)
+  const dStr = new Date(d.getTime() + BIZ_TZ_MS).toISOString().slice(0, 10)
+  return dStr > todayStr
+}
+
 async function updateBalance(db, col, filter, currency, delta) {
   await db.collection(col).updateOne(filter, { $inc: { [`balances.${currency}`]: delta } })
 }
@@ -5257,6 +5274,7 @@ async function handleRoute(request, { params }) {
       if (!b.agent_phone || !String(b.agent_phone).trim()) return bad('رقم جوال الوكيل (واتساب) مطلوب')
       if (!b.visa_no || !String(b.visa_no).trim()) return bad('رقم التأشيرة مطلوب')
       if (!b.visa_issue_date) return bad('تاريخ إصدار التأشيرة مطلوب')
+      if (isFutureDocDate(b.visa_issue_date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ إصدار التأشيرة)`) // v3.80
       if (!b.entry_date) return bad('تاريخ الدخول مطلوب')
       const allowedDays = Number(b.allowed_days) > 0 ? Number(b.allowed_days) : 85
       const doc = {
@@ -5302,6 +5320,7 @@ async function handleRoute(request, { params }) {
         else if (b.action === 'acknowledge') upd.status = 'acknowledged'
         else if (b.action === 'reactivate') { upd.status = 'active'; upd.actual_exit_date = null }
         else {
+          if (b.visa_issue_date !== undefined && isFutureDocDate(b.visa_issue_date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ إصدار التأشيرة)`) // v3.80
           ['traveler_name', 'phone', 'passport_no', 'nationality', 'agent_name', 'agent_phone', 'visa_no', 'visa_issue_date', 'host_name', 'entry_date', 'entry_port', 'allowed_days', 'actual_exit_date', 'exit_port', 'destination_country', 'visa_type', 'max_exit_date', 'notes'].forEach(f => { if (b[f] !== undefined) upd[f] = b[f] })
           if (upd.allowed_days !== undefined) upd.allowed_days = Number(upd.allowed_days) > 0 ? Number(upd.allowed_days) : 85
           // Recompute expected exit if entry/allowed changed
@@ -5353,6 +5372,7 @@ async function handleRoute(request, { params }) {
           if (!r.agent_phone) missing.push('جوال الوكيل')
           if (!r.visa_no) missing.push('رقم التأشيرة')
           if (!r.visa_issue_date) missing.push('تاريخ الإصدار')
+          else if (isFutureDocDate(r.visa_issue_date)) missing.push('تاريخ الإصدار مستقبلي (غير مسموح)') // v3.80
           if (!r.entry_date) missing.push('تاريخ الدخول')
           if (missing.length) { skipped++; skipReasons.push(`${passport}: ينقصه ${missing.join('، ')}`); continue }
           const allowedDays = Number(r.allowed_days) > 0 ? Number(r.allowed_days) : 85
@@ -6082,6 +6102,8 @@ async function handleRoute(request, { params }) {
       const allowed = ['supplier_id', 'date', 'payment_method', 'box_id', 'currency', 'exchange_rate']
       const changeKeys = Object.keys(changes).filter(k => allowed.includes(k) && changes[k] !== undefined && changes[k] !== null && changes[k] !== '')
       if (changeKeys.length === 0) return bad('لم يتم تحديد أي تغيير')
+      // v3.80 — reject future doc date EARLY (before the destructive reverse+delete+recreate loop)
+      if (changes.date && isFutureDocDate(changes.date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ المستند)`)
       let updated = 0, failed = 0
       const errors = []
       for (const docId of ids) {
@@ -6200,6 +6222,9 @@ async function handleRoute(request, { params }) {
       const oldJe = await db.collection('journal_entries').findOne({ id: jeId, tenant_id: T })
       if (!oldJe) return bad('القيد غير موجود', 404)
       if (!['manual', 'manual_dual'].includes(oldJe.ref_type)) return bad('لا يمكن تعديل قيود المعاملات مباشرةً — عدّل السجل المرتبط', 400)
+      // v3.80 — reject future doc date EARLY (this handler deletes the old JE before re-creating,
+      // with no restore-on-error mechanism — validating here prevents data loss)
+      if (isFutureDocDate(b.date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ القيد)`)
       // Reverse old effects
       await reverseManualJournalEffects(db, T, oldJe)
       await db.collection('journal_entries').deleteOne({ id: jeId })
@@ -7223,6 +7248,7 @@ async function meraajLinkOfficeAPI(db, T, payload) {
 
 // ================= Business logic =================
 async function createTicket(db, T, b, opts = {}) {
+  if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ إصدار التذكرة)` } // v3.80
   if (!b.supplier_id) return { error: 'المورد مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   // v3.10.2 — Strict validation for mandatory ticket fields
@@ -7355,6 +7381,7 @@ async function createTicket(db, T, b, opts = {}) {
 }
 
 async function createVisa(db, T, b, opts = {}) {
+  if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ إصدار التأشيرة)` } // v3.80
   if (!b.supplier_id) return { error: 'المورد مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   // v3.10.2 — Strict validation for mandatory visa fields
@@ -7494,6 +7521,7 @@ async function createVisa(db, T, b, opts = {}) {
 // v3.0 — Services: Dedicated dynamic-catalog service transactions (Hotels, Attestations, Transfers, etc.)
 // Uses revenue account 4103 (إيرادات خدمات إضافية). Party label = "حساب القبض" but stored the same way.
 async function createService(db, T, b, opts = {}) {
+  if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ الخدمة/المستند)` } // v3.80
   if (!b.supplier_id) return { error: 'المورد/المزود مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   // v3.9.14 — Period lock: prevent creating records in a closed year
@@ -7597,6 +7625,7 @@ async function createService(db, T, b, opts = {}) {
 }
 
 async function createVoucher(db, T, b, opts = {}) {
+  if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ السند)` } // v3.80
   if (!['receipt', 'payment'].includes(b.type)) return { error: 'نوع السند غير صالح' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   const amount = Number(b.amount) || 0
@@ -7702,6 +7731,7 @@ async function resolveAccountRef(db, T, ref) {
 }
 
 async function createFx(db, T, b, opts = {}) {
+  if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ عملية الصرافة)` } // v3.80
   if (!['buy', 'sell'].includes(b.type)) return { error: 'نوع العملية غير صالح' }
   if (!CURRENCIES.includes(b.currency) || !CURRENCIES.includes(b.counter_currency)) return { error: 'العملات غير صالحة' }
   if (b.currency === b.counter_currency) return { error: 'يجب اختيار عملتين مختلفتين' }
@@ -7780,6 +7810,7 @@ async function createFx(db, T, b, opts = {}) {
 }
 
 async function createManualJournal(db, T, b, opts = {}) {
+  if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ القيد)` } // v3.80
   // Modes:
   //  A) single: { date, currency, description, lines: [...] }
   //  B) dual:   { date, description, dual: true, debit_*, credit_* }
