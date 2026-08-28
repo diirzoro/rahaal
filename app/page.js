@@ -77,6 +77,9 @@ const CURRENCIES = ['USD', 'SAR', 'YER']
 
 const fmt = (n, c = 'USD') => `${CUR_SYMBOL[c] || ''} ${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' }) : '—'
+// v3.77 — documents upload helpers (base64 transport, MIME whitelist mirrors the server)
+const readFileB64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(file) })
+const DOC_OK_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
 const fmtTime = (d) => d ? new Date(d).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' }) : '—'
 const todayISO = () => new Date().toISOString().slice(0, 10)
 
@@ -337,6 +340,88 @@ function LoginPage({ onLogin, onBack, initialSignup }) {
 // ================================================================
 // SUPER ADMIN PANEL
 // ================================================================
+// v3.77 — OFFICE VERIFICATION (توثيق المكتب): upload license/owner-id documents, track review
+// status (unverified → pending_review → verified | rejected + reason), re-upload after rejection.
+function OfficeVerificationCard() {
+  const { user } = useAuth()
+  const isOwner = user?.role === 'owner'
+  const [ver, setVer] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [docType, setDocType] = useState('license')
+  const loadVer = useCallback(async () => { try { setVer(await api('/office/verification')) } catch { /* silent */ } }, [])
+  useEffect(() => { loadVer() }, [loadVer])
+  const VER_BADGE = {
+    unverified: { label: 'غير موثق', cls: 'bg-slate-100 text-slate-600' },
+    pending_review: { label: '⏳ قيد المراجعة', cls: 'bg-amber-100 text-amber-700' },
+    verified: { label: '✅ مكتب موثق', cls: 'bg-emerald-100 text-emerald-700' },
+    rejected: { label: '❌ مرفوض — أعد الرفع', cls: 'bg-rose-100 text-rose-700' },
+  }
+  const DOC_TYPE_LABELS = { license: '📜 السجل / الترخيص', owner_id: '🪪 هوية المالك / المسؤول', other: '📎 مستند آخر' }
+  const upload = async (file) => {
+    if (!file) return
+    if (!DOC_OK_TYPES.includes(file.type)) { toast.error('المسموح: PDF / JPG / PNG / WEBP فقط'); return }
+    if (file.size > 4 * 1024 * 1024) { toast.error('الحد الأقصى لحجم المستند 4MB'); return }
+    setBusy(true)
+    try {
+      const file_base64 = await readFileB64(file)
+      const r = await api('/office/verification/documents', { method: 'POST', body: { doc_type: docType, filename: file.name, content_type: file.type, file_base64 } })
+      toast.success(r.verification_status === 'pending_review' ? '📤 رُفع المستند — مكتبك الآن قيد المراجعة للتوثيق' : '📤 رُفع المستند بنجاح')
+      loadVer()
+    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+  const delDoc = async (d) => {
+    try { await api(`/office/verification/documents/${d.id}`, { method: 'DELETE' }); toast.success('حُذف المستند'); loadVer() } catch (e) { toast.error(e.message) }
+  }
+  const st = ver?.status || 'unverified'
+  const badge = VER_BADGE[st] || VER_BADGE.unverified
+  return (
+    <Card className="mt-4">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base flex items-center gap-2 flex-wrap">
+          🛡️ توثيق المكتب / مستندات المكتب
+          <Badge className={`${badge.cls} hover:${badge.cls}`}>{badge.label}</Badge>
+          {ver?.storage_driver === 'db' && <span className="text-[9px] font-normal text-slate-400">(تخزين مؤقت آمن — جاهز للترحيل إلى S3)</span>}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {st === 'rejected' && ver?.reject_reason && (
+          <div className="rounded-lg bg-rose-50 border border-rose-200 px-3 py-2 text-xs text-rose-700">
+            <b>سبب الرفض:</b> {ver.reject_reason}
+            <div className="text-[10px] text-rose-500 mt-0.5">صحّح المستندات وأعد رفعها — سيعود المكتب تلقائياً لقائمة المراجعة.</div>
+          </div>
+        )}
+        {st === 'verified' && <div className="rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2 text-xs text-emerald-700">مكتبك موثق ✅ — حالة التوثيق تُشارك تلقائياً مع شبكة معراج (رحّال هو مصدر هوية المكتب، لا حاجة لإعادة رفع المستندات هناك).</div>}
+        {st === 'unverified' && <div className="text-[11px] text-slate-500">التوثيق اختياري بعد إنشاء الحساب ويرفع موثوقية مكتبك في شبكة معراج. ارفع السجل/الترخيص وهوية المسؤول وسيراجعها فريق المنصة.</div>}
+        {isOwner && st !== 'verified' && (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 border p-2.5">
+            <select value={docType} onChange={e => setDocType(e.target.value)} className="h-8 text-xs border rounded-md px-2 bg-white font-bold">
+              {Object.entries(DOC_TYPE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+            <label className={`h-8 inline-flex items-center gap-1.5 text-xs font-bold border rounded-md px-3 cursor-pointer bg-white hover:bg-slate-100 ${busy ? 'opacity-50 pointer-events-none' : ''}`}>
+              {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستند
+              <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = '' }} />
+            </label>
+            <span className="text-[10px] text-slate-400">PDF / JPG / PNG / WEBP — حتى 4MB</span>
+          </div>
+        )}
+        {(ver?.documents || []).length > 0 && (
+          <div className="space-y-1">
+            {(ver.documents || []).map(d => (
+              <div key={d.id} className="flex items-center gap-2 text-xs border rounded-lg px-2.5 py-1.5 bg-white">
+                <span className="font-bold">{(DOC_TYPE_LABELS[d.doc_type] || DOC_TYPE_LABELS.other)}</span>
+                <span className="text-slate-500 truncate flex-1" dir="ltr">{d.filename}</span>
+                <span className="text-[9px] text-slate-400">{((d.size || 0) / 1024).toFixed(0)}KB • {fmtDate(d.uploaded_at)}</span>
+                <button onClick={() => window.open(`/api/office/verification/documents/${d.id}/download`, '_blank')} className="text-indigo-600 hover:underline text-[10px] font-bold">عرض</button>
+                {isOwner && st !== 'verified' && <button onClick={() => delDoc(d)} className="text-rose-500 hover:text-rose-700 text-xs font-black px-1" title="حذف">✕</button>}
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 function SuperAdminPanel() {
   const { user, logout } = useAuth()
   const [data, setData] = useState(null)
@@ -9097,7 +9182,7 @@ function MeraajStoreScreen() {
         executed_services: posServices.map(s => ({
           type: s.type, status: s.status, ref: String(s.ref || '').trim(), cost: Number(s.cost) || 0,
           currency: posFor.currency, note: String(s.note || '').trim(),
-          evidence: (s.evidence || []).filter(ev => String(ev.value || '').trim()).map(ev => ({ kind: 'url', value: String(ev.value).trim(), label: String(ev.label || '').trim() })),
+          evidence: (s.evidence || []).filter(ev => String(ev.value || '').trim()).map(ev => ev.kind === 'file_ref' ? { kind: 'file_ref', value: ev.value, label: String(ev.label || '').trim() } : { kind: 'url', value: String(ev.value).trim(), label: String(ev.label || '').trim() }),
         })),
         notes: posNotes.trim(),
       }
@@ -9106,6 +9191,51 @@ function MeraajStoreScreen() {
       setPosFor(null)
       load()
     } catch (e) { toast.error(e.message) } finally { setPosBusy(false) }
+  }
+  // v3.77 — upload a REAL evidence file for a position service (context: cancellation_evidence)
+  const EV_TYPE_BY_SVC = { visa: 'visa', ticket: 'ticket', hotel: 'hotel', transport: 'other', other: 'receipt' }
+  const uploadEvidenceFile = async (i, file) => {
+    if (!file || !posFor) return
+    if (!DOC_OK_TYPES.includes(file.type)) { toast.error('المسموح: PDF / JPG / PNG / WEBP فقط'); return }
+    if (file.size > 4 * 1024 * 1024) { toast.error('الحد الأقصى لحجم الملف 4MB'); return }
+    setPosBusy(true)
+    try {
+      const file_base64 = await readFileB64(file)
+      const svcType = posServices[i]?.type || 'other'
+      const r = await api(`/meraaj/inbound-bookings/${posFor.id}/documents`, {
+        method: 'POST',
+        body: { context: 'cancellation_evidence', evidence_type: EV_TYPE_BY_SVC[svcType] || 'other', label: file.name, filename: file.name, content_type: file.type, file_base64 },
+      })
+      setPosServices(list => list.map((x, idx) => idx === i ? { ...x, evidence: [...(x.evidence || []), { kind: 'file_ref', value: r.document.id, label: file.name }] } : x))
+      toast.success('📎 رُفع ملف الدليل وارتبط بالخدمة')
+    } catch (e) { toast.error(e.message) } finally { setPosBusy(false) }
+  }
+  // v3.77 — BOOKING DOCUMENTS (traveler passports/visas + cancellation evidence) per inbound booking
+  const [docsFor, setDocsFor] = useState(null)
+  const [docsList, setDocsList] = useState([])
+  const [docsBusy, setDocsBusy] = useState(false)
+  const [docReg, setDocReg] = useState(0)
+  const [docTypeB, setDocTypeB] = useState('passport')
+  const BK_DOC_LABELS = { passport: '🛂 جواز', visa: '📄 تأشيرة', other: '📎 آخر' }
+  const loadDocs = async (b) => { try { const r = await api(`/meraaj/inbound-bookings/${b.id}/documents`); setDocsList(r.documents || []) } catch (e) { toast.error(e.message) } }
+  const openDocs = (b) => { setDocsFor(b); setDocsList([]); setDocReg(0); setDocTypeB('passport'); loadDocs(b) }
+  const uploadBookingDoc = async (file) => {
+    if (!file || !docsFor) return
+    if (!DOC_OK_TYPES.includes(file.type)) { toast.error('المسموح: PDF / JPG / PNG / WEBP فقط'); return }
+    if (file.size > 4 * 1024 * 1024) { toast.error('الحد الأقصى لحجم الملف 4MB'); return }
+    setDocsBusy(true)
+    try {
+      const file_base64 = await readFileB64(file)
+      await api(`/meraaj/inbound-bookings/${docsFor.id}/documents`, {
+        method: 'POST',
+        body: { context: 'traveler', registrant_index: docReg, doc_type: docTypeB, label: file.name, filename: file.name, content_type: file.type, file_base64 },
+      })
+      toast.success('📤 رُفع مستند المسافر')
+      loadDocs(docsFor)
+    } catch (e) { toast.error(e.message) } finally { setDocsBusy(false) }
+  }
+  const delBookingDoc = async (d) => {
+    try { await api(`/meraaj/booking-documents/${d.id}`, { method: 'DELETE' }); toast.success('حُذف المستند'); loadDocs(docsFor) } catch (e) { toast.error(e.message) }
   }
   const [activating, setActivating] = useState(false)
   const storeActive = !!config?.store_active
@@ -9343,6 +9473,8 @@ function MeraajStoreScreen() {
                 ) : (b.registrants || []).length > 0 && (
                   <span className="inline-block mt-0.5 text-[9px] font-bold text-emerald-600" title="جميع المسجّلين لديهم أرقام جوازات">🛂 الجوازات مكتملة</span>
                 )}
+                {/* v3.77 — traveler documents & evidence per booking */}
+                <button onClick={() => openDocs(b)} className="inline-block mt-0.5 ms-1 text-[9px] font-black bg-slate-100 text-slate-600 border border-slate-300 rounded-full px-1.5 py-0 hover:bg-slate-200 transition" title="مستندات المسافرين وأدلة الحجز">📎 مستندات</button>
               </TableCell>
               <TableCell className="text-xs">{fmt(b.total_price || 0, b.currency)}</TableCell>
               <TableCell className="text-[10px] text-slate-400">{b.meraaj_booking_ref || '—'}</TableCell>
@@ -9557,13 +9689,27 @@ function MeraajStoreScreen() {
                     <Input value={s.note} onChange={e => updPosService(i, { note: e.target.value })} placeholder="ملاحظة على الخدمة (اختياري)" className="h-7 text-[11px] bg-white" maxLength={300} />
                     <div className="space-y-1">
                       {(s.evidence || []).map((ev, j) => (
-                        <div key={j} className="flex items-center gap-1.5">
-                          <Input value={ev.value} onChange={e => updPosEvidence(i, j, { value: e.target.value })} placeholder="https://... رابط الدليل (صورة تأشيرة/إيصال)" dir="ltr" className="h-7 flex-1 text-[10px] font-mono bg-white" maxLength={500} />
-                          <Input value={ev.label} onChange={e => updPosEvidence(i, j, { label: e.target.value })} placeholder="وصف الدليل" className="h-7 w-32 text-[10px] bg-white" maxLength={120} />
-                          <button onClick={() => delPosEvidence(i, j)} className="text-rose-400 hover:text-rose-600 text-xs px-1">✕</button>
-                        </div>
+                        ev.kind === 'file_ref' ? (
+                          <div key={j} className="flex items-center gap-1.5 rounded-md bg-indigo-50 border border-indigo-200 px-2 py-1">
+                            <span className="text-[10px] font-bold text-indigo-700 truncate flex-1">📎 {ev.label || 'ملف دليل'}</span>
+                            <button onClick={() => window.open(`/api/meraaj/booking-documents/${ev.value}/download`, '_blank')} className="text-[10px] font-bold text-indigo-600 hover:underline">عرض</button>
+                            <button onClick={() => delPosEvidence(i, j)} className="text-rose-400 hover:text-rose-600 text-xs px-1">✕</button>
+                          </div>
+                        ) : (
+                          <div key={j} className="flex items-center gap-1.5">
+                            <Input value={ev.value} onChange={e => updPosEvidence(i, j, { value: e.target.value })} placeholder="https://... رابط الدليل (صورة تأشيرة/إيصال)" dir="ltr" className="h-7 flex-1 text-[10px] font-mono bg-white" maxLength={500} />
+                            <Input value={ev.label} onChange={e => updPosEvidence(i, j, { label: e.target.value })} placeholder="وصف الدليل" className="h-7 w-32 text-[10px] bg-white" maxLength={120} />
+                            <button onClick={() => delPosEvidence(i, j)} className="text-rose-400 hover:text-rose-600 text-xs px-1">✕</button>
+                          </div>
+                        )
                       ))}
-                      <button onClick={() => addPosEvidence(i)} disabled={(s.evidence || []).length >= 10} className="text-[10px] font-bold text-indigo-600 hover:underline disabled:opacity-40">🔗 إضافة رابط دليل ({(s.evidence || []).length}/10)</button>
+                      <div className="flex items-center gap-3">
+                        <button onClick={() => addPosEvidence(i)} disabled={(s.evidence || []).length >= 10} className="text-[10px] font-bold text-indigo-600 hover:underline disabled:opacity-40">🔗 إضافة رابط دليل ({(s.evidence || []).length}/10)</button>
+                        <label className={`text-[10px] font-bold text-indigo-600 hover:underline cursor-pointer ${(s.evidence || []).length >= 10 || posBusy ? 'opacity-40 pointer-events-none' : ''}`}>
+                          📎 رفع ملف دليل (PDF/صورة)
+                          <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) uploadEvidenceFile(i, f); e.target.value = '' }} />
+                        </label>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -9585,6 +9731,51 @@ function MeraajStoreScreen() {
                 </Button>
               </div>
               <div className="text-[10px] text-slate-400 text-center">بعد التقديم لا يمكن تعديل الموقف — بانتظار قرار إدارة معراج النهائي الذي سيُنفَّذ تلقائياً</div>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
+      {/* v3.77 — BOOKING DOCUMENTS dialog (traveler docs + evidence, per booking_ref) */}
+      {docsFor && (
+        <Dialog open onOpenChange={() => !docsBusy && setDocsFor(null)}>
+          <DialogContent className="max-w-xl max-h-[85vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle className="text-base">📎 مستندات الحجز — «{docsFor.buyer_office_name}» <span className="text-[10px] font-mono text-slate-400" dir="ltr">{docsFor.meraaj_booking_ref || ''}</span></DialogTitle>
+            </DialogHeader>
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 border p-2.5">
+                <select value={docReg} onChange={e => setDocReg(Number(e.target.value))} className="h-8 text-xs border rounded-md px-2 bg-white font-bold max-w-[180px]">
+                  {(docsFor.registrants || []).map((r, i) => <option key={i} value={i}>{r.name}</option>)}
+                </select>
+                <select value={docTypeB} onChange={e => setDocTypeB(e.target.value)} className="h-8 text-xs border rounded-md px-2 bg-white font-bold">
+                  <option value="passport">🛂 جواز سفر</option>
+                  <option value="visa">📄 تأشيرة</option>
+                  <option value="other">📎 مستند آخر</option>
+                </select>
+                <label className={`h-8 inline-flex items-center gap-1.5 text-xs font-bold border rounded-md px-3 cursor-pointer bg-white hover:bg-slate-100 ${docsBusy ? 'opacity-50 pointer-events-none' : ''}`}>
+                  {docsBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستند للمسافر
+                  <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) uploadBookingDoc(f); e.target.value = '' }} />
+                </label>
+                <span className="text-[9px] text-slate-400 w-full">PDF / JPG / PNG / WEBP — حتى 4MB — مرتبط بـ booking_ref والمسافر المحدد</span>
+              </div>
+              {docsList.length === 0 ? (
+                <div className="text-[11px] text-slate-400 border border-dashed rounded-lg p-4 text-center">لا مستندات بعد — مستندات المشتري القادمة من معراج تظهر هنا تلقائياً، ويمكن لمكتبك رفع مستندات المسافرين وأدلة الإلغاء</div>
+              ) : (
+                <div className="space-y-1">
+                  {docsList.map(d => (
+                    <div key={d.id} className="flex items-center gap-2 text-xs border rounded-lg px-2.5 py-1.5 bg-white flex-wrap">
+                      <span className="font-bold">{d.context === 'cancellation_evidence' ? `⚖️ دليل إلغاء (${d.evidence_type || 'other'})` : (BK_DOC_LABELS[d.doc_type] || BK_DOC_LABELS.other)}</span>
+                      {d.registrant_name && <span className="text-slate-500">{d.registrant_name}</span>}
+                      <span className="text-slate-400 truncate flex-1" dir="ltr">{d.filename || d.label || d.external_url || '—'}</span>
+                      <Badge className={d.source === 'meraaj' ? 'bg-purple-100 text-purple-700 text-[9px]' : 'bg-slate-100 text-slate-600 text-[9px]'}>{d.source === 'meraaj' ? 'من معراج' : 'من المكتب'}</Badge>
+                      <span className="text-[9px] text-slate-400">{d.size ? `${(d.size / 1024).toFixed(0)}KB` : ''} {fmtDate(d.uploaded_at)}</span>
+                      <button onClick={() => window.open(d.external_url || `/api/meraaj/booking-documents/${d.id}/download`, '_blank')} className="text-indigo-600 hover:underline text-[10px] font-bold">عرض</button>
+                      {d.source !== 'meraaj' && <button onClick={() => delBookingDoc(d)} className="text-rose-500 hover:text-rose-700 text-xs font-black px-1" title="حذف">✕</button>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="text-[10px] text-slate-400 text-center">كل عمليات الرفع/العرض/الحذف مسجلة في سجل تدقيق — والمشاركة مقصورة على الأطراف المخولة بنفس booking_ref</div>
             </div>
           </DialogContent>
         </Dialog>
@@ -11987,6 +12178,8 @@ function OfficeSettings() {
               </CardContent>
             </Card>
           </div>
+          {/* v3.77 — Office verification & documents */}
+          <OfficeVerificationCard />
           <div className="flex justify-end mt-4"><Button onClick={save} disabled={saving} className="grad-brand text-white gap-2">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ الإعدادات'}</Button></div>
         </TabsContent>
 

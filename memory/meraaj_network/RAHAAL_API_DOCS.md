@@ -342,3 +342,46 @@ Body: { "token": "<token>" }
 ```
 أخطاء: `invalid_token_signature` (401) • `token_expired` (401) • `user_not_found_or_inactive` (404) • `invalid_token_claims` (401).
 - **نطاق الصلاحيات = مكتب المستخدم فقط** — امنحوا داخل معراج ما تسمح به `permissions` حصراً (إدارة الباقات، الطلبات، القبول/الرفض، التحديث/الإيقاف/الحذف).
+
+---
+
+# 📎 v3.77 — طبقة المستندات (Documents Layer)
+
+## 1) مستندات المسافرين داخل booking.created (امتداد اختياري للعقد)
+```json
+"registrants": [{ "name": "...", "age": 30, "room_type": "QUAD", "passport_no": "...",
+  "documents": [{ "type": "passport|visa|other", "url": "https://...", "label": "وصف" }] }]
+```
+- حتى 10 مستندات لكل مسافر — تُخزن كمراجع (رحّال لا ينسخ الملفات؛ معراج يبقى مضيف ملفات المشتري).
+- المكتب البائع المخوّل يراها فور وصول الحجز Pending. فشل الاستيعاب لا يرفض الحجز أبداً.
+
+## 2) أدلة الإلغاء كملفات فعلية (booking.cancellation.position)
+- `evidence[].kind` يدعم: `url` أو `file_ref` (ملف حقيقي مرفوع في رحّال).
+- في الحدث الصادر، كل `file_ref` يُثرى تلقائياً بـ:
+```json
+{ "kind": "file_ref", "value": "<doc_id>", "label": "...",
+  "download_url": "https://.../api/meraaj/documents/signed/<doc_id>?exp=...&sig=...",
+  "filename": "visa.pdf", "content_type": "application/pdf" }
+```
+- `download_url` = رابط موقّع HMAC صالح 72 ساعة — للسوبر أدمن في معراج لفتح الملف بأمان دون أي بيانات دخول.
+- الملف Evidence فقط — **لا يولّد أي قيد مالي تلقائياً**.
+
+## 3) توثيق المكتب (Office Verification) — رحّال مصدر الهوية
+حدث صادر جديد: `office.verification_updated`
+```json
+{ "office_ref": "<tenant_id>", "status": "pending_review|verified|rejected",
+  "office_name": "...", "verified_at": "ISO"?, "reject_reason": "..."?, "documents_count": 3? }
+```
+- معراج يستقبل الحالة والمرجع فقط — لا يعاد رفع مستندات المكتب في النظامين.
+- الحالات: `unverified → pending_review → verified | rejected` (سبب واضح + إعادة رفع مسموحة).
+
+## 4) التنزيل الموقّع (عام، HMAC-expiring)
+```
+GET {RAHAAL_BASE}/api/meraaj/documents/signed/{doc_id}?exp={unix}&sig={HMAC-SHA256("doc:{doc_id}:{exp}")}
+```
+- 401 توقيع خاطئ • 410 منتهي • 404 غير موجود. كل قراءة تسجَّل في سجل التدقيق.
+
+## 5) التخزين والأمان
+- طبقة تخزين S3-compatible خاصة (Private) — التفعيل عبر ENV فقط: `S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY`.
+- حتى توفر بيانات S3: fallback داخل MongoDB (`document_blobs`) بنفس مساحة أسماء object_key — جاهز للترحيل.
+- MIME المسموح: PDF/JPG/PNG/WEBP • الحد 4MB • مفاتيح كائنات عشوائية • عزل كامل بين المكاتب • تدقيق كامل (رفع/قراءة/حذف/تغيير حالة) في `document_audit`.

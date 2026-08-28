@@ -746,6 +746,29 @@ async function handleRoute(request, { params }) {
         user: { email: ssoUser.email, name: ssoUser.name || '', role: ssoUser.role, permissions: scope },
       })
     }
+    // v3.77 — SIGNED DOCUMENT DOWNLOAD (public, HMAC-expiring link): lets authorized external
+    // parties (Meraaj Super Admin reviewing cancellation evidence / office verification) fetch a
+    // document WITHOUT Rahaal credentials. Link = HMAC(doc:{id}:{exp}) — single doc, time-boxed.
+    const signedDocMatch = route.match(/^\/meraaj\/documents\/signed\/([^/]+)$/)
+    if (signedDocMatch && method === 'GET') {
+      const docIdS = signedDocMatch[1]
+      const url = new URL(request.url)
+      const expS = Number(url.searchParams.get('exp') || 0)
+      const sigS = String(url.searchParams.get('sig') || '')
+      if (!expS || expS < Math.floor(Date.now() / 1000)) return bad('انتهت صلاحية رابط التنزيل', 410)
+      if (!sigS || meraajSign(`doc:${docIdS}:${expS}`) !== sigS) return bad('توقيع رابط غير صالح', 401)
+      const docS = await db.collection('booking_documents').findOne({ id: docIdS })
+        || await db.collection('office_documents').findOne({ id: docIdS })
+      if (!docS) return bad('المستند غير موجود', 404)
+      if (docS.storage?.driver === 'external_url') {
+        await docAuditLog(db, docS.tenant_id, 'viewed', docS.id, 'signed_link', { via: 'redirect_external' })
+        return NextResponse.redirect(docS.storage.url, 302)
+      }
+      const blobS = await docStorageGet(db, docS.storage?.object_key)
+      if (!blobS) return bad('ملف المستند غير متاح في التخزين', 404)
+      await docAuditLog(db, docS.tenant_id, 'viewed', docS.id, 'signed_link', {})
+      return new Response(blobS.buffer, { status: 200, headers: { 'Content-Type': blobS.content_type, 'Content-Disposition': `inline; filename="${encodeURIComponent(docS.filename || 'document')}"`, 'Cache-Control': 'private, no-store' } })
+    }
     // Reverse webhooks from Meraaj → Rahaal: signature over the RAW body (x-meraaj-signature)
     if (route === '/meraaj/webhooks' && method === 'POST') {
       const rawBody = await request.text()
@@ -872,6 +895,34 @@ async function handleRoute(request, { params }) {
           created_at: nowRcv,
         }
         await db.collection('meraaj_inbound_bookings').insertOne(inbound)
+        // v3.77 — TRAVELER DOCUMENTS ingestion (documented contract extension, fully optional):
+        // data.registrants[i].documents = [{ type: 'passport'|'visa'|'other', url, label }] (max 10/registrant).
+        // Stored as metadata refs (external_url driver) so the authorized seller office can view them
+        // on the PENDING booking. No file bytes are copied — Meraaj stays the host of buyer uploads.
+        try {
+          const trvDocs = []
+          const rawRegs = Array.isArray(data.registrants) ? data.registrants : []
+          registrants.forEach((rg, idx) => {
+            const docsIn = Array.isArray(rawRegs[idx]?.documents) ? rawRegs[idx].documents.slice(0, 10) : []
+            for (const d of docsIn) {
+              const u = String(d?.url || '').trim().slice(0, 600)
+              if (!/^https?:\/\//i.test(u)) continue
+              trvDocs.push({
+                id: uuidv4(), tenant_id: pkg.tenant_id, inbound_id: inbound.id,
+                booking_ref: inbound.meraaj_booking_ref, context: 'traveler', source: 'meraaj',
+                registrant_index: idx, registrant_name: rg.name, passport_no: rg.passport_no || null,
+                doc_type: ['passport', 'visa', 'other'].includes(d?.type) ? d.type : 'other',
+                label: String(d?.label || '').slice(0, 120), filename: null, content_type: null, size: null,
+                storage: { driver: 'external_url', url: u },
+                uploaded_by: 'meraaj', uploaded_at: nowRcv,
+              })
+            }
+          })
+          if (trvDocs.length > 0) {
+            await db.collection('booking_documents').insertMany(trvDocs)
+            for (const d of trvDocs) await docAuditLog(db, pkg.tenant_id, 'uploaded', d.id, 'meraaj', { context: 'traveler', via: 'booking.created' })
+          }
+        } catch { /* ingestion must never reject the booking webhook */ }
         await db.collection('packages').updateOne({ id: pkg.id }, { $inc: { 'meraaj.seats_sold': seats } })
         // v3.53 — Optional AUTO-APPROVE (per-office setting): converts the booking instantly.
         // Failure NEVER rejects the webhook — the booking simply stays pending for manual approval.
@@ -1834,6 +1885,211 @@ async function handleRoute(request, { params }) {
       }, { upsert: true })
       return ok({ linked: true, meraaj_office_id: link.office_id })
     }
+    // ============ v3.77 — OFFICE VERIFICATION (توثيق المكتب) ============
+    // Verification happens AFTER account creation (signup stays simple). States:
+    // unverified → pending_review (auto on first upload) → verified | rejected (reason + re-upload allowed).
+    if (route === '/office/verification' && method === 'GET') {
+      const stV = await db.collection('tenant_settings').findOne(tf)
+      const ver = stV?.office_verification || { status: 'unverified' }
+      const docsV = await db.collection('office_documents').find({ tenant_id: T }).sort({ uploaded_at: -1 }).toArray()
+      return ok({
+        status: ver.status || 'unverified',
+        submitted_at: ver.submitted_at || null, reviewed_at: ver.reviewed_at || null,
+        reject_reason: ver.reject_reason || null,
+        documents: docsV.map(d => ({ id: d.id, doc_type: d.doc_type, label: d.label, filename: d.filename, content_type: d.content_type, size: d.size, uploaded_at: d.uploaded_at, uploaded_by: d.uploaded_by })),
+        storage_driver: docStorageDriver(),
+      })
+    }
+    if (route === '/office/verification/documents' && method === 'POST') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — رفع مستندات التوثيق للمالك فقط', 403)
+      const bOD = await request.json()
+      const docTypeOD = ['license', 'owner_id', 'other'].includes(bOD.doc_type) ? bOD.doc_type : 'other'
+      const up = parseDocUpload(bOD, T, 'office-docs')
+      if (up.error) return bad(up.error)
+      const countOD = await db.collection('office_documents').countDocuments({ tenant_id: T })
+      if (countOD >= 20) return bad('الحد الأقصى 20 مستند توثيق للمكتب')
+      await docStoragePut(db, T, up.objectKey, up.base64, up.contentType, up.size)
+      const docOD = {
+        id: uuidv4(), tenant_id: T, doc_type: docTypeOD,
+        label: String(bOD.label || '').slice(0, 120), filename: up.filename,
+        content_type: up.contentType, size: up.size,
+        storage: { driver: docStorageDriver() === 's3' ? 's3' : 'db', object_key: up.objectKey },
+        uploaded_by: sess.user.email, uploaded_at: new Date(),
+      }
+      await db.collection('office_documents').insertOne(docOD)
+      await docAuditLog(db, T, 'uploaded', docOD.id, sess.user.email, { context: 'office_verification', doc_type: docTypeOD, size: up.size })
+      // Any upload while unverified/rejected (re-)submits for review — never blocks account usage
+      const stOD = await db.collection('tenant_settings').findOne(tf)
+      const curStatus = stOD?.office_verification?.status || 'unverified'
+      let newStatus = curStatus
+      if (curStatus === 'unverified' || curStatus === 'rejected') {
+        newStatus = 'pending_review'
+        await db.collection('tenant_settings').updateOne(tf, { $set: { 'office_verification.status': 'pending_review', 'office_verification.submitted_at': new Date(), 'office_verification.reject_reason': null } }, { upsert: true })
+        await docAuditLog(db, T, 'status_changed', null, sess.user.email, { from: curStatus, to: 'pending_review' })
+        // Rahaal is the identity source — Meraaj receives the status + reference (never the raw file duplicated)
+        emitMeraajEvent(db, T, 'office.verification_updated', {
+          office_ref: T, status: 'pending_review',
+          office_name: stOD?.agency_name || sess.tenant?.name || '',
+          documents_count: countOD + 1, submitted_at: new Date().toISOString(),
+        }).catch(() => {})
+      }
+      return ok({ uploaded: true, document: { id: docOD.id, doc_type: docOD.doc_type, filename: docOD.filename, size: docOD.size }, verification_status: newStatus })
+    }
+    const officeDocDlMatch = route.match(/^\/office\/verification\/documents\/([^/]+)\/download$/)
+    if (officeDocDlMatch && method === 'GET') {
+      const docDL = await db.collection('office_documents').findOne(sess.user.role === 'super_admin' ? { id: officeDocDlMatch[1] } : { id: officeDocDlMatch[1], tenant_id: T })
+      if (!docDL) return bad('المستند غير موجود', 404)
+      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      const blobDL = await docStorageGet(db, docDL.storage?.object_key)
+      if (!blobDL) return bad('ملف المستند غير متاح في التخزين', 404)
+      await docAuditLog(db, docDL.tenant_id, 'viewed', docDL.id, sess.user.email, { context: 'office_verification' })
+      return new Response(blobDL.buffer, { status: 200, headers: { 'Content-Type': blobDL.content_type, 'Content-Disposition': `inline; filename="${encodeURIComponent(docDL.filename || 'document')}"`, 'Cache-Control': 'private, no-store' } })
+    }
+    const officeDocDelMatch = route.match(/^\/office\/verification\/documents\/([^/]+)$/)
+    if (officeDocDelMatch && method === 'DELETE') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — حذف مستندات التوثيق للمالك فقط', 403)
+      const stDel = await db.collection('tenant_settings').findOne(tf)
+      if ((stDel?.office_verification?.status || 'unverified') === 'verified') return bad('المكتب موثق — لا يمكن حذف مستندات التوثيق المعتمدة', 409)
+      const docDel = await db.collection('office_documents').findOne({ id: officeDocDelMatch[1], tenant_id: T })
+      if (!docDel) return bad('المستند غير موجود', 404)
+      if (docDel.storage?.object_key) await docStorageDelete(db, docDel.storage.object_key)
+      await db.collection('office_documents').deleteOne({ id: docDel.id, tenant_id: T })
+      await docAuditLog(db, T, 'deleted', docDel.id, sess.user.email, { context: 'office_verification', filename: docDel.filename })
+      return ok({ deleted: true })
+    }
+    // ---- Admin review (super_admin only — API-first: served to the external holding dashboard) ----
+    if (route === '/admin/office-verifications' && method === 'GET') {
+      if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      const url = new URL(request.url)
+      const stFilter = url.searchParams.get('status') || null
+      const allSettings = await db.collection('tenant_settings').find({ office_verification: { $exists: true } }).toArray()
+      const rows = []
+      for (const s of allSettings) {
+        const v = s.office_verification || {}
+        if (stFilter && v.status !== stFilter) continue
+        const docsA = await db.collection('office_documents').find({ tenant_id: s.tenant_id }).toArray()
+        rows.push({
+          tenant_id: s.tenant_id, office_name: s.agency_name || '', status: v.status || 'unverified',
+          submitted_at: v.submitted_at || null, reviewed_at: v.reviewed_at || null, reject_reason: v.reject_reason || null,
+          documents: docsA.map(d => ({ id: d.id, doc_type: d.doc_type, label: d.label, filename: d.filename, size: d.size, uploaded_at: d.uploaded_at, download_url: docSignedUrl(d.id, 3600) })),
+        })
+      }
+      return ok({ verifications: rows })
+    }
+    const adminVerDecideMatch = route.match(/^\/admin\/office-verifications\/([^/]+)\/decision$/)
+    if (adminVerDecideMatch && method === 'POST') {
+      if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      const bAD = await request.json()
+      const decisionAD = String(bAD.decision || '')
+      if (!['verified', 'rejected'].includes(decisionAD)) return bad('القرار: verified أو rejected فقط')
+      const reasonAD = String(bAD.reason || '').slice(0, 400)
+      if (decisionAD === 'rejected' && !reasonAD.trim()) return bad('سبب الرفض إلزامي — ليتمكن المكتب من تصحيح مستنداته وإعادة الرفع')
+      const tenantIdAD = adminVerDecideMatch[1]
+      const stAD = await db.collection('tenant_settings').findOne({ tenant_id: tenantIdAD })
+      if (!stAD?.office_verification) return bad('لا يوجد طلب توثيق لهذا المكتب', 404)
+      await db.collection('tenant_settings').updateOne({ tenant_id: tenantIdAD }, {
+        $set: {
+          'office_verification.status': decisionAD,
+          'office_verification.reviewed_at': new Date(),
+          'office_verification.reviewed_by': sess.user.email,
+          'office_verification.reject_reason': decisionAD === 'rejected' ? reasonAD : null,
+        },
+      })
+      await docAuditLog(db, tenantIdAD, 'status_changed', null, sess.user.email, { to: decisionAD, reason: reasonAD || null })
+      // Meraaj receives the verification outcome + stable reference (Rahaal = identity source)
+      emitMeraajEvent(db, tenantIdAD, 'office.verification_updated', {
+        office_ref: tenantIdAD, status: decisionAD,
+        office_name: stAD?.agency_name || '',
+        ...(decisionAD === 'verified' ? { verified_at: new Date().toISOString() } : { reject_reason: reasonAD }),
+      }).catch(() => {})
+      return ok({ decided: true, status: decisionAD })
+    }
+    // ============ v3.77 — BOOKING DOCUMENTS (مستندات المسافرين + أدلة الإلغاء) ============
+    // Tenant-isolated. Staff needs mod_meraaj (module guard). Linked to booking_ref + registrant.
+    const bkDocsMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/documents$/)
+    if (bkDocsMatch && method === 'GET') {
+      const inbBD = await db.collection('meraaj_inbound_bookings').findOne({ id: bkDocsMatch[1], tenant_id: T })
+      if (!inbBD) return bad('الحجز الوارد غير موجود', 404)
+      const docsBD = await db.collection('booking_documents').find({ inbound_id: inbBD.id, tenant_id: T }).sort({ uploaded_at: -1 }).toArray()
+      return ok({
+        booking_ref: inbBD.meraaj_booking_ref,
+        documents: docsBD.map(d => ({
+          id: d.id, context: d.context, source: d.source || 'office',
+          registrant_index: d.registrant_index ?? null, registrant_name: d.registrant_name || null,
+          doc_type: d.doc_type, evidence_type: d.evidence_type || null, label: d.label,
+          filename: d.filename, content_type: d.content_type, size: d.size,
+          external_url: d.storage?.driver === 'external_url' ? d.storage.url : null,
+          uploaded_by: d.uploaded_by, uploaded_at: d.uploaded_at,
+        })),
+      })
+    }
+    if (bkDocsMatch && method === 'POST') {
+      const inbBU = await db.collection('meraaj_inbound_bookings').findOne({ id: bkDocsMatch[1], tenant_id: T })
+      if (!inbBU) return bad('الحجز الوارد غير موجود', 404)
+      const bBU = await request.json()
+      const contextBU = bBU.context === 'cancellation_evidence' ? 'cancellation_evidence' : 'traveler'
+      let regIdx = null, regName = null, regPass = null
+      if (contextBU === 'traveler') {
+        regIdx = Number(bBU.registrant_index)
+        const regs = Array.isArray(inbBU.registrants) ? inbBU.registrants : []
+        if (!Number.isInteger(regIdx) || regIdx < 0 || regIdx >= regs.length) return bad('registrant_index غير صالح — يجب أن يشير لمسافر ضمن هذا الحجز')
+        regName = regs[regIdx].name; regPass = regs[regIdx].passport_no || null
+      }
+      const docTypeBU = contextBU === 'traveler'
+        ? (['passport', 'visa', 'other'].includes(bBU.doc_type) ? bBU.doc_type : 'other')
+        : 'other'
+      const evidenceTypeBU = contextBU === 'cancellation_evidence'
+        ? (['visa', 'ticket', 'hotel', 'receipt', 'other'].includes(bBU.evidence_type) ? bBU.evidence_type : 'other')
+        : null
+      const countBU = await db.collection('booking_documents').countDocuments({ inbound_id: inbBU.id, tenant_id: T })
+      if (countBU >= 60) return bad('الحد الأقصى 60 مستند لكل حجز')
+      const upBU = parseDocUpload(bBU, T, 'booking-docs')
+      if (upBU.error) return bad(upBU.error)
+      await docStoragePut(db, T, upBU.objectKey, upBU.base64, upBU.contentType, upBU.size)
+      const docBU = {
+        id: uuidv4(), tenant_id: T, inbound_id: inbBU.id, booking_ref: inbBU.meraaj_booking_ref,
+        context: contextBU, source: 'office',
+        registrant_index: regIdx, registrant_name: regName, passport_no: regPass,
+        doc_type: docTypeBU, evidence_type: evidenceTypeBU,
+        label: String(bBU.label || '').slice(0, 120), filename: upBU.filename,
+        content_type: upBU.contentType, size: upBU.size,
+        storage: { driver: docStorageDriver() === 's3' ? 's3' : 'db', object_key: upBU.objectKey },
+        uploaded_by: sess.user.email, uploaded_at: new Date(),
+      }
+      await db.collection('booking_documents').insertOne(docBU)
+      await docAuditLog(db, T, 'uploaded', docBU.id, sess.user.email, { context: contextBU, booking_ref: inbBU.meraaj_booking_ref, registrant_index: regIdx, size: upBU.size })
+      return ok({ uploaded: true, document: { id: docBU.id, context: docBU.context, doc_type: docBU.doc_type, evidence_type: docBU.evidence_type, registrant_index: regIdx, filename: docBU.filename, size: docBU.size } })
+    }
+    const bkDocDlMatch = route.match(/^\/meraaj\/booking-documents\/([^/]+)\/download$/)
+    if (bkDocDlMatch && method === 'GET') {
+      const docBDL = await db.collection('booking_documents').findOne({ id: bkDocDlMatch[1], tenant_id: T })
+      if (!docBDL) return bad('المستند غير موجود', 404)
+      if (docBDL.storage?.driver === 'external_url') {
+        await docAuditLog(db, T, 'viewed', docBDL.id, sess.user.email, { via: 'redirect_external' })
+        return NextResponse.redirect(docBDL.storage.url, 302)
+      }
+      const blobBDL = await docStorageGet(db, docBDL.storage?.object_key)
+      if (!blobBDL) return bad('ملف المستند غير متاح في التخزين', 404)
+      await docAuditLog(db, T, 'viewed', docBDL.id, sess.user.email, {})
+      return new Response(blobBDL.buffer, { status: 200, headers: { 'Content-Type': blobBDL.content_type, 'Content-Disposition': `inline; filename="${encodeURIComponent(docBDL.filename || 'document')}"`, 'Cache-Control': 'private, no-store' } })
+    }
+    const bkDocDelMatch = route.match(/^\/meraaj\/booking-documents\/([^/]+)$/)
+    if (bkDocDelMatch && method === 'DELETE') {
+      const docBDel = await db.collection('booking_documents').findOne({ id: bkDocDelMatch[1], tenant_id: T })
+      if (!docBDel) return bad('المستند غير موجود', 404)
+      if (docBDel.source === 'meraaj') return bad('مستند وارد من معراج — لا يُحذف من جهة رحّال', 403)
+      if (sess.user.role !== 'owner' && docBDel.uploaded_by !== sess.user.email) return bad('غير مصرح — الحذف للمالك أو لمن رفع المستند', 403)
+      if (docBDel.context === 'cancellation_evidence') {
+        const inbDel = await db.collection('meraaj_inbound_bookings').findOne({ id: docBDel.inbound_id, tenant_id: T }, { projection: { cancellation_status: 1 } })
+        if (inbDel && ['position_submitted', 'finalized_cancelled'].includes(inbDel.cancellation_status)) {
+          return bad('الموقف مُقدَّم لمعراج — أدلة الإلغاء المرتبطة به لا تُحذف (سلامة الأدلة)', 409)
+        }
+      }
+      if (docBDel.storage?.object_key) await docStorageDelete(db, docBDel.storage.object_key)
+      await db.collection('booking_documents').deleteOne({ id: docBDel.id, tenant_id: T })
+      await docAuditLog(db, T, 'deleted', docBDel.id, sess.user.email, { context: docBDel.context, filename: docBDel.filename })
+      return ok({ deleted: true })
+    }
     // Integration status for the frontend tab
     if (route === '/meraaj/config' && method === 'GET') {
       const settingsCfg = await db.collection('tenant_settings').findOne(tf)
@@ -2674,6 +2930,16 @@ async function handleRoute(request, { params }) {
         })).filter(ev73 => ev73.value),
       }))
       const costsTotal = +services.reduce((s, x) => s + x.cost, 0).toFixed(2) // authoritative server-side sum
+      // v3.77 — evidence file_ref values MUST be real booking_documents of THIS tenant + THIS booking
+      // (context cancellation_evidence or traveler). Invalid refs = hard 400 (evidence integrity).
+      const fileRefIds = services.flatMap(s => s.evidence.filter(ev => ev.kind === 'file_ref').map(ev => ev.value))
+      let fileRefDocs = []
+      if (fileRefIds.length > 0) {
+        fileRefDocs = await db.collection('booking_documents').find({ id: { $in: fileRefIds }, tenant_id: T, inbound_id: cancPositionMatch[1] }).toArray()
+        const foundIds = new Set(fileRefDocs.map(d => d.id))
+        const missing = fileRefIds.filter(idf => !foundIds.has(idf))
+        if (missing.length > 0) return bad(`مرجع ملف دليل غير صالح أو لا يخص هذا الحجز: ${missing[0]}`, 400)
+      }
       const notesCP = String(bCP.notes || '').slice(0, 1000)
       const actorNameCP = sess.user.name || sess.user.email
       const nowCP = new Date()
@@ -2699,7 +2965,16 @@ async function handleRoute(request, { params }) {
         ...(await meraajPkgIdentityFields(db, inbound.package_id)), // v3.76
         inbound_id: inbound.id,
         position: positionVal,
-        executed_services: services,
+        // v3.77 — outbound evidence enrichment: file_ref entries carry a signed, expiring
+        // download_url (72h) so the Meraaj Super Admin can open the actual file securely.
+        executed_services: services.map(s => ({
+          ...s,
+          evidence: s.evidence.map(ev => {
+            if (ev.kind !== 'file_ref') return ev
+            const d = fileRefDocs.find(x => x.id === ev.value)
+            return { ...ev, download_url: docSignedUrl(ev.value), filename: d?.filename || null, content_type: d?.content_type || null }
+          }),
+        })),
         actual_costs_total: costsTotal,
         costs_currency: inbound.currency,
         notes: notesCP,
@@ -6713,6 +6988,65 @@ async function meraajRegisterPackageAPI(db, T, pkg, comps, meraajSet) {
     try { await db.collection('meraaj_events').insertOne(logDoc) } catch {}
     return { ok: false, error: errMsg.includes('abort') || errMsg.includes('timeout') ? 'انتهت مهلة الاتصال بمعراج' : errMsg }
   }
+}
+
+// ================= v3.77 — DOCUMENTS & VERIFICATION LAYER =================
+// Storage abstraction — target driver: S3-compatible PRIVATE object storage.
+// Driver selection via ENV ONLY (credentials NEVER in code):
+//   S3_ENDPOINT + S3_BUCKET + S3_ACCESS_KEY_ID + S3_SECRET_ACCESS_KEY (+ S3_REGION)
+// Until real S3 credentials are provided, the 'db' fallback stores blobs in MongoDB
+// (collection document_blobs) — NOT container-local disk, survives restarts, and is
+// migration-ready (same object_key namespace: a one-shot script can move blobs to S3).
+const DOC_ALLOWED_MIME = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }
+const DOC_MAX_BYTES = 4 * 1024 * 1024 // 4MB per document (safe for base64 transport behind ingress)
+function docStorageDriver() {
+  return (process.env.S3_ENDPOINT && process.env.S3_BUCKET && process.env.S3_ACCESS_KEY_ID && process.env.S3_SECRET_ACCESS_KEY) ? 's3' : 'db'
+}
+async function docStoragePut(db, T, objectKey, base64Data, contentType, size) {
+  if (docStorageDriver() === 's3') {
+    // Intentionally NOT wired yet — awaiting S3 provider credentials (blocker documented).
+    throw new Error('S3 driver detected but not wired — قدّم بيانات مزود S3 لإكمال الربط عبر playbook التكامل')
+  }
+  await db.collection('document_blobs').updateOne(
+    { object_key: objectKey },
+    { $set: { object_key: objectKey, tenant_id: T, data: base64Data, content_type: contentType, size, created_at: new Date() } },
+    { upsert: true },
+  )
+  return { driver: 'db' }
+}
+async function docStorageGet(db, objectKey) {
+  if (docStorageDriver() === 's3') throw new Error('S3 driver not wired yet')
+  const blob = await db.collection('document_blobs').findOne({ object_key: objectKey })
+  if (!blob) return null
+  return { buffer: Buffer.from(blob.data, 'base64'), content_type: blob.content_type || 'application/octet-stream', size: blob.size || 0 }
+}
+async function docStorageDelete(db, objectKey) {
+  if (docStorageDriver() === 's3') throw new Error('S3 driver not wired yet')
+  await db.collection('document_blobs').deleteOne({ object_key: objectKey })
+}
+// Audit trail for EVERY document action (upload/view/delete/status change)
+async function docAuditLog(db, T, action, docId, actor, meta = {}) {
+  try { await db.collection('document_audit').insertOne({ id: uuidv4(), tenant_id: T, doc_id: docId, action, actor: String(actor || '').slice(0, 160), meta, at: new Date() }) } catch { /* audit must never break the request */ }
+}
+// Upload payload validation: MIME whitelist + size cap + random object key
+function parseDocUpload(b, T, prefix) {
+  const contentType = String(b.content_type || '').toLowerCase().trim()
+  const ext = DOC_ALLOWED_MIME[contentType]
+  if (!ext) return { error: `نوع الملف غير مسموح — المسموح: PDF / JPG / PNG / WEBP (المستلم: ${contentType || 'غير محدد'})` }
+  const raw = String(b.file_base64 || '').replace(/^data:[^;]+;base64,/, '')
+  if (!raw || !/^[A-Za-z0-9+/=]+$/.test(raw)) return { error: 'محتوى الملف (file_base64) مفقود أو غير صالح' }
+  const size = Math.floor(raw.length * 0.75)
+  if (size > DOC_MAX_BYTES) return { error: `حجم الملف يتجاوز الحد (${(DOC_MAX_BYTES / 1024 / 1024).toFixed(0)}MB)` }
+  if (size < 100) return { error: 'الملف فارغ أو تالف' }
+  const filename = String(b.filename || `document.${ext}`).replace(/[^\w\u0600-\u06FF .()\-]/g, '').slice(0, 120) || `document.${ext}`
+  const objectKey = `${prefix}/${T}/${uuidv4()}.${ext}` // random object key — never user-controlled
+  return { contentType, ext, base64: raw, size, filename, objectKey }
+}
+// Short-lived signed download URL (HMAC over doc id + expiry) — for authorized cross-system sharing
+function docSignedUrl(docId, expiresInSec = 72 * 3600) {
+  const exp = Math.floor(Date.now() / 1000) + expiresInSec
+  const sig = meraajSign(`doc:${docId}:${exp}`)
+  return `${rahaalPublicBase()}/api/meraaj/documents/signed/${docId}?exp=${exp}&sig=${sig}`
 }
 
 // v3.76 — ACCOUNT LINKING: register/link the office at Meraaj via REST (same signing contract as package share).
