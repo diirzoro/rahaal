@@ -121,3 +121,8 @@ See /app/memory/test_credentials.md
 - 20MB PER SELECTED BATCH — FE-enforced (each file is its own request) via shared validateDocBatch() used by all 3 multi-upload points (office verification, cancellation evidence, booking docs). Batch msg: «إجمالي حجم الملفات يجب ألا يتجاوز 20MB».
 - Chunked blob storage kept (base64 of 10MB ≈ 13.3MB chars > 10MB chunk threshold → still split, BSON-safe).
 - Direct verification: BE 11MB→400/9MB→200; FE logic 24MB batch rejected w/ exact msg, 18MB allowed, 11MB per-file msg. Zero residue.
+
+## v3.84 — Batch size meter (staged upload) (2026-08)
+- New shared FE component DocBatchUpload (page.js): files are STAGED before upload with per-file validation (type + 10MB), duplicate skip, and live 20MB batch budget meter (progress bar amber >90%, «الإجمالي: X من 20MB» / «المتبقي: Y MB»), per-file remove ✕, «رفع الآن (N)» + «مسح». Adding a file that would exceed the batch shows «إجمالي حجم الملفات يجب ألا يتجاوز 20MB — المتبقي …».
+- Wired at all 3 multi-upload points: office verification (button variant), booking traveler docs (button), cancellation evidence (link variant, respects evidence<10 + posBusy). Upload handlers unchanged (still validateDocBatch + sequential POSTs).
+- Visually verified via Playwright: staged 2.5MB+1.2MB → meter showed 3.7/20MB, remaining 16.3MB, upload/clear buttons present. No real upload performed.
