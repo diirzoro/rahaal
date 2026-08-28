@@ -7186,9 +7186,10 @@ async function meraajRegisterPackageAPI(db, T, pkg, comps, meraajSet) {
 // (collection document_blobs) — NOT container-local disk, survives restarts, and is
 // migration-ready (same object_key namespace: a one-shot script can move blobs to S3).
 const DOC_ALLOWED_MIME = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }
-// v3.82 — UNIFIED UPLOAD POLICY: 20MB PER FILE (not per batch) across every upload point.
-// Transport verified: ingress accepts ~27MB JSON bodies (20MB file after base64 overhead).
-const DOC_MAX_BYTES = 20 * 1024 * 1024
+// v3.83 — UNIFIED UPLOAD POLICY (aligned with Meraaj): 10MB PER SINGLE FILE.
+// Batch total (20MB across all files selected at once) is enforced client-side —
+// each file arrives as its own request, so the per-request cap here is per-file.
+const DOC_MAX_BYTES = 10 * 1024 * 1024
 // MongoDB BSON documents are capped at 16MB — base64 of a 20MB file is ~27MB, so blobs
 // larger than DOC_CHUNK_CHARS are split into parts (parent_key + part_index) transparently.
 const DOC_CHUNK_CHARS = 10 * 1024 * 1024

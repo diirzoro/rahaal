@@ -80,9 +80,26 @@ const fmtDate = (d) => d ? new Date(d).toLocaleDateString('ar-EG', { year: 'nume
 // v3.77 — documents upload helpers (base64 transport, MIME whitelist mirrors the server)
 const readFileB64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(file) })
 const DOC_OK_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
-// v3.82 — UNIFIED UPLOAD POLICY: 20MB per single file (not per batch) at every upload point
-const DOC_MAX_MB = 20
+// v3.83 — UNIFIED UPLOAD POLICY (aligned with Meraaj): 10MB per single file + 20MB per selected batch
+const DOC_MAX_MB = 10
 const DOC_MAX_FILE_BYTES = DOC_MAX_MB * 1024 * 1024
+const DOC_BATCH_MAX_MB = 20
+const DOC_BATCH_MAX_BYTES = DOC_BATCH_MAX_MB * 1024 * 1024
+// Shared validation: per-file type/size + batch total — returns valid files or [] (errors toasted)
+const validateDocBatch = (fileList) => {
+  const files = Array.from(fileList || [])
+  const valid = []
+  for (const f of files) {
+    if (!DOC_OK_TYPES.includes(f.type)) { toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`); continue }
+    if (f.size > DOC_MAX_FILE_BYTES) { toast.error(`${f.name}: الحد الأقصى ${DOC_MAX_MB}MB لكل ملف`); continue }
+    valid.push(f)
+  }
+  if (valid.reduce((s, f) => s + f.size, 0) > DOC_BATCH_MAX_BYTES) {
+    toast.error(`إجمالي حجم الملفات يجب ألا يتجاوز ${DOC_BATCH_MAX_MB}MB`)
+    return []
+  }
+  return valid
+}
 const fmtTime = (d) => d ? new Date(d).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' }) : '—'
 const todayISO = () => new Date().toISOString().slice(0, 10)
 // v3.80 — UNIFIED document-date input: never accepts a future date (issue/voucher/journal dates).
@@ -416,14 +433,8 @@ function OfficeVerificationCard() {
   }
   const DOC_TYPE_LABELS = { license: '📜 السجل / الترخيص', owner_id: '🪪 هوية المالك / المسؤول', other: '📎 مستند آخر' }
   const upload = async (fileList) => {
-    // v3.82 — multiple upload + 20MB per file (verification usually needs several documents)
-    const files = Array.from(fileList || [])
-    const valid = []
-    for (const f of files) {
-      if (!DOC_OK_TYPES.includes(f.type)) { toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`); continue }
-      if (f.size > DOC_MAX_FILE_BYTES) { toast.error(`${f.name}: الحد الأقصى ${DOC_MAX_MB}MB لكل ملف`); continue }
-      valid.push(f)
-    }
+    // v3.83 — multiple upload: 10MB per file + 20MB per batch (verification usually needs several documents)
+    const valid = validateDocBatch(fileList)
     if (valid.length === 0) return
     setBusy(true)
     let okCount = 0, lastStatus = null
@@ -473,7 +484,7 @@ function OfficeVerificationCard() {
               {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستندات (متعدد)
               <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) upload(e.target.files); e.target.value = '' }} />
             </label>
-            <span className="text-[10px] text-slate-400">PDF / JPG / PNG / WEBP — حتى {DOC_MAX_MB}MB لكل ملف — يمكن اختيار عدة ملفات</span>
+            <span className="text-[10px] text-slate-400">PDF / JPG / PNG / WEBP — حتى {DOC_MAX_MB}MB لكل ملف و{DOC_BATCH_MAX_MB}MB إجمالاً للدفعة — يمكن اختيار عدة ملفات</span>
           </div>
         )}
         {(ver?.documents || []).length > 0 && (
@@ -9347,15 +9358,9 @@ function MeraajStoreScreen() {
   // v3.77 — upload a REAL evidence file for a position service (context: cancellation_evidence)
   const EV_TYPE_BY_SVC = { visa: 'visa', ticket: 'ticket', hotel: 'hotel', transport: 'other', other: 'receipt' }
   const uploadEvidenceFile = async (i, fileList) => {
-    // v3.82 — multiple evidence files per service + 20MB per file
+    // v3.83 — multiple evidence files per service: 10MB per file + 20MB per batch
     if (!posFor) return
-    const files = Array.from(fileList || [])
-    const valid = []
-    for (const f of files) {
-      if (!DOC_OK_TYPES.includes(f.type)) { toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`); continue }
-      if (f.size > DOC_MAX_FILE_BYTES) { toast.error(`${f.name}: الحد الأقصى ${DOC_MAX_MB}MB لكل ملف`); continue }
-      valid.push(f)
-    }
+    const valid = validateDocBatch(fileList)
     if (valid.length === 0) return
     setPosBusy(true)
     let okCount = 0
@@ -9393,13 +9398,8 @@ function MeraajStoreScreen() {
   const [docUploadProgress, setDocUploadProgress] = useState(null) // { done, total, name }
   const selectBookingDocs = async (fileList) => {
     if (!docsFor) return
-    const files = Array.from(fileList || [])
-    const valid = []
-    for (const f of files) {
-      if (!DOC_OK_TYPES.includes(f.type)) { toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`); continue }
-      if (f.size > DOC_MAX_FILE_BYTES) { toast.error(`${f.name}: الحد الأقصى ${DOC_MAX_MB}MB لكل ملف`); continue }
-      valid.push(f)
-    }
+    // v3.83 — 10MB per file + 20MB per batch
+    const valid = validateDocBatch(fileList)
     if (valid.length === 0) return
     setDocPendingFiles(valid.map(f => f.name))
     setDocsBusy(true)
@@ -9938,7 +9938,7 @@ function MeraajStoreScreen() {
                   {docsBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستندات (متعدد)
                   <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) selectBookingDocs(e.target.files); e.target.value = '' }} />
                 </label>
-                <span className="text-[9px] text-slate-400 w-full">PDF / JPG / PNG / WEBP — حتى {DOC_MAX_MB}MB لكل ملف — يمكن اختيار عدة ملفات دفعة واحدة — مرتبطة بـ booking_ref والمسافر المحدد</span>
+                <span className="text-[9px] text-slate-400 w-full">PDF / JPG / PNG / WEBP — حتى {DOC_MAX_MB}MB لكل ملف و{DOC_BATCH_MAX_MB}MB إجمالاً للدفعة — يمكن اختيار عدة ملفات — مرتبطة بـ booking_ref والمسافر المحدد</span>
                 {docUploadProgress && (
                   <div className="w-full space-y-1">
                     <div className="flex items-center justify-between text-[10px] text-slate-500">

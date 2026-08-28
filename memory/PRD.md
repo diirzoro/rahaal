@@ -115,3 +115,9 @@ See /app/memory/test_credentials.md
 - FE DOC_MAX_MB=20 constant. MULTIPLE upload now at: office verification docs (new), cancellation evidence per service (new), booking traveler docs (was already multiple in v3.81). All with per-file validation + Arabic per-file errors + summary toast. Preview via existing DocViewer (already wired v3.81).
 - NOT converted (by design, reported to user): package image (client-side compressed single thumbnail), tenant logo (700KB, stored inline in tenant_settings — 20MB would bloat the settings doc), Excel/CSV import inputs (client-side parsing, not server uploads).
 - Direct verification (no test agent): 15MB upload OK + chunks=2 reassembled exactly via document-proxy, 21MB rejected 400, small file single-doc, delete removes parts, zero residue.
+
+## v3.83 — Upload size policy aligned with Meraaj (2026-08)
+- 10MB PER SINGLE FILE (backend DOC_MAX_BYTES + FE DOC_MAX_FILE_BYTES) — BE msg «حجم الملف يتجاوز الحد (10MB)», FE per-file msg «الحد الأقصى 10MB لكل ملف».
+- 20MB PER SELECTED BATCH — FE-enforced (each file is its own request) via shared validateDocBatch() used by all 3 multi-upload points (office verification, cancellation evidence, booking docs). Batch msg: «إجمالي حجم الملفات يجب ألا يتجاوز 20MB».
+- Chunked blob storage kept (base64 of 10MB ≈ 13.3MB chars > 10MB chunk threshold → still split, BSON-safe).
+- Direct verification: BE 11MB→400/9MB→200; FE logic 24MB batch rejected w/ exact msg, 18MB allowed, 11MB per-file msg. Zero residue.
