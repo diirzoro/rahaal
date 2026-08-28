@@ -1266,13 +1266,10 @@ async function handleRoute(request, { params }) {
       // Accept international format with optional leading '+' and 7-15 digits
       if (!/^\+?[0-9]{7,15}$/.test(phone.replace(/[\s-]/g, ''))) return bad('رقم الهاتف غير صالح — أدخل رمز الدولة والرقم (مثال: +967771234567)')
       const email = String(b.owner_email).toLowerCase().trim()
-      // v3.9 — Restrict signup to real Gmail addresses to prevent fake/duplicate accounts.
-      // (Full Google OAuth verification will be added later; this is the interim enforcement.)
-      if (!/^[a-z0-9._%+-]+@gmail\.com$/.test(email)) {
-        return bad('يجب استخدام بريد Gmail حقيقي فقط (@gmail.com). سيتم دعم تسجيل الدخول بحساب Google قريباً.')
+      // Accept valid email addresses from any provider.
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+        return bad('البريد الإلكتروني غير صالح')
       }
-      // Also block +alias patterns to prevent duplicate signups from same Gmail (Gmail treats a+b@gmail = a@gmail)
-      if (email.includes('+')) return bad('بريد Gmail يجب أن يكون بدون رمز + (بدون aliases)')
       if (await db.collection('users').findOne({ email })) return bad('البريد الإلكتروني مستخدم بالفعل')
       const slug = (b.slug || b.name).toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 40) + '-' + uuidv4().slice(0, 4)
       let referredBy = null
@@ -2073,6 +2070,7 @@ async function handleRoute(request, { params }) {
         documents: docsBD.map(d => ({
           id: d.id, context: d.context, source: d.source || 'office',
           registrant_index: d.registrant_index ?? null, registrant_name: d.registrant_name || null,
+          passport_no: d.passport_no || null,
           doc_type: d.doc_type, evidence_type: d.evidence_type || null, label: d.label,
           filename: d.filename, content_type: d.content_type, size: d.size,
           external_url: d.storage?.driver === 'external_url' ? d.storage.url : null,
@@ -2117,6 +2115,84 @@ async function handleRoute(request, { params }) {
       await docAuditLog(db, T, 'uploaded', docBU.id, sess.user.email, { context: contextBU, booking_ref: inbBU.meraaj_booking_ref, registrant_index: regIdx, size: upBU.size })
       return ok({ uploaded: true, document: { id: docBU.id, context: docBU.context, doc_type: docBU.doc_type, evidence_type: docBU.evidence_type, registrant_index: regIdx, filename: docBU.filename, size: docBU.size } })
     }
+
+    // v3.77 — Same-origin proxy for Meraaj signed traveler documents.
+    // Prevents browser CORS failures in preview / print / download.
+    // Security: the client-supplied host is NEVER fetched. Only an approved
+    // signed Meraaj document pathname/query is forwarded to MERAAJ_API_BASE_URL.
+    if (route === '/meraaj/document-proxy' && method === 'GET') {
+      try {
+        const reqUrl = new URL(request.url)
+        const rawUrl = String(reqUrl.searchParams.get('url') || '').trim()
+        const requestedName = String(reqUrl.searchParams.get('name') || 'document')
+          .replace(/[\r\n"]/g, '')
+          .slice(0, 180)
+        const forceDownload = reqUrl.searchParams.get('download') === '1'
+
+        if (!rawUrl) return bad('رابط المستند مطلوب', 400)
+
+        let signed
+        try {
+          signed = new URL(rawUrl)
+        } catch {
+          return bad('رابط المستند غير صالح', 400)
+        }
+
+        // Accept ONLY Meraaj signed document endpoints.
+        if (!/^\/api\/documents\/[^/]+\/signed$/.test(signed.pathname)) {
+          return bad('مسار المستند غير مسموح', 403)
+        }
+
+        if (!signed.searchParams.get('exp') || !signed.searchParams.get('sig')) {
+          return bad('توقيع المستند مفقود', 403)
+        }
+
+        const meraajBase = String(process.env.MERAAJ_API_BASE_URL || '')
+          .trim()
+          .replace(/\/+$/, '')
+
+        if (!meraajBase) {
+          console.error('[MERAAJ DOC PROXY] MERAAJ_API_BASE_URL missing')
+          return bad('خدمة مستندات معراج غير مهيأة', 503)
+        }
+
+        const upstreamUrl = `${meraajBase}${signed.pathname}${signed.search}`
+
+        const upstream = await fetch(upstreamUrl, {
+          method: 'GET',
+          cache: 'no-store',
+          redirect: 'error',
+        })
+
+        if (!upstream.ok) {
+          console.error('[MERAAJ DOC PROXY] upstream failed', upstream.status)
+          return bad(`تعذر جلب المستند من معراج (${upstream.status})`, 502)
+        }
+
+        const headers = new Headers()
+        headers.set(
+          'Content-Type',
+          upstream.headers.get('content-type') || 'application/octet-stream'
+        )
+        headers.set('Cache-Control', 'private, no-store, max-age=0')
+        headers.set('X-Content-Type-Options', 'nosniff')
+
+        const disposition = forceDownload ? 'attachment' : 'inline'
+        headers.set(
+          'Content-Disposition',
+          `${disposition}; filename*=UTF-8''${encodeURIComponent(requestedName || 'document')}`
+        )
+
+        return new NextResponse(upstream.body, {
+          status: 200,
+          headers,
+        })
+      } catch (e) {
+        console.error('[MERAAJ DOC PROXY]', e)
+        return bad('تعذر معالجة المستند', 500)
+      }
+    }
+
     const bkDocDlMatch = route.match(/^\/meraaj\/booking-documents\/([^/]+)\/download$/)
     if (bkDocDlMatch && method === 'GET') {
       const docBDL = await db.collection('booking_documents').findOne({ id: bkDocDlMatch[1], tenant_id: T })
@@ -2867,6 +2943,7 @@ async function handleRoute(request, { params }) {
     // reversed via a mirrored Journal Entry, then booking.cancellation.approved → Meraaj.
     const cancApproveMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/cancellation\/approve$/)
     if (cancApproveMatch && method === 'POST') {
+      return cors(NextResponse.json({ error: 'final_cancellation_authority_moved', message: 'القرار النهائي لإلغاء حجوزات معراج متاح حصراً للسوبر أدمن في معراج. مكتب رحّال يقدّم موقفه والأدلة فقط.' }, { status: 403 }))
       // v3.74 — SERVER-SIDE RBAC: financial decision → owner OR (mod_meraaj + can_refund)
       const permsCA = effectivePermissions(sess.user)
       if (sess.user.role !== 'owner' && !(permsCA.mod_meraaj && permsCA.can_refund)) return bad('غير مصرح — يتطلب صلاحية متجر معراج + صلاحية الاسترداد', 403)
@@ -2929,6 +3006,7 @@ async function handleRoute(request, { params }) {
     // booking.cancellation.rejected → Meraaj with the reason.
     const cancRejectMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/cancellation\/reject$/)
     if (cancRejectMatch && method === 'POST') {
+      return cors(NextResponse.json({ error: 'final_cancellation_authority_moved', message: 'القرار النهائي برفض/قبول إلغاء حجوزات معراج متاح حصراً للسوبر أدمن في معراج. مكتب رحّال يقدّم موقفه والأدلة فقط.' }, { status: 403 }))
       // v3.74 — SERVER-SIDE RBAC + escrow gate (same authority rules as cancellation/approve)
       const permsCR = effectivePermissions(sess.user)
       if (sess.user.role !== 'owner' && !(permsCR.mod_meraaj && permsCR.can_refund)) return bad('غير مصرح — يتطلب صلاحية متجر معراج + صلاحية الاسترداد', 403)
@@ -2965,8 +3043,8 @@ async function handleRoute(request, { params }) {
     if (cancPositionMatch && method === 'POST') {
       const permsCP = effectivePermissions(sess.user)
       if (sess.user.role !== 'owner' && !(permsCP.mod_meraaj && permsCP.can_refund)) return bad('غير مصرح — يتطلب صلاحية متجر معراج + صلاحية الاسترداد', 403)
-      const esCfgP = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { meraaj_escrow_mode: 1 } })
-      if (!esCfgP?.meraaj_escrow_mode) return cors(NextResponse.json({ error: 'escrow_mode_inactive', message: 'وضع Escrow غير مفعل — استخدم مساري cancellation/approve أو cancellation/reject' }, { status: 409 }))
+      // Final cancellation authority is permanently centralized in Meraaj Super Admin.
+      // Rahal offices may submit a position/evidence regardless of the legacy escrow toggle.
       const bCP = await request.json()
       const positionVal = String(bCP.position || '').trim()
       if (!['no_objection', 'objection'].includes(positionVal)) return bad('الموقف إلزامي: no_objection أو objection')
