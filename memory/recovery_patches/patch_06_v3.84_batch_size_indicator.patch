@@ -1,0 +1,107 @@
+diff --git a/app/page.js b/app/page.js
+index 13e93cf..8c7170e 100644
+--- a/app/page.js
++++ b/app/page.js
+@@ -100,6 +100,66 @@ const validateDocBatch = (fileList) => {
+   }
+   return valid
+ }
++// v3.84 — STAGED BATCH PICKER with live size meter: files are staged first (with per-file
++// validation), the user sees used/remaining of the 20MB batch budget, can remove files,
++// then explicitly starts the upload. Trigger renders as a button (default) or inline link.
++const fmtMB = (b) => (b / 1024 / 1024).toFixed(1)
++const DocBatchUpload = ({ onUpload, busy, label = '📁 اختيار ملفات', variant = 'button', disabled = false }) => {
++  const [staged, setStaged] = useState([])
++  const total = staged.reduce((s, f) => s + f.size, 0)
++  const addFiles = (fileList) => {
++    const files = Array.from(fileList || [])
++    const cur = [...staged]
++    for (const f of files) {
++      if (!DOC_OK_TYPES.includes(f.type)) { toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`); continue }
++      if (f.size > DOC_MAX_FILE_BYTES) { toast.error(`${f.name}: الحد الأقصى ${DOC_MAX_MB}MB لكل ملف`); continue }
++      if (cur.some(x => x.name === f.name && x.size === f.size)) continue
++      const used = cur.reduce((s, x) => s + x.size, 0)
++      if (used + f.size > DOC_BATCH_MAX_BYTES) { toast.error(`${f.name}: إجمالي حجم الملفات يجب ألا يتجاوز ${DOC_BATCH_MAX_MB}MB — المتبقي ${fmtMB(DOC_BATCH_MAX_BYTES - used)}MB`); continue }
++      cur.push(f)
++    }
++    setStaged(cur)
++  }
++  const start = async () => { const files = staged; setStaged([]); await onUpload(files) }
++  const trigger = variant === 'link'
++    ? <label className={`text-[10px] font-bold text-indigo-600 hover:underline cursor-pointer ${busy || disabled ? 'opacity-40 pointer-events-none' : ''}`}>
++        {label}
++        <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = '' }} />
++      </label>
++    : <label className={`h-8 inline-flex items-center gap-1.5 text-xs font-bold border rounded-md px-3 cursor-pointer bg-white hover:bg-slate-100 ${busy || disabled ? 'opacity-50 pointer-events-none' : ''}`}>
++        {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📁'} {label}
++        <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = '' }} />
++      </label>
++  return (
++    <div className="w-full space-y-1.5">
++      <div className="flex flex-wrap items-center gap-2">
++        {trigger}
++        {staged.length > 0 && !busy && (<>
++          <button onClick={start} className="h-7 px-3 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold">📤 رفع الآن ({staged.length})</button>
++          <button onClick={() => setStaged([])} className="h-7 px-2 rounded-md border text-[11px] text-slate-500 hover:bg-slate-100">مسح</button>
++        </>)}
++      </div>
++      {staged.length > 0 && (
++        <div className="rounded-lg border bg-white p-2 space-y-1.5">
++          {staged.map((f, i) => (
++            <div key={`${f.name}-${i}`} className="flex items-center gap-2 text-[10px]">
++              <span className="truncate flex-1" dir="ltr">{f.name}</span>
++              <span className="text-slate-400 font-mono" dir="ltr">{fmtMB(f.size)}MB</span>
++              <button onClick={() => setStaged(staged.filter((_, idx) => idx !== i))} className="text-rose-500 hover:text-rose-700 font-black px-1">✕</button>
++            </div>
++          ))}
++          <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden">
++            <div className={`h-full rounded-full transition-all ${total > DOC_BATCH_MAX_BYTES * 0.9 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(100, Math.round((total / DOC_BATCH_MAX_BYTES) * 100))}%` }} />
++          </div>
++          <div className="flex justify-between text-[9px]">
++            <span className="text-slate-500">الإجمالي: {fmtMB(total)}MB من {DOC_BATCH_MAX_MB}MB</span>
++            <span className="font-bold text-emerald-600">المتبقي: {fmtMB(DOC_BATCH_MAX_BYTES - total)}MB</span>
++          </div>
++        </div>
++      )}
++    </div>
++  )
++}
+ const fmtTime = (d) => d ? new Date(d).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' }) : '—'
+ const todayISO = () => new Date().toISOString().slice(0, 10)
+ // v3.80 — UNIFIED document-date input: never accepts a future date (issue/voucher/journal dates).
+@@ -480,10 +540,7 @@ function OfficeVerificationCard() {
+             <select value={docType} onChange={e => setDocType(e.target.value)} className="h-8 text-xs border rounded-md px-2 bg-white font-bold">
+               {Object.entries(DOC_TYPE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+             </select>
+-            <label className={`h-8 inline-flex items-center gap-1.5 text-xs font-bold border rounded-md px-3 cursor-pointer bg-white hover:bg-slate-100 ${busy ? 'opacity-50 pointer-events-none' : ''}`}>
+-              {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستندات (متعدد)
+-              <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) upload(e.target.files); e.target.value = '' }} />
+-            </label>
++            <DocBatchUpload busy={busy} label="اختيار مستندات (متعدد)" onUpload={upload} />
+             <span className="text-[10px] text-slate-400">PDF / JPG / PNG / WEBP — حتى {DOC_MAX_MB}MB لكل ملف و{DOC_BATCH_MAX_MB}MB إجمالاً للدفعة — يمكن اختيار عدة ملفات</span>
+           </div>
+         )}
+@@ -9887,10 +9944,7 @@ function MeraajStoreScreen() {
+                       ))}
+                       <div className="flex items-center gap-3">
+                         <button onClick={() => addPosEvidence(i)} disabled={(s.evidence || []).length >= 10} className="text-[10px] font-bold text-indigo-600 hover:underline disabled:opacity-40">🔗 إضافة رابط دليل ({(s.evidence || []).length}/10)</button>
+-                        <label className={`text-[10px] font-bold text-indigo-600 hover:underline cursor-pointer ${(s.evidence || []).length >= 10 || posBusy ? 'opacity-40 pointer-events-none' : ''}`}>
+-                          📎 رفع ملف دليل (PDF/صورة)
+-                          <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) uploadEvidenceFile(i, e.target.files); e.target.value = '' }} />
+-                        </label>
++                        <DocBatchUpload busy={posBusy} disabled={(s.evidence || []).length >= 10} variant="link" label="📎 رفع ملفات دليل (PDF/صورة)" onUpload={files => uploadEvidenceFile(i, files)} />
+                       </div>
+                     </div>
+                   </div>
+@@ -9934,10 +9988,7 @@ function MeraajStoreScreen() {
+                   <option value="visa">📄 تأشيرة</option>
+                   <option value="other">📎 مستند آخر</option>
+                 </select>
+-                <label className={`h-8 inline-flex items-center gap-1.5 text-xs font-bold border rounded-md px-3 cursor-pointer bg-white hover:bg-slate-100 ${docsBusy ? 'opacity-50 pointer-events-none' : ''}`}>
+-                  {docsBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستندات (متعدد)
+-                  <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) selectBookingDocs(e.target.files); e.target.value = '' }} />
+-                </label>
++                <DocBatchUpload busy={docsBusy} label="اختيار مستندات للمسافر (متعدد)" onUpload={selectBookingDocs} />
+                 <span className="text-[9px] text-slate-400 w-full">PDF / JPG / PNG / WEBP — حتى {DOC_MAX_MB}MB لكل ملف و{DOC_BATCH_MAX_MB}MB إجمالاً للدفعة — يمكن اختيار عدة ملفات — مرتبطة بـ booking_ref والمسافر المحدد</span>
+                 {docUploadProgress && (
+                   <div className="w-full space-y-1">

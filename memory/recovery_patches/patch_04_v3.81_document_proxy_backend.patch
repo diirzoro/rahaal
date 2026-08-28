@@ -1,0 +1,38 @@
+diff --git a/app/api/[[...path]]/route.js b/app/api/[[...path]]/route.js
+index ac80e92..9019772 100644
+--- a/app/api/[[...path]]/route.js
++++ b/app/api/[[...path]]/route.js
+@@ -2165,6 +2165,33 @@ async function handleRoute(request, { params }) {
+       await docAuditLog(db, T, 'viewed', docBDL.id, sess.user.email, {})
+       return new Response(blobBDL.buffer, { status: 200, headers: { 'Content-Type': blobBDL.content_type, 'Content-Disposition': `inline; filename="${encodeURIComponent(docBDL.filename || 'document')}"`, 'Cache-Control': 'private, no-store' } })
+     }
++    // v3.81 — DOCUMENT PROXY: same-origin streaming for the professional document viewer.
++    // Serves BOTH locally-stored and external (Meraaj signed URL) booking documents through one
++    // authenticated tenant-scoped URL, so inline preview + print always work (no cross-origin redirects).
++    const docProxyMatch = route.match(/^\/document-proxy\/([^/]+)$/)
++    if (docProxyMatch && method === 'GET') {
++      const dpDoc = await db.collection('booking_documents').findOne({ id: docProxyMatch[1], tenant_id: T })
++      if (!dpDoc) return bad('المستند غير موجود', 404)
++      if (dpDoc.storage?.driver === 'external_url') {
++        try {
++          const dpCtrl = new AbortController()
++          const dpTimer = setTimeout(() => dpCtrl.abort(), 15000)
++          const dpResp = await fetch(dpDoc.storage.url, { signal: dpCtrl.signal })
++          clearTimeout(dpTimer)
++          if (!dpResp.ok) return bad(`تعذر جلب المستند من المصدر (${dpResp.status})`, 502)
++          const dpBuf = Buffer.from(await dpResp.arrayBuffer())
++          if (dpBuf.length > 20 * 1024 * 1024) return bad('حجم المستند يتجاوز الحد المسموح للمعاينة', 413)
++          await docAuditLog(db, T, 'viewed', dpDoc.id, sess.user.email, { via: 'proxy_external' })
++          return new Response(dpBuf, { status: 200, headers: { 'Content-Type': dpResp.headers.get('content-type') || dpDoc.content_type || 'application/octet-stream', 'Content-Disposition': `inline; filename="${encodeURIComponent(dpDoc.filename || 'document')}"`, 'Cache-Control': 'private, no-store' } })
++        } catch {
++          return bad('تعذر الوصول لمصدر المستند الخارجي', 502)
++        }
++      }
++      const dpBlob = await docStorageGet(db, dpDoc.storage?.object_key)
++      if (!dpBlob) return bad('ملف المستند غير متاح في التخزين', 404)
++      await docAuditLog(db, T, 'viewed', dpDoc.id, sess.user.email, { via: 'proxy' })
++      return new Response(dpBlob.buffer, { status: 200, headers: { 'Content-Type': dpBlob.content_type, 'Content-Disposition': `inline; filename="${encodeURIComponent(dpDoc.filename || 'document')}"`, 'Cache-Control': 'private, no-store' } })
++    }
+     const bkDocDelMatch = route.match(/^\/meraaj\/booking-documents\/([^/]+)$/)
+     if (bkDocDelMatch && method === 'DELETE') {
+       const docBDel = await db.collection('booking_documents').findOne({ id: bkDocDelMatch[1], tenant_id: T })
