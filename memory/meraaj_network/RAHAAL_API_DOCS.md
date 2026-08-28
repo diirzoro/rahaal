@@ -385,3 +385,14 @@ GET {RAHAAL_BASE}/api/meraaj/documents/signed/{doc_id}?exp={unix}&sig={HMAC-SHA2
 - طبقة تخزين S3-compatible خاصة (Private) — التفعيل عبر ENV فقط: `S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY`.
 - حتى توفر بيانات S3: fallback داخل MongoDB (`document_blobs`) بنفس مساحة أسماء object_key — جاهز للترحيل.
 - MIME المسموح: PDF/JPG/PNG/WEBP • الحد 4MB • مفاتيح كائنات عشوائية • عزل كامل بين المكاتب • تدقيق كامل (رفع/قراءة/حذف/تغيير حالة) في `document_audit`.
+
+## v3.77.1 — تحديث العقد النهائي للمستندات
+- `office.verification_updated` الآن يرسل الحقول القياسية: `verification_status` • `verification_reason` • `rahal_office_ref` • `verified_at` • `updated_at` (+ الأسماء القديمة `status`/`reject_reason`/`office_ref` مؤقتاً للتوافق الرجعي).
+- كل ملف Evidence في `booking.cancellation.position` يحمل الآن `type` (visa/ticket/hotel/receipt/other) بجانب `file_ref` + metadata + `download_url`.
+- حدث وارد جديد مدعوم: `meraaj.booking.documents_updated`
+```json
+{ "id": "uuid", "type": "meraaj.booking.documents_updated",
+  "data": { "booking_ref": "<نفس booking_ref>",
+    "documents": [{ "registrant_index": 0, "type": "passport|visa|other", "url": "https://...", "label": "..." }] } }
+```
+(يُقبل أيضاً شكل `data.registrants[i].documents[]`). Idempotent: نفس المسافر + نفس URL لا يتكرر. حد 10 مستندات معراج لكل مسافر. **صفر أثر مالي وصفر تغيير حالة** — فقط ربط المستندات بالحجز والمسافر الصحيح + سجل تدقيق.

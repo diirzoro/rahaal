@@ -939,6 +939,54 @@ async function handleRoute(request, { params }) {
         const { _id, ...rest } = inbound
         return ok({ received: true, inbound_booking: rest, auto_approved: autoApproved, seats_remaining: meraajAvailability({ ...pkg, meraaj: { ...pkg.meraaj, seats_sold: (Number(pkg.meraaj.seats_sold) || 0) + seats } }) })
       }
+      // v3.77.1 — DOCUMENTS UPDATED after booking creation (metadata only — ZERO financial
+      // effect, ZERO status change): buyer uploads more traveler documents in Meraaj and they
+      // attach to the SAME booking_ref + the correct registrant. Accepted shapes (both):
+      //   data.documents   = [{ registrant_index, type, url, label }]
+      //   data.registrants = [{ documents: [{ type, url, label }] }]  (aligned by index)
+      if (type === 'meraaj.booking.documents_updated') {
+        const inboundDU = await db.collection('meraaj_inbound_bookings').findOne({ meraaj_booking_ref: String(data.booking_ref || '') })
+        if (!inboundDU) return cors(NextResponse.json({ error: 'unknown_booking_ref', message: 'الحجز غير موجود — booking_ref يجب أن يطابق data.booking_ref لحدث booking.created الذي قبِله رحّال (HTTP 200)', received_booking_ref: String(data.booking_ref || '').slice(0, 60) || null }, { status: 404 }))
+        const regsDU = Array.isArray(inboundDU.registrants) ? inboundDU.registrants : []
+        // normalize both accepted shapes into one flat list
+        const flat = []
+        for (const d of (Array.isArray(data.documents) ? data.documents.slice(0, 100) : [])) {
+          flat.push({ idx: Number(d?.registrant_index), type: d?.type, url: d?.url, label: d?.label })
+        }
+        const shapeRegs = Array.isArray(data.registrants) ? data.registrants.slice(0, regsDU.length) : []
+        shapeRegs.forEach((r, idx) => {
+          for (const d of (Array.isArray(r?.documents) ? r.documents.slice(0, 10) : [])) flat.push({ idx, type: d?.type, url: d?.url, label: d?.label })
+        })
+        let added = 0, skipped = 0
+        for (const d of flat) {
+          const u = String(d.url || '').trim().slice(0, 600)
+          if (!/^https?:\/\//i.test(u)) { skipped++; continue }
+          if (!Number.isInteger(d.idx) || d.idx < 0 || d.idx >= regsDU.length) { skipped++; continue }
+          // idempotent: same registrant + same URL never duplicated (safe replays)
+          const dupDU = await db.collection('booking_documents').findOne({ inbound_id: inboundDU.id, registrant_index: d.idx, 'storage.url': u })
+          if (dupDU) { skipped++; continue }
+          const perRegCount = await db.collection('booking_documents').countDocuments({ inbound_id: inboundDU.id, registrant_index: d.idx, source: 'meraaj' })
+          if (perRegCount >= 10) { skipped++; continue }
+          const docDU = {
+            id: uuidv4(), tenant_id: inboundDU.tenant_id, inbound_id: inboundDU.id,
+            booking_ref: inboundDU.meraaj_booking_ref, context: 'traveler', source: 'meraaj',
+            registrant_index: d.idx, registrant_name: regsDU[d.idx]?.name || null, passport_no: regsDU[d.idx]?.passport_no || null,
+            doc_type: ['passport', 'visa', 'other'].includes(d.type) ? d.type : 'other',
+            label: String(d.label || '').slice(0, 120), filename: null, content_type: null, size: null,
+            storage: { driver: 'external_url', url: u },
+            uploaded_by: 'meraaj', uploaded_at: new Date(),
+          }
+          await db.collection('booking_documents').insertOne(docDU)
+          await docAuditLog(db, inboundDU.tenant_id, 'uploaded', docDU.id, 'meraaj', { context: 'traveler', via: 'booking.documents_updated', registrant_index: d.idx })
+          added++
+        }
+        if (added > 0) {
+          await db.collection('meraaj_inbound_bookings').updateOne({ id: inboundDU.id }, {
+            $push: { history: { at: new Date(), action: 'documents_updated', actor: 'meraaj', note: `${added} مستند مسافر جديد من معراج` } },
+          })
+        }
+        return ok({ received: true, documents_added: added, documents_skipped: skipped })
+      }
       if (type === 'meraaj.booking.cancelled') {
         const inbound = await db.collection('meraaj_inbound_bookings').findOne({ meraaj_booking_ref: String(data.booking_ref || ''), status: { $ne: 'cancelled' } })
         if (!inbound) return cors(NextResponse.json({ error: 'unknown_booking_ref', message: 'الحجز غير موجود أو مُلغى مسبقاً — booking_ref يجب أن يطابق data.booking_ref لحدث booking.created الذي قبِله رحّال (HTTP 200)', received_booking_ref: String(data.booking_ref || '').slice(0, 60) || null }, { status: 404 }))
@@ -1927,8 +1975,11 @@ async function handleRoute(request, { params }) {
         await db.collection('tenant_settings').updateOne(tf, { $set: { 'office_verification.status': 'pending_review', 'office_verification.submitted_at': new Date(), 'office_verification.reject_reason': null } }, { upsert: true })
         await docAuditLog(db, T, 'status_changed', null, sess.user.email, { from: curStatus, to: 'pending_review' })
         // Rahaal is the identity source — Meraaj receives the status + reference (never the raw file duplicated)
+        // v3.77.1 — canonical contract fields + legacy aliases kept for backward compatibility
         emitMeraajEvent(db, T, 'office.verification_updated', {
-          office_ref: T, status: 'pending_review',
+          verification_status: 'pending_review', verification_reason: null,
+          rahal_office_ref: T, verified_at: null, updated_at: new Date().toISOString(),
+          office_ref: T, status: 'pending_review', // legacy aliases
           office_name: stOD?.agency_name || sess.tenant?.name || '',
           documents_count: countOD + 1, submitted_at: new Date().toISOString(),
         }).catch(() => {})
@@ -1997,10 +2048,16 @@ async function handleRoute(request, { params }) {
       })
       await docAuditLog(db, tenantIdAD, 'status_changed', null, sess.user.email, { to: decisionAD, reason: reasonAD || null })
       // Meraaj receives the verification outcome + stable reference (Rahaal = identity source)
+      // v3.77.1 — canonical contract fields + legacy aliases kept for backward compatibility
       emitMeraajEvent(db, tenantIdAD, 'office.verification_updated', {
-        office_ref: tenantIdAD, status: decisionAD,
+        verification_status: decisionAD,
+        verification_reason: decisionAD === 'rejected' ? reasonAD : null,
+        rahal_office_ref: tenantIdAD,
+        verified_at: decisionAD === 'verified' ? new Date().toISOString() : null,
+        updated_at: new Date().toISOString(),
+        office_ref: tenantIdAD, status: decisionAD, // legacy aliases
         office_name: stAD?.agency_name || '',
-        ...(decisionAD === 'verified' ? { verified_at: new Date().toISOString() } : { reject_reason: reasonAD }),
+        ...(decisionAD === 'rejected' ? { reject_reason: reasonAD } : {}),
       }).catch(() => {})
       return ok({ decided: true, status: decisionAD })
     }
@@ -2972,7 +3029,8 @@ async function handleRoute(request, { params }) {
           evidence: s.evidence.map(ev => {
             if (ev.kind !== 'file_ref') return ev
             const d = fileRefDocs.find(x => x.id === ev.value)
-            return { ...ev, download_url: docSignedUrl(ev.value), filename: d?.filename || null, content_type: d?.content_type || null }
+            // v3.77.1 — per-file evidence type (visa/ticket/hotel/receipt/other) per contract
+            return { ...ev, type: d?.evidence_type || 'other', download_url: docSignedUrl(ev.value), filename: d?.filename || null, content_type: d?.content_type || null }
           }),
         })),
         actual_costs_total: costsTotal,
