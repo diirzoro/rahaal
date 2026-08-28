@@ -423,6 +423,23 @@ async function ensureReferralCode(db, tenantId) {
 }
 
 // ================= Helpers =================
+// v3.80 — UNIFIED RULE: document/accounting dates can NEVER be in the future.
+// Applies to: ticket/visa/service issue date, receipt/payment voucher date, FX date,
+// manual journal date, visa-monitor issue date, bulk date edits.
+// Travel/service dates (travel_date, entry_date, expected_exit_date, package start/end,
+// visa expiry, ...) are intentionally NOT restricted.
+// Date-only comparison in business timezone UTC+3 (KSA/Yemen) to avoid midnight edge cases.
+const FUTURE_DOC_DATE_MSG = 'لا يمكن أن يكون تاريخ المستند بعد تاريخ اليوم'
+function isFutureDocDate(dateVal) {
+  if (!dateVal) return false
+  const d = new Date(dateVal)
+  if (isNaN(d.getTime())) return false
+  const BIZ_TZ_MS = 3 * 3600 * 1000
+  const todayStr = new Date(Date.now() + BIZ_TZ_MS).toISOString().slice(0, 10)
+  const dStr = new Date(d.getTime() + BIZ_TZ_MS).toISOString().slice(0, 10)
+  return dStr > todayStr
+}
+
 async function updateBalance(db, col, filter, currency, delta) {
   await db.collection(col).updateOne(filter, { $inc: { [`balances.${currency}`]: delta } })
 }
@@ -2205,6 +2222,33 @@ async function handleRoute(request, { params }) {
       if (!blobBDL) return bad('ملف المستند غير متاح في التخزين', 404)
       await docAuditLog(db, T, 'viewed', docBDL.id, sess.user.email, {})
       return new Response(blobBDL.buffer, { status: 200, headers: { 'Content-Type': blobBDL.content_type, 'Content-Disposition': `inline; filename="${encodeURIComponent(docBDL.filename || 'document')}"`, 'Cache-Control': 'private, no-store' } })
+    }
+    // v3.81 — DOCUMENT PROXY: same-origin streaming for the professional document viewer.
+    // Serves BOTH locally-stored and external (Meraaj signed URL) booking documents through one
+    // authenticated tenant-scoped URL, so inline preview + print always work (no cross-origin redirects).
+    const docProxyMatch = route.match(/^\/document-proxy\/([^/]+)$/)
+    if (docProxyMatch && method === 'GET') {
+      const dpDoc = await db.collection('booking_documents').findOne({ id: docProxyMatch[1], tenant_id: T })
+      if (!dpDoc) return bad('المستند غير موجود', 404)
+      if (dpDoc.storage?.driver === 'external_url') {
+        try {
+          const dpCtrl = new AbortController()
+          const dpTimer = setTimeout(() => dpCtrl.abort(), 15000)
+          const dpResp = await fetch(dpDoc.storage.url, { signal: dpCtrl.signal })
+          clearTimeout(dpTimer)
+          if (!dpResp.ok) return bad(`تعذر جلب المستند من المصدر (${dpResp.status})`, 502)
+          const dpBuf = Buffer.from(await dpResp.arrayBuffer())
+          if (dpBuf.length > 20 * 1024 * 1024) return bad('حجم المستند يتجاوز الحد المسموح للمعاينة', 413)
+          await docAuditLog(db, T, 'viewed', dpDoc.id, sess.user.email, { via: 'proxy_external' })
+          return new Response(dpBuf, { status: 200, headers: { 'Content-Type': dpResp.headers.get('content-type') || dpDoc.content_type || 'application/octet-stream', 'Content-Disposition': `inline; filename="${encodeURIComponent(dpDoc.filename || 'document')}"`, 'Cache-Control': 'private, no-store' } })
+        } catch {
+          return bad('تعذر الوصول لمصدر المستند الخارجي', 502)
+        }
+      }
+      const dpBlob = await docStorageGet(db, dpDoc.storage?.object_key)
+      if (!dpBlob) return bad('ملف المستند غير متاح في التخزين', 404)
+      await docAuditLog(db, T, 'viewed', dpDoc.id, sess.user.email, { via: 'proxy' })
+      return new Response(dpBlob.buffer, { status: 200, headers: { 'Content-Type': dpBlob.content_type, 'Content-Disposition': `inline; filename="${encodeURIComponent(dpDoc.filename || 'document')}"`, 'Cache-Control': 'private, no-store' } })
     }
     const bkDocDelMatch = route.match(/^\/meraaj\/booking-documents\/([^/]+)$/)
     if (bkDocDelMatch && method === 'DELETE') {
@@ -5317,6 +5361,7 @@ async function handleRoute(request, { params }) {
       if (!b.agent_phone || !String(b.agent_phone).trim()) return bad('رقم جوال الوكيل (واتساب) مطلوب')
       if (!b.visa_no || !String(b.visa_no).trim()) return bad('رقم التأشيرة مطلوب')
       if (!b.visa_issue_date) return bad('تاريخ إصدار التأشيرة مطلوب')
+      if (isFutureDocDate(b.visa_issue_date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ إصدار التأشيرة)`) // v3.80
       if (!b.entry_date) return bad('تاريخ الدخول مطلوب')
       const allowedDays = Number(b.allowed_days) > 0 ? Number(b.allowed_days) : 85
       const doc = {
@@ -5362,6 +5407,7 @@ async function handleRoute(request, { params }) {
         else if (b.action === 'acknowledge') upd.status = 'acknowledged'
         else if (b.action === 'reactivate') { upd.status = 'active'; upd.actual_exit_date = null }
         else {
+          if (b.visa_issue_date !== undefined && isFutureDocDate(b.visa_issue_date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ إصدار التأشيرة)`) // v3.80
           ['traveler_name', 'phone', 'passport_no', 'nationality', 'agent_name', 'agent_phone', 'visa_no', 'visa_issue_date', 'host_name', 'entry_date', 'entry_port', 'allowed_days', 'actual_exit_date', 'exit_port', 'destination_country', 'visa_type', 'max_exit_date', 'notes'].forEach(f => { if (b[f] !== undefined) upd[f] = b[f] })
           if (upd.allowed_days !== undefined) upd.allowed_days = Number(upd.allowed_days) > 0 ? Number(upd.allowed_days) : 85
           // Recompute expected exit if entry/allowed changed
@@ -5413,6 +5459,7 @@ async function handleRoute(request, { params }) {
           if (!r.agent_phone) missing.push('جوال الوكيل')
           if (!r.visa_no) missing.push('رقم التأشيرة')
           if (!r.visa_issue_date) missing.push('تاريخ الإصدار')
+          else if (isFutureDocDate(r.visa_issue_date)) missing.push('تاريخ الإصدار مستقبلي (غير مسموح)') // v3.80
           if (!r.entry_date) missing.push('تاريخ الدخول')
           if (missing.length) { skipped++; skipReasons.push(`${passport}: ينقصه ${missing.join('، ')}`); continue }
           const allowedDays = Number(r.allowed_days) > 0 ? Number(r.allowed_days) : 85
@@ -5475,7 +5522,9 @@ async function handleRoute(request, { params }) {
       const baseQ = { tenant_id: T, ...filterInactive }
       const results = []
       const wantAll = wantType === 'all'
-      if (wantAll || wantType === 'client') {
+      const wantParty = wantType === 'party' // v3.79 — clients + suppliers combined (partner pickers)
+      const acctTypeF = String(q.acct_type || '').toLowerCase() // v3.79 — filter COA accounts by type (expense/revenue/...)
+      if (wantAll || wantParty || wantType === 'client') {
         const rows = await db.collection('clients').find(baseQ).toArray()
         rows.forEach(r => {
           const label = (r.name || '').toLowerCase()
@@ -5485,7 +5534,7 @@ async function handleRoute(request, { params }) {
           }
         })
       }
-      if (wantAll || wantType === 'supplier') {
+      if (wantAll || wantParty || wantType === 'supplier') {
         const rows = await db.collection('suppliers').find(baseQ).toArray()
         rows.forEach(r => {
           const label = (r.name || '').toLowerCase()
@@ -5511,6 +5560,7 @@ async function handleRoute(request, { params }) {
         accs.forEach(a => {
           // Skip group-parents already served via sub-entities (client/supplier/box parents)
           if (['1101', '1201', '1301', '2101'].includes(a.code)) return
+          if (acctTypeF && a.type !== acctTypeF) return // v3.79 — expense/revenue scoped selectors
           const label = (a.name_ar || '').toLowerCase()
           const code = (a.code || '').toLowerCase()
           if (!qText || label.includes(qText) || code.includes(qText)) {
@@ -5571,8 +5621,29 @@ async function handleRoute(request, { params }) {
 
     if (route === '/accounts' && method === 'POST') {
       const b = await request.json()
-      if (!b.code || !b.name_ar || !b.type) return bad('الرمز والاسم والنوع مطلوبة')
-      const code = String(b.code)
+      if (!b.name_ar || !b.type) return bad('الاسم والنوع مطلوبان')
+      // v3.79 — AUTO CODE: when code is omitted, generate the next child code under the parent
+      // (inline quick-add from the unified Account Selector). Parent = classification only.
+      let code = b.code ? String(b.code) : ''
+      if (!code) {
+        if (!b.parent) return bad('الرمز مطلوب — أو حدد الحساب الأب ليُولَّد الرمز تلقائياً')
+        const parentStr = String(b.parent)
+        const pAcc = await db.collection('accounts').findOne({ tenant_id: T, code: parentStr })
+        if (!pAcc) return bad('الحساب الأب غير موجود')
+        const kids = await db.collection('accounts').find({ tenant_id: T, parent: parentStr }).project({ code: 1 }).toArray()
+        const nums = kids.map(k => Number(k.code)).filter(n => Number.isFinite(n))
+        let candidate = nums.length ? Math.max(...nums) + 1 : Number(`${parentStr}01`)
+        for (let i = 0; i < 200; i++) { // skip collisions with any existing account_code
+          const cStr = String(candidate)
+          const clash = await db.collection('accounts').findOne({ tenant_id: T, code: cStr })
+            || await db.collection('clients').findOne({ tenant_id: T, account_code: cStr })
+            || await db.collection('suppliers').findOne({ tenant_id: T, account_code: cStr })
+            || await db.collection('boxes').findOne({ tenant_id: T, account_code: cStr })
+          if (!clash) break
+          candidate++
+        }
+        code = String(candidate)
+      }
       // v3.10.2 — check uniqueness across accounts + clients + suppliers + boxes account_codes
       const [existsAcc, existsClient, existsSupp, existsBox] = await Promise.all([
         db.collection('accounts').findOne({ tenant_id: T, code }),
@@ -6118,6 +6189,8 @@ async function handleRoute(request, { params }) {
       const allowed = ['supplier_id', 'date', 'payment_method', 'box_id', 'currency', 'exchange_rate']
       const changeKeys = Object.keys(changes).filter(k => allowed.includes(k) && changes[k] !== undefined && changes[k] !== null && changes[k] !== '')
       if (changeKeys.length === 0) return bad('لم يتم تحديد أي تغيير')
+      // v3.80 — reject future doc date EARLY (before the destructive reverse+delete+recreate loop)
+      if (changes.date && isFutureDocDate(changes.date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ المستند)`)
       let updated = 0, failed = 0
       const errors = []
       for (const docId of ids) {
@@ -6134,6 +6207,11 @@ async function handleRoute(request, { params }) {
             // preserve type-specific fields
             pnr: oldDoc.pnr, route: oldDoc.route, ticket_number: oldDoc.ticket_number, passenger_name: oldDoc.passenger_name,
             carrier: oldDoc.carrier, class: oldDoc.class,
+            // v3.80b — FIX: these required fields were dropped during bulk-edit reconstruction,
+            // making every tickets bulk-edit fail with «رقم الجوال مطلوب» and visas with «اسم صاحب التأشيرة مطلوب»
+            passenger_phone: oldDoc.passenger_phone, passenger_whatsapp: oldDoc.passenger_whatsapp, phone: oldDoc.phone,
+            // visas VALIDATE beneficiary_* but STORE passenger_* — fall back so re-validation passes with identical data
+            beneficiary_name: oldDoc.beneficiary_name || oldDoc.passenger_name, beneficiary_phone: oldDoc.beneficiary_phone || oldDoc.passenger_phone, beneficiary_whatsapp: oldDoc.beneficiary_whatsapp || oldDoc.passenger_whatsapp,
             passport_no: oldDoc.passport_no, nationality: oldDoc.nationality, service_type: oldDoc.service_type,
             visa_type: oldDoc.visa_type, entry_date: oldDoc.entry_date, exit_date: oldDoc.exit_date,
             travel_date: oldDoc.travel_date, notes: oldDoc.notes, description: oldDoc.description,
@@ -6249,6 +6327,9 @@ async function handleRoute(request, { params }) {
       const oldJe = await db.collection('journal_entries').findOne({ id: jeId, tenant_id: T })
       if (!oldJe) return bad('القيد غير موجود', 404)
       if (!['manual', 'manual_dual'].includes(oldJe.ref_type)) return bad('لا يمكن تعديل قيود المعاملات مباشرةً — عدّل السجل المرتبط', 400)
+      // v3.80 — reject future doc date EARLY (this handler deletes the old JE before re-creating,
+      // with no restore-on-error mechanism — validating here prevents data loss)
+      if (isFutureDocDate(b.date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ القيد)`)
       // Reverse old effects
       await reverseManualJournalEffects(db, T, oldJe)
       await db.collection('journal_entries').deleteOne({ id: jeId })
@@ -7228,6 +7309,7 @@ async function meraajLinkOfficeAPI(db, T, payload) {
 
 // ================= Business logic =================
 async function createTicket(db, T, b, opts = {}) {
+  if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ إصدار التذكرة)` } // v3.80
   if (!b.supplier_id) return { error: 'المورد مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   // v3.10.2 — Strict validation for mandatory ticket fields
@@ -7360,6 +7442,7 @@ async function createTicket(db, T, b, opts = {}) {
 }
 
 async function createVisa(db, T, b, opts = {}) {
+  if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ إصدار التأشيرة)` } // v3.80
   if (!b.supplier_id) return { error: 'المورد مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   // v3.10.2 — Strict validation for mandatory visa fields
@@ -7499,6 +7582,7 @@ async function createVisa(db, T, b, opts = {}) {
 // v3.0 — Services: Dedicated dynamic-catalog service transactions (Hotels, Attestations, Transfers, etc.)
 // Uses revenue account 4103 (إيرادات خدمات إضافية). Party label = "حساب القبض" but stored the same way.
 async function createService(db, T, b, opts = {}) {
+  if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ الخدمة/المستند)` } // v3.80
   if (!b.supplier_id) return { error: 'المورد/المزود مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   // v3.9.14 — Period lock: prevent creating records in a closed year
@@ -7602,12 +7686,14 @@ async function createService(db, T, b, opts = {}) {
 }
 
 async function createVoucher(db, T, b, opts = {}) {
+  if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ السند)` } // v3.80
   if (!['receipt', 'payment'].includes(b.type)) return { error: 'نوع السند غير صالح' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   const amount = Number(b.amount) || 0
   if (Number(b.amount) < 0) return { error: 'لا يُسمح بمبلغ سالب في السند' }
   if (amount <= 0) return { error: 'المبلغ يجب أن يكون أكبر من صفر' }
   let partyName = ''
+  let coaAccount = null // v3.79 — real COA account for expense/revenue vouchers
   if (b.party_type === 'client') {
     const c = await db.collection('clients').findOne({ id: b.party_id, tenant_id: T })
     if (!c) return { error: 'العميل غير موجود' }; partyName = c.name
@@ -7615,7 +7701,26 @@ async function createVoucher(db, T, b, opts = {}) {
     const s = await db.collection('suppliers').findOne({ id: b.party_id, tenant_id: T })
     if (!s) return { error: 'المورد غير موجود' }; partyName = s.name
   } else if (b.party_type === 'expense') {
-    partyName = b.party_name || 'مصروف تشغيلي'
+    if (b.type !== 'payment') return { error: 'المصروف متاح في سند الصرف فقط' }
+    // v3.79 — expense MUST be a real account from the chart of accounts (not free text).
+    // Legacy fallback (old records being re-created on edit) keeps the generic 5101 line.
+    if (b.coa_account_code) {
+      coaAccount = await db.collection('accounts').findOne({ tenant_id: T, code: String(b.coa_account_code) })
+      if (!coaAccount) return { error: 'حساب المصروف غير موجود في دليل الحسابات' }
+      if (coaAccount.type !== 'expense') return { error: `الحساب "${coaAccount.name_ar}" ليس حساب مصروف` }
+      if (coaAccount.is_group) return { error: 'اختر حساب مصروف فرعياً — الحساب الأب للتصنيف فقط ولا تُسجل عليه حركة' }
+      partyName = coaAccount.name_ar
+    } else {
+      partyName = b.party_name || 'مصروف تشغيلي'
+    }
+  } else if (b.party_type === 'revenue') {
+    if (b.type !== 'receipt') return { error: 'الإيراد متاح في سند القبض فقط' }
+    // v3.79 — revenue MUST be a real account from the chart of accounts
+    coaAccount = await db.collection('accounts').findOne({ tenant_id: T, code: String(b.coa_account_code || '') })
+    if (!coaAccount) return { error: 'حساب الإيراد غير موجود في دليل الحسابات' }
+    if (coaAccount.type !== 'revenue') return { error: `الحساب "${coaAccount.name_ar}" ليس حساب إيراد` }
+    if (coaAccount.is_group) return { error: 'اختر حساب إيراد فرعياً — الحساب الأب للتصنيف فقط ولا تُسجل عليه حركة' }
+    partyName = coaAccount.name_ar
   } else return { error: 'الطرف غير صالح' }
   const box = await db.collection('boxes').findOne({ id: b.box_id, tenant_id: T })
   if (!box) return { error: 'الصندوق/البنك غير موجود' }
@@ -7623,6 +7728,7 @@ async function createVoucher(db, T, b, opts = {}) {
     id: opts.existingId || uuidv4(), tenant_id: T, type: b.type, date: new Date(b.date || Date.now()),
     currency: b.currency, amount, party_type: b.party_type, party_id: b.party_id || null,
     party_name: partyName, box_id: box.id, box_name: box.name_ar,
+    coa_account_code: coaAccount?.code || null, coa_account_name: coaAccount?.name_ar || null, // v3.79
     method: b.method || (box.type === 'cash' ? 'صندوق' : 'بنك'),
     description: b.description || '', created_at: opts.createdAt || new Date(),
     ...(opts.existingId ? { updated_at: new Date() } : {}),
@@ -7643,11 +7749,17 @@ async function createVoucher(db, T, b, opts = {}) {
     lines.push({ account_code: boxAccCode, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: amount, credit: 0 })
     if (b.party_type === 'client') lines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
     if (b.party_type === 'supplier') lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
+    // v3.79 — revenue posts to the SELECTED revenue account (statement-able independent account)
+    if (b.party_type === 'revenue') lines.push({ account_code: coaAccount.code, account_name: coaAccount.name_ar, party_type: 'account', party_id: coaAccount.id, party_name: coaAccount.name_ar, debit: 0, credit: amount })
     if (b.party_type === 'expense') lines.push({ account_code: '4103', account_name: 'إيراد متنوع', party_type: 'revenue', party_id: null, party_name: 'إيراد متنوع', debit: 0, credit: amount })
   } else {
     if (b.party_type === 'supplier') lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
     if (b.party_type === 'client') lines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
-    if (b.party_type === 'expense') lines.push({ account_code: '5101', account_name: 'مصاريف تشغيلية', party_type: 'expense', party_id: null, party_name: partyName, debit: amount, credit: 0 })
+    // v3.79 — expense posts to the SELECTED expense account; legacy free-text keeps generic 5101
+    if (b.party_type === 'expense') {
+      if (coaAccount) lines.push({ account_code: coaAccount.code, account_name: coaAccount.name_ar, party_type: 'account', party_id: coaAccount.id, party_name: coaAccount.name_ar, debit: amount, credit: 0 })
+      else lines.push({ account_code: '5101', account_name: 'مصاريف تشغيلية', party_type: 'expense', party_id: null, party_name: partyName, debit: amount, credit: 0 })
+    }
     lines.push({ account_code: boxAccCode, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: 0, credit: amount })
   }
   await createJournalEntry(db, T, {
@@ -7680,6 +7792,7 @@ async function resolveAccountRef(db, T, ref) {
 }
 
 async function createFx(db, T, b, opts = {}) {
+  if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ عملية الصرافة)` } // v3.80
   if (!['buy', 'sell'].includes(b.type)) return { error: 'نوع العملية غير صالح' }
   if (!CURRENCIES.includes(b.currency) || !CURRENCIES.includes(b.counter_currency)) return { error: 'العملات غير صالحة' }
   if (b.currency === b.counter_currency) return { error: 'يجب اختيار عملتين مختلفتين' }
@@ -7758,6 +7871,7 @@ async function createFx(db, T, b, opts = {}) {
 }
 
 async function createManualJournal(db, T, b, opts = {}) {
+  if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ القيد)` } // v3.80
   // Modes:
   //  A) single: { date, currency, description, lines: [...] }
   //  B) dual:   { date, description, dual: true, debit_*, credit_* }

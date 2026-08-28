@@ -80,8 +80,48 @@ const fmtDate = (d) => d ? new Date(d).toLocaleDateString('ar-EG', { year: 'nume
 // v3.77 — documents upload helpers (base64 transport, MIME whitelist mirrors the server)
 const readFileB64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(file) })
 const DOC_OK_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
+const DOC_MAX_MB = 10
+const DOC_MAX_FILE_BYTES = DOC_MAX_MB * 1024 * 1024
+const DOC_BATCH_MAX_MB = 20
+const DOC_BATCH_MAX_BYTES = DOC_BATCH_MAX_MB * 1024 * 1024
+
+const validateDocBatch = (fileList) => {
+  const files = Array.from(fileList || [])
+  const valid = []
+
+  for (const f of files) {
+    if (!DOC_OK_TYPES.includes(f.type)) {
+      toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`)
+      continue
+    }
+
+    if (f.size > DOC_MAX_FILE_BYTES) {
+      toast.error(`${f.name}: الحد الأقصى ${DOC_MAX_MB}MB لكل ملف`)
+      continue
+    }
+
+    valid.push(f)
+  }
+
+  if (valid.reduce((sum, f) => sum + f.size, 0) > DOC_BATCH_MAX_BYTES) {
+    toast.error(`إجمالي حجم الملفات يجب ألا يتجاوز ${DOC_BATCH_MAX_MB}MB`)
+    return []
+  }
+
+  return valid
+}
+
 const fmtTime = (d) => d ? new Date(d).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' }) : '—'
 const todayISO = () => new Date().toISOString().slice(0, 10)
+// v3.80 — UNIFIED document-date input: never accepts a future date (issue/voucher/journal dates).
+// Travel & service dates keep using the plain date input (future allowed).
+const DocDateInput = ({ value, onChange, ...props }) => (
+  <Input type="date" max={todayISO()} value={value} onChange={e => {
+    const v = e.target.value
+    if (v && v > todayISO()) { toast.error('لا يمكن أن يكون تاريخ المستند بعد تاريخ اليوم'); return }
+    onChange(v)
+  }} {...props} />
+)
 
 // v3.2 — WhatsApp helpers
 // Normalizes a phone: keeps digits only. If starts with 0, replaces with default country code (967 Yemen).
@@ -357,17 +397,43 @@ function OfficeVerificationCard() {
     rejected: { label: '❌ مرفوض — أعد الرفع', cls: 'bg-rose-100 text-rose-700' },
   }
   const DOC_TYPE_LABELS = { license: '📜 السجل / الترخيص', owner_id: '🪪 هوية المالك / المسؤول', other: '📎 مستند آخر' }
-  const upload = async (file) => {
-    if (!file) return
-    if (!DOC_OK_TYPES.includes(file.type)) { toast.error('المسموح: PDF / JPG / PNG / WEBP فقط'); return }
-    if (file.size > 4 * 1024 * 1024) { toast.error('الحد الأقصى لحجم المستند 4MB'); return }
+  const upload = async (fileList) => {
+    const valid = validateDocBatch(fileList)
+    if (!valid.length) return
+
     setBusy(true)
-    try {
-      const file_base64 = await readFileB64(file)
-      const r = await api('/office/verification/documents', { method: 'POST', body: { doc_type: docType, filename: file.name, content_type: file.type, file_base64 } })
-      toast.success(r.verification_status === 'pending_review' ? '📤 رُفع المستند — مكتبك الآن قيد المراجعة للتوثيق' : '📤 رُفع المستند بنجاح')
+    let okCount = 0
+    let lastStatus = null
+
+    for (const f of valid) {
+      try {
+        const file_base64 = await readFileB64(f)
+        const r = await api('/office/verification/documents', {
+          method: 'POST',
+          body: {
+            doc_type: docType,
+            filename: f.name,
+            content_type: f.type,
+            file_base64
+          }
+        })
+        okCount += 1
+        lastStatus = r.verification_status
+      } catch (e) {
+        toast.error(`${f.name}: ${e.message}`)
+      }
+    }
+
+    setBusy(false)
+
+    if (okCount > 0) {
+      toast.success(
+        lastStatus === 'pending_review'
+          ? `📤 رُفع ${okCount} مستند — مكتبك الآن قيد المراجعة للتوثيق`
+          : `📤 رُفع ${okCount} مستند بنجاح`
+      )
       loadVer()
-    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+    }
   }
   const delDoc = async (d) => {
     try { await api(`/office/verification/documents/${d.id}`, { method: 'DELETE' }); toast.success('حُذف المستند'); loadVer() } catch (e) { toast.error(e.message) }
@@ -398,10 +464,10 @@ function OfficeVerificationCard() {
               {Object.entries(DOC_TYPE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
             </select>
             <label className={`h-8 inline-flex items-center gap-1.5 text-xs font-bold border rounded-md px-3 cursor-pointer bg-white hover:bg-slate-100 ${busy ? 'opacity-50 pointer-events-none' : ''}`}>
-              {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستند
-              <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = '' }} />
+              {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستندات (متعدد)
+              <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) upload(e.target.files); e.target.value = '' }} />
             </label>
-            <span className="text-[10px] text-slate-400">PDF / JPG / PNG / WEBP — حتى 4MB</span>
+            <span className="text-[10px] text-slate-400">PDF / JPG / PNG / WEBP — حتى {DOC_MAX_MB}MB لكل ملف و{DOC_BATCH_MAX_MB}MB إجمالاً للدفعة — يمكن اختيار عدة ملفات</span>
           </div>
         )}
         {(ver?.documents || []).length > 0 && (
@@ -1124,18 +1190,12 @@ function Field({ label, required, children }) {
   )
 }
 
-// v3.10.0 — AccountAutocomplete: smart searcher across clients/suppliers/boxes/accounts
-// v3.10.3 — Now supports quick-add: shows "+ Add new" when no results
-// Props:
-//   type: 'client' | 'supplier' | 'box' | 'account' | 'all'  (default 'all')
-//   value: currently selected id (or null)
-//   onChange: fn(entity)
-//   placeholder: string
-//   disabled: bool
-//   allowClear: bool
-//   dropdownWidth: css string
-//   allowQuickAdd: bool (default true for client/supplier — false otherwise)
-function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder = 'بحث بالاسم أو الكود...', disabled = false, allowClear = true, dropdownWidth = '420px', allowQuickAdd }) {
+// v3.79 — UNIFIED Account Selector (المكوّن الموحّد لكل حقول الحساب في النظام):
+//   type: 'client' | 'supplier' | 'box' | 'account' | 'party' (عميل+مورد) | 'all'
+//   acctType: 'expense' | 'revenue' | ... — يحصر حسابات الدليل بنوع محدد (لحقلي المصروف/الإيراد)
+//   suggestedParent: كود الحساب الأب المقترح عند الإضافة السريعة (قابل للتغيير قبل الحفظ)
+//   compact: ارتفاع مصغّر لصفوف الجداول
+function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder = 'بحث بالاسم أو الكود...', disabled = false, allowClear = true, dropdownWidth = '420px', allowQuickAdd, acctType = null, suggestedParent = null, compact = false }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState([])
   const [open, setOpen] = useState(false)
@@ -1143,33 +1203,64 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
   const [loading, setLoading] = useState(false)
   const [quickAddOpen, setQuickAddOpen] = useState(false)
   const [quickAddType, setQuickAddType] = useState(null) // 'client' | 'supplier'
+  // v3.79 — inline COA account creation (independent account, parent = classification only)
+  const [coaAdd, setCoaAdd] = useState(false)
+  const [coaName, setCoaName] = useState('')
+  const [coaParent, setCoaParent] = useState(suggestedParent || '')
+  const [coaParents, setCoaParents] = useState([])
+  const [coaSaving, setCoaSaving] = useState(false)
   const wrapRef = useRef(null)
   const inputRef = useRef(null)
-  // Default: quick-add enabled for client/supplier/all, disabled for box/account
-  const enableQA = allowQuickAdd !== undefined ? allowQuickAdd : ['client', 'supplier', 'all'].includes(type)
+  // Default: quick-add enabled everywhere except plain box pickers
+  const enableQA = allowQuickAdd !== undefined ? allowQuickAdd : ['client', 'supplier', 'party', 'all', 'account'].includes(type)
   // Debounced search
   useEffect(() => {
     if (!open) return
     const timer = setTimeout(async () => {
       setLoading(true)
       try {
-        const rs = await api(`/accounts/search?q=${encodeURIComponent(query)}&type=${type}&limit=30`)
+        const rs = await api(`/accounts/search?q=${encodeURIComponent(query)}&type=${type}&limit=30${acctType ? `&acct_type=${acctType}` : ''}`)
         setResults(Array.isArray(rs) ? rs : [])
       } catch (_) { setResults([]) }
       setLoading(false)
     }, 200)
     return () => clearTimeout(timer)
-  }, [query, type, open])
+  }, [query, type, open, acctType])
   // Load selected by value once
   useEffect(() => {
     if (!value) { setSelected(null); return }
     if (selected?.id === value) return
-    api(`/accounts/search?q=&type=${type}&limit=300`).then(list => {
-      const found = (list || []).find(x => x.id === value)
+    api(`/accounts/search?q=&type=${type}&limit=300${acctType ? `&acct_type=${acctType}` : ''}`).then(list => {
+      const found = (list || []).find(x => x.id === value || x.account_code === value)
       if (found) setSelected(found)
     }).catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value, type])
+  // Load COA group parents for inline account creation
+  const openCoaAdd = async () => {
+    setCoaName(query.trim())
+    setCoaAdd(true)
+    try {
+      const rows = await api('/accounts')
+      const groups = (rows || []).filter(a => (!acctType || a.type === acctType) && a.is_group)
+      const list = groups.length ? groups : (rows || []).filter(a => !acctType || a.type === acctType)
+      setCoaParents(list)
+      setCoaParent(p => p || suggestedParent || list[0]?.code || '')
+    } catch { setCoaParents([]) }
+  }
+  const submitCoaAdd = async () => {
+    if (!coaName.trim()) { toast.error('اسم الحساب مطلوب'); return }
+    if (!coaParent) { toast.error('اختر الحساب الأب (للتصنيف فقط)'); return }
+    setCoaSaving(true)
+    try {
+      const parentAcc = coaParents.find(p => p.code === coaParent)
+      const created = await api('/accounts', { method: 'POST', body: { name_ar: coaName.trim(), type: acctType || parentAcc?.type || 'expense', parent: coaParent } })
+      const entity = { id: created.id, name: created.name_ar, type: 'account', account_code: created.code, parent_code: created.parent, acct_type: created.type }
+      toast.success(`✅ أُنشئ حساب مستقل في دليل الحسابات بكود ${created.code} تحت «${parentAcc?.name_ar || coaParent}»`)
+      setCoaAdd(false); setCoaName('')
+      pick(entity)
+    } catch (e) { toast.error(e.message) } finally { setCoaSaving(false) }
+  }
   // Click outside — close popover
   useEffect(() => {
     const handler = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false) }
@@ -1197,7 +1288,7 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
     <div ref={wrapRef} className="relative w-full">
       {/* Field trigger */}
       <div
-        className={`flex items-center gap-1 border-2 rounded-md bg-white px-2 py-1.5 text-sm min-h-[38px] ${disabled ? 'opacity-60 pointer-events-none' : 'cursor-pointer hover:border-blue-400'} ${open ? 'border-blue-500 ring-1 ring-blue-200' : 'border-slate-200'}`}
+        className={`flex items-center gap-1 border-2 rounded-md bg-white px-2 ${compact ? 'py-0.5 text-xs min-h-[30px]' : 'py-1.5 text-sm min-h-[38px]'} ${disabled ? 'opacity-60 pointer-events-none' : 'cursor-pointer hover:border-blue-400'} ${open ? 'border-blue-500 ring-1 ring-blue-200' : 'border-slate-200'}`}
         onClick={openPopover}
       >
         {selected ? (
@@ -1231,30 +1322,16 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
           <div className="max-h-72 overflow-y-auto">
             {loading && <div className="p-4 text-center text-xs text-slate-400">جاري البحث...</div>}
             {!loading && results.length === 0 && (
-              <div className="p-4 text-center text-xs text-slate-400">
-                لا نتائج مطابقة
-                {enableQA && query.trim().length > 0 && (
-                  <div className="mt-3 space-y-2">
-                    {(type === 'client' || type === 'all') && (
-                      <button type="button" onClick={() => openQuickAdd('client')} className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-emerald-50 border-2 border-dashed border-emerald-300 text-emerald-700 font-bold text-sm hover:bg-emerald-100">
-                        👤 ➕ إضافة عميل جديد باسم "{query.trim().slice(0, 30)}"
-                      </button>
-                    )}
-                    {(type === 'supplier' || type === 'all') && (
-                      <button type="button" onClick={() => openQuickAdd('supplier')} className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-rose-50 border-2 border-dashed border-rose-300 text-rose-700 font-bold text-sm hover:bg-rose-100">
-                        🏭 ➕ إضافة مورد جديد باسم "{query.trim().slice(0, 30)}"
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
+              <div className="p-4 text-center text-xs text-slate-400">لا نتائج مطابقة{query.trim() ? ' — يمكنك الإضافة من الأسفل' : ''}</div>
             )}
-            {!loading && results.map(r => (
+            {!loading && results.map(r => {
+              const isGroupRow = r.type === 'account' && r.is_group
+              return (
               <button
                 key={`${r.type}-${r.id}`}
                 type="button"
-                onClick={() => pick(r)}
-                className={`w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-blue-50 border-b last:border-b-0 text-right ${selected?.id === r.id ? 'bg-blue-100' : ''}`}
+                onClick={() => { if (isGroupRow) { toast.error('هذا حساب أب (تصنيف) — اختر حساباً فرعياً أو أضف جديداً تحته'); return } pick(r) }}
+                className={`w-full flex items-center gap-2 px-3 py-2 text-sm border-b last:border-b-0 text-right ${isGroupRow ? 'bg-slate-50 text-slate-500 font-black cursor-default' : 'hover:bg-blue-50'} ${selected?.id === r.id ? 'bg-blue-100' : ''}`}
               >
                 <span className="text-base shrink-0">{typeIcon[r.type] || '•'}</span>
                 <span className={`font-mono text-[11px] font-bold px-1.5 py-0.5 rounded border shrink-0 whitespace-nowrap ${typeBadge[r.type] || 'bg-slate-50 border-slate-200'}`}>{r.account_code}</span>
@@ -1264,8 +1341,45 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
                   {Object.entries(r.balances || {}).filter(([, v]) => Number(v) !== 0).slice(0, 1).map(([c, v]) => `${c}:${Number(v).toLocaleString()}`).join('')}
                 </span>
               </button>
-            ))}
+            )})}
           </div>
+          {/* v3.79 — unified quick-add footer: always available while typing (never leave the flow) */}
+          {enableQA && query.trim().length > 0 && !coaAdd && (
+            <div className="p-2 border-t bg-slate-50/70 space-y-1.5">
+              {(type === 'client' || type === 'party' || type === 'all') && (
+                <button type="button" onClick={() => openQuickAdd('client')} className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-50 border-2 border-dashed border-emerald-300 text-emerald-700 font-bold text-xs hover:bg-emerald-100">
+                  👤 ➕ إضافة عميل جديد باسم "{query.trim().slice(0, 30)}"
+                </button>
+              )}
+              {(type === 'supplier' || type === 'party' || type === 'all') && (
+                <button type="button" onClick={() => openQuickAdd('supplier')} className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg bg-rose-50 border-2 border-dashed border-rose-300 text-rose-700 font-bold text-xs hover:bg-rose-100">
+                  🏭 ➕ إضافة مورد جديد باسم "{query.trim().slice(0, 30)}"
+                </button>
+              )}
+              {(type === 'account' || type === 'all') && (
+                <button type="button" onClick={openCoaAdd} className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg bg-purple-50 border-2 border-dashed border-purple-300 text-purple-700 font-bold text-xs hover:bg-purple-100">
+                  📒 ➕ إضافة حساب {acctType === 'expense' ? 'مصروف' : acctType === 'revenue' ? 'إيراد' : ''} جديد باسم "{query.trim().slice(0, 30)}"
+                </button>
+              )}
+            </div>
+          )}
+          {/* v3.79 — inline COA account creation: independent account, parent = classification only (changeable) */}
+          {coaAdd && (
+            <div className="p-2.5 border-t bg-purple-50/60 space-y-2">
+              <div className="text-[11px] font-black text-purple-800">📒 حساب جديد في دليل الحسابات (مستقل — يمكن استخراج كشفه لاحقاً)</div>
+              <input value={coaName} onChange={e => setCoaName(e.target.value)} placeholder="اسم الحساب (مثال: إيجار المكتب)" className="w-full px-2 py-1.5 text-xs border rounded bg-white outline-none focus:border-purple-400" />
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-bold text-slate-500 shrink-0">الحساب الأب (تصنيف فقط):</span>
+                <select value={coaParent} onChange={e => setCoaParent(e.target.value)} className="flex-1 text-[11px] border rounded px-1.5 py-1 bg-white font-bold">
+                  {coaParents.map(p => <option key={p.code} value={p.code}>{p.code} — {p.name_ar}</option>)}
+                </select>
+              </div>
+              <div className="flex gap-1.5">
+                <button type="button" onClick={submitCoaAdd} disabled={coaSaving} className="flex-1 px-3 py-1.5 rounded-lg bg-purple-600 text-white font-bold text-xs hover:bg-purple-700 disabled:opacity-50">{coaSaving ? '...' : '✅ إنشاء واختيار (الكود تلقائي)'}</button>
+                <button type="button" onClick={() => setCoaAdd(false)} className="px-3 py-1.5 rounded-lg border text-xs font-bold text-slate-600 bg-white">إلغاء</button>
+              </div>
+            </div>
+          )}
           <div className="p-1.5 border-t bg-slate-50 rounded-b-lg text-[10px] text-slate-500 text-center">
             {results.length > 0 ? `${results.length} نتيجة — اضغط للاختيار` : (enableQA ? 'ابحث أولاً أو اضغط لإضافة جديد' : 'استخدم البحث الذكي')}
           </div>
@@ -2206,16 +2320,12 @@ function CommissionShareBlock({ form, setForm, clients, suppliers, commission, e
         )}
       </div>
       <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
-        <Field label="الشريك (المستفيد)">
-          <SearchPick
-            items={[...clients.map(c => ({ id: `client:${c.id}`, name: c.name, badge: '👤' })), ...suppliers.map(s => ({ id: `supplier:${s.id}`, name: s.name, badge: '🏢' }))]}
-            value={form.commission_partner_id ? `${form.commission_partner_type}:${form.commission_partner_id}` : ''}
-            onChange={(v, item) => { const [type, id] = String(v).split(':'); setForm({ ...form, commission_partner_type: type, commission_partner_id: id, commission_partner_name: item?.name || '' }) }}
-            placeholder="اختر عميل / مورد"
-            quickAdds={[
-              { label: 'عميل غير موجود — إضافة جديد', badge: '👤', fn: async (name) => { const c = await api('/clients', { method: 'POST', body: { name } }); return { id: `client:${c.id}`, name: c.name } } },
-              { label: 'مورد غير موجود — إضافة جديد', badge: '🏢', fn: async (name) => { const s = await api('/suppliers', { method: 'POST', body: { name } }); return { id: `supplier:${s.id}`, name: s.name } } },
-            ]}
+        <Field label="الشريك (المستفيد) 🔍">
+          <AccountAutocomplete
+            type="party"
+            value={form.commission_partner_id || null}
+            onChange={(sel) => setForm({ ...form, commission_partner_type: sel?.type || '', commission_partner_id: sel?.id || '', commission_partner_name: sel?.name || '' })}
+            placeholder="ابحث عن عميل / مورد..."
           />
         </Field>
         <Field label="الصيغة">
@@ -2336,13 +2446,13 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" dir="rtl">
           <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><div className="w-9 h-9 rounded-lg grad-brand flex items-center justify-center"><Plane className="w-4 h-4 text-white -rotate-45" /></div>{isEdit ? '✏️ تعديل تذكرة' : 'حجز تذكرة جديدة'}</DialogTitle><DialogDescription>{isEdit ? 'سيتم عكس القيد المحاسبي القديم وإعادة الترحيل بالقيم الجديدة تلقائياً — دون خصم من حصة القيود' : 'سيتم إنشاء قيد يومية تلقائي — نقد (خصم من الصندوق) أو آجل (على حساب القبض)'}</DialogDescription></DialogHeader>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-2">
-            <Field label="تاريخ الحركة"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
+            <Field label="تاريخ الحركة"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
             <Field label="نوع العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="سعر الصرف"><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
-            <Field label="اسم المورد" required>
-              <SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id}
-                onChange={(id) => setForm({ ...form, supplier_id: id })}
-                onCreated={() => onSaved && onSaved()} />
+            <Field label="اسم المورد 🔍" required>
+              <AccountAutocomplete type="supplier" value={form.supplier_id || null}
+                onChange={(sel) => setForm({ ...form, supplier_id: sel?.id || '' })}
+                placeholder="ابحث عن المورد بالاسم أو الكود..." />
             </Field>
             <Field label="رقم التذكرة / PNR"><Input value={form.pnr} onChange={e => setForm({ ...form, pnr: e.target.value })} /></Field>
             <Field label="خط السير"><Input value={form.route} onChange={e => setForm({ ...form, route: e.target.value })} placeholder="RUH - CAI" /></Field>
@@ -2453,17 +2563,17 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
                 </Select>
               </Field>
               {form.payment_method === 'credit' ? (
-                <Field label="حساب القبض / العميل" required>
-                  <SmartAutocomplete kind="client" items={clients} value={form.client_id}
-                    onChange={(id) => setForm({ ...form, client_id: id })}
-                    onCreated={() => onSaved && onSaved()} />
+                <Field label="حساب القبض / العميل 🔍" required>
+                  <AccountAutocomplete type="client" value={form.client_id || null}
+                    onChange={(sel) => setForm({ ...form, client_id: sel?.id || '' })}
+                    placeholder="ابحث عن العميل بالاسم أو الكود..." />
                 </Field>
               ) : (
-                <Field label="الصندوق / البنك" required>
-                  <Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}>
-                    <SelectTrigger className="bg-white"><SelectValue placeholder="اختر الصندوق أو البنك" /></SelectTrigger>
-                    <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.type === 'cash' ? '💵' : '🏦'} {b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent>
-                  </Select>
+                <Field label="الصندوق / البنك 🔍" required>
+                  <AccountAutocomplete type="box" value={form.box_id || null}
+                    onChange={(sel) => setForm({ ...form, box_id: sel?.id || '' })}
+                    placeholder="ابحث عن صندوق أو بنك..."
+                    disabled={!!user?.lock_box && user?.role !== 'owner'} />
                 </Field>
               )}
             </div>
@@ -2490,16 +2600,12 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
                 )}
               </div>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
-                <Field label="الشريك (المستفيد)">
-                  <SearchPick
-                    items={[...clients.map(c => ({ id: `client:${c.id}`, name: c.name, badge: '👤' })), ...suppliers.map(s => ({ id: `supplier:${s.id}`, name: s.name, badge: '🏢' }))]}
-                    value={form.commission_partner_id ? `${form.commission_partner_type}:${form.commission_partner_id}` : ''}
-                    onChange={(v, item) => { const [type, id] = String(v).split(':'); setForm({ ...form, commission_partner_type: type, commission_partner_id: id, commission_partner_name: item?.name || '' }) }}
-                    placeholder="اختر عميل / مورد"
-                    quickAdds={[
-                      { label: 'عميل غير موجود — إضافة جديد', badge: '👤', fn: async (name) => { const c = await api('/clients', { method: 'POST', body: { name } }); return { id: `client:${c.id}`, name: c.name } } },
-                      { label: 'مورد غير موجود — إضافة جديد', badge: '🏢', fn: async (name) => { const s = await api('/suppliers', { method: 'POST', body: { name } }); return { id: `supplier:${s.id}`, name: s.name } } },
-                    ]}
+                <Field label="الشريك (المستفيد) 🔍">
+                  <AccountAutocomplete
+                    type="party"
+                    value={form.commission_partner_id || null}
+                    onChange={(sel) => setForm({ ...form, commission_partner_type: sel?.type || '', commission_partner_id: sel?.id || '', commission_partner_name: sel?.name || '' })}
+                    placeholder="ابحث عن عميل / مورد..."
                   />
                 </Field>
                 <Field label="الصيغة">
@@ -3799,7 +3905,7 @@ function BulkEditDialog({ open, onOpenChange, kind, ids, suppliers, boxes, onDon
               </label>
               {changeSupplier && (
                 <div className="mt-2">
-                  <SearchPick items={suppliers.map(s => ({ id: s.id, name: s.name }))} value={supplierId} onChange={setSupplierId} placeholder="ابحث عن المورد الجديد..." quickAdds={[quickAddSupplier()]} />
+                  <AccountAutocomplete type="supplier" value={supplierId || null} onChange={(sel) => setSupplierId(sel?.id || '')} placeholder="ابحث عن المورد الجديد بالاسم أو الكود..." />
                 </div>
               )}
             </div>
@@ -3809,7 +3915,7 @@ function BulkEditDialog({ open, onOpenChange, kind, ids, suppliers, boxes, onDon
                 <input type="checkbox" checked={changeDate} onChange={e => setChangeDate(e.target.checked)} className="w-4 h-4 accent-blue-600" />
                 <span className="font-bold text-sm">تغيير التاريخ</span>
               </label>
-              {changeDate && <Input type="date" value={newDate} onChange={e => setNewDate(e.target.value)} className="mt-2" />}
+              {changeDate && <DocDateInput value={newDate} onChange={v => setNewDate(v)} className="mt-2" />}
             </div>
             {/* Payment */}
             <div className={`p-3 rounded-lg border-2 ${changePayment ? 'border-blue-400 bg-blue-50' : 'border-slate-200 bg-slate-50'}`}>
@@ -3827,10 +3933,7 @@ function BulkEditDialog({ open, onOpenChange, kind, ids, suppliers, boxes, onDon
                     </SelectContent>
                   </Select>
                   {paymentMethod === 'cash' && (
-                    <Select value={boxId} onValueChange={setBoxId}>
-                      <SelectTrigger><SelectValue placeholder="اختر الصندوق" /></SelectTrigger>
-                      <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.name_ar || b.name} · {b.currency}</SelectItem>)}</SelectContent>
-                    </Select>
+                    <AccountAutocomplete type="box" value={boxId || null} onChange={(sel) => setBoxId(sel?.id || '')} placeholder="ابحث عن صندوق أو بنك..." />
                   )}
                 </div>
               )}
@@ -4098,10 +4201,10 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" dir="rtl">
           <DialogHeader><DialogTitle className="flex items-center gap-2 text-xl"><div className="w-9 h-9 rounded-lg grad-green flex items-center justify-center"><FileBadge2 className="w-4 h-4 text-white" /></div>{isEdit ? '✏️ تعديل خدمة / تأشيرة' : 'خدمة / تأشيرة جديدة'}</DialogTitle>{isEdit && <DialogDescription>سيتم عكس القيد المحاسبي القديم وإعادة الترحيل تلقائياً — دون خصم من الحصة</DialogDescription>}</DialogHeader>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
+            <Field label="التاريخ"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
             <Field label="نوع الخدمة"><Select value={form.service_type} onValueChange={v => setForm({ ...form, service_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{VISA_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
-            <Field label="المورد" required><SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id} onChange={id => setForm({ ...form, supplier_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
+            <Field label="المورد 🔍" required><AccountAutocomplete type="supplier" value={form.supplier_id || null} onChange={(sel) => setForm({ ...form, supplier_id: sel?.id || '' })} placeholder="ابحث عن المورد بالاسم أو الكود..." /></Field>
             <Field label="سعر الصرف"><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
             <Field label="اسم صاحب التأشيرة"><Input value={form.passenger_name} onChange={e => setForm({ ...form, passenger_name: e.target.value })} /></Field>
             <Field label="رقم الجواز"><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value })} /></Field>
@@ -4146,17 +4249,17 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
                 </Select>
               </Field>
               {form.payment_method === 'credit' ? (
-                <Field label="حساب القبض / العميل" required>
-                  <SmartAutocomplete kind="client" items={clients} value={form.client_id}
-                    onChange={id => setForm({ ...form, client_id: id })}
-                    onCreated={() => onSaved && onSaved()} />
+                <Field label="حساب القبض / العميل 🔍" required>
+                  <AccountAutocomplete type="client" value={form.client_id || null}
+                    onChange={(sel) => setForm({ ...form, client_id: sel?.id || '' })}
+                    placeholder="ابحث عن العميل بالاسم أو الكود..." />
                 </Field>
               ) : (
-                <Field label="الصندوق / البنك" required>
-                  <Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}>
-                    <SelectTrigger className="bg-white"><SelectValue placeholder="اختر الصندوق أو البنك" /></SelectTrigger>
-                    <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.type === 'cash' ? '💵' : '🏦'} {b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent>
-                  </Select>
+                <Field label="الصندوق / البنك 🔍" required>
+                  <AccountAutocomplete type="box" value={form.box_id || null}
+                    onChange={(sel) => setForm({ ...form, box_id: sel?.id || '' })}
+                    placeholder="ابحث عن صندوق أو بنك..."
+                    disabled={!!user?.lock_box && user?.role !== 'owner'} />
                 </Field>
               )}
             </div>
@@ -4432,7 +4535,7 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
           {isEdit && <DialogDescription>سيتم عكس القيد المحاسبي القديم وإعادة الترحيل تلقائياً — دون خصم من الحصة</DialogDescription>}
         </DialogHeader>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
+          <Field label="التاريخ"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
           <Field label="نوع الخدمة">
             <Select value={form.service_type} onValueChange={v => setForm({ ...form, service_type: v })}>
               <SelectTrigger><SelectValue /></SelectTrigger>
@@ -4440,7 +4543,7 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
             </Select>
           </Field>
           <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
-          <Field label="المورد / المزود" required><SmartAutocomplete kind="supplier" items={suppliers} value={form.supplier_id} onChange={id => setForm({ ...form, supplier_id: id })} onCreated={() => onSaved && onSaved()} /></Field>
+          <Field label="المورد / المزود 🔍" required><AccountAutocomplete type="supplier" value={form.supplier_id || null} onChange={(sel) => setForm({ ...form, supplier_id: sel?.id || '' })} placeholder="ابحث عن المورد بالاسم أو الكود..." /></Field>
           <Field label="سعر الصرف"><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
           <Field label="اسم المستفيد"><Input value={form.beneficiary_name} onChange={e => setForm({ ...form, beneficiary_name: e.target.value })} placeholder="مثال: أحمد محمد" /></Field>
           <Field label="الرقم المرجعي"><Input value={form.reference_no} onChange={e => setForm({ ...form, reference_no: e.target.value })} placeholder="مثال: HTL-2025-001" /></Field>
@@ -4474,17 +4577,17 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
               </Select>
             </Field>
             {form.payment_method === 'credit' ? (
-              <Field label="حساب القبض / العميل" required>
-                <SmartAutocomplete kind="client" items={clients} value={form.client_id}
-                  onChange={id => setForm({ ...form, client_id: id })}
-                  onCreated={() => onSaved && onSaved()} />
+              <Field label="حساب القبض / العميل 🔍" required>
+                <AccountAutocomplete type="client" value={form.client_id || null}
+                  onChange={(sel) => setForm({ ...form, client_id: sel?.id || '' })}
+                  placeholder="ابحث عن العميل بالاسم أو الكود..." />
               </Field>
             ) : (
-              <Field label="الصندوق / البنك" required>
-                <Select value={form.box_id} onValueChange={v => setForm({ ...form, box_id: v })} disabled={!!user?.lock_box && user?.role !== 'owner'}>
-                  <SelectTrigger className="bg-white"><SelectValue placeholder="اختر الصندوق أو البنك" /></SelectTrigger>
-                  <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.type === 'cash' ? '💵' : '🏦'} {b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent>
-                </Select>
+              <Field label="الصندوق / البنك 🔍" required>
+                <AccountAutocomplete type="box" value={form.box_id || null}
+                  onChange={(sel) => setForm({ ...form, box_id: sel?.id || '' })}
+                  placeholder="ابحث عن صندوق أو بنك..."
+                  disabled={!!user?.lock_box && user?.role !== 'owner'} />
               </Field>
             )}
           </div>
@@ -4691,6 +4794,7 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
         amount: record.amount ?? '',
         party_type: record.party_type || defaultParty,
         party_id: record.party_id || '', party_name: record.party_name || '',
+        coa_account_code: record.coa_account_code || '', // v3.79 — real expense/revenue account
         box_id: record.box_id || '', method: record.method || '', description: record.description || '',
       })
     } else {
@@ -4702,7 +4806,9 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
   const list = form.party_type === 'client' ? clients : form.party_type === 'supplier' ? suppliers : []
   const submit = async () => {
     if (!form.amount) return toast.error('أدخل المبلغ')
-    if (form.party_type !== 'expense' && !form.party_id) return toast.error('اختر الطرف')
+    if (form.party_type === 'expense' && !form.coa_account_code) return toast.error('اختر حساب المصروف من دليل الحسابات — أو أضفه من نفس الحقل')
+    if (form.party_type === 'revenue' && !form.coa_account_code) return toast.error('اختر حساب الإيراد من دليل الحسابات — أو أضفه من نفس الحقل')
+    if (!['expense', 'revenue'].includes(form.party_type) && !form.party_id) return toast.error('اختر الطرف')
     if (!form.box_id) return toast.error('اختر الصندوق')
     try {
       setSaving(true)
@@ -4716,10 +4822,22 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
       <DialogContent className="max-w-2xl" dir="rtl">
         <DialogHeader><DialogTitle>{isEdit ? `✏️ تعديل ${mode === 'receipt' ? 'سند قبض' : 'سند صرف'}` : (mode === 'receipt' ? 'سند قبض جديد' : 'سند صرف جديد')}</DialogTitle>{isEdit && <DialogDescription>سيتم عكس القيد المحاسبي القديم وإعادة الترحيل بالقيم الجديدة تلقائياً</DialogDescription>}</DialogHeader>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
-          <Field label="نوع الطرف"><Select value={form.party_type} onValueChange={v => setForm({ ...form, party_type: v, party_id: '' })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="client">عميل</SelectItem><SelectItem value="supplier">مورد</SelectItem>{mode === 'payment' && <SelectItem value="expense">مصروف</SelectItem>}</SelectContent></Select></Field>
-          {form.party_type === 'expense' ? (
-            <Field label="بيان المصروف" required><Input value={form.party_name} onChange={e => setForm({ ...form, party_name: e.target.value })} placeholder="إيجار / كهرباء" /></Field>
+          <Field label="التاريخ"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
+          <Field label="نوع الطرف"><Select value={form.party_type} onValueChange={v => setForm({ ...form, party_type: v, party_id: '', coa_account_code: '' })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="client">عميل</SelectItem><SelectItem value="supplier">مورد</SelectItem>{mode === 'payment' && <SelectItem value="expense">مصروف</SelectItem>}{mode === 'receipt' && <SelectItem value="revenue">إيراد</SelectItem>}</SelectContent></Select></Field>
+          {form.party_type === 'expense' || form.party_type === 'revenue' ? (
+            <div className="md:col-span-1">
+              {/* v3.79 — REAL account from the chart of accounts (not free text). The «البيان» field below stays for description only. */}
+              <Field label={form.party_type === 'expense' ? 'حساب المصروف 🔍 (من دليل الحسابات)' : 'حساب الإيراد 🔍 (من دليل الحسابات)'} required>
+                <AccountAutocomplete
+                  type="account"
+                  acctType={form.party_type === 'expense' ? 'expense' : 'revenue'}
+                  suggestedParent={form.party_type === 'expense' ? '51' : '4'}
+                  value={form.coa_account_code || null}
+                  onChange={(sel) => setForm({ ...form, coa_account_code: sel?.account_code || '', party_name: sel?.name || '' })}
+                  placeholder={form.party_type === 'expense' ? 'اكتب: إيجار / مرتبات / كهرباء...' : 'اكتب اسم حساب الإيراد...'}
+                />
+              </Field>
+            </div>
           ) : (
             <div className="md:col-span-1">
               <Field label={`${mode === 'receipt' ? 'المستلم من' : 'المدفوع إلى'} 🔍 (بحث ذكي)`} required>
@@ -5902,7 +6020,7 @@ function VisaMonitorDialog({ open, onOpenChange, record, countries, onSaved }) {
           <div className="text-xs font-bold text-slate-500 border-b pb-1">🛂 التأشيرة والمستضيف</div>
           <div className="grid grid-cols-3 gap-3">
             <Field label="رقم التأشيرة" required><Input value={form.visa_no} onChange={e => setForm({ ...form, visa_no: e.target.value })} className="font-mono" /></Field>
-            <Field label="تاريخ إصدار التأشيرة" required><Input type="date" value={form.visa_issue_date} onChange={e => setForm({ ...form, visa_issue_date: e.target.value })} /></Field>
+            <Field label="تاريخ إصدار التأشيرة" required><DocDateInput value={form.visa_issue_date} onChange={v => setForm({ ...form, visa_issue_date: v })} /></Field>
             <Field label="نوع التأشيرة">
               <Select value={form.visa_type} onValueChange={v => setForm({ ...form, visa_type: v })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
@@ -6970,10 +7088,7 @@ function PermissionsDialog({ target, onClose, onSaved }) {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-end">
             <div>
               <label className="text-xs font-semibold text-slate-700 block mb-1">الصندوق الافتراضي (يُختار تلقائياً عند البيع النقدي)</label>
-              <select value={defaultBoxId} onChange={e => setDefaultBoxId(e.target.value)} className="w-full text-sm border rounded px-2 py-1.5 bg-white">
-                <option value="">— بدون تعيين —</option>
-                {boxes.map(b => <option key={b.id} value={b.id}>{b.name_ar || b.name} · {b.type === 'cash' ? '💵 صندوق' : '🏦 بنك'} · {b.currency}</option>)}
-              </select>
+              <AccountAutocomplete type="box" value={defaultBoxId || null} onChange={(sel) => setDefaultBoxId(sel?.id || '')} placeholder="ابحث عن صندوق أو بنك..." />
             </div>
             <label className="flex items-center gap-2 p-2 bg-white border rounded cursor-pointer text-sm">
               <input type="checkbox" checked={lockBox} onChange={e => setLockBox(e.target.checked)} className="w-4 h-4 accent-rose-600" />
@@ -8108,13 +8223,11 @@ function PartnerStatementDialog({ open, onOpenChange }) {
         <DialogHeader><DialogTitle className="flex items-center gap-2">🤝 كشف حساب عمولات الشريك (B2B)</DialogTitle></DialogHeader>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
           <Field label="الشريك">
-            <SearchPick
-              items={[...clients.map(c => ({ id: `client:${c.id}`, name: c.name, badge: '👤' })), ...suppliers.map(s => ({ id: `supplier:${s.id}`, name: s.name, badge: '🏢' }))]}
-              value={partnerKey} onChange={setPartnerKey} placeholder="اختر عميل / مورد"
-              quickAdds={[
-                { label: 'عميل غير موجود — إضافة جديد', badge: '👤', fn: async (name) => { const c = await api('/clients', { method: 'POST', body: { name } }); return { id: `client:${c.id}`, name: c.name } } },
-                { label: 'مورد غير موجود — إضافة جديد', badge: '🏢', fn: async (name) => { const s = await api('/suppliers', { method: 'POST', body: { name } }); return { id: `supplier:${s.id}`, name: s.name } } },
-              ]}
+            <AccountAutocomplete
+              type="party"
+              value={partnerKey ? String(partnerKey).split(':')[1] : null}
+              onChange={(sel) => setPartnerKey(sel ? `${sel.type}:${sel.id}` : '')}
+              placeholder="ابحث عن عميل / مورد..."
             />
           </Field>
           <Field label="من تاريخ"><Input type="date" value={from} onChange={e => setFrom(e.target.value)} /></Field>
@@ -8142,10 +8255,7 @@ function PartnerStatementDialog({ open, onOpenChange }) {
             </div>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
               <Field label="الصندوق / البنك (الصرف منه)">
-                <Select value={settleForm.box_id} onValueChange={v => setSettleForm({ ...settleForm, box_id: v })}>
-                  <SelectTrigger className="bg-white"><SelectValue placeholder="اختر" /></SelectTrigger>
-                  <SelectContent>{boxes.map(bx => <SelectItem key={bx.id} value={bx.id}>{bx.type === 'cash' ? '💵' : '🏦'} {bx.name_ar}</SelectItem>)}</SelectContent>
-                </Select>
+                <AccountAutocomplete type="box" value={settleForm.box_id || null} onChange={(sel) => setSettleForm({ ...settleForm, box_id: sel?.id || '' })} placeholder="ابحث عن صندوق أو بنك..." />
               </Field>
               <Field label={`المبلغ (${settleFor.currency}) — المستحق: ${settleFor.due}`}>
                 <Input type="number" min="0" step="0.01" value={settleForm.amount} onChange={e => setSettleForm({ ...settleForm, amount: e.target.value })} className="bg-white font-bold" />
@@ -9194,21 +9304,48 @@ function MeraajStoreScreen() {
   }
   // v3.77 — upload a REAL evidence file for a position service (context: cancellation_evidence)
   const EV_TYPE_BY_SVC = { visa: 'visa', ticket: 'ticket', hotel: 'hotel', transport: 'other', other: 'receipt' }
-  const uploadEvidenceFile = async (i, file) => {
-    if (!file || !posFor) return
-    if (!DOC_OK_TYPES.includes(file.type)) { toast.error('المسموح: PDF / JPG / PNG / WEBP فقط'); return }
-    if (file.size > 4 * 1024 * 1024) { toast.error('الحد الأقصى لحجم الملف 4MB'); return }
+  const uploadEvidenceFile = async (i, fileList) => {
+    if (!posFor) return
+
+    const valid = validateDocBatch(fileList)
+    if (!valid.length) return
+
     setPosBusy(true)
-    try {
-      const file_base64 = await readFileB64(file)
-      const svcType = posServices[i]?.type || 'other'
-      const r = await api(`/meraaj/inbound-bookings/${posFor.id}/documents`, {
-        method: 'POST',
-        body: { context: 'cancellation_evidence', evidence_type: EV_TYPE_BY_SVC[svcType] || 'other', label: file.name, filename: file.name, content_type: file.type, file_base64 },
-      })
-      setPosServices(list => list.map((x, idx) => idx === i ? { ...x, evidence: [...(x.evidence || []), { kind: 'file_ref', value: r.document.id, label: file.name }] } : x))
-      toast.success('📎 رُفع ملف الدليل وارتبط بالخدمة')
-    } catch (e) { toast.error(e.message) } finally { setPosBusy(false) }
+    let okCount = 0
+
+    for (const f of valid) {
+      try {
+        const file_base64 = await readFileB64(f)
+        const svcType = posServices[i]?.type || 'other'
+        const r = await api(`/meraaj/inbound-bookings/${posFor.id}/documents`, {
+          method: 'POST',
+          body: {
+            context: 'cancellation_evidence',
+            evidence_type: EV_TYPE_BY_SVC[svcType] || 'other',
+            label: f.name,
+            filename: f.name,
+            content_type: f.type,
+            file_base64
+          },
+        })
+
+        setPosServices(list => list.map((x, idx) =>
+          idx === i
+            ? { ...x, evidence: [...(x.evidence || []), { kind: 'file_ref', value: r.document.id, label: f.name }] }
+            : x
+        ))
+
+        okCount += 1
+      } catch (e) {
+        toast.error(`${f.name}: ${e.message}`)
+      }
+    }
+
+    setPosBusy(false)
+
+    if (okCount > 0) {
+      toast.success(`📎 رُفع ${okCount} ملف دليل وارتبط بالخدمة`)
+    }
   }
   // v3.77 — BOOKING DOCUMENTS (traveler passports/visas + cancellation evidence) per inbound booking
   const [docsFor, setDocsFor] = useState(null)
@@ -9245,7 +9382,7 @@ function MeraajStoreScreen() {
   const chooseBookingDoc = (file) => {
     if (!file) return
     if (!DOC_OK_TYPES.includes(file.type)) { toast.error('المسموح: PDF / JPG / PNG / WEBP فقط'); return }
-    if (file.size > 4 * 1024 * 1024) { toast.error('الحد الأقصى لحجم الملف 4MB'); return }
+    if (file.size > DOC_MAX_FILE_BYTES) { toast.error(`الحد الأقصى لحجم الملف ${DOC_MAX_MB}MB`); return }
     if (docPendingUrl) URL.revokeObjectURL(docPendingUrl)
     setDocPending(file)
     setDocPendingUrl(URL.createObjectURL(file))
@@ -9417,25 +9554,7 @@ function MeraajStoreScreen() {
     const incoming = Array.from(fileList || [])
     if (!incoming.length) return
 
-    const valid = []
-    let rejected = 0
-
-    for (const file of incoming) {
-      if (!DOC_OK_TYPES.includes(file.type)) {
-        rejected += 1
-        continue
-      }
-      if (file.size > 4 * 1024 * 1024) {
-        rejected += 1
-        continue
-      }
-      valid.push(file)
-    }
-
-    if (rejected) {
-      toast.error(`تم تجاهل ${rejected} ملف — المسموح PDF/JPG/PNG/WEBP وبحد أقصى 4MB لكل ملف`)
-    }
-
+    const valid = validateDocBatch(incoming)
     if (!valid.length) return
 
     setDocPendingFiles(valid)
@@ -9469,16 +9588,9 @@ function MeraajStoreScreen() {
       return
     }
 
-    for (const file of files) {
-      if (!DOC_OK_TYPES.includes(file.type)) {
-        toast.error(`نوع الملف غير مسموح: ${file.name}`)
-        return
-      }
-      if (file.size > 4 * 1024 * 1024) {
-        toast.error(`الملف أكبر من 4MB: ${file.name}`)
-        return
-      }
-    }
+    const validated = validateDocBatch(files)
+    if (!validated.length) return
+    files = validated
 
     setDocsBusy(true)
     setDocUploadProgress({ current: 0, total: files.length })
@@ -9999,7 +10111,7 @@ function MeraajStoreScreen() {
                         <button onClick={() => addPosEvidence(i)} disabled={(s.evidence || []).length >= 10} className="text-[10px] font-bold text-indigo-600 hover:underline disabled:opacity-40">🔗 إضافة رابط دليل ({(s.evidence || []).length}/10)</button>
                         <label className={`text-[10px] font-bold text-indigo-600 hover:underline cursor-pointer ${(s.evidence || []).length >= 10 || posBusy ? 'opacity-40 pointer-events-none' : ''}`}>
                           📎 رفع ملف دليل (PDF/صورة)
-                          <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) uploadEvidenceFile(i, f); e.target.value = '' }} />
+                          <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) uploadEvidenceFile(i, e.target.files); e.target.value = '' }} />
                         </label>
                       </div>
                     </div>
@@ -10090,9 +10202,37 @@ function MeraajStoreScreen() {
                     />
                   </label>
                 </div>
-                {docPendingFiles.length > 1 && (
-                      <div className="text-[10px] font-bold text-blue-700">
-                        تم اختيار {docPendingFiles.length} ملفات — ستُرفع جميعها
+                {docPendingFiles.length > 0 && (
+                      <div className="lg:col-span-3 rounded-lg border bg-white px-3 py-2 space-y-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[10px]">
+                          <span className="font-bold text-blue-700">
+                            تم اختيار {docPendingFiles.length} {docPendingFiles.length === 1 ? 'ملف' : 'ملفات'} — ستُرفع جميعها
+                          </span>
+                          <span className="text-slate-500">
+                            الإجمالي: {(docPendingFiles.reduce((s, f) => s + (f?.size || 0), 0) / 1024 / 1024).toFixed(1)}MB من {DOC_BATCH_MAX_MB}MB
+                          </span>
+                        </div>
+                        <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-emerald-500"
+                            style={{
+                              width: `${Math.min(
+                                100,
+                                Math.round(
+                                  (docPendingFiles.reduce((s, f) => s + (f?.size || 0), 0) / DOC_BATCH_MAX_BYTES) * 100
+                                )
+                              )}%`
+                            }}
+                          />
+                        </div>
+                        <div className="text-[9px] text-slate-500">
+                          المتبقي: {(
+                            Math.max(
+                              0,
+                              DOC_BATCH_MAX_BYTES - docPendingFiles.reduce((s, f) => s + (f?.size || 0), 0)
+                            ) / 1024 / 1024
+                          ).toFixed(1)}MB
+                        </div>
                       </div>
                     )}
                     {docUploadProgress.total > 0 && (
@@ -11175,7 +11315,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
           <Field label="تاريخ النهاية"><Input type="date" value={f.end_date} onChange={e => setF({ ...f, end_date: e.target.value })} /></Field>
           <div className="md:col-span-2"><Field label={`المدة${nights > 0 ? ` (${nights} ليلة تلقائي)` : ''}`}><Input value={nights ? `${nights} ليلة` : ''} disabled className="bg-slate-50" /></Field></div>
           {/* v3.51 — Main package supplier: saved with the package in one shot */}
-          <div className="md:col-span-6"><Field label="🏢 المورد الرئيسي للباقة (اختياري)"><SearchPick items={suppliers.map(s => ({ id: s.id, name: s.name }))} value={f.supplier_id} onChange={v => setF({ ...f, supplier_id: v })} placeholder="ابحث أو أضف المورد الرئيسي..." quickAdds={[quickAddSupplier()]} /></Field></div>
+          <div className="md:col-span-6"><Field label="🏢 المورد الرئيسي للباقة (اختياري)"><AccountAutocomplete type="supplier" value={f.supplier_id || null} onChange={(sel) => setF({ ...f, supplier_id: sel?.id || '' })} placeholder="ابحث أو أضف المورد الرئيسي..." /></Field></div>
         </div>
         {/* v3.23 — Features + Image (Miraj Network marketplace readiness) */}
         <div className="border-2 border-purple-200 rounded-xl p-3 mb-3 bg-purple-50/30">
@@ -11392,7 +11532,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
                       </div>
                       <div className="col-span-3">
                         <div className="text-[10px] text-slate-500 mb-1">المورد (شجرة الحسابات) *</div>
-                        <SearchPick compact items={suppliers.map(s => ({ id: s.id, name: s.name }))} value={it.supplier_id} onChange={v => updItem(i, 'supplier_id', v)} placeholder="ابحث أو أضف مورداً..." quickAdds={[quickAddSupplier()]} />
+                        <AccountAutocomplete type="supplier" compact value={it.supplier_id || null} onChange={(sel) => updItem(i, 'supplier_id', sel?.id || '')} placeholder="ابحث أو أضف مورداً..." />
                       </div>
                       {f.pricing_mode !== 'direct' ? (
                         <div className="col-span-3">
@@ -11633,7 +11773,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                 <div className={`grid grid-cols-1 ${pkgIsDirect ? 'md:grid-cols-4' : 'md:grid-cols-5'} gap-2`}>
                   <Field label="نوع"><Select value={newComp.component_type} onValueChange={v => setNewComp({ ...newComp, component_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{COMPONENT_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
                   <Field label="الاسم"><Input value={newComp.name} onChange={e => setNewComp({ ...newComp, name: e.target.value })} placeholder="فندق البلد" /></Field>
-                  <Field label="المورد"><SearchPick items={suppliers.map(s => ({ id: s.id, name: s.name }))} value={newComp.supplier_id} onChange={v => setNewComp({ ...newComp, supplier_id: v })} placeholder="ابحث أو أضف مورداً..." quickAdds={[quickAddSupplier()]} /></Field>
+                  <Field label="المورد"><AccountAutocomplete type="supplier" value={newComp.supplier_id || null} onChange={(sel) => setNewComp({ ...newComp, supplier_id: sel?.id || '' })} placeholder="ابحث أو أضف مورداً..." /></Field>
                   {!pkgIsDirect && <Field label="طريقة التسعير"><Select value={newComp.pricing_type} onValueChange={v => setNewComp({ ...newComp, pricing_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{COMP_PRICING_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>}
                   <div className="flex items-end"><Button onClick={addComp} className="w-full grad-brand text-white gap-1"><Plus className="w-4 h-4" /> إضافة</Button></div>
                 </div>
@@ -11994,14 +12134,11 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
                     </Field>
                     {newBooking.payment_method === 'credit' ? (
                       <Field label="حساب القبض / العميل" required>
-                        <SearchPick items={clients.map(c => ({ id: c.id, name: c.name }))} value={newBooking.client_id} onChange={v => setNewBooking({ ...newBooking, client_id: v })} placeholder="ابحث عن العميل..." quickAdds={[quickAddClient()]} />
+                        <AccountAutocomplete type="client" value={newBooking.client_id || null} onChange={(sel) => setNewBooking({ ...newBooking, client_id: sel?.id || '' })} placeholder="ابحث عن العميل بالاسم أو الكود..." />
                       </Field>
                     ) : (
                       <Field label="الصندوق / البنك" required>
-                        <Select value={newBooking.box_id} onValueChange={v => setNewBooking({ ...newBooking, box_id: v })}>
-                          <SelectTrigger className="bg-white"><SelectValue placeholder="اختر الصندوق أو البنك" /></SelectTrigger>
-                          <SelectContent>{boxes.map(b => <SelectItem key={b.id} value={b.id}>{b.type === 'cash' ? '💵' : '🏦'} {b.name_ar} ({b.type === 'cash' ? 'صندوق' : 'بنك'})</SelectItem>)}</SelectContent>
-                        </Select>
+                        <AccountAutocomplete type="box" value={newBooking.box_id || null} onChange={(sel) => setNewBooking({ ...newBooking, box_id: sel?.id || '' })} placeholder="ابحث عن صندوق أو بنك..." />
                       </Field>
                     )}
                   </div>
@@ -12361,7 +12498,7 @@ function SendToMonitorDialog({ booking, pkg, onClose }) {
             <Field label="اسم الوكيل / المكتب" required><Input value={f.agent_name} onChange={e => setF({ ...f, agent_name: e.target.value })} /></Field>
             <Field label="واتساب الوكيل" required><Input dir="ltr" value={f.agent_phone} onChange={e => setF({ ...f, agent_phone: e.target.value })} placeholder="9677XXXXXXXX" className="font-mono" /></Field>
             <Field label="تاريخ الدخول" required><Input type="date" value={f.entry_date} onChange={e => setF({ ...f, entry_date: e.target.value })} /></Field>
-            <Field label="تاريخ إصدار التأشيرة"><Input type="date" value={f.visa_issue_date} onChange={e => setF({ ...f, visa_issue_date: e.target.value })} /></Field>
+            <Field label="تاريخ إصدار التأشيرة"><DocDateInput value={f.visa_issue_date} onChange={v => setF({ ...f, visa_issue_date: v })} /></Field>
             <Field label="مدة الإقامة (يوم)"><Input type="number" min="1" value={f.allowed_days} onChange={e => setF({ ...f, allowed_days: e.target.value })} className="font-bold" /></Field>
           </div>
           <div className="text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded p-2">💡 سيبدأ العدّاد الآلي فوراً (🟢/🟡/🔴/⚫) وتظهر أزرار واتساب الوكيل في مركز المراقبة ولوحة التحكم.</div>
@@ -13548,7 +13685,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-2">
-          <Field label="التاريخ"><Input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
+          <Field label="التاريخ"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
           <Field label="العملة" required><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="المبلغ" required><Input type="number" min="0" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
           <Field label="سعر الصرف" required><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} className="text-lg font-bold" /></Field>
@@ -13718,7 +13855,7 @@ function ManualJournalDialog({ open, onOpenChange, onSaved, record }) {
         {mode === 'single' ? (
           <div className="space-y-3">
             <div className="grid grid-cols-3 gap-3">
-              <Field label="التاريخ"><Input type="date" value={singleForm.date} onChange={e => setSingleForm({ ...singleForm, date: e.target.value })} /></Field>
+              <Field label="التاريخ"><DocDateInput value={singleForm.date} onChange={v => setSingleForm({ ...singleForm, date: v })} /></Field>
               <Field label="العملة"><Select value={singleForm.currency} onValueChange={v => setSingleForm({ ...singleForm, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
               <Field label="البيان"><Input value={singleForm.description} onChange={e => setSingleForm({ ...singleForm, description: e.target.value })} placeholder="سبب القيد" /></Field>
             </div>
@@ -13753,7 +13890,7 @@ function ManualJournalDialog({ open, onOpenChange, onSaved, record }) {
         ) : (
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
-              <Field label="التاريخ"><Input type="date" value={dualForm.date} onChange={e => setDualForm({ ...dualForm, date: e.target.value })} /></Field>
+              <Field label="التاريخ"><DocDateInput value={dualForm.date} onChange={v => setDualForm({ ...dualForm, date: v })} /></Field>
               <Field label="البيان"><Input value={dualForm.description} onChange={e => setDualForm({ ...dualForm, description: e.target.value })} placeholder="مصارفة / تسوية" /></Field>
             </div>
             <div className="grid grid-cols-2 gap-4">
