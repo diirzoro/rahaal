@@ -107,3 +107,11 @@ See /app/memory/test_credentials.md
 - GET /api/document-proxy/:docId (tenant-authed): same-origin streaming of booking_documents — local via docStorageGet, external_url via server fetch (15s timeout, 20MB cap). Audit 'viewed' via proxy/proxy_external. Backend-tested 6/6.
 - FE: bookingDocUrl helper + DocViewer professional viewer (img/PDF preview, print via hidden iframe, download, open-in-tab, prev/next) wired in: booking docs dialog, cancellation evidence links, office verification docs. Multi-file upload: selectBookingDocs + docPendingFiles + docUploadProgress bar (sequential, per-file validation). Docs dialog scroll unchanged (max-h-[85vh] overflow-y-auto).
 - v3.80b: bulk-edit newBody now copies passenger_phone/whatsapp/phone AND beneficiary_name/phone/whatsapp with fallback beneficiary_* || passenger_* (visas VALIDATE beneficiary_* but STORE passenger_*). Tickets + visas bulk-edit both verified working; future-date rejection intact.
+
+## v3.82 — Unified Upload Policy: 20MB per file + Multiple Upload (2026-08)
+- DOC_MAX_BYTES 4MB → 20MB PER SINGLE FILE (not per batch). Arabic reject msg: «حجم الملف يتجاوز الحد (20MB)». Transport verified: ingress accepts ~27MB JSON bodies.
+- CHUNKED BLOB STORAGE (document_blobs): base64 > 10MB chars split into parts {object_key: key::partN, parent_key, part_index}; main doc keeps {chunks:N, content_type, size} without data. Get reassembles (incomplete → null); Delete removes parts. Small files unchanged (single doc, backward compatible).
+- FIX: base64 regex validation now runs in 1MB slices — RegExp.test on one 20MB string overflows V8 call stack.
+- FE DOC_MAX_MB=20 constant. MULTIPLE upload now at: office verification docs (new), cancellation evidence per service (new), booking traveler docs (was already multiple in v3.81). All with per-file validation + Arabic per-file errors + summary toast. Preview via existing DocViewer (already wired v3.81).
+- NOT converted (by design, reported to user): package image (client-side compressed single thumbnail), tenant logo (700KB, stored inline in tenant_settings — 20MB would bloat the settings doc), Excel/CSV import inputs (client-side parsing, not server uploads).
+- Direct verification (no test agent): 15MB upload OK + chunks=2 reassembled exactly via document-proxy, 21MB rejected 400, small file single-doc, delete removes parts, zero residue.

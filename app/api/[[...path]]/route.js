@@ -7186,7 +7186,12 @@ async function meraajRegisterPackageAPI(db, T, pkg, comps, meraajSet) {
 // (collection document_blobs) — NOT container-local disk, survives restarts, and is
 // migration-ready (same object_key namespace: a one-shot script can move blobs to S3).
 const DOC_ALLOWED_MIME = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }
-const DOC_MAX_BYTES = 4 * 1024 * 1024 // 4MB per document (safe for base64 transport behind ingress)
+// v3.82 — UNIFIED UPLOAD POLICY: 20MB PER FILE (not per batch) across every upload point.
+// Transport verified: ingress accepts ~27MB JSON bodies (20MB file after base64 overhead).
+const DOC_MAX_BYTES = 20 * 1024 * 1024
+// MongoDB BSON documents are capped at 16MB — base64 of a 20MB file is ~27MB, so blobs
+// larger than DOC_CHUNK_CHARS are split into parts (parent_key + part_index) transparently.
+const DOC_CHUNK_CHARS = 10 * 1024 * 1024
 function docStorageDriver() {
   return (process.env.S3_ENDPOINT && process.env.S3_BUCKET && process.env.S3_ACCESS_KEY_ID && process.env.S3_SECRET_ACCESS_KEY) ? 's3' : 'db'
 }
@@ -7195,9 +7200,24 @@ async function docStoragePut(db, T, objectKey, base64Data, contentType, size) {
     // Intentionally NOT wired yet — awaiting S3 provider credentials (blocker documented).
     throw new Error('S3 driver detected but not wired — قدّم بيانات مزود S3 لإكمال الربط عبر playbook التكامل')
   }
+  // v3.82 — chunked storage for large files (BSON 16MB cap): parts carry parent_key + part_index
+  await db.collection('document_blobs').deleteMany({ parent_key: objectKey }) // clear stale parts on overwrite
+  if (base64Data.length > DOC_CHUNK_CHARS) {
+    const parts = []
+    for (let i = 0; i * DOC_CHUNK_CHARS < base64Data.length; i++) parts.push(base64Data.slice(i * DOC_CHUNK_CHARS, (i + 1) * DOC_CHUNK_CHARS))
+    await db.collection('document_blobs').updateOne(
+      { object_key: objectKey },
+      { $set: { object_key: objectKey, tenant_id: T, chunks: parts.length, content_type: contentType, size, created_at: new Date() }, $unset: { data: '' } },
+      { upsert: true },
+    )
+    for (let i = 0; i < parts.length; i++) {
+      await db.collection('document_blobs').insertOne({ object_key: `${objectKey}::part${i}`, parent_key: objectKey, part_index: i, tenant_id: T, data: parts[i], created_at: new Date() })
+    }
+    return { driver: 'db', chunks: parts.length }
+  }
   await db.collection('document_blobs').updateOne(
     { object_key: objectKey },
-    { $set: { object_key: objectKey, tenant_id: T, data: base64Data, content_type: contentType, size, created_at: new Date() } },
+    { $set: { object_key: objectKey, tenant_id: T, data: base64Data, content_type: contentType, size, created_at: new Date() }, $unset: { chunks: '' } },
     { upsert: true },
   )
   return { driver: 'db' }
@@ -7206,11 +7226,18 @@ async function docStorageGet(db, objectKey) {
   if (docStorageDriver() === 's3') throw new Error('S3 driver not wired yet')
   const blob = await db.collection('document_blobs').findOne({ object_key: objectKey })
   if (!blob) return null
+  // v3.82 — reassemble chunked blobs
+  if (blob.chunks > 0) {
+    const parts = await db.collection('document_blobs').find({ parent_key: objectKey }).sort({ part_index: 1 }).toArray()
+    if (parts.length !== blob.chunks) return null // incomplete blob — treat as missing
+    return { buffer: Buffer.from(parts.map(p => p.data).join(''), 'base64'), content_type: blob.content_type || 'application/octet-stream', size: blob.size || 0 }
+  }
   return { buffer: Buffer.from(blob.data, 'base64'), content_type: blob.content_type || 'application/octet-stream', size: blob.size || 0 }
 }
 async function docStorageDelete(db, objectKey) {
   if (docStorageDriver() === 's3') throw new Error('S3 driver not wired yet')
   await db.collection('document_blobs').deleteOne({ object_key: objectKey })
+  await db.collection('document_blobs').deleteMany({ parent_key: objectKey }) // v3.82 — remove chunk parts too
 }
 // Audit trail for EVERY document action (upload/view/delete/status change)
 async function docAuditLog(db, T, action, docId, actor, meta = {}) {
@@ -7222,7 +7249,13 @@ function parseDocUpload(b, T, prefix) {
   const ext = DOC_ALLOWED_MIME[contentType]
   if (!ext) return { error: `نوع الملف غير مسموح — المسموح: PDF / JPG / PNG / WEBP (المستلم: ${contentType || 'غير محدد'})` }
   const raw = String(b.file_base64 || '').replace(/^data:[^;]+;base64,/, '')
-  if (!raw || !/^[A-Za-z0-9+/=]+$/.test(raw)) return { error: 'محتوى الملف (file_base64) مفقود أو غير صالح' }
+  // v3.82 — validate base64 in 1MB slices: RegExp.test on a single 20MB+ string overflows
+  // V8's call stack (RangeError: Maximum call stack size exceeded) — sliced checks are safe.
+  let rawValid = raw.length > 0
+  for (let vi = 0; vi < raw.length && rawValid; vi += 1024 * 1024) {
+    if (!/^[A-Za-z0-9+/=]+$/.test(raw.slice(vi, vi + 1024 * 1024))) rawValid = false
+  }
+  if (!rawValid) return { error: 'محتوى الملف (file_base64) مفقود أو غير صالح' }
   const size = Math.floor(raw.length * 0.75)
   if (size > DOC_MAX_BYTES) return { error: `حجم الملف يتجاوز الحد (${(DOC_MAX_BYTES / 1024 / 1024).toFixed(0)}MB)` }
   if (size < 100) return { error: 'الملف فارغ أو تالف' }

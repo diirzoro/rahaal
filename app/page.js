@@ -80,6 +80,9 @@ const fmtDate = (d) => d ? new Date(d).toLocaleDateString('ar-EG', { year: 'nume
 // v3.77 — documents upload helpers (base64 transport, MIME whitelist mirrors the server)
 const readFileB64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(file) })
 const DOC_OK_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
+// v3.82 — UNIFIED UPLOAD POLICY: 20MB per single file (not per batch) at every upload point
+const DOC_MAX_MB = 20
+const DOC_MAX_FILE_BYTES = DOC_MAX_MB * 1024 * 1024
 const fmtTime = (d) => d ? new Date(d).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' }) : '—'
 const todayISO = () => new Date().toISOString().slice(0, 10)
 // v3.80 — UNIFIED document-date input: never accepts a future date (issue/voucher/journal dates).
@@ -412,17 +415,30 @@ function OfficeVerificationCard() {
     rejected: { label: '❌ مرفوض — أعد الرفع', cls: 'bg-rose-100 text-rose-700' },
   }
   const DOC_TYPE_LABELS = { license: '📜 السجل / الترخيص', owner_id: '🪪 هوية المالك / المسؤول', other: '📎 مستند آخر' }
-  const upload = async (file) => {
-    if (!file) return
-    if (!DOC_OK_TYPES.includes(file.type)) { toast.error('المسموح: PDF / JPG / PNG / WEBP فقط'); return }
-    if (file.size > 4 * 1024 * 1024) { toast.error('الحد الأقصى لحجم المستند 4MB'); return }
+  const upload = async (fileList) => {
+    // v3.82 — multiple upload + 20MB per file (verification usually needs several documents)
+    const files = Array.from(fileList || [])
+    const valid = []
+    for (const f of files) {
+      if (!DOC_OK_TYPES.includes(f.type)) { toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`); continue }
+      if (f.size > DOC_MAX_FILE_BYTES) { toast.error(`${f.name}: الحد الأقصى ${DOC_MAX_MB}MB لكل ملف`); continue }
+      valid.push(f)
+    }
+    if (valid.length === 0) return
     setBusy(true)
-    try {
-      const file_base64 = await readFileB64(file)
-      const r = await api('/office/verification/documents', { method: 'POST', body: { doc_type: docType, filename: file.name, content_type: file.type, file_base64 } })
-      toast.success(r.verification_status === 'pending_review' ? '📤 رُفع المستند — مكتبك الآن قيد المراجعة للتوثيق' : '📤 رُفع المستند بنجاح')
+    let okCount = 0, lastStatus = null
+    for (const f of valid) {
+      try {
+        const file_base64 = await readFileB64(f)
+        const r = await api('/office/verification/documents', { method: 'POST', body: { doc_type: docType, filename: f.name, content_type: f.type, file_base64 } })
+        okCount++; lastStatus = r.verification_status
+      } catch (e) { toast.error(`${f.name}: ${e.message}`) }
+    }
+    setBusy(false)
+    if (okCount > 0) {
+      toast.success(lastStatus === 'pending_review' ? `📤 رُفع ${okCount} مستند — مكتبك الآن قيد المراجعة للتوثيق` : `📤 رُفع ${okCount} مستند بنجاح`)
       loadVer()
-    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+    }
   }
   const delDoc = async (d) => {
     try { await api(`/office/verification/documents/${d.id}`, { method: 'DELETE' }); toast.success('حُذف المستند'); loadVer() } catch (e) { toast.error(e.message) }
@@ -454,10 +470,10 @@ function OfficeVerificationCard() {
               {Object.entries(DOC_TYPE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
             </select>
             <label className={`h-8 inline-flex items-center gap-1.5 text-xs font-bold border rounded-md px-3 cursor-pointer bg-white hover:bg-slate-100 ${busy ? 'opacity-50 pointer-events-none' : ''}`}>
-              {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستند
-              <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = '' }} />
+              {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستندات (متعدد)
+              <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) upload(e.target.files); e.target.value = '' }} />
             </label>
-            <span className="text-[10px] text-slate-400">PDF / JPG / PNG / WEBP — حتى 4MB</span>
+            <span className="text-[10px] text-slate-400">PDF / JPG / PNG / WEBP — حتى {DOC_MAX_MB}MB لكل ملف — يمكن اختيار عدة ملفات</span>
           </div>
         )}
         {(ver?.documents || []).length > 0 && (
@@ -9330,21 +9346,33 @@ function MeraajStoreScreen() {
   }
   // v3.77 — upload a REAL evidence file for a position service (context: cancellation_evidence)
   const EV_TYPE_BY_SVC = { visa: 'visa', ticket: 'ticket', hotel: 'hotel', transport: 'other', other: 'receipt' }
-  const uploadEvidenceFile = async (i, file) => {
-    if (!file || !posFor) return
-    if (!DOC_OK_TYPES.includes(file.type)) { toast.error('المسموح: PDF / JPG / PNG / WEBP فقط'); return }
-    if (file.size > 4 * 1024 * 1024) { toast.error('الحد الأقصى لحجم الملف 4MB'); return }
+  const uploadEvidenceFile = async (i, fileList) => {
+    // v3.82 — multiple evidence files per service + 20MB per file
+    if (!posFor) return
+    const files = Array.from(fileList || [])
+    const valid = []
+    for (const f of files) {
+      if (!DOC_OK_TYPES.includes(f.type)) { toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`); continue }
+      if (f.size > DOC_MAX_FILE_BYTES) { toast.error(`${f.name}: الحد الأقصى ${DOC_MAX_MB}MB لكل ملف`); continue }
+      valid.push(f)
+    }
+    if (valid.length === 0) return
     setPosBusy(true)
-    try {
-      const file_base64 = await readFileB64(file)
-      const svcType = posServices[i]?.type || 'other'
-      const r = await api(`/meraaj/inbound-bookings/${posFor.id}/documents`, {
-        method: 'POST',
-        body: { context: 'cancellation_evidence', evidence_type: EV_TYPE_BY_SVC[svcType] || 'other', label: file.name, filename: file.name, content_type: file.type, file_base64 },
-      })
-      setPosServices(list => list.map((x, idx) => idx === i ? { ...x, evidence: [...(x.evidence || []), { kind: 'file_ref', value: r.document.id, label: file.name }] } : x))
-      toast.success('📎 رُفع ملف الدليل وارتبط بالخدمة')
-    } catch (e) { toast.error(e.message) } finally { setPosBusy(false) }
+    let okCount = 0
+    for (const f of valid) {
+      try {
+        const file_base64 = await readFileB64(f)
+        const svcType = posServices[i]?.type || 'other'
+        const r = await api(`/meraaj/inbound-bookings/${posFor.id}/documents`, {
+          method: 'POST',
+          body: { context: 'cancellation_evidence', evidence_type: EV_TYPE_BY_SVC[svcType] || 'other', label: f.name, filename: f.name, content_type: f.type, file_base64 },
+        })
+        setPosServices(list => list.map((x, idx) => idx === i ? { ...x, evidence: [...(x.evidence || []), { kind: 'file_ref', value: r.document.id, label: f.name }] } : x))
+        okCount++
+      } catch (e) { toast.error(`${f.name}: ${e.message}`) }
+    }
+    setPosBusy(false)
+    if (okCount > 0) toast.success(`📎 رُفع ${okCount} ملف دليل وارتبط بالخدمة`)
   }
   // v3.77 — BOOKING DOCUMENTS (traveler passports/visas + cancellation evidence) per inbound booking
   const [docsFor, setDocsFor] = useState(null)
@@ -9369,7 +9397,7 @@ function MeraajStoreScreen() {
     const valid = []
     for (const f of files) {
       if (!DOC_OK_TYPES.includes(f.type)) { toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`); continue }
-      if (f.size > 4 * 1024 * 1024) { toast.error(`${f.name}: الحد الأقصى 4MB`); continue }
+      if (f.size > DOC_MAX_FILE_BYTES) { toast.error(`${f.name}: الحد الأقصى ${DOC_MAX_MB}MB لكل ملف`); continue }
       valid.push(f)
     }
     if (valid.length === 0) return
@@ -9861,7 +9889,7 @@ function MeraajStoreScreen() {
                         <button onClick={() => addPosEvidence(i)} disabled={(s.evidence || []).length >= 10} className="text-[10px] font-bold text-indigo-600 hover:underline disabled:opacity-40">🔗 إضافة رابط دليل ({(s.evidence || []).length}/10)</button>
                         <label className={`text-[10px] font-bold text-indigo-600 hover:underline cursor-pointer ${(s.evidence || []).length >= 10 || posBusy ? 'opacity-40 pointer-events-none' : ''}`}>
                           📎 رفع ملف دليل (PDF/صورة)
-                          <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) uploadEvidenceFile(i, f); e.target.value = '' }} />
+                          <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) uploadEvidenceFile(i, e.target.files); e.target.value = '' }} />
                         </label>
                       </div>
                     </div>
@@ -9910,7 +9938,7 @@ function MeraajStoreScreen() {
                   {docsBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستندات (متعدد)
                   <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) selectBookingDocs(e.target.files); e.target.value = '' }} />
                 </label>
-                <span className="text-[9px] text-slate-400 w-full">PDF / JPG / PNG / WEBP — حتى 4MB لكل ملف — يمكن اختيار عدة ملفات دفعة واحدة — مرتبطة بـ booking_ref والمسافر المحدد</span>
+                <span className="text-[9px] text-slate-400 w-full">PDF / JPG / PNG / WEBP — حتى {DOC_MAX_MB}MB لكل ملف — يمكن اختيار عدة ملفات دفعة واحدة — مرتبطة بـ booking_ref والمسافر المحدد</span>
                 {docUploadProgress && (
                   <div className="w-full space-y-1">
                     <div className="flex items-center justify-between text-[10px] text-slate-500">
