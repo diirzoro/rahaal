@@ -422,6 +422,40 @@ function OfficeVerificationCard() {
   )
 }
 
+// v3.78 — ACCOUNTING MAINTENANCE: rebuild all cached party balances from the ledger (owner only)
+function RecomputeBalancesCard() {
+  const { user } = useAuth()
+  const [busy, setBusy] = useState(false)
+  const [res, setRes] = useState(null)
+  if (user?.role !== 'owner') return null
+  const run = async () => {
+    setBusy(true)
+    try {
+      const r = await api('/accounts/recompute-balances', { method: 'POST' })
+      setRes(r)
+      toast.success(r.corrected > 0 ? `🔁 أُعيد احتساب الأرصدة — صُحّح ${r.corrected} حساب من أصل ${r.checked}` : `✅ فُحص ${r.checked} حساب — كل الأرصدة مطابقة للقيود`, { duration: 8000 })
+    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <Card className="mt-4">
+      <CardHeader className="pb-2"><CardTitle className="text-base">🔁 الصيانة المحاسبية — مطابقة الأرصدة مع القيود</CardTitle></CardHeader>
+      <CardContent className="space-y-2">
+        <div className="text-[11px] text-slate-500">القيود اليومية هي مصدر الحقيقة الوحيد. هذا الإجراء يعيد بناء الأرصدة المخزنة (بطاقات العملاء والموردين والصناديق، لكل عملة على حدة) من القيود مباشرة — يصحح أي انحراف تاريخي دون المساس بأي قيد.</div>
+        <Button onClick={run} disabled={busy} variant="outline" className="gap-2">{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : '🔁'} إعادة احتساب الأرصدة الآن</Button>
+        {res && res.changes?.length > 0 && (
+          <div className="space-y-1 max-h-52 overflow-y-auto border rounded-lg p-2 bg-slate-50">
+            {res.changes.map((c, i) => (
+              <div key={i} className="text-[10px] font-bold text-slate-600">
+                {c.type === 'supplier' ? '🏢' : c.type === 'client' ? '👤' : '💰'} {c.name}: {c.diffs.map(d => `${d.currency}: ${d.was.toLocaleString('en-US')} ← ${d.now.toLocaleString('en-US')}`).join(' • ')}
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 function SuperAdminPanel() {
   const { user, logout } = useAuth()
   const [data, setData] = useState(null)
@@ -6492,11 +6526,12 @@ function StatementReport() {
         <div>
           <div className="text-sm font-bold text-slate-700 mb-2">إجمالي كل العملات في الفترة المحددة</div>
           <Table>
-            <TableHeader><TableRow><TableHead>العملة</TableHead><TableHead className="text-left">إجمالي مدين</TableHead><TableHead className="text-left">إجمالي دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>العملة</TableHead><TableHead className="text-left">رصيد سابق</TableHead><TableHead className="text-left">إجمالي مدين</TableHead><TableHead className="text-left">إجمالي دائن</TableHead><TableHead className="text-left">الرصيد النهائي</TableHead></TableRow></TableHeader>
             <TableBody>
               {(data.summary || []).map(s => (
                 <TableRow key={s.currency}>
                   <TableCell><Badge variant="outline" className="font-bold">{s.currency}</Badge></TableCell>
+                  <TableCell className="text-left font-bold text-slate-500">{fmt(s.opening_balance || 0, s.currency)}</TableCell>
                   <TableCell className="text-left text-blue-700 font-bold">{fmt(s.total_debit, s.currency)}</TableCell>
                   <TableCell className="text-left text-rose-700 font-bold">{fmt(s.total_credit, s.currency)}</TableCell>
                   <TableCell className={`text-left font-extrabold ${s.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(s.balance, s.currency)}</TableCell>
@@ -12180,6 +12215,8 @@ function OfficeSettings() {
           </div>
           {/* v3.77 — Office verification & documents */}
           <OfficeVerificationCard />
+          {/* v3.78 — rebuild cached balances from the ledger */}
+          <RecomputeBalancesCard />
           <div className="flex justify-end mt-4"><Button onClick={save} disabled={saving} className="grad-brand text-white gap-2">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ الإعدادات'}</Button></div>
         </TabsContent>
 

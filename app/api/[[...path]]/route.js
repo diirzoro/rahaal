@@ -544,23 +544,40 @@ async function createJournalEntry(db, tenantId, { date, description, ref_type, r
 
 // ============ EDIT/REVERSAL ENGINE ============
 // Reverses balance updates for a transactional record. Used before re-applying edited values or deleting.
-async function reverseTransactionEffects(db, T, kind, doc) {
+// v3.78 — UNIFIED TRANSACTION EFFECTS ENGINE (root-cause fix).
+// ONE symmetric engine for apply/reverse. sign=-1 reverses creation effects (edit/delete),
+// sign=+1 re-applies them (restore after a failed edit). MUST mirror create* functions exactly.
+// ROOT CAUSE FIXED: the old reverse had SWAPPED client/supplier signs in the PAYMENT voucher
+// branch (applied -amount again instead of +amount) — every edit DOUBLED the cached party
+// balance instead of cancelling it (the reported 40,028 ≈ 2 × 20,113 residue, in BOTH currencies
+// because the voucher was edited SAR→USD→SAR). It also never reversed the partner commission share.
+async function applyTransactionEffects(db, T, kind, doc, sign = -1) {
   if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
+    // create: cash → box +sale | credit → client +sale ; supplier +cost ; partner −share
     if (doc.payment_method === 'cash' && doc.box_id) {
-      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
-    } else {
-      await updateBalance(db, 'clients', { id: doc.client_id, tenant_id: T }, doc.currency, -doc.sale_price)
+      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, sign * (Number(doc.sale_price) || 0))
+    } else if (doc.client_id) {
+      await updateBalance(db, 'clients', { id: doc.client_id, tenant_id: T }, doc.currency, sign * (Number(doc.sale_price) || 0))
     }
-    await updateBalance(db, 'suppliers', { id: doc.supplier_id, tenant_id: T }, doc.currency, -doc.cost)
+    await updateBalance(db, 'suppliers', { id: doc.supplier_id, tenant_id: T }, doc.currency, sign * (Number(doc.cost) || 0))
+    // v3.78 — partner commission share was NEVER reversed before (silent corruption on edit/delete)
+    const share = Number(doc.commission_share_amount) || 0
+    if (share > 0 && doc.commission_partner_id) {
+      const pCol = doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
+      await updateBalance(db, pCol, { id: doc.commission_partner_id, tenant_id: T }, doc.currency, sign * -share)
+    }
   } else if (kind === 'vouchers') {
+    const amt = Number(doc.amount) || 0
     if (doc.type === 'receipt') {
-      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.amount)
-      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
-      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+      // create: box +amount ; client −amount ; supplier +amount
+      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, sign * amt)
+      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, sign * -amt)
+      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, sign * amt)
     } else {
-      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, +doc.amount)
-      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
-      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
+      // create (payment): box −amount ; supplier −amount ; client +amount
+      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, sign * -amt)
+      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, sign * -amt)
+      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, sign * amt)
     }
   } else if (kind === 'fx') {
     // Use stored refs (falls back to box_currency_id for pre-v2.6 records)
@@ -571,13 +588,14 @@ async function reverseTransactionEffects(db, T, kind, doc) {
     const debitAmtCur = doc.type === 'buy' ? doc.amount : -doc.amount
     const debitAmtCounter = doc.type === 'buy' ? -doc.counter_amount : doc.counter_amount
     if (accCur && accCur.updateBalance) {
-      await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, doc.currency, -debitAmtCur * accCur.debitSign)
+      await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, doc.currency, sign * -debitAmtCur * accCur.debitSign * -1)
     }
     if (accCounter && accCounter.updateBalance) {
-      await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, doc.counter_currency, -debitAmtCounter * accCounter.debitSign)
+      await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, doc.counter_currency, sign * -debitAmtCounter * accCounter.debitSign * -1)
     }
   }
 }
+async function reverseTransactionEffects(db, T, kind, doc) { return applyTransactionEffects(db, T, kind, doc, -1) }
 
 // Reverses party balance updates that were applied at the moment a manual JE was inserted.
 async function reverseManualJournalEffects(db, T, je) {
@@ -6089,34 +6107,10 @@ async function handleRoute(request, { params }) {
       const coll = kind === 'fx' ? 'currency_exchanges' : kind
       const doc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
       if (!doc) return bad('العنصر غير موجود', 404)
-      // Reverse balance updates & delete linked journal entry
+      // v3.78 — ONE effects engine everywhere (the old inline copy diverged from the PUT path
+      // and neither reversed the partner commission share). Same engine as edits now.
       const je = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
-      if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
-        if (doc.payment_method === 'cash' && doc.box_id) {
-          await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
-        } else {
-          await updateBalance(db, 'clients', { id: doc.client_id, tenant_id: T }, doc.currency, -doc.sale_price)
-        }
-        await updateBalance(db, 'suppliers', { id: doc.supplier_id, tenant_id: T }, doc.currency, -doc.cost)
-      } else if (kind === 'vouchers') {
-        if (doc.type === 'receipt') {
-          await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.amount)
-          if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
-          if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
-        } else {
-          await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, +doc.amount)
-          if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
-          if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
-        }
-      } else if (kind === 'fx') {
-        if (doc.type === 'buy') {
-          await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, -doc.amount)
-          await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, +doc.counter_amount)
-        } else {
-          await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, +doc.amount)
-          await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, -doc.counter_amount)
-        }
-      }
+      await reverseTransactionEffects(db, T, kind, doc)
       if (je) {
         await db.collection('journal_entries').deleteOne({ id: je.id })
         await db.collection('tenants').updateOne({ id: T }, { $inc: { 'journal_quota.used': -1 } })
@@ -6149,8 +6143,19 @@ async function handleRoute(request, { params }) {
       else if (kind === 'vouchers') result = await createVoucher(db, T, { ...b, type: b.type || oldDoc.type }, opts)
       else if (kind === 'fx') result = await createFx(db, T, { ...b, type: b.type || oldDoc.type }, opts)
       if (result.error) {
-        // Best-effort restore: re-apply original doc (though balances may be inconsistent — client should refresh)
-        return bad(result.error)
+        // v3.78 — ROOT-CAUSE FIX (data-loss on failed edit): the old flow reversed balances and
+        // DELETED the record + JE BEFORE validating the new payload. Any validation failure
+        // (closed fiscal year, period lock, missing phone, ...) silently DESTROYED the record —
+        // the next edit attempt then showed «السجل غير موجود». Now we fully RESTORE the original
+        // record, its journal entry and its balance effects, then surface the real error.
+        const { _id: _o, ...oldDocClean } = oldDoc
+        await db.collection(coll).insertOne(oldDocClean)
+        if (oldJe) {
+          const { _id: _j, ...oldJeClean } = oldJe
+          await db.collection('journal_entries').insertOne(oldJeClean)
+        }
+        await applyTransactionEffects(db, T, kind, oldDoc, +1) // re-apply original effects
+        return bad(`${result.error} — لم يُحفظ التعديل، وسجلك الأصلي كما هو دون أي تغيير`)
       }
       return ok(result.doc)
     }
@@ -6178,6 +6183,50 @@ async function handleRoute(request, { params }) {
       const result = await createManualJournal(db, T, b, { existingId: jeId, skipQuota: true, createdAt: oldJe.created_at })
       if (result.error) return bad(result.error)
       return ok(result.doc)
+    }
+
+    // v3.78 — REBUILD CACHED BALANCES FROM THE LEDGER (owner only).
+    // The ledger (journal_entries) is the single source of truth; cards/lists read the cached
+    // balances object. After fixing the reversal engine, this endpoint re-derives every cached
+    // balance from the ledger — the principled repair (NOT manual zeroing that hides root causes).
+    if (route === '/accounts/recompute-balances' && method === 'POST') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const jesAll = await db.collection('journal_entries').find({ tenant_id: T }).toArray()
+      const accSums = { client: {}, supplier: {}, box: {} }
+      for (const je of jesAll) {
+        for (const l of je.lines || []) {
+          if (!l.party_id || !['client', 'supplier', 'box'].includes(l.party_type)) continue
+          const cur = l.currency || je.currency
+          if (!['USD', 'SAR', 'YER'].includes(cur)) continue
+          // SAME conventions as the detailed statement: client/box = debit−credit ; supplier = credit−debit
+          const delta = l.party_type === 'supplier' ? (l.credit || 0) - (l.debit || 0) : (l.debit || 0) - (l.credit || 0)
+          accSums[l.party_type][l.party_id] = accSums[l.party_type][l.party_id] || { USD: 0, SAR: 0, YER: 0 }
+          accSums[l.party_type][l.party_id][cur] += delta
+        }
+      }
+      const collMap = { client: 'clients', supplier: 'suppliers', box: 'boxes' }
+      const changes = []
+      let checked = 0, corrected = 0
+      for (const [ptype, coll] of Object.entries(collMap)) {
+        const entities = await db.collection(coll).find({ tenant_id: T }).toArray()
+        for (const e of entities) {
+          checked++
+          const target = { USD: 0, SAR: 0, YER: 0, ...(accSums[ptype][e.id] || {}) }
+          for (const c of ['USD', 'SAR', 'YER']) target[c] = +Number(target[c] || 0).toFixed(2)
+          const curBal = e.balances || {}
+          const diffs = ['USD', 'SAR', 'YER']
+            .map(c => ({ currency: c, was: +Number(curBal[c] || 0).toFixed(2), now: target[c] }))
+            .filter(d => Math.abs(d.was - d.now) > 0.009)
+          if (diffs.length > 0) {
+            await db.collection(coll).updateOne({ id: e.id, tenant_id: T }, {
+              $set: { 'balances.USD': target.USD, 'balances.SAR': target.SAR, 'balances.YER': target.YER, balances_recomputed_at: new Date() },
+            })
+            corrected++
+            if (changes.length < 100) changes.push({ type: ptype, name: e.name || e.name_ar || e.id, diffs })
+          }
+        }
+      }
+      return ok({ checked, corrected, changes })
     }
 
     // ============ Currency Exchange (Buy/Sell) ============
@@ -7896,20 +7945,54 @@ async function reportStatement(db, T, q) {
   const filter = { tenant_id: T }
   if (dateFilter) filter.date = dateFilter
 
+  // v3.78 — OPENING BALANCE (root-cause fix): a period filter must limit which ROWS are shown,
+  // NEVER erase the effect of prior history. Before listing the period we net ALL movements
+  // strictly before the start date into an opening balance per currency, seed the running
+  // balance with it and show it as a leading «رصيد سابق» row. Same delta conventions as below.
+  const partyDelta = (l) => {
+    if (party_type === 'client') return (l.debit || 0) - (l.credit || 0)
+    if (party_type === 'supplier') return (l.credit || 0) - (l.debit || 0)
+    return (l.debit || 0) - (l.credit || 0) // box + generic COA (asset convention)
+  }
+  const opening = { USD: 0, SAR: 0, YER: 0 }
+  let hasOpening = false
+  if (dateFilter && dateFilter.$gte && dateFilter.$gte.getTime() > 0) {
+    const prevJes = await db.collection('journal_entries').find({ tenant_id: T, date: { $lt: dateFilter.$gte } }).toArray()
+    for (const je of prevJes) {
+      for (const l of je.lines || []) {
+        if (l.party_type === party_type && l.party_id === party_id) {
+          const cur = l.currency || je.currency
+          if (!['USD', 'SAR', 'YER'].includes(cur)) continue
+          opening[cur] += partyDelta(l)
+          hasOpening = true
+        }
+      }
+    }
+    for (const c of ['USD', 'SAR', 'YER']) opening[c] = +opening[c].toFixed(2)
+  }
+
   const jes = await db.collection('journal_entries').find(filter).sort({ date: 1, created_at: 1 }).toArray()
   const rows = []
-  const run = { USD: 0, SAR: 0, YER: 0 }
+  const run = { ...opening } // running balance STARTS from the opening balance — not from zero
   const totals = { USD: { d: 0, c: 0 }, SAR: { d: 0, c: 0 }, YER: { d: 0, c: 0 } }
+  if (hasOpening) {
+    for (const c of ['USD', 'SAR', 'YER']) {
+      if (opening[c] !== 0) {
+        rows.push({
+          date: dateFilter.$gte, description: 'رصيد سابق (افتتاحي) — صافي جميع الحركات قبل بداية الفترة',
+          ref_type: 'opening_balance', currency: c,
+          debit: opening[c] > 0 ? opening[c] : 0, credit: opening[c] < 0 ? -opening[c] : 0,
+          balance: opening[c], is_opening: true,
+        })
+      }
+    }
+  }
   for (const je of jes) {
     for (const l of je.lines || []) {
       if (l.party_type === party_type && l.party_id === party_id) {
         const cur = l.currency || je.currency
         if (!['USD','SAR','YER'].includes(cur)) continue
-        let delta = 0
-        if (party_type === 'client') delta = (l.debit || 0) - (l.credit || 0)
-        else if (party_type === 'supplier') delta = (l.credit || 0) - (l.debit || 0)
-        else if (party_type === 'box') delta = (l.debit || 0) - (l.credit || 0)
-        else delta = (l.debit || 0) - (l.credit || 0)  // generic COA account (asset convention)
+        const delta = partyDelta(l)
         run[cur] += delta
         totals[cur].d += l.debit || 0
         totals[cur].c += l.credit || 0
@@ -7934,7 +8017,7 @@ async function reportStatement(db, T, q) {
   let finalRows = rows
   if (['USD','SAR','YER'].includes(mode)) finalRows = rows.filter(r => r.currency === mode)
 
-  const summary = CURRENCIES.map(c => ({ currency: c, total_debit: +totals[c].d.toFixed(2), total_credit: +totals[c].c.toFixed(2), balance: +run[c].toFixed(2) }))
+  const summary = CURRENCIES.map(c => ({ currency: c, opening_balance: +(opening[c] || 0).toFixed(2), total_debit: +totals[c].d.toFixed(2), total_credit: +totals[c].c.toFixed(2), balance: +run[c].toFixed(2) }))
 
   return {
     party: party ? { id: party.id, name: party.name, phone: party.phone, balances: party.balances } : null,
