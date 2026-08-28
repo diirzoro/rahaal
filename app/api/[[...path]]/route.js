@@ -5415,7 +5415,9 @@ async function handleRoute(request, { params }) {
       const baseQ = { tenant_id: T, ...filterInactive }
       const results = []
       const wantAll = wantType === 'all'
-      if (wantAll || wantType === 'client') {
+      const wantParty = wantType === 'party' // v3.79 — clients + suppliers combined (partner pickers)
+      const acctTypeF = String(q.acct_type || '').toLowerCase() // v3.79 — filter COA accounts by type (expense/revenue/...)
+      if (wantAll || wantParty || wantType === 'client') {
         const rows = await db.collection('clients').find(baseQ).toArray()
         rows.forEach(r => {
           const label = (r.name || '').toLowerCase()
@@ -5425,7 +5427,7 @@ async function handleRoute(request, { params }) {
           }
         })
       }
-      if (wantAll || wantType === 'supplier') {
+      if (wantAll || wantParty || wantType === 'supplier') {
         const rows = await db.collection('suppliers').find(baseQ).toArray()
         rows.forEach(r => {
           const label = (r.name || '').toLowerCase()
@@ -5451,6 +5453,7 @@ async function handleRoute(request, { params }) {
         accs.forEach(a => {
           // Skip group-parents already served via sub-entities (client/supplier/box parents)
           if (['1101', '1201', '1301', '2101'].includes(a.code)) return
+          if (acctTypeF && a.type !== acctTypeF) return // v3.79 — expense/revenue scoped selectors
           const label = (a.name_ar || '').toLowerCase()
           const code = (a.code || '').toLowerCase()
           if (!qText || label.includes(qText) || code.includes(qText)) {
@@ -5511,8 +5514,29 @@ async function handleRoute(request, { params }) {
 
     if (route === '/accounts' && method === 'POST') {
       const b = await request.json()
-      if (!b.code || !b.name_ar || !b.type) return bad('الرمز والاسم والنوع مطلوبة')
-      const code = String(b.code)
+      if (!b.name_ar || !b.type) return bad('الاسم والنوع مطلوبان')
+      // v3.79 — AUTO CODE: when code is omitted, generate the next child code under the parent
+      // (inline quick-add from the unified Account Selector). Parent = classification only.
+      let code = b.code ? String(b.code) : ''
+      if (!code) {
+        if (!b.parent) return bad('الرمز مطلوب — أو حدد الحساب الأب ليُولَّد الرمز تلقائياً')
+        const parentStr = String(b.parent)
+        const pAcc = await db.collection('accounts').findOne({ tenant_id: T, code: parentStr })
+        if (!pAcc) return bad('الحساب الأب غير موجود')
+        const kids = await db.collection('accounts').find({ tenant_id: T, parent: parentStr }).project({ code: 1 }).toArray()
+        const nums = kids.map(k => Number(k.code)).filter(n => Number.isFinite(n))
+        let candidate = nums.length ? Math.max(...nums) + 1 : Number(`${parentStr}01`)
+        for (let i = 0; i < 200; i++) { // skip collisions with any existing account_code
+          const cStr = String(candidate)
+          const clash = await db.collection('accounts').findOne({ tenant_id: T, code: cStr })
+            || await db.collection('clients').findOne({ tenant_id: T, account_code: cStr })
+            || await db.collection('suppliers').findOne({ tenant_id: T, account_code: cStr })
+            || await db.collection('boxes').findOne({ tenant_id: T, account_code: cStr })
+          if (!clash) break
+          candidate++
+        }
+        code = String(candidate)
+      }
       // v3.10.2 — check uniqueness across accounts + clients + suppliers + boxes account_codes
       const [existsAcc, existsClient, existsSupp, existsBox] = await Promise.all([
         db.collection('accounts').findOne({ tenant_id: T, code }),
@@ -7579,6 +7603,7 @@ async function createVoucher(db, T, b, opts = {}) {
   if (Number(b.amount) < 0) return { error: 'لا يُسمح بمبلغ سالب في السند' }
   if (amount <= 0) return { error: 'المبلغ يجب أن يكون أكبر من صفر' }
   let partyName = ''
+  let coaAccount = null // v3.79 — real COA account for expense/revenue vouchers
   if (b.party_type === 'client') {
     const c = await db.collection('clients').findOne({ id: b.party_id, tenant_id: T })
     if (!c) return { error: 'العميل غير موجود' }; partyName = c.name
@@ -7586,7 +7611,26 @@ async function createVoucher(db, T, b, opts = {}) {
     const s = await db.collection('suppliers').findOne({ id: b.party_id, tenant_id: T })
     if (!s) return { error: 'المورد غير موجود' }; partyName = s.name
   } else if (b.party_type === 'expense') {
-    partyName = b.party_name || 'مصروف تشغيلي'
+    if (b.type !== 'payment') return { error: 'المصروف متاح في سند الصرف فقط' }
+    // v3.79 — expense MUST be a real account from the chart of accounts (not free text).
+    // Legacy fallback (old records being re-created on edit) keeps the generic 5101 line.
+    if (b.coa_account_code) {
+      coaAccount = await db.collection('accounts').findOne({ tenant_id: T, code: String(b.coa_account_code) })
+      if (!coaAccount) return { error: 'حساب المصروف غير موجود في دليل الحسابات' }
+      if (coaAccount.type !== 'expense') return { error: `الحساب "${coaAccount.name_ar}" ليس حساب مصروف` }
+      if (coaAccount.is_group) return { error: 'اختر حساب مصروف فرعياً — الحساب الأب للتصنيف فقط ولا تُسجل عليه حركة' }
+      partyName = coaAccount.name_ar
+    } else {
+      partyName = b.party_name || 'مصروف تشغيلي'
+    }
+  } else if (b.party_type === 'revenue') {
+    if (b.type !== 'receipt') return { error: 'الإيراد متاح في سند القبض فقط' }
+    // v3.79 — revenue MUST be a real account from the chart of accounts
+    coaAccount = await db.collection('accounts').findOne({ tenant_id: T, code: String(b.coa_account_code || '') })
+    if (!coaAccount) return { error: 'حساب الإيراد غير موجود في دليل الحسابات' }
+    if (coaAccount.type !== 'revenue') return { error: `الحساب "${coaAccount.name_ar}" ليس حساب إيراد` }
+    if (coaAccount.is_group) return { error: 'اختر حساب إيراد فرعياً — الحساب الأب للتصنيف فقط ولا تُسجل عليه حركة' }
+    partyName = coaAccount.name_ar
   } else return { error: 'الطرف غير صالح' }
   const box = await db.collection('boxes').findOne({ id: b.box_id, tenant_id: T })
   if (!box) return { error: 'الصندوق/البنك غير موجود' }
@@ -7594,6 +7638,7 @@ async function createVoucher(db, T, b, opts = {}) {
     id: opts.existingId || uuidv4(), tenant_id: T, type: b.type, date: new Date(b.date || Date.now()),
     currency: b.currency, amount, party_type: b.party_type, party_id: b.party_id || null,
     party_name: partyName, box_id: box.id, box_name: box.name_ar,
+    coa_account_code: coaAccount?.code || null, coa_account_name: coaAccount?.name_ar || null, // v3.79
     method: b.method || (box.type === 'cash' ? 'صندوق' : 'بنك'),
     description: b.description || '', created_at: opts.createdAt || new Date(),
     ...(opts.existingId ? { updated_at: new Date() } : {}),
@@ -7614,11 +7659,17 @@ async function createVoucher(db, T, b, opts = {}) {
     lines.push({ account_code: boxAccCode, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: amount, credit: 0 })
     if (b.party_type === 'client') lines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
     if (b.party_type === 'supplier') lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
+    // v3.79 — revenue posts to the SELECTED revenue account (statement-able independent account)
+    if (b.party_type === 'revenue') lines.push({ account_code: coaAccount.code, account_name: coaAccount.name_ar, party_type: 'account', party_id: coaAccount.id, party_name: coaAccount.name_ar, debit: 0, credit: amount })
     if (b.party_type === 'expense') lines.push({ account_code: '4103', account_name: 'إيراد متنوع', party_type: 'revenue', party_id: null, party_name: 'إيراد متنوع', debit: 0, credit: amount })
   } else {
     if (b.party_type === 'supplier') lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
     if (b.party_type === 'client') lines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
-    if (b.party_type === 'expense') lines.push({ account_code: '5101', account_name: 'مصاريف تشغيلية', party_type: 'expense', party_id: null, party_name: partyName, debit: amount, credit: 0 })
+    // v3.79 — expense posts to the SELECTED expense account; legacy free-text keeps generic 5101
+    if (b.party_type === 'expense') {
+      if (coaAccount) lines.push({ account_code: coaAccount.code, account_name: coaAccount.name_ar, party_type: 'account', party_id: coaAccount.id, party_name: coaAccount.name_ar, debit: amount, credit: 0 })
+      else lines.push({ account_code: '5101', account_name: 'مصاريف تشغيلية', party_type: 'expense', party_id: null, party_name: partyName, debit: amount, credit: 0 })
+    }
     lines.push({ account_code: boxAccCode, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: 0, credit: amount })
   }
   await createJournalEntry(db, T, {
