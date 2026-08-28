@@ -699,6 +699,53 @@ async function handleRoute(request, { params }) {
       if (!img) return bad('لا توجد صورة', 404)
       return new Response(Buffer.from(img.data, 'base64'), { status: 200, headers: { 'Content-Type': img.content_type || 'image/jpeg', 'Cache-Control': 'public, max-age=300' } })
     }
+    // v3.76 — SSO VERIFY (server-to-server, Meraaj -> Rahaal): "Login with Rahaal" support.
+    // Meraaj POSTs { token } — request body HMAC-signed like webhooks (x-meraaj-signature over raw body).
+    // Rahaal re-verifies the token signature + expiry and returns FRESH office identity + permissions
+    // scoped to the office only (never cross-tenant data).
+    if (route === '/meraaj/sso/verify' && method === 'POST') {
+      const rawBodySso = await request.text()
+      const sigSso = request.headers.get('x-meraaj-signature')
+      if (!meraajVerify(rawBodySso, sigSso)) return bad('توقيع غير صالح — Invalid HMAC signature', 401)
+      let bodySso
+      try { bodySso = JSON.parse(rawBodySso) } catch { return bad('JSON غير صالح') }
+      const tokenSso = String(bodySso.token || '')
+      const [b64Sso, tsigSso] = tokenSso.split('.')
+      if (!b64Sso || !tsigSso || meraajSign(b64Sso) !== tsigSso) {
+        return cors(NextResponse.json({ valid: false, error: 'invalid_token_signature' }, { status: 401 }))
+      }
+      let claims
+      try { claims = JSON.parse(Buffer.from(b64Sso, 'base64url').toString()) } catch {
+        return cors(NextResponse.json({ valid: false, error: 'malformed_token' }, { status: 400 }))
+      }
+      if (claims.iss !== 'rahaal-erp' || claims.aud !== 'meraaj-network') {
+        return cors(NextResponse.json({ valid: false, error: 'invalid_token_claims' }, { status: 401 }))
+      }
+      if (!claims.exp || claims.exp < Math.floor(Date.now() / 1000)) {
+        return cors(NextResponse.json({ valid: false, error: 'token_expired' }, { status: 401 }))
+      }
+      const ssoUser = await db.collection('users').findOne({ tenant_id: claims.tenant_id, email: claims.email })
+      if (!ssoUser || ssoUser.active === false) {
+        return cors(NextResponse.json({ valid: false, error: 'user_not_found_or_inactive' }, { status: 404 }))
+      }
+      const ssoSettings = await db.collection('tenant_settings').findOne({ tenant_id: claims.tenant_id })
+      const P = ssoUser.role === 'owner' ? null : effectivePermissions(ssoUser)
+      // Meraaj-scoped permission surface ONLY (no internal ERP permissions leak)
+      const scope = ssoUser.role === 'owner'
+        ? { manage_packages: true, manage_bookings: true, approve_reject: true, can_refund: true, manage_settings: true }
+        : { manage_packages: !!P.mod_meraaj, manage_bookings: !!P.mod_meraaj, approve_reject: !!P.mod_meraaj, can_refund: !!P.can_refund, manage_settings: false }
+      return ok({
+        valid: true,
+        office: {
+          office_ref: claims.tenant_id,
+          office_name: ssoSettings?.agency_name || claims.office_name || '',
+          meraaj_office_id: ssoSettings?.meraaj_office_id || null,
+          store_active: !!ssoSettings?.meraaj_store?.active,
+          escrow_mode: !!ssoSettings?.meraaj_escrow_mode,
+        },
+        user: { email: ssoUser.email, name: ssoUser.name || '', role: ssoUser.role, permissions: scope },
+      })
+    }
     // Reverse webhooks from Meraaj → Rahaal: signature over the RAW body (x-meraaj-signature)
     if (route === '/meraaj/webhooks' && method === 'POST') {
       const rawBody = await request.text()
@@ -720,8 +767,24 @@ async function handleRoute(request, { params }) {
         await db.collection('meraaj_inbound_events').insertOne({ id: uuidv4(), external_id: evt.id, type, received_at: new Date() })
       }
       if (type === 'meraaj.booking.created') {
-        const pkg = await db.collection('packages').findOne({ id: data.package_ref })
-        if (!pkg) return bad('الباكج غير موجود', 404)
+        // v3.76 — CONTRACT LOCK: package_ref MUST equal rahal_ref (= packages.id in Rahaal, sent at share).
+        // Resilient resolution (same contract, no redesign): the Meraaj-side package id (meraaj.remote_id)
+        // and an explicit data.rahal_ref are accepted as aliases of the SAME package.
+        const pkgRefRaw = String(data.package_ref || '').trim().slice(0, 80)
+        const rahalRefRaw = String(data.rahal_ref || '').trim().slice(0, 80)
+        const pkgOr = []
+        if (pkgRefRaw) pkgOr.push({ id: pkgRefRaw }, { 'meraaj.remote_id': pkgRefRaw })
+        if (rahalRefRaw && rahalRefRaw !== pkgRefRaw) pkgOr.push({ id: rahalRefRaw }, { 'meraaj.remote_id': rahalRefRaw })
+        const pkg = pkgOr.length ? await db.collection('packages').findOne({ $or: pkgOr }) : null
+        if (!pkg) {
+          try { await db.collection('meraaj_webhook_log').insertOne({ id: uuidv4(), ok: false, reason: 'unknown_package_ref', package_ref: pkgRefRaw.slice(0, 60), booking_ref: String(data.booking_ref || '').slice(0, 60), at: new Date() }) } catch {}
+          return cors(NextResponse.json({
+            error: 'unknown_package_ref',
+            message: 'الباكج غير موجود — package_ref يجب أن يساوي rahal_ref (packages.id في رحّال) المستلم عند التسجيل، أو meraaj_package_id المعاد من رحّال',
+            received_package_ref: pkgRefRaw || null,
+            received_rahal_ref: rahalRefRaw || null,
+          }, { status: 404 }))
+        }
         if (!pkg.meraaj?.shared) return bad('الباكج غير مُشارَك', 403)
         // v3.73 — ENTERPRISE VALIDATION: bookings are only accepted for live, listed packages
         if (pkg.status !== 'open' || pkg.archived || pkg.meraaj.dispatched) {
@@ -827,7 +890,7 @@ async function handleRoute(request, { params }) {
       }
       if (type === 'meraaj.booking.cancelled') {
         const inbound = await db.collection('meraaj_inbound_bookings').findOne({ meraaj_booking_ref: String(data.booking_ref || ''), status: { $ne: 'cancelled' } })
-        if (!inbound) return bad('الحجز غير موجود أو مُلغى مسبقاً', 404)
+        if (!inbound) return cors(NextResponse.json({ error: 'unknown_booking_ref', message: 'الحجز غير موجود أو مُلغى مسبقاً — booking_ref يجب أن يطابق data.booking_ref لحدث booking.created الذي قبِله رحّال (HTTP 200)', received_booking_ref: String(data.booking_ref || '').slice(0, 60) || null }, { status: 404 }))
         // v3.73 — ENTERPRISE SPLIT: an APPROVED booking is NEVER cancelled directly by the buyer.
         // It becomes a cancellation REQUEST that the package owner must approve/reject.
         if (inbound.status === 'approved') {
@@ -854,7 +917,7 @@ async function handleRoute(request, { params }) {
       // recorded only — the booking stays approved until the package owner decides.
       if (type === 'meraaj.booking.cancellation_requested') {
         const inbound = await db.collection('meraaj_inbound_bookings').findOne({ meraaj_booking_ref: String(data.booking_ref || '') })
-        if (!inbound) return bad('الحجز غير موجود', 404)
+        if (!inbound) return cors(NextResponse.json({ error: 'unknown_booking_ref', message: 'الحجز غير موجود — booking_ref يجب أن يطابق data.booking_ref لحدث booking.created الذي قبِله رحّال (HTTP 200)', received_booking_ref: String(data.booking_ref || '').slice(0, 60) || null }, { status: 404 }))
         if (inbound.status === 'cancelled') return ok({ received: true, note: 'الحجز ملغى مسبقاً' })
         if (inbound.status === 'rejected') return ok({ received: true, note: 'الحجز مرفوض مسبقاً — لا إجراء' })
         if (inbound.status === 'new') {
@@ -886,7 +949,7 @@ async function handleRoute(request, { params }) {
       // never re-created) up to min(position costs, recorded costs) — zero double-posting.
       if (type === 'meraaj.booking.cancellation_finalized') {
         const inbound = await db.collection('meraaj_inbound_bookings').findOne({ meraaj_booking_ref: String(data.booking_ref || '') })
-        if (!inbound) return bad('الحجز غير موجود', 404)
+        if (!inbound) return cors(NextResponse.json({ error: 'unknown_booking_ref', message: 'الحجز غير موجود — booking_ref يجب أن يطابق data.booking_ref لحدث booking.created الذي قبِله رحّال (HTTP 200)', received_booking_ref: String(data.booking_ref || '').slice(0, 60) || null }, { status: 404 }))
         const decision = String(data.decision || '')
         if (!['cancelled', 'kept'].includes(decision)) return bad('قرار غير معروف — cancelled أو kept فقط')
         const decidedBy = String(data.decided_by || 'super_admin').slice(0, 120)
@@ -1728,16 +1791,48 @@ async function handleRoute(request, { params }) {
       if (!meraajSecret()) return bad('التكامل مع معراج غير مُهيأ (MERAAJ_SHARED_SECRET مفقود)', 503)
       const now = Math.floor(Date.now() / 1000)
       const settings = await db.collection('tenant_settings').findOne(tf)
+      // v3.76 — enriched identity: linked Meraaj office id + Meraaj-scoped permissions (office scope only)
+      const Ptok = sess.user.role === 'owner' ? null : effectivePermissions(sess.user)
+      const tokenScope = sess.user.role === 'owner'
+        ? { manage_packages: true, manage_bookings: true, approve_reject: true, can_refund: true, manage_settings: true }
+        : { manage_packages: !!Ptok.mod_meraaj, manage_bookings: !!Ptok.mod_meraaj, approve_reject: !!Ptok.mod_meraaj, can_refund: !!Ptok.can_refund, manage_settings: false }
       const payload = {
         iss: 'rahaal-erp', aud: 'meraaj-network',
         tenant_id: T,
         office_name: settings?.agency_name || sess.tenant.name || '',
+        meraaj_office_id: settings?.meraaj_office_id || null, // v3.76 — account linking
         email: sess.user.email, role: sess.user.role,
+        permissions: tokenScope, // v3.76 — office-scoped Meraaj permissions
         iat: now, exp: now + 300,
       }
       const body64 = Buffer.from(JSON.stringify(payload)).toString('base64url')
       const token = `${body64}.${meraajSign(body64)}`
       return ok({ token, expires_in: 300 })
+    }
+    // v3.76 — ACCOUNT LINKING: create/link this office's Meraaj account (owner or mod_meraaj staff).
+    // Calls Meraaj REST {base}/api/integrations/rahal/offices/link (HMAC-signed) and stores meraaj_office_id.
+    if (route === '/meraaj/account-link' && method === 'POST') {
+      const stLink = await db.collection('tenant_settings').findOne(tf)
+      if (stLink?.meraaj_office_id) {
+        return ok({ linked: true, already: true, meraaj_office_id: stLink.meraaj_office_id, linked_at: stLink.meraaj_linked_at || null })
+      }
+      const link = await meraajLinkOfficeAPI(db, T, {
+        office_ref: T,
+        office_name: stLink?.agency_name || sess.tenant.name || '',
+        owner_email: sess.user.email,
+        store_active: !!stLink?.meraaj_store?.active,
+        escrow_mode: !!stLink?.meraaj_escrow_mode,
+        requested_by: sess.user.email,
+        requested_at: new Date().toISOString(),
+      })
+      if (!link.ok) {
+        await db.collection('tenant_settings').updateOne(tf, { $set: { meraaj_link_status: 'failed', meraaj_link_error: link.error, meraaj_link_attempted_at: new Date() } }, { upsert: true })
+        return bad(`فشل ربط الحساب — لم يقبل معراج الطلب: ${link.error}`, 502)
+      }
+      await db.collection('tenant_settings').updateOne(tf, {
+        $set: { meraaj_office_id: link.office_id, meraaj_link_status: 'linked', meraaj_linked_at: new Date(), meraaj_link_error: null },
+      }, { upsert: true })
+      return ok({ linked: true, meraaj_office_id: link.office_id })
     }
     // Integration status for the frontend tab
     if (route === '/meraaj/config' && method === 'GET') {
@@ -1758,6 +1853,11 @@ async function handleRoute(request, { params }) {
         auto_retry_last: settingsCfg?.meraaj_auto_retry_last || null,
         // v3.71 — daily WhatsApp digest reminder time ('HH:MM' or '' = disabled)
         digest_reminder_time: settingsCfg?.meraaj_digest_reminder_time || '',
+        // v3.76 — Account linking state (office identity at Meraaj)
+        office_linked: !!settingsCfg?.meraaj_office_id,
+        meraaj_office_id: settingsCfg?.meraaj_office_id || null,
+        link_status: settingsCfg?.meraaj_link_status || (settingsCfg?.meraaj_office_id ? 'linked' : 'not_linked'),
+        link_error: settingsCfg?.meraaj_link_error || null,
         // v3.74 — P2P/Escrow mode: cancellation authority moves to Meraaj Super Admin
         escrow_mode: !!settingsCfg?.meraaj_escrow_mode,
       })
@@ -2131,6 +2231,21 @@ async function handleRoute(request, { params }) {
           activated_at: activatedAt.toISOString(),
         })
       } catch { /* non-blocking */ }
+      // v3.76 — AUTO ACCOUNT LINKING on opt-in (fire-and-forget: activation never blocks on it)
+      if (!settingsAct?.meraaj_office_id) {
+        meraajLinkOfficeAPI(db, T, {
+          office_ref: T,
+          office_name: settingsAct?.agency_name || sess.tenant.name || '',
+          owner_email: sess.user.email,
+          store_active: true,
+          escrow_mode: !!settingsAct?.meraaj_escrow_mode,
+          requested_by: sess.user.email,
+          requested_at: activatedAt.toISOString(),
+        }).then(link => {
+          if (link.ok) return db.collection('tenant_settings').updateOne(tf, { $set: { meraaj_office_id: link.office_id, meraaj_link_status: 'linked', meraaj_linked_at: new Date(), meraaj_link_error: null } }, { upsert: true })
+          return db.collection('tenant_settings').updateOne(tf, { $set: { meraaj_link_status: 'failed', meraaj_link_error: link.error, meraaj_link_attempted_at: new Date() } }, { upsert: true })
+        }).catch(() => {})
+      }
       return ok({ active: true, activated_at: activatedAt })
     }
     // Share / update / unshare a package to Meraaj marketplace
@@ -2424,6 +2539,7 @@ async function handleRoute(request, { params }) {
       await emitMeraajEvent(db, T, 'booking.rejected', {
         booking_ref: inbound.meraaj_booking_ref,
         package_ref: inbound.package_id,
+        ...(await meraajPkgIdentityFields(db, inbound.package_id)), // v3.76
         inbound_id: inbound.id,
         buyer_office_name: inbound.buyer_office_name,
         reason,
@@ -2487,6 +2603,7 @@ async function handleRoute(request, { params }) {
       await emitMeraajEvent(db, T, 'booking.cancellation.approved', {
         booking_ref: inbound.meraaj_booking_ref,
         package_ref: inbound.package_id,
+        ...(await meraajPkgIdentityFields(db, inbound.package_id)), // v3.76
         inbound_id: inbound.id,
         buyer_office_name: inbound.buyer_office_name,
         released_seats: inbound.seats,
@@ -2519,6 +2636,7 @@ async function handleRoute(request, { params }) {
       await emitMeraajEvent(db, T, 'booking.cancellation.rejected', {
         booking_ref: inbound.meraaj_booking_ref,
         package_ref: inbound.package_id,
+        ...(await meraajPkgIdentityFields(db, inbound.package_id)), // v3.76
         inbound_id: inbound.id,
         buyer_office_name: inbound.buyer_office_name,
         reason: reasonCR,
@@ -2578,6 +2696,7 @@ async function handleRoute(request, { params }) {
       await emitMeraajEvent(db, T, 'booking.cancellation.position', {
         booking_ref: inbound.meraaj_booking_ref,
         package_ref: inbound.package_id,
+        ...(await meraajPkgIdentityFields(db, inbound.package_id)), // v3.76
         inbound_id: inbound.id,
         position: positionVal,
         executed_services: services,
@@ -6238,6 +6357,8 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
   await emitMeraajEvent(db, T, 'booking.approved', {
     booking_ref: inbound.meraaj_booking_ref,
     package_ref: pkg.id,
+    rahal_ref: pkg.id, // v3.76 — contract lock identity trio
+    meraaj_package_id: pkg.meraaj?.remote_id || null, // v3.76
     inbound_id: inbound.id,
     buyer_office_name: inbound.buyer_office_name,
     seats: inbound.seats,
@@ -6259,6 +6380,15 @@ function meraajAvailability(pkg) {
   const allocated = Number(m.seats_allocated) || 0
   const sold = Number(m.seats_sold) || 0
   return Math.max(0, allocated - sold)
+}
+
+// v3.76 — CONTRACT LOCK: unified package identity trio (package_ref = rahal_ref = packages.id,
+// meraaj_package_id = Meraaj-side id returned at registration) attached to EVERY outbound booking event.
+async function meraajPkgIdentityFields(db, packageId) {
+  try {
+    const p = await db.collection('packages').findOne({ id: packageId }, { projection: { 'meraaj.remote_id': 1 } })
+    return { rahal_ref: packageId, meraaj_package_id: p?.meraaj?.remote_id || null }
+  } catch { return { rahal_ref: packageId, meraaj_package_id: null } }
 }
 // Outbox pattern: persist the event, then best-effort deliver (signed) if Meraaj endpoint is configured.
 // v3.32 — returns delivery status: 'sent' | 'failed' | 'pending' (pending = no endpoint configured yet)
@@ -6572,6 +6702,47 @@ async function meraajRegisterPackageAPI(db, T, pkg, comps, meraajSet) {
       await db.collection('meraaj_events').insertOne(logDoc)
       const remoteId = json?.meraaj_package_id || json?.package_id || json?.id || json?.data?.id || null
       return { ok: true, remote_id: remoteId }
+    }
+    const errMsg = (json?.message || json?.error || `HTTP ${res.status}`).toString().slice(0, 200)
+    logDoc.status = 'failed'; logDoc.last_error = errMsg
+    await db.collection('meraaj_events').insertOne(logDoc)
+    return { ok: false, error: errMsg }
+  } catch (e) {
+    const errMsg = String(e.message || e).slice(0, 200)
+    logDoc.status = 'failed'; logDoc.last_error = errMsg
+    try { await db.collection('meraaj_events').insertOne(logDoc) } catch {}
+    return { ok: false, error: errMsg.includes('abort') || errMsg.includes('timeout') ? 'انتهت مهلة الاتصال بمعراج' : errMsg }
+  }
+}
+
+// v3.76 — ACCOUNT LINKING: register/link the office at Meraaj via REST (same signing contract as package share).
+// POST {MERAAJ_API_BASE_URL}/api/integrations/rahal/offices/link with X-Rahal-Api-Key + X-Rahal-Signature.
+// Success ONLY on 2xx; the returned office id is stored as tenant_settings.meraaj_office_id.
+async function meraajLinkOfficeAPI(db, T, payload) {
+  const base = meraajApiBase()
+  if (!base) return { ok: false, error: 'MERAAJ_API_BASE_URL غير مُهيأ في إعدادات الخادم' }
+  if (!meraajSecret()) return { ok: false, error: 'MERAAJ_SHARED_SECRET غير مُهيأ' }
+  const endpoint = `${base}/api/integrations/rahal/offices/link`
+  const logDoc = {
+    id: uuidv4(), tenant_id: T, type: 'office.link_api', channel: 'rest_api',
+    payload: { office_ref: T, endpoint },
+    status: 'pending', attempts: 1, last_error: null, created_at: new Date(), sent_at: null,
+  }
+  try {
+    const rawBody = JSON.stringify(payload)
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Rahal-Api-Key': meraajSecret(), 'X-Rahal-Signature': meraajSign(rawBody) },
+      body: rawBody,
+      signal: AbortSignal.timeout(15000),
+    })
+    let json = null
+    try { json = await res.json() } catch { /* non-JSON body is fine */ }
+    if (res.ok) {
+      logDoc.status = 'sent'; logDoc.sent_at = new Date()
+      await db.collection('meraaj_events').insertOne(logDoc)
+      const officeId = json?.meraaj_office_id || json?.office_id || json?.id || json?.data?.id || null
+      return { ok: true, office_id: officeId }
     }
     const errMsg = (json?.message || json?.error || `HTTP ${res.status}`).toString().slice(0, 200)
     logDoc.status = 'failed'; logDoc.last_error = errMsg

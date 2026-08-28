@@ -9153,6 +9153,16 @@ function MeraajStoreScreen() {
       toast.success(r.escrow_mode ? '⚖️ وضع Escrow مفعّل — القرار النهائي لإلغاءات الحجوزات المعتمدة لدى إدارة معراج' : 'أُوقف وضع Escrow — عاد قرار الإلغاء لمكتبك')
     } catch (e) { toast.error(e.message) }
   }
+  // v3.76 — ACCOUNT LINKING: create/link this office's Meraaj account (SSO identity, office scope only)
+  const [linking, setLinking] = useState(false)
+  const linkAccount = async () => {
+    setLinking(true)
+    try {
+      const r = await api('/meraaj/account-link', { method: 'POST' })
+      setConfig(c => ({ ...c, office_linked: true, meraaj_office_id: r.meraaj_office_id, link_status: 'linked', link_error: null }))
+      toast.success(r.already ? '🔗 حساب المكتب مرتبط مسبقاً بمعراج' : '🔗 تم ربط حساب المكتب بمعراج بنجاح')
+    } catch (e) { toast.error(e.message) } finally { setLinking(false) }
+  }
   return (
     <div>
       <TopBar title="🕋 متجر معراج نتورك" subtitle="سوق B2B لبيع وشراء برامج العمرة والسياحة بين المكاتب" right={<div className="flex gap-2 items-center flex-wrap">
@@ -9178,6 +9188,21 @@ function MeraajStoreScreen() {
             <div className="text-[11px] text-slate-500 mt-0.5">عند التفعيل: مكتبك يقدّم «موقف المكتب» فقط على طلبات إلغاء الحجوزات المعتمدة (خدمات منفذة + تكاليف + أدلة)، والقرار المالي النهائي (استرداد كلي/جزئي/إبقاء) يصدر من إدارة معراج ويُسوّى محاسبياً تلقائياً بقيود متوازنة.</div>
           </div>
           <Switch checked={!!config.escrow_mode} onCheckedChange={toggleEscrow} />
+        </div>
+      )}
+      {/* v3.76 — Account Linking / SSO with Meraaj */}
+      {config && (
+        <div className={`flex items-center justify-between gap-3 rounded-xl border-2 px-4 py-2.5 mb-4 flex-wrap ${config.office_linked ? 'border-emerald-200 bg-emerald-50/40' : 'border-slate-200 bg-slate-50/50'}`}>
+          <div className="min-w-0">
+            <div className="font-bold text-sm text-slate-800">🔗 ربط حساب معراج (SSO) {config.office_linked ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 ms-1">مرتبط</Badge> : <Badge variant="outline" className="ms-1">غير مرتبط</Badge>}</div>
+            <div className="text-[11px] text-slate-500 mt-0.5">
+              {config.office_linked
+                ? <>معرّف المكتب في معراج: <span className="font-mono text-[10px]" dir="ltr">{config.meraaj_office_id || '—'}</span> — الدخول لمتجر معراج يتم بحساب رحّال تلقائياً ضمن هوية وصلاحيات مكتبك فقط</>
+                : 'اربط حساب مكتبك بمعراج لإنشاء/مطابقة هوية المكتب تلقائياً، وتفعيل «الدخول بحساب رحّال»، ومزامنة الصلاحيات ضمن نطاق مكتبك فقط'}
+              {!config.office_linked && config.link_status === 'failed' && config.link_error && <span className="text-rose-500"> — آخر محاولة فشلت: {config.link_error}</span>}
+            </div>
+          </div>
+          {!config.office_linked && <Button size="sm" onClick={linkAccount} disabled={linking} className="gap-1 bg-slate-800 hover:bg-slate-900 text-white">{linking ? <Loader2 className="w-3 h-3 animate-spin" /> : '🔗'} ربط الحساب الآن</Button>}
         </div>
       )}
       {iframeUrl && storeActive ? (

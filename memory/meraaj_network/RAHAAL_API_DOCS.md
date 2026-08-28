@@ -287,3 +287,58 @@ Headers مطلوبة:
 { "error": "package_not_available", "message": "الباكج غير متاح للحجز (مغلق أو مؤرشف أو مُفوَّج)", "package_ref": "..." }
 ```
 ⚠️ عند 409 لا يُنشأ أي حجز ولا تُحجز مقاعد — صححوا السعر وأعيدوا الإرسال بمعرف حدث جديد.
+
+---
+
+# 🔒 v3.76 — قفل عقد التكامل (CONTRACT LOCK) + ربط الحسابات وSSO
+
+## 1) قاعدة المراجع الموحدة (إلزامية في كل الأحداث)
+| الحقل | التعريف | مصدره | ثباته |
+|---|---|---|---|
+| `package_ref` | **يساوي دائماً** `rahal_ref` = `packages.id` في رحّال (UUID) | يُرسل من رحّال في نداء التسجيل `packages/share` وفي كل حدث صادر | ثابت مدى الحياة |
+| `rahal_ref` | نفس قيمة `package_ref` (اسم بديل صريح) | رحّال | ثابت |
+| `meraaj_package_id` | معرّف الباقة داخل معراج (يعيده معراج في رد التسجيل 2xx) | معراج | ثابت |
+| `booking_ref` | معرّف الحجز الحقيقي لدى معراج (`bookings._id`) | يولّده معراج في `meraaj.booking.created` | **نفس القيمة حرفياً في كل أحداث دورة الحجز لاحقاً (الطرفان)** |
+
+- ⚠️ ممنوع استخدام أي مرجع تجريبي (`TEST_...`) مكان `package_ref` أو `booking_ref`.
+- تسامح رحّال (نفس العقد): يقبل في `data.package_ref` أيضاً قيمة `meraaj_package_id`، ويقرأ `data.rahal_ref` كبديل — الحل النهائي دائماً باقة واحدة.
+- كل حدث صادر من رحّال يحمل الثلاثية كاملة: `package_ref` + `rahal_ref` + `meraaj_package_id` + `booking_ref`.
+
+## 2) أخطاء 404 مُهيكلة (machine-readable)
+```json
+{ "error": "unknown_package_ref", "message": "...", "received_package_ref": "...", "received_rahal_ref": "..." }
+{ "error": "unknown_booking_ref", "message": "...", "received_booking_ref": "..." }
+```
+- `unknown_booking_ref` على أي حدث إلغاء يعني أن `booking.created` الأصلي لم يُقبل (HTTP 200) في رحّال — أصلحوا الأصل ثم أعيدوا التسلسل بمعرّفات أحداث جديدة.
+- التسلسل الزمني إلزامي: `booking.created` (200) ← انتظار `booking.approved` من رحّال ← ثم `cancellation_requested` ← انتظار `booking.cancellation.position` ← ثم `cancellation_finalized`.
+
+## 3) ربط حساب المكتب (Account Linking) — مطلوب تنفيذه لدى معراج
+رحّال ينادي (عند تفعيل المتجر تلقائياً، أو يدوياً من زر «ربط الحساب»):
+```
+POST {MERAAJ_BASE}/api/integrations/rahal/offices/link
+Headers: X-Rahal-Api-Key: <SHARED_SECRET> | X-Rahal-Signature: HMAC-SHA256(rawBody)
+Body: { "office_ref": "<tenant_id>", "office_name": "...", "owner_email": "...",
+        "store_active": true, "escrow_mode": false,
+        "requested_by": "...", "requested_at": "ISO-8601" }
+```
+الرد المتوقع عند النجاح (2xx): `{ "office_id": "<meraaj_office_id>" }` (تُقبل أيضاً المفاتيح: `meraaj_office_id` أو `id` أو `data.id`).
+- `office_ref` هو معرّف المكتب الثابت في رحّال — اربطوه بحساب المكتب لديكم (idempotent: نفس `office_ref` = نفس الحساب دائماً).
+
+## 4) الدخول بحساب رحّال (SSO) — من جهة معراج
+1. المستخدم يضغط «دخول متجر معراج» في رحّال ← رحّال يولّد Token: `base64url(payload) + "." + HMAC-SHA256(base64url(payload))`.
+2. حمولة الـ Token: `{ iss:"rahaal-erp", aud:"meraaj-network", tenant_id, office_name, meraaj_office_id, email, role, permissions:{...}, iat, exp }` (صلاحية 5 دقائق).
+3. معراج يتحقق محلياً بالسر المشترك، **أو** عبر النداء الخادمي:
+```
+POST {RAHAAL_BASE}/api/meraaj/sso/verify
+Headers: x-meraaj-signature: HMAC-SHA256(rawBody)
+Body: { "token": "<token>" }
+```
+الرد عند الصحة (200):
+```json
+{ "valid": true,
+  "office": { "office_ref": "...", "office_name": "...", "meraaj_office_id": "...", "store_active": true, "escrow_mode": false },
+  "user": { "email": "...", "name": "...", "role": "owner|staff",
+            "permissions": { "manage_packages": true, "manage_bookings": true, "approve_reject": true, "can_refund": true, "manage_settings": true } } }
+```
+أخطاء: `invalid_token_signature` (401) • `token_expired` (401) • `user_not_found_or_inactive` (404) • `invalid_token_claims` (401).
+- **نطاق الصلاحيات = مكتب المستخدم فقط** — امنحوا داخل معراج ما تسمح به `permissions` حصراً (إدارة الباقات، الطلبات، القبول/الرفض، التحديث/الإيقاف/الحذف).
