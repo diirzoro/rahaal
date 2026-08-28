@@ -96,33 +96,10 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 ## Test Credentials
 See /app/memory/test_credentials.md
 
-## v3.80 — Future Document/Accounting Date Rule (2026-08)
-- RULE: document/accounting dates can NEVER be in the future (date-only, UTC+3 business timezone). Arabic error: «لا يمكن أن يكون تاريخ المستند بعد تاريخ اليوم».
-- Backend guards (route.js): top of createTicket/createVisa/createService/createVoucher/createFx/createManualJournal (covers POST + PUT since PUT re-creates; PUT has v3.78 restore-on-error). EARLY guards: bulk-edit (before destructive loop) + PUT /journal-entries/:id (no restore mechanism there). Visa-monitor visa_issue_date guarded on create/update/import.
-- NOT restricted (intentionally): travel_date, entry_date, exit_date, visa expiry, package start/end, max_exit_date.
-- Frontend (page.js): DocDateInput component (max=todayISO + toast) used ONLY on issue/voucher/journal/bulk-change date fields (10 sites).
-- Backend-tested: 7/7 core cases passed. Known PRE-EXISTING issue (not v3.80): tickets bulk-edit newBody omits passenger_phone → ticket bulk edits fail with «رقم الجوال مطلوب».
-
-## v3.81 — Document Viewer Restore + v3.80b Bulk-edit Fix (2026-08)
-- GET /api/document-proxy/:docId (tenant-authed): same-origin streaming of booking_documents — local via docStorageGet, external_url via server fetch (15s timeout, 20MB cap). Audit 'viewed' via proxy/proxy_external. Backend-tested 6/6.
-- FE: bookingDocUrl helper + DocViewer professional viewer (img/PDF preview, print via hidden iframe, download, open-in-tab, prev/next) wired in: booking docs dialog, cancellation evidence links, office verification docs. Multi-file upload: selectBookingDocs + docPendingFiles + docUploadProgress bar (sequential, per-file validation). Docs dialog scroll unchanged (max-h-[85vh] overflow-y-auto).
-- v3.80b: bulk-edit newBody now copies passenger_phone/whatsapp/phone AND beneficiary_name/phone/whatsapp with fallback beneficiary_* || passenger_* (visas VALIDATE beneficiary_* but STORE passenger_*). Tickets + visas bulk-edit both verified working; future-date rejection intact.
-
-## v3.82 — Unified Upload Policy: 20MB per file + Multiple Upload (2026-08)
-- DOC_MAX_BYTES 4MB → 20MB PER SINGLE FILE (not per batch). Arabic reject msg: «حجم الملف يتجاوز الحد (20MB)». Transport verified: ingress accepts ~27MB JSON bodies.
-- CHUNKED BLOB STORAGE (document_blobs): base64 > 10MB chars split into parts {object_key: key::partN, parent_key, part_index}; main doc keeps {chunks:N, content_type, size} without data. Get reassembles (incomplete → null); Delete removes parts. Small files unchanged (single doc, backward compatible).
-- FIX: base64 regex validation now runs in 1MB slices — RegExp.test on one 20MB string overflows V8 call stack.
-- FE DOC_MAX_MB=20 constant. MULTIPLE upload now at: office verification docs (new), cancellation evidence per service (new), booking traveler docs (was already multiple in v3.81). All with per-file validation + Arabic per-file errors + summary toast. Preview via existing DocViewer (already wired v3.81).
-- NOT converted (by design, reported to user): package image (client-side compressed single thumbnail), tenant logo (700KB, stored inline in tenant_settings — 20MB would bloat the settings doc), Excel/CSV import inputs (client-side parsing, not server uploads).
-- Direct verification (no test agent): 15MB upload OK + chunks=2 reassembled exactly via document-proxy, 21MB rejected 400, small file single-doc, delete removes parts, zero residue.
-
-## v3.83 — Upload size policy aligned with Meraaj (2026-08)
-- 10MB PER SINGLE FILE (backend DOC_MAX_BYTES + FE DOC_MAX_FILE_BYTES) — BE msg «حجم الملف يتجاوز الحد (10MB)», FE per-file msg «الحد الأقصى 10MB لكل ملف».
-- 20MB PER SELECTED BATCH — FE-enforced (each file is its own request) via shared validateDocBatch() used by all 3 multi-upload points (office verification, cancellation evidence, booking docs). Batch msg: «إجمالي حجم الملفات يجب ألا يتجاوز 20MB».
-- Chunked blob storage kept (base64 of 10MB ≈ 13.3MB chars > 10MB chunk threshold → still split, BSON-safe).
-- Direct verification: BE 11MB→400/9MB→200; FE logic 24MB batch rejected w/ exact msg, 18MB allowed, 11MB per-file msg. Zero residue.
-
-## v3.84 — Batch size meter (staged upload) (2026-08)
-- New shared FE component DocBatchUpload (page.js): files are STAGED before upload with per-file validation (type + 10MB), duplicate skip, and live 20MB batch budget meter (progress bar amber >90%, «الإجمالي: X من 20MB» / «المتبقي: Y MB»), per-file remove ✕, «رفع الآن (N)» + «مسح». Adding a file that would exceed the batch shows «إجمالي حجم الملفات يجب ألا يتجاوز 20MB — المتبقي …».
-- Wired at all 3 multi-upload points: office verification (button variant), booking traveler docs (button), cancellation evidence (link variant, respects evidence<10 + posBusy). Upload handlers unchanged (still validateDocBatch + sequential POSTs).
-- Visually verified via Playwright: staged 2.5MB+1.2MB → meter showed 3.7/20MB, remaining 16.3MB, upload/clear buttons present. No real upload performed.
+## SYNC NOTE (2026-08-28): Workspace reconciled to GitHub main
+- Source of truth: https://github.com/diirzoro/rahaal @ main = fb5c6f4 (the consolidated, Live-approved version built by the user's team on common ancestor 7529a75).
+- Local workspace files replaced with GitHub versions (page.js, route.js, PRD.md, yarn.lock, .env.example); local-only helper files removed (apply_date_rule.py, migrate_selectors.py, memory/recovery_patches/ — the patch bundle already served its purpose, recoverable from local git history).
+- .emergent/emergent.yml intentionally kept local (platform metadata).
+- GitHub main verified to contain: SSO/account-link, document-proxy + Live's approved viewer (selectBookingDocs/docUploadProgress — NOT the v3.84 DocBatchUpload staged component), validateDocBatch 10MB/20MB limits, isFutureDocDate + DocDateInput, bulk-edit passenger/beneficiary fixes, AccountAutocomplete, full cancellation/escrow policy.
+- NOT in GitHub main (team's consolidation choices, do NOT re-add unless asked): DocBatchUpload staged size meter, chunked blob storage (unneeded at 10MB/file), sliced base64 regex validation.
+- FUTURE RULE: treat GitHub main as the reference; do not resurrect older workspace behavior over it.

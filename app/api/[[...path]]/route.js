@@ -561,40 +561,23 @@ async function createJournalEntry(db, tenantId, { date, description, ref_type, r
 
 // ============ EDIT/REVERSAL ENGINE ============
 // Reverses balance updates for a transactional record. Used before re-applying edited values or deleting.
-// v3.78 — UNIFIED TRANSACTION EFFECTS ENGINE (root-cause fix).
-// ONE symmetric engine for apply/reverse. sign=-1 reverses creation effects (edit/delete),
-// sign=+1 re-applies them (restore after a failed edit). MUST mirror create* functions exactly.
-// ROOT CAUSE FIXED: the old reverse had SWAPPED client/supplier signs in the PAYMENT voucher
-// branch (applied -amount again instead of +amount) — every edit DOUBLED the cached party
-// balance instead of cancelling it (the reported 40,028 ≈ 2 × 20,113 residue, in BOTH currencies
-// because the voucher was edited SAR→USD→SAR). It also never reversed the partner commission share.
-async function applyTransactionEffects(db, T, kind, doc, sign = -1) {
+async function reverseTransactionEffects(db, T, kind, doc) {
   if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
-    // create: cash → box +sale | credit → client +sale ; supplier +cost ; partner −share
     if (doc.payment_method === 'cash' && doc.box_id) {
-      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, sign * (Number(doc.sale_price) || 0))
-    } else if (doc.client_id) {
-      await updateBalance(db, 'clients', { id: doc.client_id, tenant_id: T }, doc.currency, sign * (Number(doc.sale_price) || 0))
-    }
-    await updateBalance(db, 'suppliers', { id: doc.supplier_id, tenant_id: T }, doc.currency, sign * (Number(doc.cost) || 0))
-    // v3.78 — partner commission share was NEVER reversed before (silent corruption on edit/delete)
-    const share = Number(doc.commission_share_amount) || 0
-    if (share > 0 && doc.commission_partner_id) {
-      const pCol = doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
-      await updateBalance(db, pCol, { id: doc.commission_partner_id, tenant_id: T }, doc.currency, sign * -share)
-    }
-  } else if (kind === 'vouchers') {
-    const amt = Number(doc.amount) || 0
-    if (doc.type === 'receipt') {
-      // create: box +amount ; client −amount ; supplier +amount
-      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, sign * amt)
-      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, sign * -amt)
-      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, sign * amt)
+      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
     } else {
-      // create (payment): box −amount ; supplier −amount ; client +amount
-      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, sign * -amt)
-      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, sign * -amt)
-      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, sign * amt)
+      await updateBalance(db, 'clients', { id: doc.client_id, tenant_id: T }, doc.currency, -doc.sale_price)
+    }
+    await updateBalance(db, 'suppliers', { id: doc.supplier_id, tenant_id: T }, doc.currency, -doc.cost)
+  } else if (kind === 'vouchers') {
+    if (doc.type === 'receipt') {
+      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.amount)
+      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
+      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+    } else {
+      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, +doc.amount)
+      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
     }
   } else if (kind === 'fx') {
     // Use stored refs (falls back to box_currency_id for pre-v2.6 records)
@@ -605,14 +588,13 @@ async function applyTransactionEffects(db, T, kind, doc, sign = -1) {
     const debitAmtCur = doc.type === 'buy' ? doc.amount : -doc.amount
     const debitAmtCounter = doc.type === 'buy' ? -doc.counter_amount : doc.counter_amount
     if (accCur && accCur.updateBalance) {
-      await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, doc.currency, sign * -debitAmtCur * accCur.debitSign * -1)
+      await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, doc.currency, -debitAmtCur * accCur.debitSign)
     }
     if (accCounter && accCounter.updateBalance) {
-      await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, doc.counter_currency, sign * -debitAmtCounter * accCounter.debitSign * -1)
+      await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, doc.counter_currency, -debitAmtCounter * accCounter.debitSign)
     }
   }
 }
-async function reverseTransactionEffects(db, T, kind, doc) { return applyTransactionEffects(db, T, kind, doc, -1) }
 
 // Reverses party balance updates that were applied at the moment a manual JE was inserted.
 async function reverseManualJournalEffects(db, T, je) {
@@ -1301,13 +1283,10 @@ async function handleRoute(request, { params }) {
       // Accept international format with optional leading '+' and 7-15 digits
       if (!/^\+?[0-9]{7,15}$/.test(phone.replace(/[\s-]/g, ''))) return bad('رقم الهاتف غير صالح — أدخل رمز الدولة والرقم (مثال: +967771234567)')
       const email = String(b.owner_email).toLowerCase().trim()
-      // v3.9 — Restrict signup to real Gmail addresses to prevent fake/duplicate accounts.
-      // (Full Google OAuth verification will be added later; this is the interim enforcement.)
-      if (!/^[a-z0-9._%+-]+@gmail\.com$/.test(email)) {
-        return bad('يجب استخدام بريد Gmail حقيقي فقط (@gmail.com). سيتم دعم تسجيل الدخول بحساب Google قريباً.')
+      // Accept valid email addresses from any provider.
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+        return bad('البريد الإلكتروني غير صالح')
       }
-      // Also block +alias patterns to prevent duplicate signups from same Gmail (Gmail treats a+b@gmail = a@gmail)
-      if (email.includes('+')) return bad('بريد Gmail يجب أن يكون بدون رمز + (بدون aliases)')
       if (await db.collection('users').findOne({ email })) return bad('البريد الإلكتروني مستخدم بالفعل')
       const slug = (b.slug || b.name).toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 40) + '-' + uuidv4().slice(0, 4)
       let referredBy = null
@@ -2108,6 +2087,7 @@ async function handleRoute(request, { params }) {
         documents: docsBD.map(d => ({
           id: d.id, context: d.context, source: d.source || 'office',
           registrant_index: d.registrant_index ?? null, registrant_name: d.registrant_name || null,
+          passport_no: d.passport_no || null,
           doc_type: d.doc_type, evidence_type: d.evidence_type || null, label: d.label,
           filename: d.filename, content_type: d.content_type, size: d.size,
           external_url: d.storage?.driver === 'external_url' ? d.storage.url : null,
@@ -2152,6 +2132,84 @@ async function handleRoute(request, { params }) {
       await docAuditLog(db, T, 'uploaded', docBU.id, sess.user.email, { context: contextBU, booking_ref: inbBU.meraaj_booking_ref, registrant_index: regIdx, size: upBU.size })
       return ok({ uploaded: true, document: { id: docBU.id, context: docBU.context, doc_type: docBU.doc_type, evidence_type: docBU.evidence_type, registrant_index: regIdx, filename: docBU.filename, size: docBU.size } })
     }
+
+    // v3.77 — Same-origin proxy for Meraaj signed traveler documents.
+    // Prevents browser CORS failures in preview / print / download.
+    // Security: the client-supplied host is NEVER fetched. Only an approved
+    // signed Meraaj document pathname/query is forwarded to MERAAJ_API_BASE_URL.
+    if (route === '/meraaj/document-proxy' && method === 'GET') {
+      try {
+        const reqUrl = new URL(request.url)
+        const rawUrl = String(reqUrl.searchParams.get('url') || '').trim()
+        const requestedName = String(reqUrl.searchParams.get('name') || 'document')
+          .replace(/[\r\n"]/g, '')
+          .slice(0, 180)
+        const forceDownload = reqUrl.searchParams.get('download') === '1'
+
+        if (!rawUrl) return bad('رابط المستند مطلوب', 400)
+
+        let signed
+        try {
+          signed = new URL(rawUrl)
+        } catch {
+          return bad('رابط المستند غير صالح', 400)
+        }
+
+        // Accept ONLY Meraaj signed document endpoints.
+        if (!/^\/api\/documents\/[^/]+\/signed$/.test(signed.pathname)) {
+          return bad('مسار المستند غير مسموح', 403)
+        }
+
+        if (!signed.searchParams.get('exp') || !signed.searchParams.get('sig')) {
+          return bad('توقيع المستند مفقود', 403)
+        }
+
+        const meraajBase = String(process.env.MERAAJ_API_BASE_URL || '')
+          .trim()
+          .replace(/\/+$/, '')
+
+        if (!meraajBase) {
+          console.error('[MERAAJ DOC PROXY] MERAAJ_API_BASE_URL missing')
+          return bad('خدمة مستندات معراج غير مهيأة', 503)
+        }
+
+        const upstreamUrl = `${meraajBase}${signed.pathname}${signed.search}`
+
+        const upstream = await fetch(upstreamUrl, {
+          method: 'GET',
+          cache: 'no-store',
+          redirect: 'error',
+        })
+
+        if (!upstream.ok) {
+          console.error('[MERAAJ DOC PROXY] upstream failed', upstream.status)
+          return bad(`تعذر جلب المستند من معراج (${upstream.status})`, 502)
+        }
+
+        const headers = new Headers()
+        headers.set(
+          'Content-Type',
+          upstream.headers.get('content-type') || 'application/octet-stream'
+        )
+        headers.set('Cache-Control', 'private, no-store, max-age=0')
+        headers.set('X-Content-Type-Options', 'nosniff')
+
+        const disposition = forceDownload ? 'attachment' : 'inline'
+        headers.set(
+          'Content-Disposition',
+          `${disposition}; filename*=UTF-8''${encodeURIComponent(requestedName || 'document')}`
+        )
+
+        return new NextResponse(upstream.body, {
+          status: 200,
+          headers,
+        })
+      } catch (e) {
+        console.error('[MERAAJ DOC PROXY]', e)
+        return bad('تعذر معالجة المستند', 500)
+      }
+    }
+
     const bkDocDlMatch = route.match(/^\/meraaj\/booking-documents\/([^/]+)\/download$/)
     if (bkDocDlMatch && method === 'GET') {
       const docBDL = await db.collection('booking_documents').findOne({ id: bkDocDlMatch[1], tenant_id: T })
@@ -2929,6 +2987,7 @@ async function handleRoute(request, { params }) {
     // reversed via a mirrored Journal Entry, then booking.cancellation.approved → Meraaj.
     const cancApproveMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/cancellation\/approve$/)
     if (cancApproveMatch && method === 'POST') {
+      return cors(NextResponse.json({ error: 'final_cancellation_authority_moved', message: 'القرار النهائي لإلغاء حجوزات معراج متاح حصراً للسوبر أدمن في معراج. مكتب رحّال يقدّم موقفه والأدلة فقط.' }, { status: 403 }))
       // v3.74 — SERVER-SIDE RBAC: financial decision → owner OR (mod_meraaj + can_refund)
       const permsCA = effectivePermissions(sess.user)
       if (sess.user.role !== 'owner' && !(permsCA.mod_meraaj && permsCA.can_refund)) return bad('غير مصرح — يتطلب صلاحية متجر معراج + صلاحية الاسترداد', 403)
@@ -2991,6 +3050,7 @@ async function handleRoute(request, { params }) {
     // booking.cancellation.rejected → Meraaj with the reason.
     const cancRejectMatch = route.match(/^\/meraaj\/inbound-bookings\/([^/]+)\/cancellation\/reject$/)
     if (cancRejectMatch && method === 'POST') {
+      return cors(NextResponse.json({ error: 'final_cancellation_authority_moved', message: 'القرار النهائي برفض/قبول إلغاء حجوزات معراج متاح حصراً للسوبر أدمن في معراج. مكتب رحّال يقدّم موقفه والأدلة فقط.' }, { status: 403 }))
       // v3.74 — SERVER-SIDE RBAC + escrow gate (same authority rules as cancellation/approve)
       const permsCR = effectivePermissions(sess.user)
       if (sess.user.role !== 'owner' && !(permsCR.mod_meraaj && permsCR.can_refund)) return bad('غير مصرح — يتطلب صلاحية متجر معراج + صلاحية الاسترداد', 403)
@@ -3027,8 +3087,8 @@ async function handleRoute(request, { params }) {
     if (cancPositionMatch && method === 'POST') {
       const permsCP = effectivePermissions(sess.user)
       if (sess.user.role !== 'owner' && !(permsCP.mod_meraaj && permsCP.can_refund)) return bad('غير مصرح — يتطلب صلاحية متجر معراج + صلاحية الاسترداد', 403)
-      const esCfgP = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { meraaj_escrow_mode: 1 } })
-      if (!esCfgP?.meraaj_escrow_mode) return cors(NextResponse.json({ error: 'escrow_mode_inactive', message: 'وضع Escrow غير مفعل — استخدم مساري cancellation/approve أو cancellation/reject' }, { status: 409 }))
+      // Final cancellation authority is permanently centralized in Meraaj Super Admin.
+      // Rahal offices may submit a position/evidence regardless of the legacy escrow toggle.
       const bCP = await request.json()
       const positionVal = String(bCP.position || '').trim()
       if (!['no_objection', 'objection'].includes(positionVal)) return bad('الموقف إلزامي: no_objection أو objection')
@@ -6185,10 +6245,34 @@ async function handleRoute(request, { params }) {
       const coll = kind === 'fx' ? 'currency_exchanges' : kind
       const doc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
       if (!doc) return bad('العنصر غير موجود', 404)
-      // v3.78 — ONE effects engine everywhere (the old inline copy diverged from the PUT path
-      // and neither reversed the partner commission share). Same engine as edits now.
+      // Reverse balance updates & delete linked journal entry
       const je = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
-      await reverseTransactionEffects(db, T, kind, doc)
+      if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
+        if (doc.payment_method === 'cash' && doc.box_id) {
+          await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
+        } else {
+          await updateBalance(db, 'clients', { id: doc.client_id, tenant_id: T }, doc.currency, -doc.sale_price)
+        }
+        await updateBalance(db, 'suppliers', { id: doc.supplier_id, tenant_id: T }, doc.currency, -doc.cost)
+      } else if (kind === 'vouchers') {
+        if (doc.type === 'receipt') {
+          await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.amount)
+          if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
+          if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+        } else {
+          await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, +doc.amount)
+          if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
+          if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+        }
+      } else if (kind === 'fx') {
+        if (doc.type === 'buy') {
+          await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, -doc.amount)
+          await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, +doc.counter_amount)
+        } else {
+          await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, +doc.amount)
+          await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, -doc.counter_amount)
+        }
+      }
       if (je) {
         await db.collection('journal_entries').deleteOne({ id: je.id })
         await db.collection('tenants').updateOne({ id: T }, { $inc: { 'journal_quota.used': -1 } })
@@ -6221,19 +6305,8 @@ async function handleRoute(request, { params }) {
       else if (kind === 'vouchers') result = await createVoucher(db, T, { ...b, type: b.type || oldDoc.type }, opts)
       else if (kind === 'fx') result = await createFx(db, T, { ...b, type: b.type || oldDoc.type }, opts)
       if (result.error) {
-        // v3.78 — ROOT-CAUSE FIX (data-loss on failed edit): the old flow reversed balances and
-        // DELETED the record + JE BEFORE validating the new payload. Any validation failure
-        // (closed fiscal year, period lock, missing phone, ...) silently DESTROYED the record —
-        // the next edit attempt then showed «السجل غير موجود». Now we fully RESTORE the original
-        // record, its journal entry and its balance effects, then surface the real error.
-        const { _id: _o, ...oldDocClean } = oldDoc
-        await db.collection(coll).insertOne(oldDocClean)
-        if (oldJe) {
-          const { _id: _j, ...oldJeClean } = oldJe
-          await db.collection('journal_entries').insertOne(oldJeClean)
-        }
-        await applyTransactionEffects(db, T, kind, oldDoc, +1) // re-apply original effects
-        return bad(`${result.error} — لم يُحفظ التعديل، وسجلك الأصلي كما هو دون أي تغيير`)
+        // Best-effort restore: re-apply original doc (though balances may be inconsistent — client should refresh)
+        return bad(result.error)
       }
       return ok(result.doc)
     }
@@ -6264,50 +6337,6 @@ async function handleRoute(request, { params }) {
       const result = await createManualJournal(db, T, b, { existingId: jeId, skipQuota: true, createdAt: oldJe.created_at })
       if (result.error) return bad(result.error)
       return ok(result.doc)
-    }
-
-    // v3.78 — REBUILD CACHED BALANCES FROM THE LEDGER (owner only).
-    // The ledger (journal_entries) is the single source of truth; cards/lists read the cached
-    // balances object. After fixing the reversal engine, this endpoint re-derives every cached
-    // balance from the ledger — the principled repair (NOT manual zeroing that hides root causes).
-    if (route === '/accounts/recompute-balances' && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
-      const jesAll = await db.collection('journal_entries').find({ tenant_id: T }).toArray()
-      const accSums = { client: {}, supplier: {}, box: {} }
-      for (const je of jesAll) {
-        for (const l of je.lines || []) {
-          if (!l.party_id || !['client', 'supplier', 'box'].includes(l.party_type)) continue
-          const cur = l.currency || je.currency
-          if (!['USD', 'SAR', 'YER'].includes(cur)) continue
-          // SAME conventions as the detailed statement: client/box = debit−credit ; supplier = credit−debit
-          const delta = l.party_type === 'supplier' ? (l.credit || 0) - (l.debit || 0) : (l.debit || 0) - (l.credit || 0)
-          accSums[l.party_type][l.party_id] = accSums[l.party_type][l.party_id] || { USD: 0, SAR: 0, YER: 0 }
-          accSums[l.party_type][l.party_id][cur] += delta
-        }
-      }
-      const collMap = { client: 'clients', supplier: 'suppliers', box: 'boxes' }
-      const changes = []
-      let checked = 0, corrected = 0
-      for (const [ptype, coll] of Object.entries(collMap)) {
-        const entities = await db.collection(coll).find({ tenant_id: T }).toArray()
-        for (const e of entities) {
-          checked++
-          const target = { USD: 0, SAR: 0, YER: 0, ...(accSums[ptype][e.id] || {}) }
-          for (const c of ['USD', 'SAR', 'YER']) target[c] = +Number(target[c] || 0).toFixed(2)
-          const curBal = e.balances || {}
-          const diffs = ['USD', 'SAR', 'YER']
-            .map(c => ({ currency: c, was: +Number(curBal[c] || 0).toFixed(2), now: target[c] }))
-            .filter(d => Math.abs(d.was - d.now) > 0.009)
-          if (diffs.length > 0) {
-            await db.collection(coll).updateOne({ id: e.id, tenant_id: T }, {
-              $set: { 'balances.USD': target.USD, 'balances.SAR': target.SAR, 'balances.YER': target.YER, balances_recomputed_at: new Date() },
-            })
-            corrected++
-            if (changes.length < 100) changes.push({ type: ptype, name: e.name || e.name_ar || e.id, diffs })
-          }
-        }
-      }
-      return ok({ checked, corrected, changes })
     }
 
     // ============ Currency Exchange (Buy/Sell) ============
@@ -7186,13 +7215,7 @@ async function meraajRegisterPackageAPI(db, T, pkg, comps, meraajSet) {
 // (collection document_blobs) — NOT container-local disk, survives restarts, and is
 // migration-ready (same object_key namespace: a one-shot script can move blobs to S3).
 const DOC_ALLOWED_MIME = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }
-// v3.83 — UNIFIED UPLOAD POLICY (aligned with Meraaj): 10MB PER SINGLE FILE.
-// Batch total (20MB across all files selected at once) is enforced client-side —
-// each file arrives as its own request, so the per-request cap here is per-file.
-const DOC_MAX_BYTES = 10 * 1024 * 1024
-// MongoDB BSON documents are capped at 16MB — base64 of a 20MB file is ~27MB, so blobs
-// larger than DOC_CHUNK_CHARS are split into parts (parent_key + part_index) transparently.
-const DOC_CHUNK_CHARS = 10 * 1024 * 1024
+const DOC_MAX_BYTES = 4 * 1024 * 1024 // 4MB per document (safe for base64 transport behind ingress)
 function docStorageDriver() {
   return (process.env.S3_ENDPOINT && process.env.S3_BUCKET && process.env.S3_ACCESS_KEY_ID && process.env.S3_SECRET_ACCESS_KEY) ? 's3' : 'db'
 }
@@ -7201,24 +7224,9 @@ async function docStoragePut(db, T, objectKey, base64Data, contentType, size) {
     // Intentionally NOT wired yet — awaiting S3 provider credentials (blocker documented).
     throw new Error('S3 driver detected but not wired — قدّم بيانات مزود S3 لإكمال الربط عبر playbook التكامل')
   }
-  // v3.82 — chunked storage for large files (BSON 16MB cap): parts carry parent_key + part_index
-  await db.collection('document_blobs').deleteMany({ parent_key: objectKey }) // clear stale parts on overwrite
-  if (base64Data.length > DOC_CHUNK_CHARS) {
-    const parts = []
-    for (let i = 0; i * DOC_CHUNK_CHARS < base64Data.length; i++) parts.push(base64Data.slice(i * DOC_CHUNK_CHARS, (i + 1) * DOC_CHUNK_CHARS))
-    await db.collection('document_blobs').updateOne(
-      { object_key: objectKey },
-      { $set: { object_key: objectKey, tenant_id: T, chunks: parts.length, content_type: contentType, size, created_at: new Date() }, $unset: { data: '' } },
-      { upsert: true },
-    )
-    for (let i = 0; i < parts.length; i++) {
-      await db.collection('document_blobs').insertOne({ object_key: `${objectKey}::part${i}`, parent_key: objectKey, part_index: i, tenant_id: T, data: parts[i], created_at: new Date() })
-    }
-    return { driver: 'db', chunks: parts.length }
-  }
   await db.collection('document_blobs').updateOne(
     { object_key: objectKey },
-    { $set: { object_key: objectKey, tenant_id: T, data: base64Data, content_type: contentType, size, created_at: new Date() }, $unset: { chunks: '' } },
+    { $set: { object_key: objectKey, tenant_id: T, data: base64Data, content_type: contentType, size, created_at: new Date() } },
     { upsert: true },
   )
   return { driver: 'db' }
@@ -7227,18 +7235,11 @@ async function docStorageGet(db, objectKey) {
   if (docStorageDriver() === 's3') throw new Error('S3 driver not wired yet')
   const blob = await db.collection('document_blobs').findOne({ object_key: objectKey })
   if (!blob) return null
-  // v3.82 — reassemble chunked blobs
-  if (blob.chunks > 0) {
-    const parts = await db.collection('document_blobs').find({ parent_key: objectKey }).sort({ part_index: 1 }).toArray()
-    if (parts.length !== blob.chunks) return null // incomplete blob — treat as missing
-    return { buffer: Buffer.from(parts.map(p => p.data).join(''), 'base64'), content_type: blob.content_type || 'application/octet-stream', size: blob.size || 0 }
-  }
   return { buffer: Buffer.from(blob.data, 'base64'), content_type: blob.content_type || 'application/octet-stream', size: blob.size || 0 }
 }
 async function docStorageDelete(db, objectKey) {
   if (docStorageDriver() === 's3') throw new Error('S3 driver not wired yet')
   await db.collection('document_blobs').deleteOne({ object_key: objectKey })
-  await db.collection('document_blobs').deleteMany({ parent_key: objectKey }) // v3.82 — remove chunk parts too
 }
 // Audit trail for EVERY document action (upload/view/delete/status change)
 async function docAuditLog(db, T, action, docId, actor, meta = {}) {
@@ -7250,13 +7251,7 @@ function parseDocUpload(b, T, prefix) {
   const ext = DOC_ALLOWED_MIME[contentType]
   if (!ext) return { error: `نوع الملف غير مسموح — المسموح: PDF / JPG / PNG / WEBP (المستلم: ${contentType || 'غير محدد'})` }
   const raw = String(b.file_base64 || '').replace(/^data:[^;]+;base64,/, '')
-  // v3.82 — validate base64 in 1MB slices: RegExp.test on a single 20MB+ string overflows
-  // V8's call stack (RangeError: Maximum call stack size exceeded) — sliced checks are safe.
-  let rawValid = raw.length > 0
-  for (let vi = 0; vi < raw.length && rawValid; vi += 1024 * 1024) {
-    if (!/^[A-Za-z0-9+/=]+$/.test(raw.slice(vi, vi + 1024 * 1024))) rawValid = false
-  }
-  if (!rawValid) return { error: 'محتوى الملف (file_base64) مفقود أو غير صالح' }
+  if (!raw || !/^[A-Za-z0-9+/=]+$/.test(raw)) return { error: 'محتوى الملف (file_base64) مفقود أو غير صالح' }
   const size = Math.floor(raw.length * 0.75)
   if (size > DOC_MAX_BYTES) return { error: `حجم الملف يتجاوز الحد (${(DOC_MAX_BYTES / 1024 / 1024).toFixed(0)}MB)` }
   if (size < 100) return { error: 'الملف فارغ أو تالف' }
@@ -8093,54 +8088,20 @@ async function reportStatement(db, T, q) {
   const filter = { tenant_id: T }
   if (dateFilter) filter.date = dateFilter
 
-  // v3.78 — OPENING BALANCE (root-cause fix): a period filter must limit which ROWS are shown,
-  // NEVER erase the effect of prior history. Before listing the period we net ALL movements
-  // strictly before the start date into an opening balance per currency, seed the running
-  // balance with it and show it as a leading «رصيد سابق» row. Same delta conventions as below.
-  const partyDelta = (l) => {
-    if (party_type === 'client') return (l.debit || 0) - (l.credit || 0)
-    if (party_type === 'supplier') return (l.credit || 0) - (l.debit || 0)
-    return (l.debit || 0) - (l.credit || 0) // box + generic COA (asset convention)
-  }
-  const opening = { USD: 0, SAR: 0, YER: 0 }
-  let hasOpening = false
-  if (dateFilter && dateFilter.$gte && dateFilter.$gte.getTime() > 0) {
-    const prevJes = await db.collection('journal_entries').find({ tenant_id: T, date: { $lt: dateFilter.$gte } }).toArray()
-    for (const je of prevJes) {
-      for (const l of je.lines || []) {
-        if (l.party_type === party_type && l.party_id === party_id) {
-          const cur = l.currency || je.currency
-          if (!['USD', 'SAR', 'YER'].includes(cur)) continue
-          opening[cur] += partyDelta(l)
-          hasOpening = true
-        }
-      }
-    }
-    for (const c of ['USD', 'SAR', 'YER']) opening[c] = +opening[c].toFixed(2)
-  }
-
   const jes = await db.collection('journal_entries').find(filter).sort({ date: 1, created_at: 1 }).toArray()
   const rows = []
-  const run = { ...opening } // running balance STARTS from the opening balance — not from zero
+  const run = { USD: 0, SAR: 0, YER: 0 }
   const totals = { USD: { d: 0, c: 0 }, SAR: { d: 0, c: 0 }, YER: { d: 0, c: 0 } }
-  if (hasOpening) {
-    for (const c of ['USD', 'SAR', 'YER']) {
-      if (opening[c] !== 0) {
-        rows.push({
-          date: dateFilter.$gte, description: 'رصيد سابق (افتتاحي) — صافي جميع الحركات قبل بداية الفترة',
-          ref_type: 'opening_balance', currency: c,
-          debit: opening[c] > 0 ? opening[c] : 0, credit: opening[c] < 0 ? -opening[c] : 0,
-          balance: opening[c], is_opening: true,
-        })
-      }
-    }
-  }
   for (const je of jes) {
     for (const l of je.lines || []) {
       if (l.party_type === party_type && l.party_id === party_id) {
         const cur = l.currency || je.currency
         if (!['USD','SAR','YER'].includes(cur)) continue
-        const delta = partyDelta(l)
+        let delta = 0
+        if (party_type === 'client') delta = (l.debit || 0) - (l.credit || 0)
+        else if (party_type === 'supplier') delta = (l.credit || 0) - (l.debit || 0)
+        else if (party_type === 'box') delta = (l.debit || 0) - (l.credit || 0)
+        else delta = (l.debit || 0) - (l.credit || 0)  // generic COA account (asset convention)
         run[cur] += delta
         totals[cur].d += l.debit || 0
         totals[cur].c += l.credit || 0
@@ -8165,7 +8126,7 @@ async function reportStatement(db, T, q) {
   let finalRows = rows
   if (['USD','SAR','YER'].includes(mode)) finalRows = rows.filter(r => r.currency === mode)
 
-  const summary = CURRENCIES.map(c => ({ currency: c, opening_balance: +(opening[c] || 0).toFixed(2), total_debit: +totals[c].d.toFixed(2), total_credit: +totals[c].c.toFixed(2), balance: +run[c].toFixed(2) }))
+  const summary = CURRENCIES.map(c => ({ currency: c, total_debit: +totals[c].d.toFixed(2), total_credit: +totals[c].c.toFixed(2), balance: +run[c].toFixed(2) }))
 
   return {
     party: party ? { id: party.id, name: party.name, phone: party.phone, balances: party.balances } : null,

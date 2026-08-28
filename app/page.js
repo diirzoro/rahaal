@@ -80,86 +80,37 @@ const fmtDate = (d) => d ? new Date(d).toLocaleDateString('ar-EG', { year: 'nume
 // v3.77 — documents upload helpers (base64 transport, MIME whitelist mirrors the server)
 const readFileB64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(file) })
 const DOC_OK_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
-// v3.83 — UNIFIED UPLOAD POLICY (aligned with Meraaj): 10MB per single file + 20MB per selected batch
 const DOC_MAX_MB = 10
 const DOC_MAX_FILE_BYTES = DOC_MAX_MB * 1024 * 1024
 const DOC_BATCH_MAX_MB = 20
 const DOC_BATCH_MAX_BYTES = DOC_BATCH_MAX_MB * 1024 * 1024
-// Shared validation: per-file type/size + batch total — returns valid files or [] (errors toasted)
+
 const validateDocBatch = (fileList) => {
   const files = Array.from(fileList || [])
   const valid = []
+
   for (const f of files) {
-    if (!DOC_OK_TYPES.includes(f.type)) { toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`); continue }
-    if (f.size > DOC_MAX_FILE_BYTES) { toast.error(`${f.name}: الحد الأقصى ${DOC_MAX_MB}MB لكل ملف`); continue }
+    if (!DOC_OK_TYPES.includes(f.type)) {
+      toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`)
+      continue
+    }
+
+    if (f.size > DOC_MAX_FILE_BYTES) {
+      toast.error(`${f.name}: الحد الأقصى ${DOC_MAX_MB}MB لكل ملف`)
+      continue
+    }
+
     valid.push(f)
   }
-  if (valid.reduce((s, f) => s + f.size, 0) > DOC_BATCH_MAX_BYTES) {
+
+  if (valid.reduce((sum, f) => sum + f.size, 0) > DOC_BATCH_MAX_BYTES) {
     toast.error(`إجمالي حجم الملفات يجب ألا يتجاوز ${DOC_BATCH_MAX_MB}MB`)
     return []
   }
+
   return valid
 }
-// v3.84 — STAGED BATCH PICKER with live size meter: files are staged first (with per-file
-// validation), the user sees used/remaining of the 20MB batch budget, can remove files,
-// then explicitly starts the upload. Trigger renders as a button (default) or inline link.
-const fmtMB = (b) => (b / 1024 / 1024).toFixed(1)
-const DocBatchUpload = ({ onUpload, busy, label = '📁 اختيار ملفات', variant = 'button', disabled = false }) => {
-  const [staged, setStaged] = useState([])
-  const total = staged.reduce((s, f) => s + f.size, 0)
-  const addFiles = (fileList) => {
-    const files = Array.from(fileList || [])
-    const cur = [...staged]
-    for (const f of files) {
-      if (!DOC_OK_TYPES.includes(f.type)) { toast.error(`${f.name}: المسموح PDF / JPG / PNG / WEBP فقط`); continue }
-      if (f.size > DOC_MAX_FILE_BYTES) { toast.error(`${f.name}: الحد الأقصى ${DOC_MAX_MB}MB لكل ملف`); continue }
-      if (cur.some(x => x.name === f.name && x.size === f.size)) continue
-      const used = cur.reduce((s, x) => s + x.size, 0)
-      if (used + f.size > DOC_BATCH_MAX_BYTES) { toast.error(`${f.name}: إجمالي حجم الملفات يجب ألا يتجاوز ${DOC_BATCH_MAX_MB}MB — المتبقي ${fmtMB(DOC_BATCH_MAX_BYTES - used)}MB`); continue }
-      cur.push(f)
-    }
-    setStaged(cur)
-  }
-  const start = async () => { const files = staged; setStaged([]); await onUpload(files) }
-  const trigger = variant === 'link'
-    ? <label className={`text-[10px] font-bold text-indigo-600 hover:underline cursor-pointer ${busy || disabled ? 'opacity-40 pointer-events-none' : ''}`}>
-        {label}
-        <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = '' }} />
-      </label>
-    : <label className={`h-8 inline-flex items-center gap-1.5 text-xs font-bold border rounded-md px-3 cursor-pointer bg-white hover:bg-slate-100 ${busy || disabled ? 'opacity-50 pointer-events-none' : ''}`}>
-        {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📁'} {label}
-        <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = '' }} />
-      </label>
-  return (
-    <div className="w-full space-y-1.5">
-      <div className="flex flex-wrap items-center gap-2">
-        {trigger}
-        {staged.length > 0 && !busy && (<>
-          <button onClick={start} className="h-7 px-3 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold">📤 رفع الآن ({staged.length})</button>
-          <button onClick={() => setStaged([])} className="h-7 px-2 rounded-md border text-[11px] text-slate-500 hover:bg-slate-100">مسح</button>
-        </>)}
-      </div>
-      {staged.length > 0 && (
-        <div className="rounded-lg border bg-white p-2 space-y-1.5">
-          {staged.map((f, i) => (
-            <div key={`${f.name}-${i}`} className="flex items-center gap-2 text-[10px]">
-              <span className="truncate flex-1" dir="ltr">{f.name}</span>
-              <span className="text-slate-400 font-mono" dir="ltr">{fmtMB(f.size)}MB</span>
-              <button onClick={() => setStaged(staged.filter((_, idx) => idx !== i))} className="text-rose-500 hover:text-rose-700 font-black px-1">✕</button>
-            </div>
-          ))}
-          <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden">
-            <div className={`h-full rounded-full transition-all ${total > DOC_BATCH_MAX_BYTES * 0.9 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(100, Math.round((total / DOC_BATCH_MAX_BYTES) * 100))}%` }} />
-          </div>
-          <div className="flex justify-between text-[9px]">
-            <span className="text-slate-500">الإجمالي: {fmtMB(total)}MB من {DOC_BATCH_MAX_MB}MB</span>
-            <span className="font-bold text-emerald-600">المتبقي: {fmtMB(DOC_BATCH_MAX_BYTES - total)}MB</span>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
+
 const fmtTime = (d) => d ? new Date(d).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit' }) : '—'
 const todayISO = () => new Date().toISOString().slice(0, 10)
 // v3.80 — UNIFIED document-date input: never accepts a future date (issue/voucher/journal dates).
@@ -171,52 +122,6 @@ const DocDateInput = ({ value, onChange, ...props }) => (
     onChange(v)
   }} {...props} />
 )
-
-// v3.81 — unified booking-document URL: everything streams same-origin through the proxy
-// (works for locally-stored AND external Meraaj signed docs → reliable preview + print)
-const bookingDocUrl = (d) => d.viewer_url || `/api/document-proxy/${d.id}`
-// v3.81 — PROFESSIONAL DOCUMENT VIEWER: inline passport/visa/evidence preview (image or PDF),
-// print, download, open-in-tab and prev/next navigation across the booking's documents.
-const DocViewer = ({ docs, index, onClose, onNav }) => {
-  const d = docs[index]
-  if (!d) return null
-  const url = bookingDocUrl(d)
-  const isImg = (d.content_type || '').startsWith('image/')
-  const printDoc = () => {
-    const fr = document.createElement('iframe')
-    fr.style.position = 'fixed'; fr.style.right = '-10000px'; fr.style.bottom = '-10000px'
-    fr.src = url
-    fr.onload = () => { try { fr.contentWindow.focus(); fr.contentWindow.print() } catch { window.open(url, '_blank') } setTimeout(() => fr.remove(), 60000) }
-    document.body.appendChild(fr)
-  }
-  const downloadDoc = () => { const a = document.createElement('a'); a.href = url; a.download = d.filename || 'document'; document.body.appendChild(a); a.click(); a.remove() }
-  return (
-    <div className="fixed inset-0 z-[80] bg-black/80 flex flex-col" dir="rtl">
-      <div className="flex items-center gap-2 px-4 py-2.5 bg-slate-900 text-white flex-wrap shrink-0">
-        <span className="font-bold text-sm truncate max-w-[38vw]" dir="ltr">{d.filename || d.label || 'مستند'}</span>
-        {d.registrant_name && <span className="text-[11px] text-slate-300">👤 {d.registrant_name}</span>}
-        {d.passport_no && <span className="text-[11px] font-mono text-amber-300" dir="ltr">🛂 {d.passport_no}</span>}
-        {docs.length > 1 && <span className="text-[10px] text-slate-400 font-mono" dir="ltr">{index + 1} / {docs.length}</span>}
-        <div className="flex-1" />
-        <button onClick={printDoc} className="h-8 px-3 rounded-md bg-slate-700 hover:bg-slate-600 text-xs font-bold">🖨️ طباعة</button>
-        <button onClick={downloadDoc} className="h-8 px-3 rounded-md bg-slate-700 hover:bg-slate-600 text-xs font-bold">⬇️ تنزيل</button>
-        <button onClick={() => window.open(url, '_blank')} className="h-8 px-3 rounded-md bg-slate-700 hover:bg-slate-600 text-xs font-bold">↗️ تبويب</button>
-        <button onClick={onClose} className="h-8 px-3 rounded-md bg-rose-600 hover:bg-rose-500 text-xs font-black">✕ إغلاق</button>
-      </div>
-      <div className="flex-1 relative overflow-auto flex items-center justify-center p-4" onClick={onClose}>
-        <div onClick={e => e.stopPropagation()} className="w-full h-full flex items-center justify-center">
-          {isImg
-            ? <img src={url} alt={d.filename || 'مستند'} className="max-w-full max-h-full object-contain rounded-lg shadow-2xl bg-white" />
-            : <iframe src={url} title={d.filename || 'document'} className="w-full h-full rounded-lg bg-white" />}
-        </div>
-        {docs.length > 1 && (<>
-          <button onClick={e => { e.stopPropagation(); onNav((index + 1) % docs.length) }} title="التالي" className="absolute left-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 hover:bg-white text-slate-800 font-black shadow-lg">‹</button>
-          <button onClick={e => { e.stopPropagation(); onNav((index - 1 + docs.length) % docs.length) }} title="السابق" className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 hover:bg-white text-slate-800 font-black shadow-lg">›</button>
-        </>)}
-      </div>
-    </div>
-  )
-}
 
 // v3.2 — WhatsApp helpers
 // Normalizes a phone: keeps digits only. If starts with 0, replaces with default country code (967 Yemen).
@@ -493,21 +398,40 @@ function OfficeVerificationCard() {
   }
   const DOC_TYPE_LABELS = { license: '📜 السجل / الترخيص', owner_id: '🪪 هوية المالك / المسؤول', other: '📎 مستند آخر' }
   const upload = async (fileList) => {
-    // v3.83 — multiple upload: 10MB per file + 20MB per batch (verification usually needs several documents)
     const valid = validateDocBatch(fileList)
-    if (valid.length === 0) return
+    if (!valid.length) return
+
     setBusy(true)
-    let okCount = 0, lastStatus = null
+    let okCount = 0
+    let lastStatus = null
+
     for (const f of valid) {
       try {
         const file_base64 = await readFileB64(f)
-        const r = await api('/office/verification/documents', { method: 'POST', body: { doc_type: docType, filename: f.name, content_type: f.type, file_base64 } })
-        okCount++; lastStatus = r.verification_status
-      } catch (e) { toast.error(`${f.name}: ${e.message}`) }
+        const r = await api('/office/verification/documents', {
+          method: 'POST',
+          body: {
+            doc_type: docType,
+            filename: f.name,
+            content_type: f.type,
+            file_base64
+          }
+        })
+        okCount += 1
+        lastStatus = r.verification_status
+      } catch (e) {
+        toast.error(`${f.name}: ${e.message}`)
+      }
     }
+
     setBusy(false)
+
     if (okCount > 0) {
-      toast.success(lastStatus === 'pending_review' ? `📤 رُفع ${okCount} مستند — مكتبك الآن قيد المراجعة للتوثيق` : `📤 رُفع ${okCount} مستند بنجاح`)
+      toast.success(
+        lastStatus === 'pending_review'
+          ? `📤 رُفع ${okCount} مستند — مكتبك الآن قيد المراجعة للتوثيق`
+          : `📤 رُفع ${okCount} مستند بنجاح`
+      )
       loadVer()
     }
   }
@@ -516,7 +440,6 @@ function OfficeVerificationCard() {
   }
   const st = ver?.status || 'unverified'
   const badge = VER_BADGE[st] || VER_BADGE.unverified
-  const [verViewer, setVerViewer] = useState(null) // v3.81 — professional viewer for office docs
   return (
     <Card className="mt-4">
       <CardHeader className="pb-2">
@@ -540,7 +463,10 @@ function OfficeVerificationCard() {
             <select value={docType} onChange={e => setDocType(e.target.value)} className="h-8 text-xs border rounded-md px-2 bg-white font-bold">
               {Object.entries(DOC_TYPE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
             </select>
-            <DocBatchUpload busy={busy} label="اختيار مستندات (متعدد)" onUpload={upload} />
+            <label className={`h-8 inline-flex items-center gap-1.5 text-xs font-bold border rounded-md px-3 cursor-pointer bg-white hover:bg-slate-100 ${busy ? 'opacity-50 pointer-events-none' : ''}`}>
+              {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '📤'} رفع مستندات (متعدد)
+              <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) upload(e.target.files); e.target.value = '' }} />
+            </label>
             <span className="text-[10px] text-slate-400">PDF / JPG / PNG / WEBP — حتى {DOC_MAX_MB}MB لكل ملف و{DOC_BATCH_MAX_MB}MB إجمالاً للدفعة — يمكن اختيار عدة ملفات</span>
           </div>
         )}
@@ -551,43 +477,8 @@ function OfficeVerificationCard() {
                 <span className="font-bold">{(DOC_TYPE_LABELS[d.doc_type] || DOC_TYPE_LABELS.other)}</span>
                 <span className="text-slate-500 truncate flex-1" dir="ltr">{d.filename}</span>
                 <span className="text-[9px] text-slate-400">{((d.size || 0) / 1024).toFixed(0)}KB • {fmtDate(d.uploaded_at)}</span>
-                <button onClick={() => { const list = (ver.documents || []).map(x => ({ ...x, viewer_url: `/api/office/verification/documents/${x.id}/download` })); setVerViewer({ docs: list, index: list.findIndex(x => x.id === d.id) }) }} className="text-indigo-600 hover:underline text-[10px] font-bold">👁️ عرض</button>
+                <button onClick={() => window.open(`/api/office/verification/documents/${d.id}/download`, '_blank')} className="text-indigo-600 hover:underline text-[10px] font-bold">عرض</button>
                 {isOwner && st !== 'verified' && <button onClick={() => delDoc(d)} className="text-rose-500 hover:text-rose-700 text-xs font-black px-1" title="حذف">✕</button>}
-              </div>
-            ))}
-          </div>
-        )}
-        {verViewer && <DocViewer docs={verViewer.docs} index={verViewer.index} onClose={() => setVerViewer(null)} onNav={i => setVerViewer(v => ({ ...v, index: i }))} />}
-      </CardContent>
-    </Card>
-  )
-}
-
-// v3.78 — ACCOUNTING MAINTENANCE: rebuild all cached party balances from the ledger (owner only)
-function RecomputeBalancesCard() {
-  const { user } = useAuth()
-  const [busy, setBusy] = useState(false)
-  const [res, setRes] = useState(null)
-  if (user?.role !== 'owner') return null
-  const run = async () => {
-    setBusy(true)
-    try {
-      const r = await api('/accounts/recompute-balances', { method: 'POST' })
-      setRes(r)
-      toast.success(r.corrected > 0 ? `🔁 أُعيد احتساب الأرصدة — صُحّح ${r.corrected} حساب من أصل ${r.checked}` : `✅ فُحص ${r.checked} حساب — كل الأرصدة مطابقة للقيود`, { duration: 8000 })
-    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
-  }
-  return (
-    <Card className="mt-4">
-      <CardHeader className="pb-2"><CardTitle className="text-base">🔁 الصيانة المحاسبية — مطابقة الأرصدة مع القيود</CardTitle></CardHeader>
-      <CardContent className="space-y-2">
-        <div className="text-[11px] text-slate-500">القيود اليومية هي مصدر الحقيقة الوحيد. هذا الإجراء يعيد بناء الأرصدة المخزنة (بطاقات العملاء والموردين والصناديق، لكل عملة على حدة) من القيود مباشرة — يصحح أي انحراف تاريخي دون المساس بأي قيد.</div>
-        <Button onClick={run} disabled={busy} variant="outline" className="gap-2">{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : '🔁'} إعادة احتساب الأرصدة الآن</Button>
-        {res && res.changes?.length > 0 && (
-          <div className="space-y-1 max-h-52 overflow-y-auto border rounded-lg p-2 bg-slate-50">
-            {res.changes.map((c, i) => (
-              <div key={i} className="text-[10px] font-bold text-slate-600">
-                {c.type === 'supplier' ? '🏢' : c.type === 'client' ? '👤' : '💰'} {c.name}: {c.diffs.map(d => `${d.currency}: ${d.was.toLocaleString('en-US')} ← ${d.now.toLocaleString('en-US')}`).join(' • ')}
               </div>
             ))}
           </div>
@@ -6719,12 +6610,11 @@ function StatementReport() {
         <div>
           <div className="text-sm font-bold text-slate-700 mb-2">إجمالي كل العملات في الفترة المحددة</div>
           <Table>
-            <TableHeader><TableRow><TableHead>العملة</TableHead><TableHead className="text-left">رصيد سابق</TableHead><TableHead className="text-left">إجمالي مدين</TableHead><TableHead className="text-left">إجمالي دائن</TableHead><TableHead className="text-left">الرصيد النهائي</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>العملة</TableHead><TableHead className="text-left">إجمالي مدين</TableHead><TableHead className="text-left">إجمالي دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
             <TableBody>
               {(data.summary || []).map(s => (
                 <TableRow key={s.currency}>
                   <TableCell><Badge variant="outline" className="font-bold">{s.currency}</Badge></TableCell>
-                  <TableCell className="text-left font-bold text-slate-500">{fmt(s.opening_balance || 0, s.currency)}</TableCell>
                   <TableCell className="text-left text-blue-700 font-bold">{fmt(s.total_debit, s.currency)}</TableCell>
                   <TableCell className="text-left text-rose-700 font-bold">{fmt(s.total_credit, s.currency)}</TableCell>
                   <TableCell className={`text-left font-extrabold ${s.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(s.balance, s.currency)}</TableCell>
@@ -9415,26 +9305,47 @@ function MeraajStoreScreen() {
   // v3.77 — upload a REAL evidence file for a position service (context: cancellation_evidence)
   const EV_TYPE_BY_SVC = { visa: 'visa', ticket: 'ticket', hotel: 'hotel', transport: 'other', other: 'receipt' }
   const uploadEvidenceFile = async (i, fileList) => {
-    // v3.83 — multiple evidence files per service: 10MB per file + 20MB per batch
     if (!posFor) return
+
     const valid = validateDocBatch(fileList)
-    if (valid.length === 0) return
+    if (!valid.length) return
+
     setPosBusy(true)
     let okCount = 0
+
     for (const f of valid) {
       try {
         const file_base64 = await readFileB64(f)
         const svcType = posServices[i]?.type || 'other'
         const r = await api(`/meraaj/inbound-bookings/${posFor.id}/documents`, {
           method: 'POST',
-          body: { context: 'cancellation_evidence', evidence_type: EV_TYPE_BY_SVC[svcType] || 'other', label: f.name, filename: f.name, content_type: f.type, file_base64 },
+          body: {
+            context: 'cancellation_evidence',
+            evidence_type: EV_TYPE_BY_SVC[svcType] || 'other',
+            label: f.name,
+            filename: f.name,
+            content_type: f.type,
+            file_base64
+          },
         })
-        setPosServices(list => list.map((x, idx) => idx === i ? { ...x, evidence: [...(x.evidence || []), { kind: 'file_ref', value: r.document.id, label: f.name }] } : x))
-        okCount++
-      } catch (e) { toast.error(`${f.name}: ${e.message}`) }
+
+        setPosServices(list => list.map((x, idx) =>
+          idx === i
+            ? { ...x, evidence: [...(x.evidence || []), { kind: 'file_ref', value: r.document.id, label: f.name }] }
+            : x
+        ))
+
+        okCount += 1
+      } catch (e) {
+        toast.error(`${f.name}: ${e.message}`)
+      }
     }
+
     setPosBusy(false)
-    if (okCount > 0) toast.success(`📎 رُفع ${okCount} ملف دليل وارتبط بالخدمة`)
+
+    if (okCount > 0) {
+      toast.success(`📎 رُفع ${okCount} ملف دليل وارتبط بالخدمة`)
+    }
   }
   // v3.77 — BOOKING DOCUMENTS (traveler passports/visas + cancellation evidence) per inbound booking
   const [docsFor, setDocsFor] = useState(null)
@@ -9442,39 +9353,288 @@ function MeraajStoreScreen() {
   const [docsBusy, setDocsBusy] = useState(false)
   const [docReg, setDocReg] = useState(0)
   const [docTypeB, setDocTypeB] = useState('passport')
-  const BK_DOC_LABELS = { passport: '🛂 جواز', visa: '📄 تأشيرة', other: '📎 آخر' }
-  const loadDocs = async (b) => { try { const r = await api(`/meraaj/inbound-bookings/${b.id}/documents`); setDocsList(r.documents || []) } catch (e) { toast.error(e.message) } }
-  const openDocs = (b) => { setDocsFor(b); setDocsList([]); setDocReg(0); setDocTypeB('passport'); loadDocs(b) }
-  const delBookingDoc = async (d) => {
-    try { await api(`/meraaj/booking-documents/${d.id}`, { method: 'DELETE' }); toast.success('حُذف المستند'); loadDocs(docsFor) } catch (e) { toast.error(e.message) }
-  }
-  // v3.81 — professional viewer + multi-file upload with progress
-  const [docViewer, setDocViewer] = useState(null) // { docs, index }
-  const openDocViewer = (list, idx) => setDocViewer({ docs: list, index: idx })
+  const [docSelectedId, setDocSelectedId] = useState(null)
+  const [docZoom, setDocZoom] = useState(1)
+  const [docPending, setDocPending] = useState(null)
   const [docPendingFiles, setDocPendingFiles] = useState([])
-  const [docUploadProgress, setDocUploadProgress] = useState(null) // { done, total, name }
-  const selectBookingDocs = async (fileList) => {
+  const [docUploadProgress, setDocUploadProgress] = useState({ current: 0, total: 0 })
+  const [docPendingUrl, setDocPendingUrl] = useState('')
+  const BK_DOC_LABELS = { passport: '🛂 جواز', visa: '📄 تأشيرة', other: '📎 آخر' }
+  const loadDocs = async (b) => {
+    try {
+      const r = await api(`/meraaj/inbound-bookings/${b.id}/documents`)
+      const list = r.documents || []
+      setDocsList(list)
+      setDocSelectedId(prev => (prev && list.some(x => x.id === prev)) ? prev : (list[0]?.id || null))
+    } catch (e) { toast.error(e.message) }
+  }
+  const clearPendingDoc = () => {
+    if (docPendingUrl) URL.revokeObjectURL(docPendingUrl)
+    setDocPending(null)
+    setDocPendingUrl('')
+      setDocPendingFiles([])
+    setDocUploadProgress({ current: 0, total: 0 })
+  }
+  const openDocs = (b) => {
+    clearPendingDoc()
+    setDocsFor(b); setDocsList([]); setDocSelectedId(null); setDocZoom(1); setDocReg(0); setDocTypeB('passport'); loadDocs(b)
+  }
+  const chooseBookingDoc = (file) => {
+    if (!file) return
+    if (!DOC_OK_TYPES.includes(file.type)) { toast.error('المسموح: PDF / JPG / PNG / WEBP فقط'); return }
+    if (file.size > DOC_MAX_FILE_BYTES) { toast.error(`الحد الأقصى لحجم الملف ${DOC_MAX_MB}MB`); return }
+    if (docPendingUrl) URL.revokeObjectURL(docPendingUrl)
+    setDocPending(file)
+    setDocPendingUrl(URL.createObjectURL(file))
+    setDocZoom(1)
+  }
+  const bookingDocUrl = (d) => {
+    if (!d) return ''
+    if (d.external_url) {
+      const name = d.filename || d.label || 'document'
+      return `/api/meraaj/document-proxy?url=${encodeURIComponent(d.external_url)}&name=${encodeURIComponent(name)}`
+    }
+    return d.id ? `/api/meraaj/booking-documents/${d.id}/download` : ''
+  }
+  const isPdfDoc = (d, pending = null) => {
+    const mime = pending?.type || d?.content_type || d?.mime_type || ''
+    const name = pending?.name || d?.filename || d?.label || ''
+    return String(mime).toLowerCase().includes('pdf') || String(name).toLowerCase().endsWith('.pdf')
+  }
+  const fetchBookingDocBlob = async (url) => {
+    if (!url) throw new Error('لا يوجد مستند')
+
+    const res = await fetch(url, {
+      method: 'GET',
+      credentials: 'omit',
+      cache: 'no-store'
+    })
+
+    if (!res.ok) {
+      throw new Error(`تعذر جلب المستند (${res.status})`)
+    }
+
+    return await res.blob()
+  }
+
+  const printBookingDoc = async (url) => {
+    if (!url) return
+
+    try {
+      const blob = await fetchBookingDocBlob(url)
+      const blobUrl = URL.createObjectURL(blob)
+      const mime = String(blob.type || '').toLowerCase()
+
+      if (mime.includes('pdf')) {
+        const frame = document.createElement('iframe')
+        frame.style.position = 'fixed'
+        frame.style.left = '-10000px'
+        frame.style.top = '0'
+        frame.style.width = '1px'
+        frame.style.height = '1px'
+        frame.style.border = '0'
+        frame.src = blobUrl
+
+        frame.onload = () => {
+          setTimeout(() => {
+            try {
+              frame.contentWindow?.focus()
+              frame.contentWindow?.print()
+            } catch {
+              toast.error('تعذر فتح نافذة الطباعة للـ PDF')
+            }
+          }, 500)
+        }
+
+        document.body.appendChild(frame)
+
+        setTimeout(() => {
+          frame.remove()
+          URL.revokeObjectURL(blobUrl)
+        }, 60000)
+
+        return
+      }
+
+      const w = window.open('', '_blank', 'width=1100,height=850')
+      if (!w) {
+        URL.revokeObjectURL(blobUrl)
+        toast.error('المتصفح منع نافذة الطباعة — اسمح بالنوافذ المنبثقة لرحّال')
+        return
+      }
+
+      w.document.open()
+      w.document.write(`
+        <!doctype html>
+        <html dir="rtl">
+          <head>
+            <meta charset="utf-8" />
+            <title>طباعة المستند</title>
+            <style>
+              html,body{
+                margin:0;
+                padding:0;
+                width:100%;
+                height:100%;
+                background:#fff;
+              }
+              body{
+                display:flex;
+                align-items:center;
+                justify-content:center;
+              }
+              img{
+                max-width:100%;
+                max-height:100vh;
+                object-fit:contain;
+              }
+              @page{
+                margin:10mm;
+              }
+              @media print{
+                html,body{
+                  width:100%;
+                  height:auto;
+                }
+                img{
+                  max-width:100%;
+                  max-height:100%;
+                }
+              }
+            </style>
+          </head>
+          <body>
+            <img src="${blobUrl}" alt="Document" />
+            <script>
+              const img = document.querySelector('img');
+              img.onload = () => {
+                setTimeout(() => {
+                  window.focus();
+                  window.print();
+                }, 250);
+              };
+            <\/script>
+          </body>
+        </html>
+      `)
+      w.document.close()
+
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000)
+
+    } catch (e) {
+      console.error('printBookingDoc:', e)
+      toast.error(e?.message || 'تعذر طباعة المستند')
+    }
+  }
+
+  const downloadBookingDoc = async (url, name = 'document') => {
+    if (!url) return
+
+    try {
+      const blob = await fetchBookingDocBlob(url)
+      const blobUrl = URL.createObjectURL(blob)
+
+      const a = document.createElement('a')
+      a.href = blobUrl
+      a.download = name || 'document'
+      a.style.display = 'none'
+
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000)
+
+    } catch (e) {
+      console.error('downloadBookingDoc:', e)
+      toast.error(e?.message || 'تعذر تنزيل المستند')
+    }
+  }
+  const selectBookingDocs = (fileList) => {
+    const incoming = Array.from(fileList || [])
+    if (!incoming.length) return
+
+    const valid = validateDocBatch(incoming)
+    if (!valid.length) return
+
+    setDocPendingFiles(valid)
+
+    // Keep the first selected file in the existing professional preview.
+    const first = valid[0]
+    setDocPending(first)
+    setDocSelectedId(null)
+    setDocZoom(1)
+
+    setDocPendingUrl(prev => {
+      if (prev && String(prev).startsWith('blob:')) {
+        try { URL.revokeObjectURL(prev) } catch {}
+      }
+      return URL.createObjectURL(first)
+    })
+  }
+
+  const uploadBookingDoc = async (fileOrFiles = null) => {
     if (!docsFor) return
-    // v3.83 — 10MB per file + 20MB per batch
-    const valid = validateDocBatch(fileList)
-    if (valid.length === 0) return
-    setDocPendingFiles(valid.map(f => f.name))
+
+    let files
+    if (Array.isArray(fileOrFiles)) files = fileOrFiles
+    else if (fileOrFiles instanceof File) files = [fileOrFiles]
+    else if (docPendingFiles?.length) files = docPendingFiles
+    else if (docPending) files = [docPending]
+    else files = []
+
+    if (!files.length) {
+      toast.error('اختر ملفاً واحداً على الأقل')
+      return
+    }
+
+    const validated = validateDocBatch(files)
+    if (!validated.length) return
+    files = validated
+
     setDocsBusy(true)
-    let okCount = 0
-    for (let i = 0; i < valid.length; i++) {
-      const f = valid[i]
-      setDocUploadProgress({ done: i, total: valid.length, name: f.name })
-      try {
-        const file_base64 = await readFileB64(f)
+    setDocUploadProgress({ current: 0, total: files.length })
+
+    try {
+      for (let i = 0; i < files.length; i += 1) {
+        const file = files[i]
+        setDocUploadProgress({ current: i + 1, total: files.length })
+
+        const file_base64 = await readFileB64(file)
+
         await api(`/meraaj/inbound-bookings/${docsFor.id}/documents`, {
           method: 'POST',
-          body: { context: 'traveler', registrant_index: docReg, doc_type: docTypeB, label: f.name, filename: f.name, content_type: f.type, file_base64 },
+          body: {
+            context: 'traveler',
+            registrant_index: docReg,
+            doc_type: docTypeB,
+            label: file.name,
+            filename: file.name,
+            content_type: file.type,
+            file_base64,
+          },
         })
-        okCount++
-      } catch (e) { toast.error(`${f.name}: ${e.message}`) }
+      }
+
+      toast.success(
+        files.length === 1
+          ? '📤 رُفع مستند المسافر'
+          : `📤 تم رفع ${files.length} مستندات بنجاح`
+      )
+
+      clearPendingDoc()
+      setDocPendingFiles([])
+      setDocUploadProgress({ current: 0, total: 0 })
+      await loadDocs(docsFor)
+    } catch (e) {
+      toast.error(e.message || 'تعذر رفع المستندات')
+    } finally {
+      setDocsBusy(false)
     }
-    setDocUploadProgress(null); setDocPendingFiles([]); setDocsBusy(false)
-    if (okCount > 0) { toast.success(`📤 رُفع ${okCount} من ${valid.length} مستند`); loadDocs(docsFor) }
+  }
+
+  const delBookingDoc = async (d) => {
+    try { await api(`/meraaj/booking-documents/${d.id}`, { method: 'DELETE' }); toast.success('حُذف المستند'); loadDocs(docsFor) } catch (e) { toast.error(e.message) }
   }
   const [activating, setActivating] = useState(false)
   const storeActive = !!config?.store_active
@@ -9726,21 +9886,26 @@ function MeraajStoreScreen() {
                         استرداد للمشتري {fmt(b.platform_decision.refund_amount || 0, b.currency)} • تعويض مكتبك {fmt(b.platform_decision.seller_compensation || 0, b.currency)}{(b.platform_decision.platform_adjustment || 0) > 0 ? ` • منصة ${fmt(b.platform_decision.platform_adjustment || 0, b.currency)}` : ''}
                       </div>
                     </div>
-                  ) : <Badge className="bg-rose-100 text-rose-700" title={b.cancellation_status === 'approved' ? 'أُلغي بموافقة صاحب الباكيج على طلب المشتري' : b.cancel_reason || ''}>⛔ ملغى</Badge>
+                  ) : (
+                    <div className="space-y-0.5">
+                      <Badge className="bg-rose-100 text-rose-700 border border-rose-200">
+                        ⛔ تم إلغاء الطلب
+                      </Badge>
+                      <div className="text-[9px] text-slate-500">
+                        ألغاه المشتري قبل اعتماد المكتب
+                      </div>
+                    </div>
+                  )
                 )
                   : b.status === 'approved' ? (
                     b.cancellation_status === 'requested' ? (
                       <div className="space-y-1">
                         <Badge className="bg-orange-100 text-orange-700 border border-orange-300">📩 طلب إلغاء من معراج</Badge>
                         {b.cancellation_reason && <div className="text-[9px] text-slate-500 max-w-[180px]">السبب: {b.cancellation_reason}</div>}
-                        {config?.escrow_mode ? (
-                          <Button size="sm" onClick={() => openPosition(b)} disabled={posBusy} className="h-6 px-2 text-[10px] bg-indigo-600 hover:bg-indigo-700 text-white">⚖️ تقديم موقف المكتب</Button>
-                        ) : (
-                          <div className="flex items-center gap-1">
-                            <Button size="sm" onClick={() => approveCancellation(b)} disabled={approving === b.id} className="h-6 px-2 text-[10px] bg-rose-600 hover:bg-rose-700 text-white">{approving === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '🗑️ موافقة على الإلغاء'}</Button>
-                            <Button size="sm" variant="outline" onClick={() => rejectCancellation(b)} disabled={approving === b.id} className="h-6 px-2 text-[10px] border-slate-300 text-slate-700 hover:bg-slate-50">🛡️ رفض الطلب</Button>
-                          </div>
-                        )}
+                        <div className="space-y-1">
+                          <Button size="sm" onClick={() => openPosition(b)} disabled={posBusy} className="h-7 px-2.5 text-[10px] bg-indigo-600 hover:bg-indigo-700 text-white">⚖️ تقديم موقف المكتب والأدلة</Button>
+                          <div className="text-[9px] text-indigo-600">القرار النهائي حصراً لدى السوبر أدمن في معراج</div>
+                        </div>
                       </div>
                     ) : b.cancellation_status === 'position_submitted' ? (
                       <div className="space-y-0.5">
@@ -9931,7 +10096,7 @@ function MeraajStoreScreen() {
                         ev.kind === 'file_ref' ? (
                           <div key={j} className="flex items-center gap-1.5 rounded-md bg-indigo-50 border border-indigo-200 px-2 py-1">
                             <span className="text-[10px] font-bold text-indigo-700 truncate flex-1">📎 {ev.label || 'ملف دليل'}</span>
-                            <button onClick={() => openDocViewer([{ id: ev.value, filename: ev.label || 'دليل', content_type: '' }], 0)} className="text-[10px] font-bold text-indigo-600 hover:underline">👁️ عرض</button>
+                            <button onClick={() => window.open(`/api/meraaj/booking-documents/${ev.value}/download`, '_blank')} className="text-[10px] font-bold text-indigo-600 hover:underline">عرض</button>
                             <button onClick={() => delPosEvidence(i, j)} className="text-rose-400 hover:text-rose-600 text-xs px-1">✕</button>
                           </div>
                         ) : (
@@ -9944,7 +10109,10 @@ function MeraajStoreScreen() {
                       ))}
                       <div className="flex items-center gap-3">
                         <button onClick={() => addPosEvidence(i)} disabled={(s.evidence || []).length >= 10} className="text-[10px] font-bold text-indigo-600 hover:underline disabled:opacity-40">🔗 إضافة رابط دليل ({(s.evidence || []).length}/10)</button>
-                        <DocBatchUpload busy={posBusy} disabled={(s.evidence || []).length >= 10} variant="link" label="📎 رفع ملفات دليل (PDF/صورة)" onUpload={files => uploadEvidenceFile(i, files)} />
+                        <label className={`text-[10px] font-bold text-indigo-600 hover:underline cursor-pointer ${(s.evidence || []).length >= 10 || posBusy ? 'opacity-40 pointer-events-none' : ''}`}>
+                          📎 رفع ملف دليل (PDF/صورة)
+                          <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" onChange={e => { if (e.target.files?.length) uploadEvidenceFile(i, e.target.files); e.target.value = '' }} />
+                        </label>
                       </div>
                     </div>
                   </div>
@@ -9971,62 +10139,205 @@ function MeraajStoreScreen() {
           </DialogContent>
         </Dialog>
       )}
-      {/* v3.77 — BOOKING DOCUMENTS dialog (traveler docs + evidence, per booking_ref) */}
-      {docsFor && (
-        <Dialog open onOpenChange={() => !docsBusy && setDocsFor(null)}>
-          <DialogContent className="max-w-xl max-h-[85vh] overflow-y-auto">
-            <DialogHeader>
-              <DialogTitle className="text-base">📎 مستندات الحجز — «{docsFor.buyer_office_name}» <span className="text-[10px] font-mono text-slate-400" dir="ltr">{docsFor.meraaj_booking_ref || ''}</span></DialogTitle>
-            </DialogHeader>
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 border p-2.5">
-                <select value={docReg} onChange={e => setDocReg(Number(e.target.value))} className="h-8 text-xs border rounded-md px-2 bg-white font-bold max-w-[180px]">
-                  {(docsFor.registrants || []).map((r, i) => <option key={i} value={i}>{r.name}</option>)}
-                </select>
-                <select value={docTypeB} onChange={e => setDocTypeB(e.target.value)} className="h-8 text-xs border rounded-md px-2 bg-white font-bold">
-                  <option value="passport">🛂 جواز سفر</option>
-                  <option value="visa">📄 تأشيرة</option>
-                  <option value="other">📎 مستند آخر</option>
-                </select>
-                <DocBatchUpload busy={docsBusy} label="اختيار مستندات للمسافر (متعدد)" onUpload={selectBookingDocs} />
-                <span className="text-[9px] text-slate-400 w-full">PDF / JPG / PNG / WEBP — حتى {DOC_MAX_MB}MB لكل ملف و{DOC_BATCH_MAX_MB}MB إجمالاً للدفعة — يمكن اختيار عدة ملفات — مرتبطة بـ booking_ref والمسافر المحدد</span>
-                {docUploadProgress && (
-                  <div className="w-full space-y-1">
-                    <div className="flex items-center justify-between text-[10px] text-slate-500">
-                      <span className="truncate max-w-[60%]" dir="ltr">{docUploadProgress.name}</span>
-                      <span className="font-mono" dir="ltr">{docUploadProgress.done + 1} / {docUploadProgress.total}</span>
+      {/* PREMIUM BOOKING DOCUMENTS WORKSPACE — inline image/PDF preview */}
+      {docsFor && (() => {
+        const selectedDoc = docsList.find(d => d.id === docSelectedId) || docsList[0] || null
+        const selectedUrl = docPendingUrl || bookingDocUrl(selectedDoc)
+        const selectedIsPdf = isPdfDoc(selectedDoc, docPending)
+        const regs = docsFor.registrants || []
+        const selectedReg = regs[docReg] || null
+        const selectedName = docPending ? (selectedReg?.name || selectedReg?.full_name || `مسافر ${docReg + 1}`) : (selectedDoc?.registrant_name || selectedReg?.name || selectedReg?.full_name || '—')
+        const selectedPassport = docPending ? (selectedReg?.passport_no || '—') : (selectedDoc?.passport_no || selectedReg?.passport_no || '—')
+        const selectedFilename = docPending?.name || selectedDoc?.filename || selectedDoc?.label || '—'
+        const selectedSource = docPending ? 'من المكتب — قبل الرفع' : (selectedDoc?.source === 'meraaj' ? 'من معراج' : 'من المكتب')
+        return (
+        <Dialog open onOpenChange={() => { if (!docsBusy) { clearPendingDoc(); setDocsFor(null) } }}>
+          <DialogContent className="max-w-[1180px] w-[96vw] h-[90vh] max-h-[90vh] p-0 overflow-hidden rounded-2xl border border-slate-200 shadow-2xl bg-white" onInteractOutside={e => e.preventDefault()}>
+            <div className="h-full min-h-0 flex flex-col overflow-hidden" dir="rtl">
+              {/* Header */}
+              <div className="px-5 py-2.5 border-b bg-white flex items-center justify-between gap-3 shrink-0">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <div className="w-9 h-9 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600">🛂</div>
+                    <div>
+                      <DialogTitle className="text-xl font-black text-slate-900">مستندات الحجز</DialogTitle>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                        <span className="font-bold text-blue-700">{docsFor.buyer_office_name || '—'}</span>
+                        <span>مرجع معراج:</span>
+                        <span className="font-mono" dir="ltr">{docsFor.meraaj_booking_ref || '—'}</span>
+                      </div>
                     </div>
-                    <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden">
-                      <div className="h-full bg-indigo-500 rounded-full transition-all" style={{ width: `${Math.round(((docUploadProgress.done + 0.5) / docUploadProgress.total) * 100)}%` }} />
+                  </div>
+                </div>
+                <button onClick={() => { clearPendingDoc(); setDocsFor(null) }} disabled={docsBusy} className="w-9 h-9 rounded-full border bg-white hover:bg-slate-50 flex items-center justify-center text-slate-500 text-xl" title="إغلاق">×</button>
+              </div>
+
+              {/* Selectors + upload */}
+              <div className="px-5 py-2 border-b bg-slate-50/60 grid lg:grid-cols-3 gap-2.5 shrink-0">
+                <div>
+                  <div className="text-[10px] font-bold text-slate-500 mb-1.5">نوع المستند</div>
+                  <select value={docTypeB} onChange={e => setDocTypeB(e.target.value)} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold shadow-sm outline-none focus:ring-2 focus:ring-blue-200">
+                    {Object.entries(BK_DOC_LABELS).map(([k,v]) => <option key={k} value={k}>{v}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold text-slate-500 mb-1.5">اختر المسافر</div>
+                  <select value={docReg} onChange={e => setDocReg(Number(e.target.value))} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold shadow-sm outline-none focus:ring-2 focus:ring-blue-200">
+                    {(regs.length ? regs : [{ name: 'المسافر 1' }]).map((r,i) => <option key={i} value={i}>{r.name || r.full_name || `مسافر ${i + 1}`}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold text-slate-500 mb-1.5">إضافة مستند</div>
+                  <label className={`h-9 w-full rounded-lg border-2 border-dashed ${docPending ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-blue-300 bg-white text-blue-700 hover:bg-blue-50'} flex items-center justify-center gap-2 text-sm font-black cursor-pointer transition ${docsBusy ? 'opacity-50 pointer-events-none' : ''}`}>
+                    <Upload className="w-4 h-4" /> {docPending ? 'تغيير الملف المختار' : 'اختيار صورة أو PDF'}
+                    <input
+                      type="file"
+                      accept=".pdf,.jpg,.jpeg,.png,.webp"
+                      multiple
+                      className="hidden"
+                      onChange={e => {
+                        selectBookingDocs(e.target.files)
+                        e.target.value = ''
+                      }}
+                    />
+                  </label>
+                </div>
+                {docPendingFiles.length > 0 && (
+                      <div className="lg:col-span-3 rounded-lg border bg-white px-3 py-2 space-y-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[10px]">
+                          <span className="font-bold text-blue-700">
+                            تم اختيار {docPendingFiles.length} {docPendingFiles.length === 1 ? 'ملف' : 'ملفات'} — ستُرفع جميعها
+                          </span>
+                          <span className="text-slate-500">
+                            الإجمالي: {(docPendingFiles.reduce((s, f) => s + (f?.size || 0), 0) / 1024 / 1024).toFixed(1)}MB من {DOC_BATCH_MAX_MB}MB
+                          </span>
+                        </div>
+                        <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-emerald-500"
+                            style={{
+                              width: `${Math.min(
+                                100,
+                                Math.round(
+                                  (docPendingFiles.reduce((s, f) => s + (f?.size || 0), 0) / DOC_BATCH_MAX_BYTES) * 100
+                                )
+                              )}%`
+                            }}
+                          />
+                        </div>
+                        <div className="text-[9px] text-slate-500">
+                          المتبقي: {(
+                            Math.max(
+                              0,
+                              DOC_BATCH_MAX_BYTES - docPendingFiles.reduce((s, f) => s + (f?.size || 0), 0)
+                            ) / 1024 / 1024
+                          ).toFixed(1)}MB
+                        </div>
+                      </div>
+                    )}
+                    {docUploadProgress.total > 0 && (
+                      <div className="text-[10px] font-bold text-indigo-700">
+                        جارٍ رفع {docUploadProgress.current} من {docUploadProgress.total}
+                      </div>
+                    )}
+                    {docPending && (
+                  <div className="lg:col-span-3 flex items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5">
+                    <div className="min-w-0">
+                      <div className="text-xs font-black text-emerald-800">✓ معاينة قبل الرفع</div>
+                      <div className="text-[10px] text-emerald-700 truncate" dir="ltr">{docPending.name} • {(docPending.size / 1024 / 1024).toFixed(2)} MB</div>
                     </div>
-                    {docPendingFiles.length > 1 && <div className="text-[9px] text-slate-400 truncate" dir="ltr">{docPendingFiles.join(' • ')}</div>}
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Button size="sm" variant="outline" onClick={clearPendingDoc} disabled={docsBusy} className="h-8">إلغاء</Button>
+                      <Button size="sm" onClick={() => uploadBookingDoc()} disabled={docsBusy} className="h-8 bg-emerald-600 hover:bg-emerald-700 text-white">{docsBusy ? 'جارٍ الرفع...' : 'تأكيد الرفع'}</Button>
+                    </div>
                   </div>
                 )}
               </div>
-              {docsList.length === 0 ? (
-                <div className="text-[11px] text-slate-400 border border-dashed rounded-lg p-4 text-center">لا مستندات بعد — مستندات المشتري القادمة من معراج تظهر هنا تلقائياً، ويمكن لمكتبك رفع مستندات المسافرين وأدلة الإلغاء</div>
-              ) : (
-                <div className="space-y-1">
-                  {docsList.map(d => (
-                    <div key={d.id} className="flex items-center gap-2 text-xs border rounded-lg px-2.5 py-1.5 bg-white flex-wrap">
-                      <span className="font-bold">{d.context === 'cancellation_evidence' ? `⚖️ دليل إلغاء (${d.evidence_type || 'other'})` : (BK_DOC_LABELS[d.doc_type] || BK_DOC_LABELS.other)}</span>
-                      {d.registrant_name && <span className="text-slate-500">{d.registrant_name}</span>}
-                      <span className="text-slate-400 truncate flex-1" dir="ltr">{d.filename || d.label || d.external_url || '—'}</span>
-                      <Badge className={d.source === 'meraaj' ? 'bg-purple-100 text-purple-700 text-[9px]' : 'bg-slate-100 text-slate-600 text-[9px]'}>{d.source === 'meraaj' ? 'من معراج' : 'من المكتب'}</Badge>
-                      <span className="text-[9px] text-slate-400">{d.size ? `${(d.size / 1024).toFixed(0)}KB` : ''} {fmtDate(d.uploaded_at)}</span>
-                      <button onClick={() => openDocViewer(docsList, docsList.indexOf(d))} className="text-indigo-600 hover:underline text-[10px] font-bold">👁️ عرض</button>
-                      {d.source !== 'meraaj' && <button onClick={() => delBookingDoc(d)} className="text-rose-500 hover:text-rose-700 text-xs font-black px-1" title="حذف">✕</button>}
-                    </div>
-                  ))}
+
+              {/* Toolbar */}
+              <div className="px-5 py-1.5 border-b bg-white flex flex-wrap items-center justify-between gap-2 shrink-0">
+                <div className="flex items-center gap-1.5">
+                  <button onClick={() => setDocZoom(z => Math.min(2, +(z + .15).toFixed(2)))} className="h-7 px-2.5 rounded-lg border hover:bg-slate-50 text-[11px] font-bold">＋ تكبير</button>
+                  <button onClick={() => setDocZoom(z => Math.max(.55, +(z - .15).toFixed(2)))} className="h-7 px-2.5 rounded-lg border hover:bg-slate-50 text-[11px] font-bold">－ تصغير</button>
+                  <button onClick={() => setDocZoom(1)} className="h-7 px-2.5 rounded-lg border hover:bg-slate-50 text-[11px] font-bold">⛶ ملاءمة</button>
                 </div>
-              )}
-              <div className="text-[10px] text-slate-400 text-center">كل عمليات الرفع/العرض/الحذف مسجلة في سجل تدقيق — والمشاركة مقصورة على الأطراف المخولة بنفس booking_ref</div>
+                <div className="flex items-center gap-1.5">
+                  <button disabled={!selectedUrl} onClick={() => printBookingDoc(selectedUrl)} className="h-8 px-3 rounded-lg border hover:bg-slate-50 text-xs font-bold disabled:opacity-40 flex items-center gap-1"><Printer className="w-3.5 h-3.5" /> طباعة</button>
+                  <button disabled={!selectedUrl} onClick={() => downloadBookingDoc(selectedUrl, selectedFilename)} className="h-8 px-3 rounded-lg border hover:bg-slate-50 text-xs font-bold disabled:opacity-40 flex items-center gap-1"><Download className="w-3.5 h-3.5" /> تنزيل</button>
+                </div>
+              </div>
+
+              {/* Main workspace */}
+              <div className="flex-1 min-h-0 overflow-auto overscroll-contain grid xl:grid-cols-[220px_minmax(0,1fr)_230px] lg:grid-cols-[200px_minmax(0,1fr)] bg-slate-50/70">
+                {/* Metadata */}
+                <aside className="border-l bg-white p-3 order-3 xl:order-1 self-start">
+                  <div className="text-xs font-black text-slate-800 mb-3">معلومات المستند</div>
+                  <div className="space-y-3 text-[11px]">
+                    <div><div className="text-slate-400">اسم المسافر</div><div className="font-black text-slate-800 mt-0.5">{selectedName}</div></div>
+                    <div><div className="text-slate-400">رقم جواز السفر</div><div className="font-mono font-black text-indigo-700 mt-0.5" dir="ltr">{selectedPassport}</div></div>
+                    <div><div className="text-slate-400">اسم المستند</div><div className="font-bold text-slate-700 mt-0.5 break-all" dir="ltr">{selectedFilename}</div></div>
+                    <div><div className="text-slate-400">المصدر</div><Badge className="mt-1 bg-violet-100 text-violet-700 border-0">{selectedSource}</Badge></div>
+                    <div><div className="text-slate-400">مرجع الحجز</div><div className="font-mono text-slate-600 mt-0.5 break-all" dir="ltr">{docsFor.meraaj_booking_ref || '—'}</div></div>
+                  </div>
+                  <div className="mt-5 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-[10px] leading-5 text-emerald-800">
+                    <div className="font-black">🛡️ يرجى مطابقة رقم جواز السفر</div>
+                    <div>مع بيانات الوثيقة قبل اعتماد الحجز.</div>
+                  </div>
+                </aside>
+
+                {/* Viewer */}
+                <main className="min-w-0 p-3 lg:p-4 order-1 xl:order-2">
+                  <div className="min-h-[520px] rounded-2xl border bg-slate-200/60 overflow-visible flex items-start justify-center relative shadow-inner">
+                    {!selectedUrl ? (
+                      <div className="text-center text-slate-400">
+                        <div className="text-5xl mb-3">📄</div>
+                        <div className="font-bold">اختر مستنداً للمعاينة</div>
+                        <div className="text-xs mt-1">يمكن عرض الصور وملفات PDF داخل رحّال</div>
+                      </div>
+                    ) : selectedIsPdf ? (
+                      <iframe title="Document preview" src={selectedUrl} className="bg-white border-0 shadow-xl rounded-lg" style={{ width: `${100 / docZoom}%`, height: `${100 / docZoom}%`, minHeight: '620px', transform: `scale(${docZoom})`, transformOrigin: 'center center' }} />
+                    ) : (
+                      <img src={selectedUrl} alt="معاينة المستند" className="max-w-none rounded-lg shadow-xl bg-white" style={{ width: `${Math.round(docZoom * 88)}%`, objectFit: 'contain' }} />
+                    )}
+                  </div>
+                </main>
+
+                {/* Attachments list */}
+                <aside className="border-r bg-white p-3 order-2 xl:order-3 lg:col-span-2 xl:col-span-1 self-start">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="text-xs font-black text-slate-800">المستندات المرفقة</div>
+                    <Badge className="bg-slate-100 text-slate-600 border-0">{docsList.length}</Badge>
+                  </div>
+                  <div className="space-y-2">
+                    {docsList.length === 0 && <div className="text-[11px] text-center text-slate-400 border border-dashed rounded-xl p-5">لا توجد مستندات بعد</div>}
+                    {docsList.map((d, i) => {
+                      const active = !docPending && (selectedDoc?.id === d.id)
+                      return (
+                        <button key={d.id || i} onClick={() => { clearPendingDoc(); setDocSelectedId(d.id); setDocZoom(1) }} className={`w-full rounded-xl border p-3 text-start transition ${active ? 'border-blue-400 bg-blue-50 ring-2 ring-blue-100' : 'border-slate-200 hover:bg-slate-50'}`}>
+                          <div className="flex items-center gap-2">
+                            <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${active ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{isPdfDoc(d) ? 'PDF' : '🖼️'}</div>
+                            <div className="min-w-0 flex-1">
+                              <div className="text-xs font-black text-slate-800 truncate">{BK_DOC_LABELS[d.doc_type] || d.label || 'مستند'}</div>
+                              <div className="text-[9px] text-slate-400 truncate" dir="ltr">{d.filename || d.label || '—'}</div>
+                              {d.passport_no && <div className="text-[9px] font-mono text-indigo-600 mt-0.5" dir="ltr">Passport: {d.passport_no}</div>}
+                            </div>
+                            {active && <span className="text-emerald-600 text-sm">●</span>}
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </aside>
+              </div>
+
+              <div className="px-6 py-3 border-t bg-blue-50/70 text-[10px] text-blue-700 flex items-center justify-center text-center shrink-0">
+                ℹ️ تأكد من مطابقة بيانات الجواز مع بيانات المسافر قبل اعتماد الحجز وإرساله إلى معراج.
+              </div>
             </div>
           </DialogContent>
         </Dialog>
-      )}
-      {/* v3.81 — professional document viewer overlay */}
-      {docViewer && <DocViewer docs={docViewer.docs} index={docViewer.index} onClose={() => setDocViewer(null)} onNav={i => setDocViewer(v => ({ ...v, index: i }))} />}
+        )
+      })()}
       {view === 'events' && (
         events.length === 0 ? <Card><CardContent className="p-8 text-center text-slate-400 text-sm">لا توجد أحداث مزامنة بعد — تُسجل هنا كل التحديثات الصادرة لمعراج (Outbox)</CardContent></Card> : (
           <Card><CardContent className="p-0"><Table>
@@ -10061,7 +10372,7 @@ function MeraajStoreScreen() {
             <div className="text-[10px] font-black text-slate-500 mt-1">🎯 يحتاج إجراء تشغيلي</div>
             <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
               <Card className={(alertsCenter.counts?.pending_bookings || 0) > 0 ? 'border-blue-300 bg-blue-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.pending_bookings || 0) > 0 ? 'text-blue-600' : 'text-slate-400'}`}>{alertsCenter.counts?.pending_bookings ?? 0}</div><div className="text-[10px] text-slate-500">📥 حجوزات بانتظار الاعتماد</div></CardContent></Card>
-              <Card className={(alertsCenter.counts?.cancellation_requests || 0) > 0 ? 'border-orange-300 bg-orange-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.cancellation_requests || 0) > 0 ? 'text-orange-600' : 'text-slate-400'}`}>{alertsCenter.counts?.cancellation_requests ?? 0}</div><div className="text-[10px] text-slate-500">📩 طلبات إلغاء تحتاج قرار</div></CardContent></Card>
+              <Card className={(alertsCenter.counts?.cancellation_requests || 0) > 0 ? 'border-orange-300 bg-orange-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.cancellation_requests || 0) > 0 ? 'text-orange-600' : 'text-slate-400'}`}>{alertsCenter.counts?.cancellation_requests ?? 0}</div><div className="text-[10px] text-slate-500">📩 طلبات إلغاء تحتاج موقف</div></CardContent></Card>
               <Card className={(alertsCenter.counts?.stale_pending || 0) > 0 ? 'border-rose-300 bg-rose-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.stale_pending || 0) > 0 ? 'text-rose-600' : 'text-slate-400'}`}>{alertsCenter.counts?.stale_pending ?? 0}</div><div className="text-[10px] text-slate-500">⏰ طلبات تجاوزت 24 ساعة</div></CardContent></Card>
               <Card className={(alertsCenter.counts?.capacity_warnings || 0) > 0 ? 'border-amber-300 bg-amber-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.capacity_warnings || 0) > 0 ? 'text-amber-600' : 'text-slate-400'}`}>{alertsCenter.counts?.capacity_warnings ?? 0}</div><div className="text-[10px] text-slate-500">💺 باكجات مقاعدها شبه ممتلئة</div></CardContent></Card>
               <Card className={(alertsCenter.counts?.missing_passports || 0) > 0 ? 'border-orange-300 bg-orange-50/40' : 'border-slate-200'}><CardContent className="p-3 text-center"><div className={`text-2xl font-black ${(alertsCenter.counts?.missing_passports || 0) > 0 ? 'text-orange-600' : 'text-slate-400'}`}>{alertsCenter.counts?.missing_passports ?? 0}</div><div className="text-[10px] text-slate-500">🛂 جوازات ناقصة (معتمدة)</div></CardContent></Card>
@@ -12424,8 +12735,6 @@ function OfficeSettings() {
           </div>
           {/* v3.77 — Office verification & documents */}
           <OfficeVerificationCard />
-          {/* v3.78 — rebuild cached balances from the ledger */}
-          <RecomputeBalancesCard />
           <div className="flex justify-end mt-4"><Button onClick={save} disabled={saving} className="grad-brand text-white gap-2">{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'حفظ الإعدادات'}</Button></div>
         </TabsContent>
 
@@ -12684,7 +12993,7 @@ function TenantApp() {
         if (!meraajInitRef.current) {
           // First poll after login: gentle reminder toast if there are pending bookings (no sound)
           if (n > 0) toast.success(`🕋 لديك ${n} حجز معراج بانتظار الاعتماد`, { duration: 8000 })
-          if (cq > 0) toast(`📩 لديك ${cq} طلب إلغاء حجز من معراج يحتاج قرارك`, { duration: 8000 }) // v3.73
+          if (cq > 0) toast(`📩 لديك ${cq} طلب إلغاء حجز من معراج يحتاج موقف المكتب`, { duration: 8000 }) // v3.73
           // v3.68 — don't toast about auto-retry runs that happened before this session
           autoRetrySeenRef.current = r?.auto_retry_last?.at || null
         } else if (n > meraajPendingRef.current) {
@@ -12694,7 +13003,7 @@ function TenantApp() {
         }
         // v3.73 — a NEW cancellation request arrived while working
         if (meraajInitRef.current && cq > meraajCancReqRef.current) {
-          toast(`📩 طلب إلغاء حجز جديد من معراج — يحتاج قرارك (موافقة/رفض)`, { duration: 10000 })
+          toast(`📩 طلب إلغاء حجز جديد من معراج — أرسل موقف المكتب والأدلة`, { duration: 10000 })
           playMeraajChime()
         }
         // v3.68 — background auto-retry success notice (new successful run since last seen)
@@ -12894,7 +13203,7 @@ function TenantApp() {
                       {/* v3.73 — CANCELLATION REQUESTS group (approved bookings the buyer wants to cancel) */}
                       {(bellCancList || []).length > 0 && (
                         <>
-                          <div className="px-3 py-1.5 bg-orange-50 border-y border-orange-200 text-[10px] font-black text-orange-700">📩 طلبات إلغاء حجوزات معتمدة ({bellCancList.length}) — تحتاج قرارك</div>
+                          <div className="px-3 py-1.5 bg-orange-50 border-y border-orange-200 text-[10px] font-black text-orange-700">📩 طلبات إلغاء حجوزات معتمدة ({bellCancList.length}) — بانتظار موقف المكتب</div>
                           {bellCancList.map(b => (
                             <div key={b.id} className="p-2.5 hover:bg-orange-50/40 bg-orange-50/20">
                               <div className="flex items-center gap-2">
@@ -12904,14 +13213,9 @@ function TenantApp() {
                                   {b.cancellation_reason && <div className="text-[9px] text-orange-600 truncate">السبب: {b.cancellation_reason}</div>}
                                   <div className="text-[9px] text-slate-400">{b.cancellation_requested_at ? new Date(b.cancellation_requested_at).toLocaleString('en-GB') : ''} • الحالة: معتمد</div>
                                 </div>
-                                <Button size="sm" onClick={() => approveCancFromBell(b.id)} disabled={bellBusy === b.id}
-                                  className="h-7 text-[10px] gap-1 bg-rose-600 hover:bg-rose-700 shrink-0" title="إلغاء الحجز نهائياً + تحرير المقاعد + عكس القيد">
-                                  {bellBusy === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : '🗑️'} موافقة
-                                </Button>
-                                <Button size="sm" variant="outline" onClick={() => { setBellCancRejectId(bellCancRejectId === b.id ? null : b.id); setBellCancRejectReason('') }} disabled={bellBusy === b.id}
-                                  className="h-7 text-[10px] px-2 border-slate-300 text-slate-700 hover:bg-slate-50 shrink-0" title="رفض طلب الإلغاء — يبقى الحجز معتمداً">🛡️</Button>
+                                <Badge className="bg-indigo-100 text-indigo-700 border border-indigo-200 whitespace-nowrap">⚖️ القرار في معراج</Badge>
                               </div>
-                              {bellCancRejectId === b.id && (
+                              {false && bellCancRejectId === b.id && (
                                 <div className="mt-2 flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg p-1.5">
                                   <Input value={bellCancRejectReason} onChange={e => setBellCancRejectReason(e.target.value)}
                                     placeholder="سبب رفض الإلغاء (إلزامي — يظهر للمشتري)" autoFocus
