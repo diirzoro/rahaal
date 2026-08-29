@@ -922,13 +922,15 @@ async function handleRoute(request, { params }) {
           registrants.forEach((rg, idx) => {
             const docsIn = Array.isArray(rawRegs[idx]?.documents) ? rawRegs[idx].documents.slice(0, 10) : []
             for (const d of docsIn) {
-              const u = String(d?.url || '').trim().slice(0, 600)
+              // v3.85 — 2048 (was 600): Meraaj signed URLs carry long signatures/tokens — a 600-char
+              // cut silently corrupted the link and the document was lost for the seller office.
+              const u = String(d?.url || '').trim().slice(0, 2048)
               if (!/^https?:\/\//i.test(u)) continue
               trvDocs.push({
                 id: uuidv4(), tenant_id: pkg.tenant_id, inbound_id: inbound.id,
                 booking_ref: inbound.meraaj_booking_ref, context: 'traveler', source: 'meraaj',
                 registrant_index: idx, registrant_name: rg.name, passport_no: rg.passport_no || null,
-                doc_type: ['passport', 'visa', 'other'].includes(d?.type) ? d.type : 'other',
+                doc_type: ['passport', 'visa', 'ticket', 'photo', 'other'].includes(d?.type) ? d.type : 'other', // v3.85 — + ticket/photo
                 label: String(d?.label || '').slice(0, 120), filename: null, content_type: null, size: null,
                 storage: { driver: 'external_url', url: u },
                 uploaded_by: 'meraaj', uploaded_at: nowRcv,
@@ -976,7 +978,7 @@ async function handleRoute(request, { params }) {
         })
         let added = 0, skipped = 0
         for (const d of flat) {
-          const u = String(d.url || '').trim().slice(0, 600)
+          const u = String(d.url || '').trim().slice(0, 2048) // v3.85 — long signed URLs must not be cut
           if (!/^https?:\/\//i.test(u)) { skipped++; continue }
           if (!Number.isInteger(d.idx) || d.idx < 0 || d.idx >= regsDU.length) { skipped++; continue }
           // idempotent: same registrant + same URL never duplicated (safe replays)
@@ -988,7 +990,7 @@ async function handleRoute(request, { params }) {
             id: uuidv4(), tenant_id: inboundDU.tenant_id, inbound_id: inboundDU.id,
             booking_ref: inboundDU.meraaj_booking_ref, context: 'traveler', source: 'meraaj',
             registrant_index: d.idx, registrant_name: regsDU[d.idx]?.name || null, passport_no: regsDU[d.idx]?.passport_no || null,
-            doc_type: ['passport', 'visa', 'other'].includes(d.type) ? d.type : 'other',
+            doc_type: ['passport', 'visa', 'ticket', 'photo', 'other'].includes(d.type) ? d.type : 'other', // v3.85 — + ticket/photo
             label: String(d.label || '').slice(0, 120), filename: null, content_type: null, size: null,
             storage: { driver: 'external_url', url: u },
             uploaded_by: 'meraaj', uploaded_at: new Date(),
@@ -2108,14 +2110,18 @@ async function handleRoute(request, { params }) {
         regName = regs[regIdx].name; regPass = regs[regIdx].passport_no || null
       }
       const docTypeBU = contextBU === 'traveler'
-        ? (['passport', 'visa', 'other'].includes(bBU.doc_type) ? bBU.doc_type : 'other')
+        ? (['passport', 'visa', 'ticket', 'photo', 'other'].includes(bBU.doc_type) ? bBU.doc_type : 'other') // v3.85 — + ticket/photo
         : 'other'
       const evidenceTypeBU = contextBU === 'cancellation_evidence'
         ? (['visa', 'ticket', 'hotel', 'receipt', 'other'].includes(bBU.evidence_type) ? bBU.evidence_type : 'other')
         : null
       const countBU = await db.collection('booking_documents').countDocuments({ inbound_id: inbBU.id, tenant_id: T })
       if (countBU >= 60) return bad('الحد الأقصى 60 مستند لكل حجز')
-      const upBU = parseDocUpload(bBU, T, 'booking-docs')
+      // v3.85 — booking (integration) documents accept up to 10MB per file: aligns backend with
+      // the existing 10MB frontend rule (was 4MB → any 5-10MB passport scan failed server-side).
+      // NOTE: 20MB per file on THIS office-upload path needs chunked blob storage (base64 of 20MB
+      // exceeds MongoDB's 16MB BSON cap) — Meraaj-hosted 20MB docs are unaffected (external_url).
+      const upBU = parseDocUpload(bBU, T, 'booking-docs', 10 * 1024 * 1024)
       if (upBU.error) return bad(upBU.error)
       await docStoragePut(db, T, upBU.objectKey, upBU.base64, upBU.contentType, upBU.size)
       const docBU = {
@@ -7246,14 +7252,21 @@ async function docAuditLog(db, T, action, docId, actor, meta = {}) {
   try { await db.collection('document_audit').insertOne({ id: uuidv4(), tenant_id: T, doc_id: docId, action, actor: String(actor || '').slice(0, 160), meta, at: new Date() }) } catch { /* audit must never break the request */ }
 }
 // Upload payload validation: MIME whitelist + size cap + random object key
-function parseDocUpload(b, T, prefix) {
+// v3.85 — maxBytes is overridable per path (booking/integration docs allow more than the default)
+function parseDocUpload(b, T, prefix, maxBytes = DOC_MAX_BYTES) {
   const contentType = String(b.content_type || '').toLowerCase().trim()
   const ext = DOC_ALLOWED_MIME[contentType]
   if (!ext) return { error: `نوع الملف غير مسموح — المسموح: PDF / JPG / PNG / WEBP (المستلم: ${contentType || 'غير محدد'})` }
   const raw = String(b.file_base64 || '').replace(/^data:[^;]+;base64,/, '')
-  if (!raw || !/^[A-Za-z0-9+/=]+$/.test(raw)) return { error: 'محتوى الملف (file_base64) مفقود أو غير صالح' }
+  // v3.85 — validate base64 in 1MB slices: RegExp.test on one very large string can overflow
+  // V8's call stack (RangeError) — sliced checks behave identically and are safe at any size.
+  let rawValid = raw.length > 0
+  for (let vi = 0; vi < raw.length && rawValid; vi += 1024 * 1024) {
+    if (!/^[A-Za-z0-9+/=]+$/.test(raw.slice(vi, vi + 1024 * 1024))) rawValid = false
+  }
+  if (!rawValid) return { error: 'محتوى الملف (file_base64) مفقود أو غير صالح' }
   const size = Math.floor(raw.length * 0.75)
-  if (size > DOC_MAX_BYTES) return { error: `حجم الملف يتجاوز الحد (${(DOC_MAX_BYTES / 1024 / 1024).toFixed(0)}MB)` }
+  if (size > maxBytes) return { error: `حجم الملف يتجاوز الحد (${(maxBytes / 1024 / 1024).toFixed(0)}MB)` }
   if (size < 100) return { error: 'الملف فارغ أو تالف' }
   const filename = String(b.filename || `document.${ext}`).replace(/[^\w\u0600-\u06FF .()\-]/g, '').slice(0, 120) || `document.${ext}`
   const objectKey = `${prefix}/${T}/${uuidv4()}.${ext}` // random object key — never user-controlled
