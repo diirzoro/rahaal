@@ -103,3 +103,11 @@ See /app/memory/test_credentials.md
 - GitHub main verified to contain: SSO/account-link, document-proxy + Live's approved viewer (selectBookingDocs/docUploadProgress — NOT the v3.84 DocBatchUpload staged component), validateDocBatch 10MB/20MB limits, isFutureDocDate + DocDateInput, bulk-edit passenger/beneficiary fixes, AccountAutocomplete, full cancellation/escrow policy.
 - NOT in GitHub main (team's consolidation choices, do NOT re-add unless asked): DocBatchUpload staged size meter, chunked blob storage (unneeded at 10MB/file), sliced base64 regex validation.
 - FUTURE RULE: treat GitHub main as the reference; do not resurrect older workspace behavior over it.
+
+## v3.85 — Meraaj inbound documents: receive & display hardening (2026-08)
+Scope: documents only (no accounting/escrow/cancellation/HMAC contract changes).
+- FE FIX (the 401 bug): fetchBookingDocBlob used credentials:'omit' → session cookie never sent → Download/Print returned 401 for authorized users while <img>/<iframe> preview worked. Now 'same-origin'.
+- Ingestion (booking.created + documents_updated): doc_type whitelist extended to passport/visa/ticket/photo/other (was coercing ticket/photo → other); URL cap 600→2048 chars (long Meraaj signed URLs were silently corrupted). Office POST accepts ticket/photo too. FE BK_DOC_LABELS + 🎫/🖼️.
+- parseDocUpload: per-call maxBytes param + sliced (1MB) base64 validation (whole-string RegExp.test overflows V8 stack on big files). Booking/integration docs path now 10MB/file server-side (was 4MB → FE said 10MB but BE rejected 5-10MB scans). Other upload paths unchanged (4MB default).
+- 20MB Meraaj files: inbound refs are external_url metadata (no size check) and /document-proxy/:id external fetch cap is 20MB → Rahaal never rejects a valid ≤20MB Meraaj doc. NOTE: true 20MB OFFICE-side uploads would need chunked blob storage (16MB BSON cap) — intentionally NOT done (needs approval).
+- Focused test 13/13 PASSED (verify_meraaj_docs.py at repo root): real HMAC webhook ingestion (types kept, registrant+passport linkage, >600-char URL intact, bad idx skipped), 6MB upload OK / 11MB → 400 (10MB), list fields, download inline exact bytes+filename, /document-proxy local+external, 401 unauth, /meraaj/document-proxy guards (400/403/403/401).
