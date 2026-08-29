@@ -9359,7 +9359,7 @@ function MeraajStoreScreen() {
   const [docPendingFiles, setDocPendingFiles] = useState([])
   const [docUploadProgress, setDocUploadProgress] = useState({ current: 0, total: 0 })
   const [docPendingUrl, setDocPendingUrl] = useState('')
-  const BK_DOC_LABELS = { passport: '🛂 جواز', visa: '📄 تأشيرة', other: '📎 آخر' }
+  const BK_DOC_LABELS = { passport: '🛂 جواز', visa: '📄 تأشيرة', ticket: '🎫 تذكرة', photo: '🖼️ صورة', other: '📎 آخر' } // v3.85 — + ticket/photo (Meraaj types)
   const loadDocs = async (b) => {
     try {
       const r = await api(`/meraaj/inbound-bookings/${b.id}/documents`)
@@ -9406,7 +9406,11 @@ function MeraajStoreScreen() {
 
     const res = await fetch(url, {
       method: 'GET',
-      credentials: 'omit',
+      // v3.85 — FIX 401 on Download/Print for authorized users: all document endpoints sit
+      // behind session auth (rahaal_session cookie). 'omit' NEVER sends cookies — even
+      // same-origin — so every fetch-based blob request was rejected with 401 while
+      // <img>/<iframe> previews (which send cookies automatically) kept working.
+      credentials: 'same-origin',
       cache: 'no-store'
     })
 
