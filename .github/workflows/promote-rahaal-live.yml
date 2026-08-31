@@ -1,0 +1,161 @@
+name: Promote Rahaal Test to Live
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type PROMOTE to deploy the current tested Rahaal image to Live"
+        required: true
+        type: string
+
+concurrency:
+  group: rahaal-live-deploy
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'PROMOTE'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Prepare SSH
+        run: |
+          mkdir -p ~/.ssh
+
+          echo "${{ secrets.TEST_SERVER_SSH_KEY_B64 }}" \
+            | base64 -d > ~/.ssh/rahaal_deploy_key
+
+          chmod 600 ~/.ssh/rahaal_deploy_key
+
+          ssh-keyscan -H "${{ vars.TEST_SERVER_HOST }}" \
+            >> ~/.ssh/known_hosts
+
+      - name: Verify SSH
+        run: |
+          ssh \
+            -i ~/.ssh/rahaal_deploy_key \
+            "${{ vars.TEST_SERVER_USER }}@${{ vars.TEST_SERVER_HOST }}" \
+            "echo SSH_CONNECTION_OK"
+
+      - name: Promote tested Rahaal image to Live
+        run: |
+          ssh \
+            -i ~/.ssh/rahaal_deploy_key \
+            "${{ vars.TEST_SERVER_USER }}@${{ vars.TEST_SERVER_HOST }}" \
+            "TEST_CONTAINER='${{ vars.TEST_RAHAAL_CONTAINER }}' \
+             LIVE_CONTAINER='${{ vars.LIVE_RAHAAL_CONTAINER }}' \
+             LIVE_PORT='${{ vars.LIVE_RAHAAL_PORT }}' \
+             LIVE_ENV_FILE='${{ vars.LIVE_RAHAAL_ENV_FILE }}' \
+             bash -s" <<'REMOTE'
+
+          set -e
+
+          echo "===== CURRENT TEST ====="
+
+          TEST_IMAGE="$(docker inspect "$TEST_CONTAINER" --format '{{.Config.Image}}')"
+          TEST_IMAGE_ID="$(docker inspect "$TEST_CONTAINER" --format '{{.Image}}')"
+
+          echo "TEST_IMAGE=$TEST_IMAGE"
+          echo "TEST_IMAGE_ID=$TEST_IMAGE_ID"
+
+          if [ -z "$TEST_IMAGE_ID" ]; then
+            echo "ERROR: Cannot determine Test image"
+            exit 1
+          fi
+
+          echo
+          echo "===== VERIFY TEST IS HEALTHY ====="
+
+          TEST_PORT="$(docker inspect "$TEST_CONTAINER" \
+            --format '{{(index (index .HostConfig.PortBindings "3000/tcp") 0).HostPort}}')"
+
+          curl -fsS "http://127.0.0.1:${TEST_PORT}/" >/dev/null
+
+          echo "TEST HEALTH OK"
+
+          echo
+          echo "===== CURRENT LIVE ====="
+
+          OLD_LIVE_IMAGE_ID="$(docker inspect "$LIVE_CONTAINER" --format '{{.Image}}')"
+          OLD_LIVE_IMAGE_NAME="$(docker inspect "$LIVE_CONTAINER" --format '{{.Config.Image}}')"
+
+          echo "OLD_LIVE_IMAGE=$OLD_LIVE_IMAGE_NAME"
+          echo "OLD_LIVE_IMAGE_ID=$OLD_LIVE_IMAGE_ID"
+
+          echo
+          echo "===== CREATE ONE ROLLBACK ====="
+
+          docker image rm rahaal:rollback 2>/dev/null || true
+          docker tag "$OLD_LIVE_IMAGE_ID" rahaal:rollback
+
+          echo
+          echo "===== PROMOTE EXACT TEST IMAGE ====="
+
+          docker tag "$TEST_IMAGE_ID" rahaal:live-current
+
+          docker rm -f "$LIVE_CONTAINER"
+
+          docker run -d \
+            --name "$LIVE_CONTAINER" \
+            --restart unless-stopped \
+            --add-host=host.docker.internal:host-gateway \
+            --env-file "$LIVE_ENV_FILE" \
+            -p "127.0.0.1:${LIVE_PORT}:3000" \
+            rahaal:live-current
+
+          echo
+          echo "===== WAIT FOR LIVE ====="
+
+          sleep 15
+
+          echo
+          echo "===== LIVE HEALTH CHECK ====="
+
+          if curl -fsS "http://127.0.0.1:${LIVE_PORT}/" >/dev/null; then
+            echo "LIVE HEALTH OK"
+          else
+            echo "LIVE HEALTH FAILED - ROLLING BACK"
+
+            docker rm -f "$LIVE_CONTAINER" 2>/dev/null || true
+
+            docker run -d \
+              --name "$LIVE_CONTAINER" \
+              --restart unless-stopped \
+              --add-host=host.docker.internal:host-gateway \
+              --env-file "$LIVE_ENV_FILE" \
+              -p "127.0.0.1:${LIVE_PORT}:3000" \
+              rahaal:rollback
+
+            sleep 10
+
+            curl -fsS "http://127.0.0.1:${LIVE_PORT}/" >/dev/null
+
+            echo "ROLLBACK RESTORED"
+            exit 1
+          fi
+
+          echo
+          echo "===== VERIFY EXACT IMAGE ====="
+
+          NEW_LIVE_ID="$(docker inspect "$LIVE_CONTAINER" --format '{{.Image}}')"
+
+          echo "TEST_IMAGE_ID=$TEST_IMAGE_ID"
+          echo "LIVE_IMAGE_ID=$NEW_LIVE_ID"
+
+          if [ "$NEW_LIVE_ID" != "$TEST_IMAGE_ID" ]; then
+            echo "ERROR: Live image does not match tested image"
+            exit 1
+          fi
+
+          echo
+          echo "===== FINAL STATE ====="
+
+          docker ps \
+            --filter "name=$LIVE_CONTAINER" \
+            --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+
+          echo
+          echo "RAHAAL PROMOTION SUCCESS"
+          echo "One rollback retained as rahaal:rollback"
+
+          REMOTE
