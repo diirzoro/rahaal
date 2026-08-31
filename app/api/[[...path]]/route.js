@@ -52,39 +52,71 @@ function getTransferRate(rates, cur) {
 const emptyBalances = () => ({ USD: 0, SAR: 0, YER: 0 })
 const SESSION_DAYS = 14
 
+// ================= v3.87 — CENTRAL SEMANTIC ACCOUNT MAP =================
+// Business logic must NEVER hardcode account numbers — it references the MEANING
+// (COA.CLIENTS, COA.SUPPLIERS, ...) and the actual code lives HERE, in one place.
+// Renumbering the chart later = editing this map only.
+// Hierarchy: L1=1 digit, L2=2, L3=4, L4=7 (terminal — journal lines post on L4/leaves).
+const COA = {
+  ASSETS: '1', CURRENT_ASSETS: '11', FIXED_ASSETS: '12',
+  CASHBOXES: '1101', BANKS: '1102', CLIENTS: '1103',
+  LIABILITIES: '2', CURRENT_LIABS: '21', LONGTERM_LIABS: '22', SUPPLIERS: '2101',
+  EQUITY: '3', EQUITY_GROUP: '31', CAPITAL: '3101', RETAINED_EARNINGS: '3102', OPENING_EQUITY: '3103',
+  REVENUES: '4', REV_GROUP: '41',
+  REV_TICKETS: '4101', REV_VISAS: '4102', REV_SERVICES: '4103', FX_PNL: '4104', REV_CANCEL_FEES: '4105',
+  EXPENSES: '5', OPEX_GROUP: '51', ADMIN_GROUP: '52', COMM_DIFF_GROUP: '53', OPEX: '5101', FX_ADJUST: '5201',
+}
+const OPENING_EQUITY_NAME = 'تسوية الأرصدة الافتتاحية'
+// v3.87 — numeric rounding helper (2 decimals)
+const round2n = (n) => Math.round((Number(n) || 0) * 100) / 100
+
 // ================= Seeding =================
+// v3.87 — the COA tree seeding is a standalone function so the REBUILD endpoint can
+// re-create the tree for an EXISTING tenant without duplicating boxes/settings.
+async function seedCoaTree(db, t) {
+  const acc = db.collection('accounts')
+  const now = new Date()
+  // v3.87 — CORRECT hierarchical tree: every child code starts with its parent's prefix.
+  // Currency is a DIMENSION inside box/party balances — NEVER a level in this tree.
+  const g = (code, name_ar, type, parent, extra = {}) => ({ id: uuidv4(), tenant_id: t, code, name_ar, type, parent, is_group: true, created_at: now, ...extra })
+  const leaf = (code, name_ar, type, parent, extra = {}) => ({ id: uuidv4(), tenant_id: t, code, name_ar, type, parent, is_group: false, created_at: now, ...extra })
+  await acc.insertMany([
+    g(COA.ASSETS, 'الأصول', 'asset', null),
+    g(COA.CURRENT_ASSETS, 'الأصول المتداولة', 'asset', COA.ASSETS),
+    g(COA.CASHBOXES, 'الصناديق', 'asset', COA.CURRENT_ASSETS, { next_child_seq: 1 }),
+    g(COA.BANKS, 'البنوك والمحافظ', 'asset', COA.CURRENT_ASSETS, { next_child_seq: 1 }),
+    g(COA.CLIENTS, 'العملاء / ذمم مدينة', 'asset', COA.CURRENT_ASSETS),
+    g(COA.FIXED_ASSETS, 'الأصول الثابتة / غير المتداولة', 'asset', COA.ASSETS),    g(COA.LIABILITIES, 'الخصوم / الالتزامات', 'liability', null),
+    g(COA.CURRENT_LIABS, 'الالتزامات المتداولة', 'liability', COA.LIABILITIES),
+    g(COA.SUPPLIERS, 'الموردون والوكلاء (دائنون)', 'liability', COA.CURRENT_LIABS),
+    g(COA.LONGTERM_LIABS, 'الالتزامات طويلة الأجل / غير المتداولة', 'liability', COA.LIABILITIES),
+    g(COA.EQUITY, 'حقوق الملكية', 'equity', null),
+    g(COA.EQUITY_GROUP, 'رأس المال وحقوق الملكية', 'equity', COA.EQUITY),
+    leaf(COA.CAPITAL, 'رأس المال', 'equity', COA.EQUITY_GROUP),
+    leaf(COA.RETAINED_EARNINGS, 'الأرباح المبقاة', 'equity', COA.EQUITY_GROUP),
+    leaf(COA.OPENING_EQUITY, OPENING_EQUITY_NAME, 'equity', COA.EQUITY_GROUP, { is_system: true }),
+    g(COA.REVENUES, 'الإيرادات', 'revenue', null),
+    g(COA.REV_GROUP, 'إيرادات النشاط', 'revenue', COA.REVENUES),
+    leaf(COA.REV_TICKETS, 'إيرادات عمولات التذاكر', 'revenue', COA.REV_GROUP),
+    leaf(COA.REV_VISAS, 'إيرادات عمولات التأشيرات والموافقات', 'revenue', COA.REV_GROUP),
+    leaf(COA.REV_SERVICES, 'إيرادات خدمات إضافية', 'revenue', COA.REV_GROUP),
+    leaf(COA.FX_PNL, 'أرباح وخسائر فروق العملات (مصارفة)', 'revenue', COA.REV_GROUP),
+    leaf(COA.REV_CANCEL_FEES, 'رسوم إلغاء واسترداد', 'revenue', COA.REV_GROUP),
+    g(COA.EXPENSES, 'المصروفات', 'expense', null),
+    g(COA.OPEX_GROUP, 'مصاريف تشغيلية', 'expense', COA.EXPENSES),
+    g(COA.ADMIN_GROUP, 'مصاريف إدارية وعمومية', 'expense', COA.EXPENSES),
+    g(COA.COMM_DIFF_GROUP, 'فروق العمولات', 'expense', COA.EXPENSES),
+    g(COA.OPEX, 'مصاريف تشغيلية (تفصيلي)', 'expense', COA.OPEX_GROUP),
+    leaf(COA.FX_ADJUST, 'فروق عملة وتسويات', 'expense', COA.ADMIN_GROUP),
+  ])
+}
 async function seedTenantDefaults(db, tenantId) {
   const acc = db.collection('accounts')
   const has = await acc.findOne({ tenant_id: tenantId })
   if (has) return
-  const now = new Date()
   const t = tenantId
-  await acc.insertMany([
-    { id: uuidv4(), tenant_id: t, code: '1', name_ar: 'الأصول', type: 'asset', parent: null, is_group: true, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '11', name_ar: 'الأصول المتداولة', type: 'asset', parent: '1', is_group: true, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '1101', name_ar: 'صندوق دولار', type: 'asset', parent: '11', is_group: false, currency: 'USD', created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '1102', name_ar: 'صندوق ريال سعودي', type: 'asset', parent: '11', is_group: false, currency: 'SAR', created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '1103', name_ar: 'صندوق ريال يمني', type: 'asset', parent: '11', is_group: false, currency: 'YER', created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '1201', name_ar: 'حسابات بنكية / محافظ', type: 'asset', parent: '11', is_group: true, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '1301', name_ar: 'العملاء (مدينون)', type: 'asset', parent: '11', is_group: true, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '2', name_ar: 'الخصوم', type: 'liability', parent: null, is_group: true, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '2101', name_ar: 'الموردون والوكلاء (دائنون)', type: 'liability', parent: '2', is_group: true, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '4', name_ar: 'الإيرادات', type: 'revenue', parent: null, is_group: true, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '4101', name_ar: 'إيرادات عمولات التذاكر', type: 'revenue', parent: '4', is_group: false, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '4102', name_ar: 'إيرادات عمولات التأشيرات والموافقات', type: 'revenue', parent: '4', is_group: false, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '4103', name_ar: 'إيرادات خدمات إضافية', type: 'revenue', parent: '4', is_group: false, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '4105', name_ar: 'رسوم إلغاء واسترداد', type: 'revenue', parent: '4', is_group: false, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '4104', name_ar: 'أرباح وخسائر فروق العملات (مصارفة)', type: 'revenue', parent: '4', is_group: false, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '5', name_ar: 'المصروفات', type: 'expense', parent: null, is_group: true, created_at: now },
-    // v3.10.7 — Restructured expenses per user COA requirements:
-    //   51 = مصاريف تشغيلية,  52 = مصاريف إدارية عمومية,  53 = فروق العمولات
-    { id: uuidv4(), tenant_id: t, code: '51', name_ar: 'مصاريف تشغيلية', type: 'expense', parent: '5', is_group: true, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '52', name_ar: 'مصاريف إدارية عمومية', type: 'expense', parent: '5', is_group: true, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '53', name_ar: 'فروق العمولات', type: 'expense', parent: '5', is_group: true, created_at: now },
-    // Legacy 4-digit expense sub-accounts kept for backward compatibility with existing data
-    { id: uuidv4(), tenant_id: t, code: '5101', name_ar: 'مصاريف تشغيلية (تفصيلي)', type: 'expense', parent: '51', is_group: true, created_at: now },
-    { id: uuidv4(), tenant_id: t, code: '5201', name_ar: 'فروق عملة وتسويات', type: 'expense', parent: '52', is_group: false, created_at: now },
-  ])
+  const now = new Date()
+  await seedCoaTree(db, t)
   // v3.0 — Seed default dynamic service catalog for the Services module
   await db.collection('service_types').insertMany([
     { id: uuidv4(), tenant_id: t, name: 'حجز فندق', active: true, created_at: now },
@@ -93,9 +125,13 @@ async function seedTenantDefaults(db, tenantId) {
     { id: uuidv4(), tenant_id: t, name: 'خدمات متنوعة', active: true, created_at: now },
   ])
   await db.collection('boxes').insertMany([
-    { id: uuidv4(), tenant_id: t, name_ar: 'الصندوق الرئيسي', type: 'cash', balances: emptyBalances(), created_at: new Date() },
-    { id: uuidv4(), tenant_id: t, name_ar: 'حساب بنكي / محفظة', type: 'bank', balances: emptyBalances(), created_at: new Date() },
+    // v3.87 — boxes are L4 leaf accounts under COA.CASHBOXES/COA.BANKS, and each single box
+    // holds MULTI-CURRENCY balances (balances.SAR/USD/YER) — never one box per currency.
+    { id: uuidv4(), tenant_id: t, name_ar: 'الصندوق الرئيسي', type: 'cash', parent_code: COA.CASHBOXES, account_code: `${COA.CASHBOXES}001`, account_parent_code: COA.CASHBOXES, account_seq: 1, balances: emptyBalances(), created_at: new Date() },
+    { id: uuidv4(), tenant_id: t, name_ar: 'حساب بنكي / محفظة', type: 'bank', parent_code: COA.BANKS, account_code: `${COA.BANKS}001`, account_parent_code: COA.BANKS, account_seq: 1, balances: emptyBalances(), created_at: new Date() },
   ])
+  // NOTE: next_child_seq stores the LAST USED sequence (the generator increments first) —
+  // seed boxes consumed seq 1 under CASHBOXES/BANKS, so the stored value stays 1.
   await db.collection('tenant_settings').insertOne({
     id: uuidv4(), tenant_id: t,
     agency_name: '', logo_base64: '', header: '', footer: '', tax_id: '', commercial_id: '',
@@ -206,21 +242,21 @@ async function seedInitial(db) {
   // Migration: ensure FX 4104 account exists for every tenant
   const allTenants = await db.collection('tenants').find({}).toArray()
   for (const tn of allTenants) {
-    const has = await db.collection('accounts').findOne({ tenant_id: tn.id, code: '4104' })
+    const has = await db.collection('accounts').findOne({ tenant_id: tn.id, code: COA.FX_PNL })
     if (!has) {
       await db.collection('accounts').insertOne({
-        id: uuidv4(), tenant_id: tn.id, code: '4104',
+        id: uuidv4(), tenant_id: tn.id, code: COA.FX_PNL,
         name_ar: 'أرباح وخسائر فروق العملات (مصارفة)',
-        type: 'revenue', parent: '4', is_group: false, created_at: new Date(),
+        type: 'revenue', parent: COA.REV_GROUP, is_group: false, created_at: new Date(),
       })
     }
     // v3.5 — Backfill 4105 (refund fees) if missing
-    const hasRefund = await db.collection('accounts').findOne({ tenant_id: tn.id, code: '4105' })
+    const hasRefund = await db.collection('accounts').findOne({ tenant_id: tn.id, code: COA.REV_CANCEL_FEES })
     if (!hasRefund) {
       await db.collection('accounts').insertOne({
-        id: uuidv4(), tenant_id: tn.id, code: '4105',
+        id: uuidv4(), tenant_id: tn.id, code: COA.REV_CANCEL_FEES,
         name_ar: 'رسوم إلغاء واسترداد',
-        type: 'revenue', parent: '4', is_group: false, created_at: new Date(),
+        type: 'revenue', parent: COA.REV_GROUP, is_group: false, created_at: new Date(),
       })
     }
     if (!tn.journal_quota) {
@@ -452,27 +488,48 @@ async function updateBalance(db, col, filter, currency, delta) {
 //   L4 = 7 digits (e.g. 1201001 = صندوق سالم) -> 3-digit sequence appended to L3
 //   L4 is a TERMINAL node — creating children under an L4 code is FORBIDDEN.
 // Returns new account_code in form: <parent_code><padded-sequence>
+// v3.87 — an account code must be unique across the COA *and* all party account codes
+async function accountCodeExists(db, tenantId, code) {
+  const [a, c, s, b] = await Promise.all([
+    db.collection('accounts').findOne({ tenant_id: tenantId, code }),
+    db.collection('clients').findOne({ tenant_id: tenantId, account_code: code }),
+    db.collection('suppliers').findOne({ tenant_id: tenantId, account_code: code }),
+    db.collection('boxes').findOne({ tenant_id: tenantId, account_code: code }),
+  ])
+  return !!(a || c || s || b)
+}
 async function generateSubAccountCode(db, tenantId, parentCode) {
   const parentStr = String(parentCode)
   // v3.10.7 — Terminal node protection: L4 (7-digit) accounts cannot have children.
   if (parentStr.length >= 7) {
     throw new Error(`الحساب ${parentStr} حساب تحليلي نهائي (Level 4) — لا يمكن إنشاء حسابات فرعية تحته. القيود المحاسبية فقط تتم على هذا المستوى.`)
   }
-  const parent = await db.collection('accounts').findOneAndUpdate(
-    { tenant_id: tenantId, code: parentStr },
-    { $inc: { next_child_seq: 1 }, $set: { is_parent: true } },
-    { returnDocument: 'after' }
-  )
-  const parentDoc = parent?.value || parent
-  if (!parentDoc) throw new Error(`الحساب الأب ${parentStr} غير موجود في الدليل`)
-  const seq = parentDoc.next_child_seq || 1
-  // Determine padding based on parent level:
-  //   parent L1 (1 digit) -> child L2 = 1-digit sequence appended -> total 2 digits
-  //   parent L2 (2 digits) -> child L3 = 2-digit sequence appended -> total 4 digits
-  //   parent L3 (4 digits) -> child L4 = 3-digit sequence appended -> total 7 digits
+  // Level scheme: L1=1 → L2=2 → L3=4 → L4=7 digits. Child = parent prefix + padded sequence,
+  // so a child ALWAYS starts with its parent's code — by construction.
   const parentLen = parentStr.length
-  const seqPad = parentLen === 1 ? 1 : parentLen === 2 ? 2 : parentLen === 4 ? 3 : 3
-  const newCode = parentStr + String(seq).padStart(seqPad, '0')
+  const seqPad = parentLen === 1 ? 1 : parentLen === 2 ? 2 : 3
+  const seqCap = parentLen === 1 ? 9 : parentLen === 2 ? 99 : 999
+  const bump = async () => {
+    const r = await db.collection('accounts').findOneAndUpdate(
+      { tenant_id: tenantId, code: parentStr },
+      { $inc: { next_child_seq: 1 }, $set: { is_parent: true } },
+      { returnDocument: 'after' }
+    )
+    const doc = r?.value || r
+    if (!doc) throw new Error(`الحساب الأب ${parentStr} غير موجود في الدليل`)
+    return doc.next_child_seq || 1
+  }
+  let seq = await bump()
+  let newCode = parentStr + String(seq).padStart(seqPad, '0')
+  // v3.87 — collision-skip: legacy/manually-created codes never break the generator
+  let guard = 0
+  while (await accountCodeExists(db, tenantId, newCode)) {
+    if (++guard > 500) throw new Error('تعذر توليد رمز حساب — تواصل مع الدعم')
+    seq = await bump()
+    if (seq > seqCap) throw new Error(`امتلأ تسلسل الفرع ${parentStr} (الحد ${seqCap} حساباً) — أنشئ مجموعة جديدة`)
+    newCode = parentStr + String(seq).padStart(seqPad, '0')
+  }
+  if (seq > seqCap) throw new Error(`امتلأ تسلسل الفرع ${parentStr} (الحد ${seqCap} حساباً) — أنشئ مجموعة جديدة`)
   return {
     account_code: newCode,
     account_parent_code: parentStr,
@@ -1140,11 +1197,11 @@ async function handleRoute(request, { params }) {
                     settleLines.push({ ...l, debit: amtC, credit: amtD }) // client + revenue: full mirror
                   }
                 }
-                if (cKept > 0) settleLines.push({ account_code: '5101', account_name: 'مصاريف تشغيلية', party_type: 'expense', party_id: null, party_name: `خدمات منفذة لحجز معراج ملغى ${inbound.meraaj_booking_ref || ''}`, debit: cKept, credit: 0 })
+                if (cKept > 0) settleLines.push({ account_code: COA.OPEX, account_name: 'مصاريف تشغيلية', party_type: 'expense', party_id: null, party_name: `خدمات منفذة لحجز معراج ملغى ${inbound.meraaj_booking_ref || ''}`, debit: cKept, credit: 0 })
                 if (S74 > 0) {
                   const cliLine = origJe.lines.find(l => l.party_type === 'client')
-                  settleLines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cliLine?.party_id || inbound.client_id, party_name: cliLine?.party_name || inbound.client_name, debit: S74, credit: 0 })
-                  settleLines.push({ account_code: '4105', account_name: 'رسوم إلغاء واسترداد', party_type: 'revenue', party_id: null, party_name: `تعويض إلغاء معراج ${inbound.meraaj_booking_ref || ''} — قرار ${decidedBy}`, debit: 0, credit: S74 })
+                  settleLines.push({ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: cliLine?.party_id || inbound.client_id, party_name: cliLine?.party_name || inbound.client_name, debit: S74, credit: 0 })
+                  settleLines.push({ account_code: COA.REV_CANCEL_FEES, account_name: 'رسوم إلغاء واسترداد', party_type: 'revenue', party_id: null, party_name: `تعويض إلغاء معراج ${inbound.meraaj_booking_ref || ''} — قرار ${decidedBy}`, debit: 0, credit: S74 })
                 }
                 await createJournalEntry(db, T74, {
                   date: nowF, // current OPEN period — locked periods are never touched (closed_until is always past-dated)
@@ -3797,24 +3854,24 @@ async function handleRoute(request, { params }) {
       if (wasCash && box) {
         // Client got their money back from box: reduce box balance by refundToClient
         await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, -refundToClient)
-        refundJeLines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: 0, credit: refundToClient })
+        refundJeLines.push({ account_code: box.type === 'cash' ? COA.CASHBOXES : COA.BANKS, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: 0, credit: refundToClient })
       }
       // Refund JE — reversal + fees
       // Client side: retained on account (they still owe us penalty + fee) — Debit client
-      if (clientRetained > 0) refundJeLines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: orig.client_id, party_name: orig.client_name, debit: clientRetained, credit: 0 })
+      if (clientRetained > 0) refundJeLines.push({ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: orig.client_id, party_name: orig.client_name, debit: clientRetained, credit: 0 })
       // Supplier: they keep supplier_penalty — Credit supplier
-      if (supplierPenalty > 0) refundJeLines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: orig.supplier_id, party_name: orig.supplier_name, debit: 0, credit: supplierPenalty })
+      if (supplierPenalty > 0) refundJeLines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: orig.supplier_id, party_name: orig.supplier_name, debit: 0, credit: supplierPenalty })
       // Office fee: revenue 4104
-      if (officeFee > 0) refundJeLines.push({ account_code: '4105', account_name: 'رسوم إلغاء واسترداد', party_type: 'revenue', party_id: null, party_name: 'رسوم استرداد', debit: 0, credit: officeFee })
+      if (officeFee > 0) refundJeLines.push({ account_code: COA.REV_CANCEL_FEES, account_name: 'رسوم إلغاء واسترداد', party_type: 'revenue', party_id: null, party_name: 'رسوم استرداد', debit: 0, credit: officeFee })
       // For non-cash refunds, we need a balancing line since debit=clientRetained, credit=supplierPenalty+officeFee=clientRetained (already balanced!) ✓
       // For cash refunds: debit clientRetained, credit refundToClient+supplierPenalty+officeFee = refundToClient + clientRetained = sale ✓ hmm — need also to debit revenue 4101 for reversal
       // Actually simpler: on cash refunds, add a debit line reversing sale
       if (wasCash) {
         // Reverse the original sale-side revenue that we had. Debit revenue by the commission (loss of earned commission).
-        if (commission > 0) refundJeLines.push({ account_code: refType === 'ticket' ? '4101' : refType === 'visa' ? '4102' : '4103', account_name: 'إيرادات (عكس)', party_type: 'revenue', party_id: null, party_name: 'عكس إيراد الحجز', debit: commission, credit: 0 })
+        if (commission > 0) refundJeLines.push({ account_code: refType === 'ticket' ? COA.REV_TICKETS : refType === 'visa' ? COA.REV_VISAS : COA.REV_SERVICES, account_name: 'إيرادات (عكس)', party_type: 'revenue', party_id: null, party_name: 'عكس إيراد الحجز', debit: commission, credit: 0 })
         // And debit cost as expense reversal (we no longer owe supplier full cost — supplier keeps only penalty)
         const supplierReturned = +(cost - supplierPenalty).toFixed(2)
-        if (supplierReturned > 0) refundJeLines.push({ account_code: '2101', account_name: 'استرجاع من المورد', party_type: 'supplier', party_id: orig.supplier_id, party_name: orig.supplier_name, debit: supplierReturned, credit: 0 })
+        if (supplierReturned > 0) refundJeLines.push({ account_code: COA.SUPPLIERS, account_name: 'استرجاع من المورد', party_type: 'supplier', party_id: orig.supplier_id, party_name: orig.supplier_name, debit: supplierReturned, credit: 0 })
       }
 
       await createJournalEntry(db, T, {
@@ -4730,21 +4787,21 @@ async function handleRoute(request, { params }) {
         await db.collection('package_transports').updateOne({ id: newTransport.id, tenant_id: T }, { $set: { seats_booked: newBooked, status: newStatus } })
       }
       const lines = []
-      if (newPay === 'cash') lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
-      else lines.push({ account_code: '1301', account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
+      if (newPay === 'cash') lines.push({ account_code: box.type === 'cash' ? COA.CASHBOXES : COA.BANKS, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
+      else lines.push({ account_code: COA.CLIENTS, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
       const supGrouped = {}
       for (const c of newSnapshots) {
         if (!c.supplier_id || !c.cost_total) continue
         supGrouped[c.supplier_id] = supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }
         supGrouped[c.supplier_id].amount += c.cost_total
       }
-      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
+      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
       // v3.19 — Balanced JE: revenue = sale - Σ(supplier credits) - partnerShare (mirrors POST logic)
       const supSumJE = +Object.values(supGrouped).reduce((s, x) => s + +x.amount.toFixed(2), 0).toFixed(2)
       const commissionJE = +(total_sale - supSumJE).toFixed(2)
       const revenueNet = +(commissionJE - newPartnerShare).toFixed(2)
-      if (revenueNet !== 0) lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkgDoc.name}`, debit: 0, credit: revenueNet })
-      if (newPartnerShare > 0) lines.push({ account_code: pcType === 'supplier' ? '2101' : '1301', account_name: pcType === 'supplier' ? 'الموردون' : 'العملاء', party_type: pcType, party_id: pcId, party_name: pcName || 'شريك عمولة', debit: 0, credit: newPartnerShare })
+      if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkgDoc.name}`, debit: 0, credit: revenueNet })
+      if (newPartnerShare > 0) lines.push({ account_code: pcType === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS, account_name: pcType === 'supplier' ? 'الموردون' : 'العملاء', party_type: pcType, party_id: pcId, party_name: pcName || 'شريك عمولة', debit: 0, credit: newPartnerShare })
       await createJournalEntry(db, T, {
         date: oldJe?.date || updatedBooking.created_at || new Date(),
         description: `تسجيل ${updatedBooking.pilgrim_name} في ${pkgDoc.name} — ${newPax} فرد (تعديل)${newPartnerShare > 0 ? ` — عمولة مشتركة ${newPartnerShare} مع ${pcName || 'شريك'}` : ''}`,
@@ -4958,16 +5015,16 @@ async function handleRoute(request, { params }) {
       }
       // Single combined JE — mathematically balanced: revenue = sale - Σ(supplier credits) - partnerShare
       const lines = []
-      if (payMethod === 'cash') lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
-      else lines.push({ account_code: '1301', account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
+      if (payMethod === 'cash') lines.push({ account_code: box.type === 'cash' ? COA.CASHBOXES : COA.BANKS, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
+      else lines.push({ account_code: COA.CLIENTS, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
       const supGrouped = {}
       for (let i = 0; i < comps.length; i++) { const c = comps[i]; supGrouped[c.supplier_id] = (supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }); supGrouped[c.supplier_id].amount += compTotals[i].cost_total * costFactor }
       let supSum = 0
-      for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
+      for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
       const commissionJE = +(total_sale - supSum).toFixed(2)
       const revenueNet = +(commissionJE - partnerShare).toFixed(2)
-      if (revenueNet !== 0) lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name}`, debit: 0, credit: revenueNet })
-      if (partnerShare > 0) lines.push({ account_code: bookingDoc.commission_partner_type === 'supplier' ? '2101' : '1301', account_name: bookingDoc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: bookingDoc.commission_partner_type, party_id: bookingDoc.commission_partner_id, party_name: bookingDoc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+      if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name}`, debit: 0, credit: revenueNet })
+      if (partnerShare > 0) lines.push({ account_code: bookingDoc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS, account_name: bookingDoc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: bookingDoc.commission_partner_type, party_id: bookingDoc.commission_partner_id, party_name: bookingDoc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
       await createJournalEntry(db, T, {
         date: new Date(), description: `تسجيل ${bookingDoc.pilgrim_name} في ${pkg.name} — ${pax} فرد${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${bookingDoc.commission_partner_name}` : ''}`,
         ref_type: 'package_booking', ref_id: bookingDoc.id, currency: cur, lines,
@@ -5063,9 +5120,9 @@ async function handleRoute(request, { params }) {
         db.collection('accounts').find(tf).sort({ code: 1 }).toArray(),
       ])
       const list = [
-        ...clients.map(c => ({ kind: 'client', id: c.id, code: '1301', name: c.name, group: 'العملاء', balances: c.balances })),
-        ...suppliers.map(s => ({ kind: 'supplier', id: s.id, code: '2101', name: s.name, group: 'الموردون', balances: s.balances })),
-        ...boxes.map(b => ({ kind: 'box', id: b.id, code: b.type === 'cash' ? '1101' : '1201', name: b.name_ar, group: b.type === 'cash' ? 'الصناديق' : 'البنوك', balances: b.balances })),
+        ...clients.map(c => ({ kind: 'client', id: c.id, code: COA.CLIENTS, name: c.name, group: 'العملاء', balances: c.balances })),
+        ...suppliers.map(s => ({ kind: 'supplier', id: s.id, code: COA.SUPPLIERS, name: s.name, group: 'الموردون', balances: s.balances })),
+        ...boxes.map(b => ({ kind: 'box', id: b.id, code: b.type === 'cash' ? COA.CASHBOXES : COA.BANKS, name: b.name_ar, group: b.type === 'cash' ? 'الصناديق' : 'البنوك', balances: b.balances })),
         ...coa.map(a => ({ kind: 'account', id: a.id, code: a.code, name: a.name_ar || a.name, group: a.type || 'دليل الحسابات' })),
       ]
       return ok(list)
@@ -5115,7 +5172,7 @@ async function handleRoute(request, { params }) {
     if (route === '/clients' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم العميل مطلوب')
-      const parent_code = String(b.parent_code || '1301') // v3.9.3 — default to العملاء (مدينون)
+      const parent_code = String(b.parent_code || COA.CLIENTS) // v3.9.3 — default to العملاء (مدينون)
       let accountInfo = {}
       try { accountInfo = await generateSubAccountCode(db, T, parent_code) } catch (e) { return bad(e.message) }
       const doc = {
@@ -5154,7 +5211,7 @@ async function handleRoute(request, { params }) {
     if (route === '/suppliers' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم المورد مطلوب')
-      const parent_code = String(b.parent_code || '2101') // v3.9.3 — default to الموردون والوكلاء (دائنون)
+      const parent_code = String(b.parent_code || COA.SUPPLIERS) // v3.9.3 — default to الموردون والوكلاء (دائنون)
       let accountInfo = {}
       try { accountInfo = await generateSubAccountCode(db, T, parent_code) } catch (e) { return bad(e.message) }
       const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', parent_code, ...accountInfo, balances: emptyBalances(), created_at: new Date() }
@@ -5192,7 +5249,7 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       if (!b.name_ar) return bad('اسم الصندوق مطلوب')
       const type = b.type || 'cash'
-      const defaultParent = type === 'cash' ? '1101' : '1201' // 1101=صندوق, 1201=حسابات بنكية
+      const defaultParent = type === 'cash' ? COA.CASHBOXES : COA.BANKS // 1101=صندوق, 1201=حسابات بنكية
       const parent_code = String(b.parent_code || defaultParent)
       let accountInfo = {}
       try { accountInfo = await generateSubAccountCode(db, T, parent_code) } catch (e) { return bad(e.message) }
@@ -5565,7 +5622,7 @@ async function handleRoute(request, { params }) {
         const accs = await db.collection('accounts').find({ tenant_id: T }).toArray()
         accs.forEach(a => {
           // Skip group-parents already served via sub-entities (client/supplier/box parents)
-          if (['1101', '1201', '1301', '2101'].includes(a.code)) return
+          if ([COA.CASHBOXES, COA.BANKS, COA.CLIENTS, COA.SUPPLIERS].includes(a.code)) return
           if (acctTypeF && a.type !== acctTypeF) return // v3.79 — expense/revenue scoped selectors
           const label = (a.name_ar || '').toLowerCase()
           const code = (a.code || '').toLowerCase()
@@ -5628,46 +5685,36 @@ async function handleRoute(request, { params }) {
     if (route === '/accounts' && method === 'POST') {
       const b = await request.json()
       if (!b.name_ar || !b.type) return bad('الاسم والنوع مطلوبان')
-      // v3.79 — AUTO CODE: when code is omitted, generate the next child code under the parent
-      // (inline quick-add from the unified Account Selector). Parent = classification only.
-      let code = b.code ? String(b.code) : ''
-      if (!code) {
-        if (!b.parent) return bad('الرمز مطلوب — أو حدد الحساب الأب ليُولَّد الرمز تلقائياً')
-        const parentStr = String(b.parent)
+      // v3.87 — HIERARCHICAL CODING (hard rule): a child's code ALWAYS starts with its
+      // parent's prefix. Auto-generation delegates to generateSubAccountCode (atomic,
+      // collision-safe, level-aware). Manual codes are validated against the same rules.
+      let code = b.code ? String(b.code).trim() : ''
+      const parentStr = b.parent ? String(b.parent) : null
+      if (parentStr) {
         const pAcc = await db.collection('accounts').findOne({ tenant_id: T, code: parentStr })
         if (!pAcc) return bad('الحساب الأب غير موجود')
-        const kids = await db.collection('accounts').find({ tenant_id: T, parent: parentStr }).project({ code: 1 }).toArray()
-        const nums = kids.map(k => Number(k.code)).filter(n => Number.isFinite(n))
-        let candidate = nums.length ? Math.max(...nums) + 1 : Number(`${parentStr}01`)
-        for (let i = 0; i < 200; i++) { // skip collisions with any existing account_code
-          const cStr = String(candidate)
-          const clash = await db.collection('accounts').findOne({ tenant_id: T, code: cStr })
-            || await db.collection('clients').findOne({ tenant_id: T, account_code: cStr })
-            || await db.collection('suppliers').findOne({ tenant_id: T, account_code: cStr })
-            || await db.collection('boxes').findOne({ tenant_id: T, account_code: cStr })
-          if (!clash) break
-          candidate++
-        }
-        code = String(candidate)
+        if (parentStr.length >= 7) return bad(`الحساب ${parentStr} حساب تحليلي نهائي (L4) — لا يمكن إنشاء حسابات تحته`)
+        if (b.type && pAcc.type && b.type !== pAcc.type) return bad(`نوع الحساب يجب أن يطابق نوع الأب (${pAcc.type})`)
       }
-      // v3.10.2 — check uniqueness across accounts + clients + suppliers + boxes account_codes
-      const [existsAcc, existsClient, existsSupp, existsBox] = await Promise.all([
-        db.collection('accounts').findOne({ tenant_id: T, code }),
-        db.collection('clients').findOne({ tenant_id: T, account_code: code }),
-        db.collection('suppliers').findOne({ tenant_id: T, account_code: code }),
-        db.collection('boxes').findOne({ tenant_id: T, account_code: code }),
-      ])
-      if (existsAcc) return bad(`رمز الحساب "${code}" مستخدم بالفعل في دليل الحسابات`)
-      if (existsClient) return bad(`رمز الحساب "${code}" مستخدم لعميل بالفعل`)
-      if (existsSupp) return bad(`رمز الحساب "${code}" مستخدم لمورد بالفعل`)
-      if (existsBox) return bad(`رمز الحساب "${code}" مستخدم لصندوق/بنك بالفعل`)
-      if (b.parent) {
-        const p = await db.collection('accounts').findOne({ tenant_id: T, code: String(b.parent) })
-        if (!p) return bad('الحساب الأب غير موجود')
+      if (!code) {
+        if (!parentStr) return bad('الرمز مطلوب — أو حدد الحساب الأب ليُولَّد الرمز تلقائياً')
+        try {
+          const gen = await generateSubAccountCode(db, T, parentStr)
+          code = gen.account_code
+        } catch (e) { return bad(e.message) }
+      } else {
+        if (!/^\d+$/.test(code)) return bad('رمز الحساب يجب أن يكون أرقاماً فقط')
+        if (parentStr && !code.startsWith(parentStr)) return bad(`رمز الحساب يجب أن يبدأ ببادئة الأب (${parentStr}...) — لا يجوز إنشاء ${code} تحت ${parentStr}`)
+        if (parentStr) {
+          const validLen = { 1: 2, 2: 4, 4: 7 }[parentStr.length]
+          if (code.length !== validLen) return bad(`طول الرمز تحت الأب ${parentStr} يجب أن يكون ${validLen} خانات (مثال: ${parentStr}${'0'.repeat(validLen - parentStr.length - 1)}1)`)
+        }
+        if (!parentStr && code.length !== 1) return bad('الحسابات الجذرية (بدون أب) رمزها خانة واحدة فقط (1-9)')
+        if (await accountCodeExists(db, T, code)) return bad(`رمز الحساب "${code}" مستخدم بالفعل (دليل/عميل/مورد/صندوق)`)
       }
       const doc = {
         id: uuidv4(), tenant_id: T, code, name_ar: String(b.name_ar),
-        type: b.type, parent: b.parent ? String(b.parent) : null,
+        type: b.type, parent: parentStr,
         is_group: !!b.is_group, notes: b.notes || '',
         created_at: new Date(),
       }
@@ -5677,14 +5724,25 @@ async function handleRoute(request, { params }) {
     const acctIdMatch = route.match(/^\/accounts\/([^/]+)$/)
     if (acctIdMatch && method === 'PUT') {
       const b = await request.json()
+      const acc = await db.collection('accounts').findOne({ id: acctIdMatch[1], tenant_id: T })
+      if (!acc) return bad('الحساب غير موجود', 404)
       const upd = {}
       for (const k of ['name_ar', 'type', 'parent', 'is_group', 'notes']) if (b[k] !== undefined) upd[k] = b[k]
+      // v3.87 — SYSTEM ACCOUNTS (e.g. 3103) are structurally immutable: code is never
+      // editable via PUT, and type/parent/is_group are locked for system accounts.
+      if (acc.is_system && (upd.type !== undefined || upd.parent !== undefined || upd.is_group !== undefined)) {
+        return bad(`الحساب ${acc.code} حساب نظامي — لا يمكن تغيير نوعه أو موقعه في الشجرة`)
+      }
+      if (b.code !== undefined && String(b.code) !== acc.code) {
+        return bad(acc.is_system ? `الحساب ${acc.code} حساب نظامي — لا يمكن تغيير رقمه` : 'تغيير رمز الحساب غير مدعوم — احذف الحساب وأنشئه من جديد بالرمز الصحيح')
+      }
       await db.collection('accounts').updateOne({ id: acctIdMatch[1], tenant_id: T }, { $set: upd })
       return ok({ success: true })
     }
     if (acctIdMatch && method === 'DELETE') {
       const acc = await db.collection('accounts').findOne({ id: acctIdMatch[1], tenant_id: T })
       if (!acc) return bad('الحساب غير موجود', 404)
+      if (acc.is_system) return bad(`الحساب ${acc.code} — ${acc.name_ar} حساب نظامي ولا يمكن حذفه`)
       // Check for children
       const childCount = await db.collection('accounts').countDocuments({ tenant_id: T, parent: acc.code })
       if (childCount > 0) return bad(`لا يمكن حذف الحساب — يحتوي على ${childCount} حساب فرعي`)
@@ -6356,6 +6414,202 @@ async function handleRoute(request, { params }) {
       return ok(result.doc)
     }
 
+    // ================= v3.87 — OPENING BALANCE ENTRIES =================
+    // Single-sided input: user picks account/box/client/supplier + currency + amount + side.
+    // The system auto-balances against COA.OPENING_EQUITY (3103) — double-entry preserved.
+    if (route === '/journal-entries/opening' && method === 'POST') {
+      const b = await request.json()
+      const amount = Number(b.amount)
+      const side = b.side === 'credit' ? 'credit' : 'debit'
+      const currency = ['SAR', 'USD', 'YER'].includes(b.currency) ? b.currency : null
+      const date = String(b.date || '').slice(0, 10)
+      if (!amount || amount <= 0) return bad('المبلغ مطلوب ويجب أن يكون أكبر من صفر')
+      if (!currency) return bad('العملة مطلوبة (SAR / USD / YER)')
+      if (!date) return bad('تاريخ الافتتاح مطلوب')
+      if (isFutureDocDate(date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ القيد الافتتاحي)`)
+      const olSettings = await db.collection('tenant_settings').findOne({ tenant_id: T })
+      const lockedUntil = olSettings?.period_lock?.closed_until || null
+      if (lockedUntil && date <= lockedUntil) return bad(`الفترة مقفلة حتى ${lockedUntil} — لا يمكن الإدخال بهذا التاريخ`)
+      // Resolve the target: party (box/client/supplier) or a direct COA leaf account
+      let accountCode = null, accountName = null, partyType = null, partyId = null
+      const kind = String(b.party_type || 'account')
+      if (kind === 'box' || kind === 'client' || kind === 'supplier') {
+        const col = kind === 'box' ? 'boxes' : kind === 'client' ? 'clients' : 'suppliers'
+        const party = await db.collection(col).findOne({ id: String(b.party_id || ''), tenant_id: T })
+        if (!party) return bad(kind === 'box' ? 'الصندوق غير موجود' : kind === 'client' ? 'العميل غير موجود' : 'المورد غير موجود')
+        accountCode = party.account_code || null
+        accountName = party.name_ar || party.name || ''
+        partyType = kind; partyId = party.id
+        if (!accountCode) return bad('هذا الطرف بلا رمز حساب في الدليل — أعد بناء الدليل أولاً')
+      } else {
+        const acct = await db.collection('accounts').findOne({ tenant_id: T, code: String(b.account_code || '') })
+        if (!acct) return bad('الحساب غير موجود في الدليل')
+        if (acct.is_group) return bad('اختر حساباً تفصيلياً (وليس مجموعة)')
+        if (!['asset', 'liability', 'equity'].includes(acct.type)) {
+          return bad('الأرصدة الافتتاحية للأصول والخصوم وحقوق الملكية فقط — نتيجة الإيرادات والمصروفات للسنة السابقة تُقفل ضمن الأرباح المبقاة (3102)')
+        }
+        if (acct.code === COA.OPENING_EQUITY) return bad('لا يمكن إدخال رصيد افتتاحي مباشرةً على حساب التسوية 3103')
+        accountCode = acct.code; accountName = acct.name_ar
+      }
+      const targetLine = { account_code: accountCode, account_name: accountName, party_type: partyType, party_id: partyId, party_name: accountName, debit: side === 'debit' ? amount : 0, credit: side === 'credit' ? amount : 0 }
+      const equityLine = { account_code: COA.OPENING_EQUITY, account_name: OPENING_EQUITY_NAME, debit: side === 'credit' ? amount : 0, credit: side === 'debit' ? amount : 0 }
+      const je = {
+        id: uuidv4(), tenant_id: T, date, currency, ref_type: 'opening', ref_id: null,
+        description: `قيد افتتاحي — ${accountName}${b.note ? ' — ' + String(b.note).slice(0, 300) : ''}`,
+        lines: [targetLine, equityLine], created_by: sess.user.email, created_at: new Date(),
+      }
+      await db.collection('journal_entries').insertOne(je)
+      // Party running balances (per-currency dimension inside the SAME box/party — no per-currency accounts)
+      if (partyType === 'box') await updateBalance(db, 'boxes', { id: partyId, tenant_id: T }, currency, side === 'debit' ? amount : -amount)
+      if (partyType === 'client') await updateBalance(db, 'clients', { id: partyId, tenant_id: T }, currency, side === 'debit' ? amount : -amount)
+      if (partyType === 'supplier') await updateBalance(db, 'suppliers', { id: partyId, tenant_id: T }, currency, side === 'credit' ? amount : -amount)
+      const { _id, ...jeOut } = je
+      return ok({ entry: jeOut })
+    }
+    // 3103 status per currency (MUST be reviewed before closing)
+    if (route === '/journal-entries/opening-equity-status' && method === 'GET') {
+      const rows = await db.collection('journal_entries').aggregate([
+        { $match: { tenant_id: T } }, { $unwind: '$lines' },
+        { $match: { 'lines.account_code': COA.OPENING_EQUITY } },
+        { $group: { _id: '$currency', debit: { $sum: '$lines.debit' }, credit: { $sum: '$lines.credit' }, count: { $sum: 1 } } },
+      ]).toArray()
+      const perCurrency = rows.map(r => ({ currency: r._id, debit: round2n(r.debit), credit: round2n(r.credit), net_credit: round2n(r.credit - r.debit), count: r.count }))
+      const openingCount = await db.collection('journal_entries').countDocuments({ tenant_id: T, ref_type: 'opening' })
+      return ok({ account_code: COA.OPENING_EQUITY, account_name: OPENING_EQUITY_NAME, per_currency: perCurrency, opening_entries: openingCount })
+    }
+    // Close 3103 into Capital (3101) or Retained Earnings (3102) — one JE per non-zero currency
+    if (route === '/journal-entries/opening-equity-close' && method === 'POST') {
+      const b = await request.json()
+      const target = b.target === COA.CAPITAL ? COA.CAPITAL : b.target === COA.RETAINED_EARNINGS ? COA.RETAINED_EARNINGS : null
+      if (!target) return bad(`وجهة الإقفال يجب أن تكون رأس المال (${COA.CAPITAL}) أو الأرباح المبقاة (${COA.RETAINED_EARNINGS})`)
+      const date = String(b.date || '').slice(0, 10)
+      if (!date) return bad('تاريخ الإقفال مطلوب')
+      if (isFutureDocDate(date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ الإقفال)`)
+      // v3.87 — optional per-currency close: pass currency: 'SAR' to close ONLY that
+      // currency independently; omit (or 'ALL') to close every non-zero currency.
+      const onlyCcy = ['SAR', 'USD', 'YER'].includes(b.currency) ? b.currency : null
+      const targetAcct = await db.collection('accounts').findOne({ tenant_id: T, code: target })
+      if (!targetAcct) return bad('حساب الوجهة غير موجود في الدليل')
+      const rows = await db.collection('journal_entries').aggregate([
+        { $match: { tenant_id: T } }, { $unwind: '$lines' },
+        { $match: { 'lines.account_code': COA.OPENING_EQUITY } },
+        { $group: { _id: '$currency', debit: { $sum: '$lines.debit' }, credit: { $sum: '$lines.credit' } } },
+      ]).toArray()
+      const closed = []
+      for (const r of rows) {
+        if (onlyCcy && r._id !== onlyCcy) continue
+        const net = round2n(r.credit - r.debit) // credit balance = positive net
+        if (Math.abs(net) < 0.01) continue
+        const amt = Math.abs(net)
+        const je = {
+          id: uuidv4(), tenant_id: T, date, currency: r._id, ref_type: 'opening_close', ref_id: null,
+          description: `إقفال الأرصدة الافتتاحية (${r._id}) إلى ${targetAcct.name_ar}`,
+          lines: net > 0
+            ? [{ account_code: COA.OPENING_EQUITY, account_name: OPENING_EQUITY_NAME, debit: amt, credit: 0 }, { account_code: target, account_name: targetAcct.name_ar, debit: 0, credit: amt }]
+            : [{ account_code: target, account_name: targetAcct.name_ar, debit: amt, credit: 0 }, { account_code: COA.OPENING_EQUITY, account_name: OPENING_EQUITY_NAME, debit: 0, credit: amt }],
+          created_by: sess.user.email, created_at: new Date(),
+        }
+        await db.collection('journal_entries').insertOne(je)
+        closed.push({ currency: r._id, amount: amt, direction: net > 0 ? 'إلى دائن الوجهة' : 'إلى مدين الوجهة' })
+      }
+      if (closed.length === 0) return bad(onlyCcy ? `رصيد حساب التسوية ${COA.OPENING_EQUITY} بعملة ${onlyCcy} صفر — لا يوجد ما يُقفل` : 'رصيد حساب التسوية 3103 صفر في جميع العملات — لا يوجد ما يُقفل')
+      return ok({ closed, target: { code: target, name: targetAcct.name_ar } })
+    }
+    // v3.87 — DELETE a manual/opening journal entry (reverses party balance effects, audited)
+    const jeDelMatch = route.match(/^\/journal-entries\/([^/]+)$/)
+    if (jeDelMatch && method === 'DELETE') {
+      const je = await db.collection('journal_entries').findOne({ id: jeDelMatch[1], tenant_id: T })
+      if (!je) return bad('القيد غير موجود', 404)
+      if (!['manual', 'manual_dual', 'opening', 'opening_close'].includes(je.ref_type)) {
+        return bad('لا يمكن حذف قيود المعاملات مباشرةً — احذف السجل المرتبط (تذكرة/سند/مصارفة)', 400)
+      }
+      for (const ln of je.lines || []) {
+        if (!ln.party_type || !ln.party_id) continue
+        const delta = round2n((ln.debit || 0) - (ln.credit || 0))
+        if (ln.party_type === 'box') await updateBalance(db, 'boxes', { id: ln.party_id, tenant_id: T }, je.currency, -delta)
+        if (ln.party_type === 'client') await updateBalance(db, 'clients', { id: ln.party_id, tenant_id: T }, je.currency, -delta)
+        if (ln.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: ln.party_id, tenant_id: T }, je.currency, delta)
+      }
+      await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T })
+      await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'delete', je_id: je.id, ref_type: je.ref_type, description: je.description, currency: je.currency, lines: je.lines, by: sess.user.email, at: new Date() })
+      // v3.87 — deleting an opening entry AFTER 3103 was already closed leaves the
+      // settlement account unbalanced — warn loudly so the user re-settles.
+      let warning = null
+      if (je.ref_type === 'opening' || je.ref_type === 'opening_close') {
+        const closesExist = await db.collection('journal_entries').countDocuments({ tenant_id: T, ref_type: 'opening_close' })
+        if (closesExist > 0 || je.ref_type === 'opening_close') {
+          const agg = await db.collection('journal_entries').aggregate([
+            { $match: { tenant_id: T, currency: je.currency } }, { $unwind: '$lines' },
+            { $match: { 'lines.account_code': COA.OPENING_EQUITY } },
+            { $group: { _id: null, debit: { $sum: '$lines.debit' }, credit: { $sum: '$lines.credit' } } },
+          ]).toArray()
+          const net = round2n((agg[0]?.credit || 0) - (agg[0]?.debit || 0))
+          if (Math.abs(net) >= 0.01) {
+            warning = `⚠️ تنبيه: بعد هذا الحذف أصبح حساب التسوية ${COA.OPENING_EQUITY} غير متوازن بعملة ${je.currency} (الصافي ${Math.abs(net).toLocaleString()} ${net > 0 ? 'دائن' : 'مدين'}) — يلزم إعادة التسوية/الإقفال من شاشة إقفال الأرصدة الافتتاحية`
+          }
+        }
+      }
+      return ok({ deleted: true, warning })
+    }
+    // ================= v3.87 — COA REBUILD (test data reset, owner only) =================
+    // NOTE: intentionally NOT under /admin/* (that prefix is super_admin-gated) — this is
+    // a per-tenant owner action.
+    if (route === '/coa/rebuild' && method === 'POST') {
+      if (sess.user.role !== 'owner') return bad('إعادة بناء الدليل متاحة لمالك المكتب فقط', 403)
+      const b = await request.json()
+      if (b.confirm !== 'REBUILD-COA') return bad('أرسل confirm: "REBUILD-COA" للتأكيد — هذه العملية تحذف كل البيانات المحاسبية التجريبية')
+      const wiped = {}
+      // v3.87 — FULL operational wipe: never leave half an operation behind (a booking
+      // whose journal entries were deleted). Financial docs + their operational sources
+      // + linked Meraaj trial bookings + linked booking documents (and their stored
+      // blobs) all go together. meraaj_inbound_events (global dedup markers, no
+      // tenant_id) are kept intentionally — they prevent old webhook replays from
+      // re-creating wiped bookings.
+      const docKeys = (await db.collection('booking_documents').find({ tenant_id: T }).project({ 'storage.object_key': 1 }).toArray())
+        .map(d => d?.storage?.object_key).filter(Boolean)
+      if (docKeys.length) {
+        const rBlobs = await db.collection('document_blobs').deleteMany({ tenant_id: T, object_key: { $in: docKeys } })
+        wiped.document_blobs = rBlobs.deletedCount
+      }
+      for (const col of ['journal_entries', 'vouchers', 'tickets', 'visas', 'services', 'currency_exchanges', 'refunds', 'cashout_requests', 'package_bookings', 'meraaj_inbound_bookings', 'booking_documents']) {
+        const r = await db.collection(col).deleteMany({ tenant_id: T })
+        wiped[col] = r.deletedCount
+      }
+      await db.collection('accounts').deleteMany({ tenant_id: T })
+      await seedCoaTree(db, T) // NEW correct tree only — boxes/settings of the tenant are preserved
+      // Re-code the EXISTING boxes/clients/suppliers under the correct parents and zero balances.
+      const recode = { boxes: 0, clients: 0, suppliers: 0 }
+      const boxes = await db.collection('boxes').find({ tenant_id: T }).sort({ created_at: 1 }).toArray()
+      let cashSeq = 0, bankSeq = 0
+      for (const bx of boxes) {
+        const isBank = bx.type === 'bank'
+        const parent = isBank ? COA.BANKS : COA.CASHBOXES
+        const seq = isBank ? ++bankSeq : ++cashSeq
+        await db.collection('boxes').updateOne({ id: bx.id, tenant_id: T }, { $set: { parent_code: parent, account_code: `${parent}${String(seq).padStart(3, '0')}`, account_parent_code: parent, account_seq: seq, balances: emptyBalances() } })
+        recode.boxes++
+      }
+      await db.collection('accounts').updateOne({ tenant_id: T, code: COA.CASHBOXES }, { $set: { next_child_seq: cashSeq || 1 } })
+      await db.collection('accounts').updateOne({ tenant_id: T, code: COA.BANKS }, { $set: { next_child_seq: bankSeq || 1 } })
+      let cSeq = 0
+      for (const c of await db.collection('clients').find({ tenant_id: T }).sort({ created_at: 1 }).toArray()) {
+        cSeq++
+        await db.collection('clients').updateOne({ id: c.id, tenant_id: T }, { $set: { account_code: `${COA.CLIENTS}${String(cSeq).padStart(3, '0')}`, account_parent_code: COA.CLIENTS, account_seq: cSeq, balances: emptyBalances() } })
+        recode.clients++
+      }
+      await db.collection('accounts').updateOne({ tenant_id: T, code: COA.CLIENTS }, { $set: { next_child_seq: cSeq || 0 } })
+      let sSeq = 0
+      for (const s of await db.collection('suppliers').find({ tenant_id: T }).sort({ created_at: 1 }).toArray()) {
+        sSeq++
+        await db.collection('suppliers').updateOne({ id: s.id, tenant_id: T }, { $set: { account_code: `${COA.SUPPLIERS}${String(sSeq).padStart(3, '0')}`, account_parent_code: COA.SUPPLIERS, account_seq: sSeq, balances: emptyBalances() } })
+        recode.suppliers++
+      }
+      await db.collection('accounts').updateOne({ tenant_id: T, code: COA.SUPPLIERS }, { $set: { next_child_seq: sSeq || 0 } })
+      await db.collection('tenant_settings').updateOne({ tenant_id: T }, { $set: { coa_version: 2, coa_rebuilt_at: new Date(), coa_rebuilt_by: sess.user.email } }, { upsert: true })
+      await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'coa_rebuild', wiped, recode, by: sess.user.email, at: new Date() })
+      const treeCount = await db.collection('accounts').countDocuments({ tenant_id: T })
+      return ok({ rebuilt: true, wiped, recode, tree_accounts: treeCount, coa_version: 2 })
+    }
+
     // Dashboard
     if (route === '/dashboard' && method === 'GET') {
       return ok(await computeDashboard(db, T))
@@ -6749,10 +7003,10 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
   let cli = await db.collection('clients').findOne({ tenant_id: T, name: clientName })
   if (!cli) {
     let accountInfo = {}
-    try { accountInfo = await generateSubAccountCode(db, T, '1301') } catch (e) { throw new Error(e.message) }
+    try { accountInfo = await generateSubAccountCode(db, T, COA.CLIENTS) } catch (e) { throw new Error(e.message) }
     cli = {
       id: uuidv4(), tenant_id: T, name: clientName, phone: '', whatsapp: '',
-      address: '', email: '', notes: `عميل آلي — مكتب مشترٍ عبر معراج نتورك`, parent_code: '1301', ...accountInfo,
+      address: '', email: '', notes: `عميل آلي — مكتب مشترٍ عبر معراج نتورك`, parent_code: COA.CLIENTS, ...accountInfo,
       credit_limit: 0, credit_currency: inbound.currency, is_frozen: false,
       balances: emptyBalances(), created_at: new Date(),
     }
@@ -6816,7 +7070,7 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
     if (compTotals[i].cost_total > 0) await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, compTotals[i].cost_total)
   }
   // 5) Balanced Journal Entry: debit client = credit suppliers + revenue
-  const lines = [{ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 }]
+  const lines = [{ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 }]
   const supGrouped = {}
   for (let i = 0; i < comps.length; i++) {
     const c = comps[i]
@@ -6825,9 +7079,9 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
     supGrouped[c.supplier_id].amount += compTotals[i].cost_total
   }
   let supSum = 0
-  for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
+  for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
   const revenueNet = +(total_sale - supSum).toFixed(2)
-  if (revenueNet !== 0) lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name} — معراج`, debit: 0, credit: revenueNet })
+  if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name} — معراج`, debit: 0, credit: revenueNet })
   let je = null
   try {
     je = await createJournalEntry(db, T, {
@@ -7435,17 +7689,17 @@ async function createTicket(db, T, b, opts = {}) {
   const lines = []
   if (paymentMethod === 'cash') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
+    lines.push({ account_code: box.type === 'cash' ? COA.CASHBOXES : COA.BANKS, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
   } else {
     await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
+    lines.push({ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
   }
-  lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
+  lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
   if (officeNetCommission !== 0) {
-    lines.push({ account_code: '4101', account_name: 'إيرادات عمولات التذاكر', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التذاكر', debit: 0, credit: officeNetCommission })
+    lines.push({ account_code: COA.REV_TICKETS, account_name: 'إيرادات عمولات التذاكر', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التذاكر', debit: 0, credit: officeNetCommission })
   }
   if (partnerShare > 0) {
-    lines.push({ account_code: doc.commission_partner_type === 'supplier' ? '2101' : '1301', account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+    lines.push({ account_code: doc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS, account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
   }
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}حجز تذكرة ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} PNR ${doc.pnr || '-'} — ${cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
@@ -7548,17 +7802,17 @@ async function createVisa(db, T, b, opts = {}) {
   const lines = []
   if (paymentMethod === 'cash') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
+    lines.push({ account_code: box.type === 'cash' ? COA.CASHBOXES : COA.BANKS, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
   } else {
     await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
+    lines.push({ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
   }
-  lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
+  lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
   if (officeNetCommission !== 0) {
-    lines.push({ account_code: '4102', account_name: 'إيرادات عمولات التأشيرات', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التأشيرات', debit: 0, credit: officeNetCommission })
+    lines.push({ account_code: COA.REV_VISAS, account_name: 'إيرادات عمولات التأشيرات', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التأشيرات', debit: 0, credit: officeNetCommission })
   }
   if (partnerShare > 0) {
-    lines.push({ account_code: doc.commission_partner_type === 'supplier' ? '2101' : '1301', account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+    lines.push({ account_code: doc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS, account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
   }
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.passenger_name || cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
@@ -7679,17 +7933,17 @@ async function createService(db, T, b, opts = {}) {
   const lines = []
   if (paymentMethod === 'cash') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: box.type === 'cash' ? '1101' : '1201', account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
+    lines.push({ account_code: box.type === 'cash' ? COA.CASHBOXES : COA.BANKS, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
   } else {
     await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: '1301', account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
+    lines.push({ account_code: COA.CLIENTS, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
   }
-  lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
+  lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
   if (officeNetCommission !== 0) {
-    lines.push({ account_code: '4103', account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيرادات ${doc.service_type}`, debit: 0, credit: officeNetCommission })
+    lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيرادات ${doc.service_type}`, debit: 0, credit: officeNetCommission })
   }
   if (partnerShare > 0) {
-    lines.push({ account_code: doc.commission_partner_type === 'supplier' ? '2101' : '1301', account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+    lines.push({ account_code: doc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS, account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
   }
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.beneficiary_name || cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
@@ -7757,21 +8011,21 @@ async function createVoucher(db, T, b, opts = {}) {
     if (b.party_type === 'client') await updateBalance(db, 'clients', { id: b.party_id, tenant_id: T }, b.currency, +amount)
   }
   const lines = []
-  const boxAccCode = box.type === 'cash' ? '1101' : '1201'
+  const boxAccCode = box.type === 'cash' ? COA.CASHBOXES : COA.BANKS
   if (b.type === 'receipt') {
     lines.push({ account_code: boxAccCode, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: amount, credit: 0 })
-    if (b.party_type === 'client') lines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
-    if (b.party_type === 'supplier') lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
+    if (b.party_type === 'client') lines.push({ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
+    if (b.party_type === 'supplier') lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
     // v3.79 — revenue posts to the SELECTED revenue account (statement-able independent account)
     if (b.party_type === 'revenue') lines.push({ account_code: coaAccount.code, account_name: coaAccount.name_ar, party_type: 'account', party_id: coaAccount.id, party_name: coaAccount.name_ar, debit: 0, credit: amount })
-    if (b.party_type === 'expense') lines.push({ account_code: '4103', account_name: 'إيراد متنوع', party_type: 'revenue', party_id: null, party_name: 'إيراد متنوع', debit: 0, credit: amount })
+    if (b.party_type === 'expense') lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيراد متنوع', party_type: 'revenue', party_id: null, party_name: 'إيراد متنوع', debit: 0, credit: amount })
   } else {
-    if (b.party_type === 'supplier') lines.push({ account_code: '2101', account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
-    if (b.party_type === 'client') lines.push({ account_code: '1301', account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
+    if (b.party_type === 'supplier') lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
+    if (b.party_type === 'client') lines.push({ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
     // v3.79 — expense posts to the SELECTED expense account; legacy free-text keeps generic 5101
     if (b.party_type === 'expense') {
       if (coaAccount) lines.push({ account_code: coaAccount.code, account_name: coaAccount.name_ar, party_type: 'account', party_id: coaAccount.id, party_name: coaAccount.name_ar, debit: amount, credit: 0 })
-      else lines.push({ account_code: '5101', account_name: 'مصاريف تشغيلية', party_type: 'expense', party_id: null, party_name: partyName, debit: amount, credit: 0 })
+      else lines.push({ account_code: COA.OPEX, account_name: 'مصاريف تشغيلية', party_type: 'expense', party_id: null, party_name: partyName, debit: amount, credit: 0 })
     }
     lines.push({ account_code: boxAccCode, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: 0, credit: amount })
   }
@@ -7787,15 +8041,15 @@ async function resolveAccountRef(db, T, ref) {
   if (!ref || !ref.id) return null
   if (ref.kind === 'client') {
     const d = await db.collection('clients').findOne({ id: ref.id, tenant_id: T })
-    return d ? { kind: 'client', id: d.id, name: d.name, code: '1301', updateBalance: true, collection: 'clients', debitSign: +1 } : null
+    return d ? { kind: 'client', id: d.id, name: d.name, code: COA.CLIENTS, updateBalance: true, collection: 'clients', debitSign: +1 } : null
   }
   if (ref.kind === 'supplier') {
     const d = await db.collection('suppliers').findOne({ id: ref.id, tenant_id: T })
-    return d ? { kind: 'supplier', id: d.id, name: d.name, code: '2101', updateBalance: true, collection: 'suppliers', debitSign: -1 } : null
+    return d ? { kind: 'supplier', id: d.id, name: d.name, code: COA.SUPPLIERS, updateBalance: true, collection: 'suppliers', debitSign: -1 } : null
   }
   if (ref.kind === 'box') {
     const d = await db.collection('boxes').findOne({ id: ref.id, tenant_id: T })
-    return d ? { kind: 'box', id: d.id, name: d.name_ar, code: d.type === 'cash' ? '1101' : '1201', updateBalance: true, collection: 'boxes', debitSign: +1 } : null
+    return d ? { kind: 'box', id: d.id, name: d.name_ar, code: d.type === 'cash' ? COA.CASHBOXES : COA.BANKS, updateBalance: true, collection: 'boxes', debitSign: +1 } : null
   }
   if (ref.kind === 'account') {
     const d = await db.collection('accounts').findOne({ id: ref.id, tenant_id: T })
@@ -7869,9 +8123,9 @@ async function createFx(db, T, b, opts = {}) {
   }
   if (Math.abs(fx_gain_base) > 0.005) {
     if (fx_gain_base > 0) {
-      lines.push({ account_code: '4104', account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: BASE_CURRENCY, debit: 0, credit: +fx_gain_base.toFixed(2) })
+      lines.push({ account_code: COA.FX_PNL, account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: BASE_CURRENCY, debit: 0, credit: +fx_gain_base.toFixed(2) })
     } else {
-      lines.push({ account_code: '4104', account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: BASE_CURRENCY, debit: +Math.abs(fx_gain_base).toFixed(2), credit: 0 })
+      lines.push({ account_code: COA.FX_PNL, account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: BASE_CURRENCY, debit: +Math.abs(fx_gain_base).toFixed(2), credit: 0 })
     }
   }
   await createJournalEntry(db, T, {
@@ -7912,8 +8166,8 @@ async function createManualJournal(db, T, b, opts = {}) {
       { account_code: b.credit_account_code || 'MANUAL', account_name: b.credit_account_name || 'حساب دائن', party_type: b.credit_party_type || 'manual', party_id: b.credit_party_id || null, party_name: b.credit_party_name || b.credit_account_name || '—', currency: b.credit_currency, debit: 0, credit: ca },
     ]
     if (Math.abs(fxDiff) > 0.005) {
-      if (fxDiff > 0) lines.push({ account_code: '4104', account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: BASE_CURRENCY, debit: 0, credit: +fxDiff.toFixed(2) })
-      else lines.push({ account_code: '4104', account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: BASE_CURRENCY, debit: +Math.abs(fxDiff).toFixed(2), credit: 0 })
+      if (fxDiff > 0) lines.push({ account_code: COA.FX_PNL, account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: BASE_CURRENCY, debit: 0, credit: +fxDiff.toFixed(2) })
+      else lines.push({ account_code: COA.FX_PNL, account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: BASE_CURRENCY, debit: +Math.abs(fxDiff).toFixed(2), credit: 0 })
     }
     for (const side of ['debit', 'credit']) {
       const pt = b[`${side}_party_type`], pid = b[`${side}_party_id`], cur = b[`${side}_currency`]
@@ -8193,7 +8447,7 @@ async function reportIncome(db, T, q) {
   let fx_gain_base = 0
   for (const je of jes) {
     for (const l of je.lines || []) {
-      if (l.account_code === '4104') fx_gain_base += (l.credit || 0) - (l.debit || 0)
+      if (l.account_code === COA.FX_PNL) fx_gain_base += (l.credit || 0) - (l.debit || 0)
     }
   }
   const totalRevBase = Object.values(rev).reduce((s, cur) => s + Object.entries(cur).reduce((ss, [c, v]) => ss + toBase(v, c, rates), 0), 0) + fx_gain_base
