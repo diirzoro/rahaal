@@ -11,6 +11,7 @@ import {
   Building, Settings, Upload, Download, FileSpreadsheet, CheckCircle2, XCircle,
   AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key, Pencil,
   ArrowLeftRight, Briefcase, CalendarClock, LogIn, Package, Copy, RefreshCw,
+  Menu, X,
 } from 'lucide-react'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTip, ResponsiveContainer,
@@ -1571,23 +1572,36 @@ const playMeraajChime = () => {
   } catch { /* autoplay blocked — silent fallback, toast still shows */ }
 }
 
-function Sidebar({ current, onChange }) {
+function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
   const { tenant, settings, user } = useAuth()
+  // v3.86 — swipe-right on the drawer closes it (RTL: drawer lives on the right edge)
+  const swipeRef = useRef(null)
+  const onTouchStart = (e) => { swipeRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY } }
+  const onTouchMove = (e) => {
+    if (!swipeRef.current || !onMobileClose) return
+    const dx = e.touches[0].clientX - swipeRef.current.x
+    const dy = Math.abs(e.touches[0].clientY - swipeRef.current.y)
+    if (dx > 50 && dy < 60) { onMobileClose(); swipeRef.current = null }
+  }
+  const onTouchEnd = () => { swipeRef.current = null }
   return (
-    <aside className="w-16 md:w-64 shrink-0 h-screen sticky top-0 bg-gradient-to-b from-[#0f1e4d] via-[#1e3a8a] to-[#0a1544] text-slate-100 flex flex-col border-l border-blue-900/60 transition-all">
-      <div className="p-2 md:p-5 border-b border-blue-900/50">
-        <div className="flex items-center gap-3 justify-center md:justify-start">
+    <aside
+      onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
+      className={`fixed md:sticky inset-y-0 right-0 z-50 md:z-auto w-72 max-w-[85vw] md:w-64 md:max-w-none h-[100dvh] md:h-screen shrink-0 bg-gradient-to-b from-[#0f1e4d] via-[#1e3a8a] to-[#0a1544] text-slate-100 flex flex-col border-l border-blue-900/60 transform transition-transform duration-200 ease-out ${mobileOpen ? 'translate-x-0' : 'translate-x-full'} md:translate-x-0`}
+    >
+      <div className="p-4 md:p-5 border-b border-blue-900/50">
+        <div className="flex items-center gap-3">
           {settings?.logo_base64 ? (
             <img src={settings.logo_base64} alt="logo" className="w-11 h-11 rounded-xl object-cover bg-white" />
           ) : (
-            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-[#1e40af] to-[#0f1e4d] flex items-center justify-center shadow-lg shadow-orange-500/20 border border-orange-400/40">
+            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-[#1e40af] to-[#0f1e4d] flex items-center justify-center shadow-lg shadow-orange-500/20 border border-orange-400/40 shrink-0">
               <svg viewBox="0 0 64 64" fill="none" className="w-7 h-7">
                 <path d="M8 40 L28 36 L40 20 L50 20 L44 34 L54 32 L58 40 L44 42 L38 50 L30 50 L34 42 L14 44 Z" fill="#f97316" />
                 <circle cx="52" cy="16" r="3" fill="#f97316" />
               </svg>
             </div>
           )}
-          <div className="min-w-0 hidden md:block">
+          <div className="min-w-0 flex-1">
             <div className="text-lg font-extrabold tracking-tight truncate">{settings?.agency_name || tenant?.name || 'رحّـــال'}</div>
             <div className="text-[10px] text-orange-300 font-black tracking-widest" style={{ letterSpacing: '0.15em' }}>RAHAL ERP</div>
             {/* v3.15 — Plan badge (approved suggestion) */}
@@ -1601,9 +1615,13 @@ function Sidebar({ current, onChange }) {
               </div>
             )}
           </div>
+          {/* v3.86 — explicit close button (mobile drawer only) */}
+          <button onClick={onMobileClose} aria-label="إغلاق القائمة" className="md:hidden shrink-0 w-10 h-10 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center">
+            <X className="w-5 h-5 text-white" />
+          </button>
         </div>
       </div>
-      <nav className="flex-1 overflow-y-auto p-1 md:p-3 space-y-1">
+      <nav className="flex-1 overflow-y-auto overscroll-contain p-2 md:p-3 space-y-1" style={{ touchAction: 'pan-y' }}>
         {NAV.filter(n => canModule(user, n.id)).map(item => {
           const Icon = item.icon
           const active = current === item.id
@@ -1612,15 +1630,15 @@ function Sidebar({ current, onChange }) {
               key={item.id}
               onClick={() => onChange(item.id)}
               title={item.label}
-              className={`w-full flex items-center gap-3 px-2 md:px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+              className={`w-full flex items-center gap-3 px-3 py-2.5 min-h-[44px] rounded-lg text-sm font-medium transition-all ${
                 active ? 'bg-white/10 text-white shadow-inner' : 'text-slate-300 hover:bg-white/5 hover:text-white'
               }`}
             >
               <span className={`w-8 h-8 rounded-md flex items-center justify-center bg-gradient-to-br ${item.color} ${active ? 'shadow-lg' : 'opacity-80'} shrink-0`}>
                 <Icon className="w-4 h-4 text-white" />
               </span>
-              <span className="flex-1 text-right hidden md:inline">{item.label}</span>
-              {active && <ChevronLeft className="w-4 h-4 text-slate-400 hidden md:block" />}
+              <span className="flex-1 text-right">{item.label}</span>
+              {active && <ChevronLeft className="w-4 h-4 text-slate-400" />}
             </button>
           )
         })}
@@ -1628,7 +1646,7 @@ function Sidebar({ current, onChange }) {
       <div className="p-2 md:p-3 border-t border-slate-800/70">
         <div className="flex items-center gap-3 p-2 rounded-lg bg-white/5">
           <div className="w-9 h-9 rounded-full grad-brand flex items-center justify-center shrink-0"><User className="w-4 h-4 text-white" /></div>
-          <div className="flex-1 min-w-0 hidden md:block">
+          <div className="flex-1 min-w-0">
             <div className="text-xs font-semibold truncate">{user.name}</div>
             <div className="text-[10px] text-slate-400 truncate">{user.role === 'owner' ? 'مالك المكتب' : 'موظف'}</div>
           </div>
@@ -12923,6 +12941,38 @@ function OfficeSettings() {
 // ================================================================
 function TenantApp() {
   const [tab, setTab] = useState('dashboard')
+  // v3.86 — real mobile drawer state + edge-swipe to open (right edge, RTL)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  // v3.86.1 — lock background page scroll while the drawer is open (drawer itself stays scrollable)
+  useEffect(() => {
+    if (!mobileNavOpen) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = prev }
+  }, [mobileNavOpen])
+  useEffect(() => {
+    let start = null
+    const onStart = (e) => {
+      if (window.innerWidth >= 768) { start = null; return }
+      const t = e.touches[0]
+      start = (window.innerWidth - t.clientX <= 24) ? { x: t.clientX, y: t.clientY } : null
+    }
+    const onMove = (e) => {
+      if (!start) return
+      const t = e.touches[0]
+      if (Math.abs(t.clientY - start.y) > 60) { start = null; return }
+      if (start.x - t.clientX > 40) { setMobileNavOpen(true); start = null }
+    }
+    const onEnd = () => { start = null }
+    document.addEventListener('touchstart', onStart, { passive: true })
+    document.addEventListener('touchmove', onMove, { passive: true })
+    document.addEventListener('touchend', onEnd, { passive: true })
+    return () => {
+      document.removeEventListener('touchstart', onStart)
+      document.removeEventListener('touchmove', onMove)
+      document.removeEventListener('touchend', onEnd)
+    }
+  }, [])
   const { user, tenant, logout } = useAuth()
   // v3.46 — Idle session auto-lock: logout via the EXISTING logout mechanism after inactivity,
   // saving the current section so the user resumes exactly where they were after re-login.
@@ -13129,7 +13179,27 @@ function TenantApp() {
 
   return (
     <div className="flex min-h-screen bg-slate-50">
-      <Sidebar current={tab} onChange={setTab} />
+      {/* v3.86 — overlay is MOUNTED ONLY while the drawer is open (no invisible layer
+          can ever block touches after closing), tapping it closes the drawer */}
+      {mobileNavOpen && (
+        <div className="fixed inset-0 bg-black/50 z-40 md:hidden" onClick={() => setMobileNavOpen(false)} aria-hidden="true" />
+      )}
+      <Sidebar
+        current={tab}
+        onChange={(id) => { setTab(id); setMobileNavOpen(false) }}
+        mobileOpen={mobileNavOpen}
+        onMobileClose={() => setMobileNavOpen(false)}
+      />
+      {/* v3.86 — floating menu button (mobile only, hidden while drawer is open) */}
+      {!mobileNavOpen && (
+        <button
+          onClick={() => setMobileNavOpen(true)}
+          aria-label="فتح القائمة"
+          className="md:hidden fixed bottom-4 right-4 z-40 w-12 h-12 rounded-full bg-gradient-to-br from-[#1e3a8a] to-[#0f1e4d] text-white shadow-xl shadow-blue-900/40 border border-blue-700/50 flex items-center justify-center active:scale-95 transition-transform"
+        >
+          <Menu className="w-6 h-6" />
+        </button>
+      )}
       <main className="flex-1 p-3 sm:p-4 md:p-6 lg:p-8 max-w-[1600px] overflow-x-hidden min-w-0">
         {isImpersonating && (
           <div className="mb-3 px-4 py-2 rounded-lg bg-gradient-to-l from-red-600 to-rose-600 text-white flex items-center gap-2 shadow-lg animate-pulse">
