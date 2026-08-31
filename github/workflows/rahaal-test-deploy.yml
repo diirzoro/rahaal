@@ -1,1 +1,111 @@
+name: Deploy Rahaal Test
 
+on:
+  push:
+    branches-ignore:
+      - main
+
+concurrency:
+  group: rahaal-test-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Build Rahaal test image
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          docker build -t "rahaal:test-${SHORT_SHA}" .
+
+      - name: Export Docker image
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          docker save "rahaal:test-${SHORT_SHA}" | gzip > rahaal-test-image.tar.gz
+
+      - name: Prepare SSH
+        run: |
+          mkdir -p ~/.ssh
+
+          echo "${{ secrets.TEST_SERVER_SSH_KEY_B64 }}" \
+            | base64 -d > ~/.ssh/rahaal_test_key
+
+          chmod 600 ~/.ssh/rahaal_test_key
+
+          ssh-keyscan -H "${{ vars.TEST_SERVER_HOST }}" \
+            >> ~/.ssh/known_hosts
+
+      - name: Verify SSH connection
+        run: |
+          ssh \
+            -i ~/.ssh/rahaal_test_key \
+            "${{ vars.TEST_SERVER_USER }}@${{ vars.TEST_SERVER_HOST }}" \
+            "echo SSH_CONNECTION_OK"
+
+      - name: Upload image to server
+        run: |
+          scp \
+            -i ~/.ssh/rahaal_test_key \
+            rahaal-test-image.tar.gz \
+            "${{ vars.TEST_SERVER_USER }}@${{ vars.TEST_SERVER_HOST }}:/root/rahaal-test-image.tar.gz"
+
+      - name: Deploy Rahaal Test
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+
+          ssh \
+            -i ~/.ssh/rahaal_test_key \
+            "${{ vars.TEST_SERVER_USER }}@${{ vars.TEST_SERVER_HOST }}" \
+            "TEST_IMAGE=rahaal:test-${SHORT_SHA} \
+             TEST_CONTAINER='${{ vars.TEST_RAHAAL_CONTAINER }}' \
+             TEST_PORT='${{ vars.TEST_RAHAAL_PORT }}' \
+             TEST_ENV_FILE='${{ vars.TEST_RAHAAL_ENV_FILE }}' \
+             bash -s" <<'REMOTE'
+
+          set -e
+
+          echo "===== LOAD NEW IMAGE ====="
+          gunzip -c /root/rahaal-test-image.tar.gz | docker load
+
+          echo "===== VERIFY IMAGE ====="
+          docker image inspect "$TEST_IMAGE" >/dev/null
+
+          echo "===== REPLACE TEST CONTAINER ====="
+          docker rm -f "$TEST_CONTAINER" 2>/dev/null || true
+
+          docker run -d \
+            --name "$TEST_CONTAINER" \
+            --restart unless-stopped \
+            --add-host=host.docker.internal:host-gateway \
+            --env-file "$TEST_ENV_FILE" \
+            -p "127.0.0.1:${TEST_PORT}:3000" \
+            "$TEST_IMAGE"
+
+          echo "===== WAIT FOR STARTUP ====="
+          sleep 15
+
+          echo "===== HEALTH CHECK ====="
+          curl -fsS "http://127.0.0.1:${TEST_PORT}/" >/dev/null
+
+          echo "===== REMOVE TRANSFER FILE ====="
+          rm -f /root/rahaal-test-image.tar.gz
+
+          echo "===== CLEAN OLD TEST IMAGES ====="
+          docker images \
+            --format '{{.Repository}}:{{.Tag}}' \
+            | grep '^rahaal:test-' \
+            | grep -v "^${TEST_IMAGE}$" \
+            | xargs -r docker image rm || true
+
+          echo "===== FINAL TEST STATE ====="
+          docker ps \
+            --filter "name=${TEST_CONTAINER}" \
+            --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+
+          echo "RAHAAL TEST DEPLOY SUCCESS"
+
+          REMOTE
