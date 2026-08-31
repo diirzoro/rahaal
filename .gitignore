@@ -110,3 +110,17 @@ phase5_test.py
 test_v3_9_21_patch_booking.py
 verify_phone_storage.py
 verify_trial_balance.py
+
+# ===== chore/cleanup-old-test-artifacts — منع عودة artifacts الاختبار/التشخيص مستقبلاً =====
+test_v*.py
+targeted_test.py
+diagnose_*.py
+e2e_preview_*.py
+verify_meraaj_*.py
+test_image_optimization.py
+test_passport_report_debug.py
+test_output.txt
+final_cleanup.py
+test_reports/
+.pytest_cache/
+verify_*.py
