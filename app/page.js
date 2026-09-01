@@ -14504,6 +14504,26 @@ function LandingPage({ onLoginClick, onSignupClick }) {
 // ================================================================
 // ROOT APP
 // ================================================================
+// v3.87.3 — TEST ENVIRONMENT badge: hostname-based (client runtime), renders ONLY when the
+// browser host contains 'rahaal-test' (rahaal-test.targetmediagrp.com). Never on Live.
+// position:fixed + pointer-events:none → zero layout shift, zero interaction blocking.
+function TestEnvBadge() {
+  const [isTest, setIsTest] = useState(false)
+  useEffect(() => {
+    try { setIsTest(window.location.hostname.includes('rahaal-test')) } catch {}
+  }, [])
+  if (!isTest) return null
+  return (
+    <div
+      dir="rtl"
+      style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 99999, pointerEvents: 'none' }}
+      className="bg-amber-400/95 text-slate-900 text-[11px] sm:text-xs font-black text-center py-1 tracking-wider shadow-md"
+    >
+      ⚠️ بيئة اختبار — TEST ENVIRONMENT ⚠️
+    </div>
+  )
+}
+
 function App() {
   const [auth, setAuth] = useState({ loading: true, user: null, tenant: null, settings: null })
   // v3.9 — When not authenticated, show LandingPage by default; user can toggle to LoginPage or Signup
@@ -14545,13 +14565,14 @@ function App() {
 
   if (!auth.user) {
     if (publicView === 'login' || publicView === 'signup') {
-      return <LoginPage onLogin={onLogin} initialSignup={publicView === 'signup'} onBack={() => setPublicView('landing')} />
+      return <><TestEnvBadge /><LoginPage onLogin={onLogin} initialSignup={publicView === 'signup'} onBack={() => setPublicView('landing')} /></>
     }
-    return <LandingPage onLoginClick={() => setPublicView('login')} onSignupClick={() => setPublicView('signup')} />
+    return <><TestEnvBadge /><LandingPage onLoginClick={() => setPublicView('login')} onSignupClick={() => setPublicView('signup')} /></>
   }
 
   return (
     <AuthCtx.Provider value={{ ...auth, refreshMe, logout }}>
+      <TestEnvBadge />
       <ConfirmHost />
       {auth.user.role === 'super_admin' ? <SuperAdminPanel /> : <TenantApp />}
     </AuthCtx.Provider>

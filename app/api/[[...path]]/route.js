@@ -322,10 +322,12 @@ async function seedInitial(db) {
 
   // v3.87.2 — Fixed TEST-ONLY accounts (owner@gmail.com / taha@gmail.com), both attached
   // to the demo tenant so Owner-vs-User can be compared inside the SAME office.
-  // Gating: runs ONLY when SEED_TEST_ACCOUNTS=true is set, or the deployment's public
-  // URL contains 'rahaal-test' (the Test container). Live is never gated in, and the
-  // global DISABLE_AUTO_SEED=true guard above still short-circuits everything on Live.
-  const isTestEnv = process.env.SEED_TEST_ACCOUNTS === 'true' || (process.env.NEXT_PUBLIC_BASE_URL || '').includes('rahaal-test')
+  // PRIMARY switch (explicit, authoritative): SEED_TEST_ACCOUNTS=true in the Test env file.
+  // SECONDARY safety layer only (do NOT rely on it alone): public URL contains 'rahaal-test'.
+  // Live is protected twice: no flag + DISABLE_AUTO_SEED=true short-circuits all seeding above.
+  const seedTestAccountsFlag = process.env.SEED_TEST_ACCOUNTS === 'true'
+  const looksLikeTestHost = (process.env.NEXT_PUBLIC_BASE_URL || '').includes('rahaal-test')
+  const isTestEnv = seedTestAccountsFlag || looksLikeTestHost
   if (isTestEnv) {
     const testAccounts = [
       { email: 'owner@gmail.com', name: 'Owner Test Account', role: 'owner' },
