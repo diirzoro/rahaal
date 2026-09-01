@@ -63,7 +63,8 @@ jobs:
             "TEST_IMAGE=rahaal:test-${SHORT_SHA} \
              TEST_CONTAINER='${{ vars.TEST_RAHAAL_CONTAINER }}' \
              TEST_PORT='${{ vars.TEST_RAHAAL_PORT }}' \
-             TEST_ENV_FILE='${{ vars.TEST_RAHAAL_ENV_FILE }}' \
+             TEST_ENV_FILE='/root/rahaal_env_test' \
+             LEGACY_ENV_FILE='${{ vars.TEST_RAHAAL_ENV_FILE }}' \
              bash -s" <<'REMOTE'
 
           set -e
@@ -73,6 +74,31 @@ jobs:
 
           echo "===== VERIFY IMAGE ====="
           docker image inspect "$TEST_IMAGE" >/dev/null
+
+          echo "===== ENSURE TEST ENV FILE (/root/rahaal_env_test) ====="
+          # Bootstrap from the legacy env file ONCE if the explicit test env file is missing
+          # (preserves MONGO_URL and other secrets), then enforce TEST-ONLY values below.
+          if [ ! -f "$TEST_ENV_FILE" ]; then
+            if [ -n "$LEGACY_ENV_FILE" ] && [ -f "$LEGACY_ENV_FILE" ]; then
+              cp "$LEGACY_ENV_FILE" "$TEST_ENV_FILE"
+              echo "Created $TEST_ENV_FILE from $LEGACY_ENV_FILE"
+            else
+              echo "ERROR: $TEST_ENV_FILE not found and no legacy env file available"
+              exit 1
+            fi
+          fi
+
+          echo "===== ENFORCE TEST-ONLY ENV VALUES ====="
+          # Never allow Live values inside the Test runtime:
+          sed -i '/^NEXT_PUBLIC_BASE_URL=/d' "$TEST_ENV_FILE"
+          echo "NEXT_PUBLIC_BASE_URL=https://rahaal-test.targetmediagrp.com" >> "$TEST_ENV_FILE"
+          # Explicit PRIMARY switch for the fixed test accounts:
+          sed -i '/^SEED_TEST_ACCOUNTS=/d' "$TEST_ENV_FILE"
+          echo "SEED_TEST_ACCOUNTS=true" >> "$TEST_ENV_FILE"
+          # DISABLE_AUTO_SEED is a Live-only guard — it must NOT block seeding in Test:
+          sed -i '/^DISABLE_AUTO_SEED=/d' "$TEST_ENV_FILE"
+          chmod 600 "$TEST_ENV_FILE"
+          echo "Test env file enforced OK"
 
           echo "===== REPLACE TEST CONTAINER ====="
           docker rm -f "$TEST_CONTAINER" 2>/dev/null || true
@@ -88,8 +114,25 @@ jobs:
           echo "===== WAIT FOR STARTUP ====="
           sleep 15
 
+          echo "===== VERIFY ENV INSIDE CONTAINER ====="
+          SEED_VAL="$(docker exec "$TEST_CONTAINER" printenv SEED_TEST_ACCOUNTS || true)"
+          URL_VAL="$(docker exec "$TEST_CONTAINER" printenv NEXT_PUBLIC_BASE_URL || true)"
+          echo "SEED_TEST_ACCOUNTS=$SEED_VAL"
+          echo "NEXT_PUBLIC_BASE_URL=$URL_VAL"
+          if [ "$SEED_VAL" != "true" ]; then
+            echo "ERROR: SEED_TEST_ACCOUNTS did not reach the container"
+            exit 1
+          fi
+          if [ "$URL_VAL" != "https://rahaal-test.targetmediagrp.com" ]; then
+            echo "ERROR: NEXT_PUBLIC_BASE_URL inside container is not the Test URL"
+            exit 1
+          fi
+          echo "CONTAINER ENV OK"
+
           echo "===== HEALTH CHECK ====="
           curl -fsS "http://127.0.0.1:${TEST_PORT}/" >/dev/null
+          # Hit an API route too — this triggers the server init (incl. test-account seeding)
+          curl -fsS "http://127.0.0.1:${TEST_PORT}/api/health" >/dev/null
 
           echo "===== REMOVE TRANSFER FILE ====="
           rm -f /root/rahaal-test-image.tar.gz
@@ -124,3 +167,28 @@ jobs:
           done
           echo "Rahaal Test public health FAILED"
           exit 1
+
+      - name: Test Accounts Login Check (owner@gmail.com / taha@gmail.com)
+        run: |
+          echo "===== TEST ACCOUNTS LOGIN CHECK ====="
+          for acct in owner@gmail.com taha@gmail.com; do
+            ok=""
+            for i in {1..6}; do
+              code=$(curl -ksS -o /tmp/login_resp.json -w "%{http_code}" \
+                -X POST "https://rahaal-test.targetmediagrp.com/api/auth/login" \
+                -H "Content-Type: application/json" \
+                -d "{\"email\":\"${acct}\",\"password\":\"123456\"}" || true)
+              echo "${acct} attempt ${i}/6 → HTTP ${code}"
+              if [ "$code" = "200" ]; then
+                ok="yes"
+                break
+              fi
+              sleep 5
+            done
+            if [ "$ok" != "yes" ]; then
+              echo "LOGIN FAILED for ${acct}"
+              cat /tmp/login_resp.json || true
+              exit 1
+            fi
+          done
+          echo "TEST ACCOUNTS LOGIN OK (owner + user)"
