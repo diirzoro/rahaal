@@ -124,3 +124,4 @@ final_cleanup.py
 test_reports/
 .pytest_cache/
 verify_*.py
+_safety_backup/

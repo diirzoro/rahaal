@@ -1,5 +1,6 @@
 'use client'
 import React, { useEffect, useMemo, useState, useCallback, useRef, createContext, useContext } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import * as XLSX from 'xlsx'
@@ -80,6 +81,8 @@ const fmt = (n, c = 'USD') => `${CUR_SYMBOL[c] || ''} ${Number(n || 0).toLocaleS
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' }) : '—'
 // v3.77 — documents upload helpers (base64 transport, MIME whitelist mirrors the server)
 const readFileB64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(file) })
+// v3.87 — semantic COA anchors (mirror of the backend COA map — single source per side)
+const COA_FE = { CASHBOXES: '1101', BANKS: '1102', CLIENTS: '1103', SUPPLIERS: '2101', CAPITAL: '3101', RETAINED_EARNINGS: '3102', OPENING_EQUITY: '3103' }
 const DOC_OK_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
 const DOC_MAX_MB = 10
 const DOC_MAX_FILE_BYTES = DOC_MAX_MB * 1024 * 1024
@@ -1212,6 +1215,7 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
   const [coaSaving, setCoaSaving] = useState(false)
   const wrapRef = useRef(null)
   const inputRef = useRef(null)
+  const popRef = useRef(null)
   // Default: quick-add enabled everywhere except plain box pickers
   const enableQA = allowQuickAdd !== undefined ? allowQuickAdd : ['client', 'supplier', 'party', 'all', 'account'].includes(type)
   // Debounced search
@@ -1262,9 +1266,36 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
       pick(entity)
     } catch (e) { toast.error(e.message) } finally { setCoaSaving(false) }
   }
-  // Click outside — close popover
+  // v3.87 — FIXED-POSITION popover: escapes dialog overflow clipping, flips upward when the
+  // space below is tight, dynamic max-height, wheel + touch scrolling, never exits the viewport.
+  const [popPos, setPopPos] = useState(null)
+  const computePopPos = useCallback(() => {
+    const r = wrapRef.current?.getBoundingClientRect()
+    if (!r) return
+    const vw = window.innerWidth, vh = window.innerHeight
+    const wantW = Math.min(Math.max(parseInt(dropdownWidth) || 420, r.width), vw - 16)
+    const left = Math.min(Math.max(r.left, 8), Math.max(8, vw - wantW - 8))
+    const spaceBelow = vh - r.bottom - 12
+    const spaceAbove = r.top - 12
+    const flip = spaceBelow < 260 && spaceAbove > spaceBelow
+    const maxH = Math.max(220, Math.min(460, Math.floor(flip ? spaceAbove : spaceBelow), Math.floor(vh * 0.7)))
+    setPopPos({ left, width: wantW, maxH, top: flip ? undefined : r.bottom + 4, bottom: flip ? vh - r.top + 4 : undefined })
+  }, [dropdownWidth])
   useEffect(() => {
-    const handler = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false) }
+    if (!open) return
+    computePopPos()
+    const onWin = () => computePopPos()
+    window.addEventListener('resize', onWin)
+    window.addEventListener('scroll', onWin, true)
+    return () => { window.removeEventListener('resize', onWin); window.removeEventListener('scroll', onWin, true) }
+  }, [open, computePopPos])
+  // Click outside — close popover (popover lives in a body portal, so check BOTH refs)
+  useEffect(() => {
+    const handler = (e) => {
+      if (wrapRef.current && wrapRef.current.contains(e.target)) return
+      if (popRef.current && popRef.current.contains(e.target)) return
+      setOpen(false)
+    }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [])
@@ -1287,12 +1318,23 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
   }
   return (
     <div ref={wrapRef} className="relative w-full">
-      {/* Field trigger */}
+      {/* Field trigger — v3.87.1: while open, the trigger ITSELF hosts the search input
+          (it lives inside the Dialog, so Radix focus-trap keeps typing working) and only
+          the results list floats in the body portal below/above. */}
       <div
         className={`flex items-center gap-1 border-2 rounded-md bg-white px-2 ${compact ? 'py-0.5 text-xs min-h-[30px]' : 'py-1.5 text-sm min-h-[38px]'} ${disabled ? 'opacity-60 pointer-events-none' : 'cursor-pointer hover:border-blue-400'} ${open ? 'border-blue-500 ring-1 ring-blue-200' : 'border-slate-200'}`}
         onClick={openPopover}
       >
-        {selected ? (
+        {open ? (
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder={selected ? `${selected.account_code} — ${selected.name}` : `🔍 ${placeholder}`}
+            className="flex-1 min-w-0 bg-transparent outline-none"
+            onClick={e => e.stopPropagation()}
+          />
+        ) : selected ? (
           <div className="flex items-center gap-2 flex-1 min-w-0">
             <span className="text-base shrink-0">{typeIcon[selected.type] || '•'}</span>
             <span className={`font-mono text-[11px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${typeBadge[selected.type] || 'bg-slate-50 border-slate-200'}`}>{selected.account_code}</span>
@@ -1304,23 +1346,17 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
         )}
         <span className="text-slate-400 text-xs shrink-0">▾</span>
       </div>
-      {/* Popover dropdown */}
-      {open && (
+      {/* Popover dropdown — v3.87.1: rendered in a BODY PORTAL (position:fixed breaks inside
+          the transformed Radix DialogContent — translate(-50%,-50%) re-anchors fixed elements).
+          Portal + fixed + flip + dynamic height + touch/wheel scroll = never clipped, never off-screen. */}
+      {open && typeof document !== 'undefined' && createPortal(
         <div
-          className="absolute mt-1 bg-white border-2 border-blue-300 rounded-lg shadow-2xl"
-          style={{ minWidth: dropdownWidth, maxWidth: '90vw', zIndex: 9999, insetInlineStart: 0 }}
+          ref={popRef}
+          dir="rtl"
+          className="bg-white border-2 border-blue-300 rounded-lg shadow-2xl flex flex-col"
+          style={{ position: 'fixed', left: popPos?.left ?? 8, top: popPos?.top, bottom: popPos?.bottom, width: popPos?.width || 420, maxWidth: 'calc(100vw - 16px)', maxHeight: popPos?.maxH || 320, zIndex: 9999, pointerEvents: 'auto' }}
         >
-          <div className="p-2 border-b bg-slate-50 rounded-t-lg">
-            <input
-              ref={inputRef}
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              placeholder="🔍 اكتب للبحث بالاسم أو الكود..."
-              className="w-full px-3 py-2 text-sm border rounded outline-none focus:border-blue-500"
-              autoFocus
-            />
-          </div>
-          <div className="max-h-72 overflow-y-auto">
+          <div className="flex-1 min-h-0 overflow-y-auto" style={{ overscrollBehavior: 'contain', WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
             {loading && <div className="p-4 text-center text-xs text-slate-400">جاري البحث...</div>}
             {!loading && results.length === 0 && (
               <div className="p-4 text-center text-xs text-slate-400">لا نتائج مطابقة{query.trim() ? ' — يمكنك الإضافة من الأسفل' : ''}</div>
@@ -1346,7 +1382,7 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
           </div>
           {/* v3.79 — unified quick-add footer: always available while typing (never leave the flow) */}
           {enableQA && query.trim().length > 0 && !coaAdd && (
-            <div className="p-2 border-t bg-slate-50/70 space-y-1.5">
+            <div className="p-2 border-t bg-slate-50/70 space-y-1.5 shrink-0">
               {(type === 'client' || type === 'party' || type === 'all') && (
                 <button type="button" onClick={() => openQuickAdd('client')} className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-50 border-2 border-dashed border-emerald-300 text-emerald-700 font-bold text-xs hover:bg-emerald-100">
                   👤 ➕ إضافة عميل جديد باسم "{query.trim().slice(0, 30)}"
@@ -1366,7 +1402,7 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
           )}
           {/* v3.79 — inline COA account creation: independent account, parent = classification only (changeable) */}
           {coaAdd && (
-            <div className="p-2.5 border-t bg-purple-50/60 space-y-2">
+            <div className="p-2.5 border-t bg-purple-50/60 space-y-2 shrink-0">
               <div className="text-[11px] font-black text-purple-800">📒 حساب جديد في دليل الحسابات (مستقل — يمكن استخراج كشفه لاحقاً)</div>
               <input value={coaName} onChange={e => setCoaName(e.target.value)} placeholder="اسم الحساب (مثال: إيجار المكتب)" className="w-full px-2 py-1.5 text-xs border rounded bg-white outline-none focus:border-purple-400" />
               <div className="flex items-center gap-1.5">
@@ -1381,10 +1417,11 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
               </div>
             </div>
           )}
-          <div className="p-1.5 border-t bg-slate-50 rounded-b-lg text-[10px] text-slate-500 text-center">
+          <div className="p-1.5 border-t bg-slate-50 rounded-b-lg text-[10px] text-slate-500 text-center shrink-0">
             {results.length > 0 ? `${results.length} نتيجة — اضغط للاختيار` : (enableQA ? 'ابحث أولاً أو اضغط لإضافة جديد' : 'استخدم البحث الذكي')}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
       {/* Quick-Add Dialog */}
       {quickAddOpen && (
@@ -1402,7 +1439,7 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
 
 // v3.10.3 — Quick-Add Client/Supplier Dialog
 function QuickAddEntityDialog({ open, onOpenChange, type, initialName = '', onCreated }) {
-  const [form, setForm] = useState({ name: initialName, phone: '', parent_code: type === 'client' ? '1301' : '2101' })
+  const [form, setForm] = useState({ name: initialName, phone: '', parent_code: type === 'client' ? COA_FE.CLIENTS : COA_FE.SUPPLIERS })
   const [saving, setSaving] = useState(false)
   const [parents, setParents] = useState([])
   useEffect(() => { setForm(f => ({ ...f, name: initialName })) }, [initialName])
@@ -2671,12 +2708,12 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
 function QuickAddDialog({ open, onOpenChange, kind, onSaved, initialName }) {
   const [name, setName] = useState(''); const [phone, setPhone] = useState(''); const [address, setAddress] = useState(''); const [serviceType, setServiceType] = useState('')
   // v3.10.3 — parent account selection (COA integration)
-  const [parentCode, setParentCode] = useState(kind === 'client' ? '1301' : '2101')
+  const [parentCode, setParentCode] = useState(kind === 'client' ? COA_FE.CLIENTS : COA_FE.SUPPLIERS)
   const [parents, setParents] = useState([])
   useEffect(() => { if (open && initialName) setName(initialName) }, [open, initialName])
   useEffect(() => {
     if (!open) return
-    setParentCode(kind === 'client' ? '1301' : '2101')
+    setParentCode(kind === 'client' ? COA_FE.CLIENTS : COA_FE.SUPPLIERS)
     // Load possible parent accounts (assets for clients, liabilities for suppliers)
     const filterType = kind === 'client' ? 'asset' : 'liability'
     api('/accounts').then(rows => {
@@ -4892,7 +4929,7 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
 
 function PartiesScreen({ kind }) {
   const cfg = kind === 'clients' ? { title: 'العملاء', icon: Users, grad: 'grad-purple' } : { title: 'الموردون والوكلاء', icon: Building2, grad: 'grad-gold' }
-  const defaultParent = kind === 'clients' ? '1301' : '2101'
+  const defaultParent = kind === 'clients' ? COA_FE.CLIENTS : COA_FE.SUPPLIERS
   const parentType = kind === 'clients' ? 'asset' : 'liability'
   const [rows, setRows] = useState([])
   const [accounts, setAccounts] = useState([])
@@ -5017,14 +5054,14 @@ function PartiesScreen({ kind }) {
 function BoxesScreen() {
   const [rows, setRows] = useState([]); const [accounts, setAccounts] = useState([]); const [open, setOpen] = useState(false)
   const [name, setName] = useState(''); const [type, setType] = useState('cash')
-  const [parentCode, setParentCode] = useState('1101')
+  const [parentCode, setParentCode] = useState(COA_FE.CASHBOXES)
   const load = async () => { try { setRows(await api('/boxes')) } catch (e) { toast.error(e.message) } }
   const loadAccounts = async () => { try { setAccounts(await api('/accounts')) } catch (_) {} }
   useEffect(() => { load(); loadAccounts() }, [])
   // Update default parent when type changes
-  useEffect(() => { setParentCode(type === 'cash' ? '1101' : '1201') }, [type])
+  useEffect(() => { setParentCode(type === 'cash' ? COA_FE.CASHBOXES : COA_FE.BANKS) }, [type])
   const save = async () => { if (!name) return toast.error('الاسم مطلوب'); try { await api('/boxes', { method: 'POST', body: { name_ar: name, type, parent_code: parentCode } }); setName(''); setOpen(false); load() } catch (e) { toast.error(e.message) } }
-  const defaultParent = type === 'cash' ? '1101' : '1201'
+  const defaultParent = type === 'cash' ? COA_FE.CASHBOXES : COA_FE.BANKS
   // Eligible parents for boxes/banks: asset accounts that are groups
   const parentOptions = accounts.filter(a => a.type === 'asset' && a.is_group)
   return (
@@ -5323,30 +5360,190 @@ function ChartScreen() {
   )
 }
 
+// v3.87 — journal ref-type Arabic labels
+const JE_REF_LABEL = { manual: 'قيد يدوي', manual_dual: 'قيد مزدوج', opening: 'قيد افتتاحي', opening_close: 'إقفال أرصدة افتتاحية', ticket: 'تذكرة', visa: 'تأشيرة', service: 'خدمة', voucher: 'سند', fx: 'مصارفة' }
+
+// v3.87 — OPENING BALANCE ENTRY: user enters ONE side only (account/box/client/supplier +
+// currency + amount + debit/credit) — the system auto-balances against 3103.
+function OpeningJournalDialog({ open, onOpenChange, onSaved }) {
+  const [entity, setEntity] = useState(null)
+  const [form, setForm] = useState({ amount: '', side: 'debit', currency: 'SAR', date: todayISO(), note: '' })
+  const [saving, setSaving] = useState(false)
+  const reset = () => { setEntity(null); setForm(f => ({ ...f, amount: '', note: '' })) }
+  const submit = async (keepOpen) => {
+    if (!entity) { toast.error('اختر الحساب / الصندوق / العميل / المورد أولاً'); return }
+    if (!Number(form.amount) || Number(form.amount) <= 0) { toast.error('أدخل مبلغاً أكبر من صفر'); return }
+    setSaving(true)
+    try {
+      await api('/journal-entries/opening', {
+        method: 'POST',
+        body: {
+          party_type: entity.type === 'account' ? 'account' : entity.type,
+          party_id: entity.id,
+          account_code: entity.account_code,
+          currency: form.currency, amount: Number(form.amount), side: form.side, date: form.date, note: form.note,
+        },
+      })
+      toast.success(`✅ سُجّل الرصيد الافتتاحي — الطرف المقابل تلقائياً: 3103 ${'تسوية الأرصدة الافتتاحية'}`)
+      onSaved?.()
+      if (keepOpen) reset()
+      else onOpenChange(false)
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader><DialogTitle>🏦 قيد افتتاحي (رصيد مُرحَّل)</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <div className="text-[11px] bg-amber-50 border border-amber-200 rounded-lg p-2 text-amber-800 leading-relaxed">
+            أدخل طرفاً واحداً فقط — النظام يوازن القيد تلقائياً على حساب <b>3103 تسوية الأرصدة الافتتاحية</b>.
+            الأصول والخصوم وحقوق الملكية فقط (نتيجة السنة السابقة تُقفل في الأرباح المبقاة).
+            الصندوق الواحد متعدد العملات: اختر نفس الصندوق وغيّر العملة لكل رصيد.
+          </div>
+          <Field label="الحساب / الصندوق / العميل / المورد *">
+            <AccountAutocomplete type="all" value={entity?.id || null} onChange={setEntity} placeholder="ابحث بالاسم أو الكود..." allowQuickAdd={false} />
+          </Field>
+          <div className="grid grid-cols-3 gap-2">
+            <Field label="المبلغ *"><Input type="number" min="0" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} /></Field>
+            <Field label="طبيعة الرصيد *">
+              <Select value={form.side} onValueChange={v => setForm({ ...form, side: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent><SelectItem value="debit">مدين</SelectItem><SelectItem value="credit">دائن</SelectItem></SelectContent>
+              </Select>
+            </Field>
+            <Field label="العملة *">
+              <Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent><SelectItem value="SAR">SAR ر.س</SelectItem><SelectItem value="USD">USD $</SelectItem><SelectItem value="YER">YER ﷼</SelectItem></SelectContent>
+              </Select>
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="تاريخ الافتتاح *"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
+            <Field label="ملاحظة"><Input value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} placeholder="اختياري" /></Field>
+          </div>
+          <div className="flex gap-2">
+            <Button onClick={() => submit(true)} disabled={saving} className="flex-1 bg-emerald-600 hover:bg-emerald-700">{saving ? '...' : '💾 حفظ وإضافة رصيد آخر'}</Button>
+            <Button onClick={() => submit(false)} disabled={saving} variant="outline" className="flex-1">حفظ وإغلاق</Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// v3.87 — 3103 review + close: NEVER closes without showing a clear per-currency result first.
+function OpeningEquityDialog({ open, onOpenChange, onChanged }) {
+  const [status, setStatus] = useState(null)
+  const [target, setTarget] = useState(COA_FE.RETAINED_EARNINGS)
+  const [ccy, setCcy] = useState('ALL')
+  const [date, setDate] = useState(todayISO())
+  const [busy, setBusy] = useState(false)
+  const loadStatus = () => api('/journal-entries/opening-equity-status').then(setStatus).catch(e => toast.error(e.message))
+  useEffect(() => { if (open) loadStatus() }, [open])
+  const doClose = async () => {
+    const all = (status?.per_currency || []).filter(r => Math.abs(r.net_credit) >= 0.01)
+    const nonZero = ccy === 'ALL' ? all : all.filter(r => r.currency === ccy)
+    if (nonZero.length === 0) { toast.error(ccy === 'ALL' ? 'رصيد 3103 صفر في جميع العملات — لا يوجد ما يُقفل' : `رصيد 3103 بعملة ${ccy} صفر — لا يوجد ما يُقفل`); return }
+    if (!(await askConfirm({ title: 'إقفال الأرصدة الافتتاحية', desc: `سيُنشأ قيد إقفال لكل عملة (${nonZero.map(r => `${r.currency}: ${Math.abs(r.net_credit).toLocaleString()}`).join(' • ')}) إلى ${target === COA_FE.CAPITAL ? 'رأس المال 3101' : 'الأرباح المبقاة 3102'}.`, confirmLabel: 'تأكيد الإقفال' }))) return
+    setBusy(true)
+    try {
+      const r = await api('/journal-entries/opening-equity-close', { method: 'POST', body: { target, date, ...(ccy !== 'ALL' ? { currency: ccy } : {}) } })
+      toast.success(`🔐 أُقفل حساب التسوية: ${r.closed.map(c => `${c.currency} ${c.amount.toLocaleString()}`).join(' • ')} → ${r.target.name}`)
+      loadStatus(); onChanged?.()
+    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader><DialogTitle>⚖️ حساب تسوية الأرصدة الافتتاحية (3103)</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          {!status && <div className="text-center text-slate-400 py-6">جاري التحميل...</div>}
+          {status && (
+            <>
+              <div className="text-[11px] text-slate-500">قيود افتتاحية مسجلة: <b>{status.opening_entries}</b></div>
+              <Table>
+                <TableHeader><TableRow><TableHead>العملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الصافي</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {(status.per_currency || []).length === 0 && <TableRow><TableCell colSpan={4} className="text-center text-slate-400">لا حركات على 3103 بعد</TableCell></TableRow>}
+                  {(status.per_currency || []).map(r => (
+                    <TableRow key={r.currency}>
+                      <TableCell className="font-bold">{r.currency}</TableCell>
+                      <TableCell className="text-left">{r.debit.toLocaleString()}</TableCell>
+                      <TableCell className="text-left">{r.credit.toLocaleString()}</TableCell>
+                      <TableCell className={`text-left font-black ${Math.abs(r.net_credit) < 0.01 ? 'text-emerald-600' : 'text-amber-600'}`}>
+                        {Math.abs(r.net_credit) < 0.01 ? '✓ متوازن' : `${Math.abs(r.net_credit).toLocaleString()} ${r.net_credit > 0 ? '(دائن)' : '(مدين)'}`}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              <div className="border-t pt-3 space-y-2">
+                <div className="text-xs font-bold text-slate-600">إقفال الرصيد إلى:</div>
+                <div className="grid grid-cols-3 gap-2">
+                  <Select value={target} onValueChange={setTarget}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={COA_FE.RETAINED_EARNINGS}>3102 — الأرباح المبقاة</SelectItem>
+                      <SelectItem value={COA_FE.CAPITAL}>3101 — رأس المال</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select value={ccy} onValueChange={setCcy}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="ALL">كل العملات</SelectItem>
+                      <SelectItem value="SAR">SAR فقط</SelectItem>
+                      <SelectItem value="USD">USD فقط</SelectItem>
+                      <SelectItem value="YER">YER فقط</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <DocDateInput value={date} onChange={setDate} />
+                </div>
+                <Button onClick={doClose} disabled={busy} className="w-full bg-indigo-600 hover:bg-indigo-700">{busy ? '...' : `🔐 إقفال الأرصدة الافتتاحية ${ccy === 'ALL' ? '(قيد لكل عملة)' : `(${ccy} فقط)`}`}</Button>
+              </div>
+            </>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function JournalScreen() {
   const { settings, tenant } = useAuth()
   const [rows, setRows] = useState([])
   const [open, setOpen] = useState(false)
+  const [openingOpen, setOpeningOpen] = useState(false)
+  const [equityOpen, setEquityOpen] = useState(false)
   const [selectedId, setSelectedId] = useState(null)
   const [editing, setEditing] = useState(null)
   const load = () => api('/journal-entries').then(setRows).catch(e => toast.error(e.message))
   useEffect(() => { load() }, [])
   const selected = rows.find(je => je.id === selectedId)
   const isEditableJe = selected && (selected.ref_type === 'manual' || selected.ref_type === 'manual_dual')
+  const isDeletableJe = selected && ['manual', 'manual_dual', 'opening', 'opening_close'].includes(selected.ref_type)
   const handleAdd = () => { setEditing(null); setOpen(true) }
   const handleEdit = () => {
     if (!selected) return toast.error('اختر قيداً أولاً')
-    if (!isEditableJe) return toast.error('لا يمكن تعديل قيود المعاملات مباشرةً — عدّل السجل الأصلي (تذكرة/تأشيرة/سند...)')
+    if (!isEditableJe) return toast.error(selected.ref_type === 'opening' ? 'القيد الافتتاحي لا يُعدَّل — احذفه وأعد إدخاله من زر "قيد افتتاحي"' : 'لا يمكن تعديل قيود المعاملات مباشرةً — عدّل السجل الأصلي (تذكرة/تأشيرة/سند...)')
     setEditing(selected); setOpen(true)
   }
   const handleDelete = async () => {
     if (!selected) return
-    if (!isEditableJe) return toast.error('لا يمكن حذف قيد معاملة مباشرةً — احذف السجل الأصلي')
-    if (!(await askConfirm({ title: 'حذف القيد اليدوي', desc: 'سيتم حذف هذا القيد اليدوي من دفتر اليومية.', variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
+    if (!isDeletableJe) return toast.error('لا يمكن حذف قيد معاملة مباشرةً — احذف السجل الأصلي')
+    const isOpening = selected.ref_type === 'opening' || selected.ref_type === 'opening_close'
+    if (!(await askConfirm({
+      title: isOpening ? 'حذف قيد افتتاحي' : 'حذف القيد اليدوي',
+      desc: isOpening
+        ? 'سيُحذف القيد وتُعكس آثاره على أرصدة الأطراف. إن كان حساب التسوية 3103 قد أُقفل سابقاً فسيصبح غير متوازن ويلزم إعادة التسوية.'
+        : 'سيتم حذف هذا القيد اليدوي من دفتر اليومية وعكس آثاره على الأرصدة.',
+      variant: 'danger', confirmLabel: 'تأكيد الحذف',
+    }))) return
     try {
-      // Reverse effects then delete via generic route (backend keeps this clean for manual JEs only)
-      // Simplest: We call DELETE on /journal-entries/:id (needs backend support) — for now, disallow via toast
-      toast.error('حذف القيود اليدوية غير مدعوم بعد — عدّل بدلاً من ذلك')
+      const r = await api(`/journal-entries/${selected.id}`, { method: 'DELETE' })
+      if (r.warning) toast.warning(r.warning, { duration: 10000 })
+      else toast.success('🗑️ تم حذف القيد وعكس آثاره')
+      setSelectedId(null); load()
     } catch (e) { toast.error(e.message) }
   }
   const handlePrintTable = () => {
@@ -5381,7 +5578,11 @@ function JournalScreen() {
   }
   return (
     <div className="space-y-4">
-      <TopBar title="قيود اليومية" subtitle="جميع القيود المحاسبية التلقائية واليدوية" />
+      <TopBar title="قيود اليومية" subtitle="جميع القيود المحاسبية التلقائية واليدوية"
+        right={<div className="flex flex-wrap gap-2">
+          <Button size="sm" onClick={() => setOpeningOpen(true)} className="gap-1 bg-emerald-600 hover:bg-emerald-700 text-white">🏦 قيد افتتاحي</Button>
+          <Button size="sm" onClick={() => setEquityOpen(true)} variant="outline" className="gap-1 border-indigo-300 text-indigo-700 hover:bg-indigo-50">⚖️ إقفال الأرصدة الافتتاحية (3103)</Button>
+        </div>} />
       <ActionToolbar
         addLabel="إضافة قيد يومي" onAdd={handleAdd} onRefresh={load}
         onEdit={handleEdit} onDelete={handleDelete} onPrintTable={handlePrintTable}
@@ -5401,7 +5602,7 @@ function JournalScreen() {
                     <input type="radio" checked={isSelected} onChange={() => setSelectedId(je.id)} onClick={e => e.stopPropagation()} />
                     <div>
                       <div className="text-sm font-bold text-slate-800">{je.description}</div>
-                      <div className="text-xs text-slate-500">{fmtDate(je.date)} • {je.ref_type} • {isMulti ? 'متعدد العملات' : je.currency}{editable && <Badge variant="outline" className="mr-2 text-emerald-600 border-emerald-300">قابل للتعديل</Badge>}</div>
+                      <div className="text-xs text-slate-500">{fmtDate(je.date)} • {JE_REF_LABEL[je.ref_type] || je.ref_type} • {isMulti ? 'متعدد العملات' : je.currency}{editable && <Badge variant="outline" className="mr-2 text-emerald-600 border-emerald-300">قابل للتعديل</Badge>}{(je.ref_type === 'opening' || je.ref_type === 'opening_close') && <Badge variant="outline" className="mr-2 text-amber-600 border-amber-300">{JE_REF_LABEL[je.ref_type]}</Badge>}</div>
                     </div>
                   </div>
                   {!isMulti && <Badge variant="secondary" className="text-sm font-bold">{fmt(totalDebit, je.currency)}</Badge>}
@@ -5433,6 +5634,8 @@ function JournalScreen() {
         {rows.length === 0 && <div className="text-center text-slate-400 py-10">لا توجد قيود</div>}
       </div>
       <ManualJournalDialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }} record={editing} onSaved={() => { load(); setEditing(null) }} />
+      <OpeningJournalDialog open={openingOpen} onOpenChange={setOpeningOpen} onSaved={load} />
+      <OpeningEquityDialog open={equityOpen} onOpenChange={setEquityOpen} onChanged={load} />
     </div>
   )
 }
@@ -14301,6 +14504,26 @@ function LandingPage({ onLoginClick, onSignupClick }) {
 // ================================================================
 // ROOT APP
 // ================================================================
+// v3.87.3 — TEST ENVIRONMENT badge: hostname-based (client runtime), renders ONLY when the
+// browser host contains 'rahaal-test' (rahaal-test.targetmediagrp.com). Never on Live.
+// position:fixed + pointer-events:none → zero layout shift, zero interaction blocking.
+function TestEnvBadge() {
+  const [isTest, setIsTest] = useState(false)
+  useEffect(() => {
+    try { setIsTest(window.location.hostname.includes('rahaal-test')) } catch {}
+  }, [])
+  if (!isTest) return null
+  return (
+    <div
+      dir="rtl"
+      style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 99999, pointerEvents: 'none' }}
+      className="bg-amber-400/95 text-slate-900 text-[11px] sm:text-xs font-black text-center py-1 tracking-wider shadow-md"
+    >
+      ⚠️ بيئة اختبار — TEST ENVIRONMENT ⚠️
+    </div>
+  )
+}
+
 function App() {
   const [auth, setAuth] = useState({ loading: true, user: null, tenant: null, settings: null })
   // v3.9 — When not authenticated, show LandingPage by default; user can toggle to LoginPage or Signup
@@ -14342,13 +14565,14 @@ function App() {
 
   if (!auth.user) {
     if (publicView === 'login' || publicView === 'signup') {
-      return <LoginPage onLogin={onLogin} initialSignup={publicView === 'signup'} onBack={() => setPublicView('landing')} />
+      return <><TestEnvBadge /><LoginPage onLogin={onLogin} initialSignup={publicView === 'signup'} onBack={() => setPublicView('landing')} /></>
     }
-    return <LandingPage onLoginClick={() => setPublicView('login')} onSignupClick={() => setPublicView('signup')} />
+    return <><TestEnvBadge /><LandingPage onLoginClick={() => setPublicView('login')} onSignupClick={() => setPublicView('signup')} /></>
   }
 
   return (
     <AuthCtx.Provider value={{ ...auth, refreshMe, logout }}>
+      <TestEnvBadge />
       <ConfirmHost />
       {auth.user.role === 'super_admin' ? <SuperAdminPanel /> : <TenantApp />}
     </AuthCtx.Provider>

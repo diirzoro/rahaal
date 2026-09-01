@@ -109,3 +109,18 @@ jobs:
           echo "RAHAAL TEST DEPLOY SUCCESS"
 
           REMOTE
+
+      - name: Public Health Check (rahaal-test.targetmediagrp.com)
+        run: |
+          echo "===== PUBLIC HEALTH CHECK ====="
+          for i in {1..12}; do
+            code=$(curl -ksS -o /dev/null -w "%{http_code}" https://rahaal-test.targetmediagrp.com || true)
+            echo "Attempt ${i}/12 → HTTP ${code}"
+            if [ "$code" = "200" ]; then
+              echo "Rahaal Test public health OK"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Rahaal Test public health FAILED"
+          exit 1
