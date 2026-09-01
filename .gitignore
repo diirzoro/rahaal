@@ -125,3 +125,4 @@ test_reports/
 .pytest_cache/
 verify_*.py
 _safety_backup/
+.next/cache/webpack/server-production/1.pack
