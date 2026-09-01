@@ -63,7 +63,10 @@ jobs:
             "TEST_IMAGE=rahaal:test-${SHORT_SHA} \
              TEST_CONTAINER='${{ vars.TEST_RAHAAL_CONTAINER }}' \
              TEST_PORT='${{ vars.TEST_RAHAAL_PORT }}' \
-             TEST_ENV_FILE='${{ vars.TEST_RAHAAL_ENV_FILE }}' \
+             TEST_ENV_FILE='/root/rahaal_env_test' \
+             LEGACY_ENV_FILE='${{ vars.TEST_RAHAAL_ENV_FILE }}' \
+             LIVE_ENV_FILE='${{ vars.LIVE_RAHAAL_ENV_FILE }}' \
+             LIVE_CONTAINER='${{ vars.LIVE_RAHAAL_CONTAINER }}' \
              bash -s" <<'REMOTE'
 
           set -e
@@ -73,6 +76,113 @@ jobs:
 
           echo "===== VERIFY IMAGE ====="
           docker image inspect "$TEST_IMAGE" >/dev/null
+
+          echo "===== ENSURE TEST ENV FILE (/root/rahaal_env_test) ====="
+          # Bootstrap from the legacy TEST env file ONCE if the explicit test env file is
+          # missing (preserves MONGO_URL and other secrets), then enforce TEST-ONLY values.
+          # SAFETY: the bootstrap source must NEVER be a Live env file — a copied Live
+          # MONGO_URL would silently point the Test container at the LIVE database.
+          if [ ! -f "$TEST_ENV_FILE" ]; then
+            if [ -n "$LIVE_ENV_FILE" ] && [ "$LEGACY_ENV_FILE" = "$LIVE_ENV_FILE" ]; then
+              echo "ERROR: legacy env source equals the Live env file ($LIVE_ENV_FILE) — refusing"
+              exit 1
+            fi
+            case "$LEGACY_ENV_FILE" in
+              *live*|*Live*|*LIVE*|/etc/rahaal.env)
+                echo "ERROR: refusing to bootstrap Test env from a Live-looking source ($LEGACY_ENV_FILE)"
+                exit 1
+                ;;
+            esac
+            if [ -n "$LEGACY_ENV_FILE" ] && [ -f "$LEGACY_ENV_FILE" ]; then
+              cp "$LEGACY_ENV_FILE" "$TEST_ENV_FILE"
+              echo "Created $TEST_ENV_FILE from legacy TEST source: $LEGACY_ENV_FILE"
+            else
+              echo "ERROR: $TEST_ENV_FILE not found and no legacy TEST env file available"
+              exit 1
+            fi
+          fi
+
+          echo "===== ENFORCE TEST-ONLY ENV VALUES ====="
+          # Never allow Live values inside the Test runtime:
+          sed -i '/^NEXT_PUBLIC_BASE_URL=/d' "$TEST_ENV_FILE"
+          echo "NEXT_PUBLIC_BASE_URL=https://rahaal-test.targetmediagrp.com" >> "$TEST_ENV_FILE"
+          # Explicit PRIMARY switch for the fixed test accounts:
+          sed -i '/^SEED_TEST_ACCOUNTS=/d' "$TEST_ENV_FILE"
+          echo "SEED_TEST_ACCOUNTS=true" >> "$TEST_ENV_FILE"
+          # DISABLE_AUTO_SEED is a Live-only guard — it must NOT block seeding in Test:
+          sed -i '/^DISABLE_AUTO_SEED=/d' "$TEST_ENV_FILE"
+          # v3.87.6 — FULLY SEPARATE TEST DATABASE (never share Live data):
+          # The app selects its database exclusively via DB_NAME
+          # (client.db(process.env.DB_NAME)), so enforcing a dedicated *_test DB name
+          # is a hard data boundary even on a shared Mongo server. The isolation guard
+          # below stays authoritative and still fails if the resolved target equals Live.
+          CURRENT_DB="$(grep -E '^DB_NAME=' "$TEST_ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+          case "$CURRENT_DB" in
+            *_test)
+              echo "DB_NAME already a dedicated test database"
+              ;;
+            *)
+              sed -i '/^DB_NAME=/d' "$TEST_ENV_FILE"
+              echo "DB_NAME=rahaal_test" >> "$TEST_ENV_FILE"
+              echo "DB_NAME enforced to dedicated test database: rahaal_test"
+              ;;
+          esac
+          chmod 600 "$TEST_ENV_FILE"
+          echo "Test env file enforced OK"
+
+          echo "===== TEST/LIVE DB ISOLATION GUARD ====="
+          # HIGHEST PRIORITY: the container enables SEED_TEST_ACCOUNTS + a destructive
+          # one-time COA migration. It must NEVER run against the Live database.
+          # We compare the Mongo TARGET (connection string + DB name) of the Test env
+          # against every discoverable Live source. Secrets are NEVER printed — only
+          # TEST_DB_ISOLATION=OK / FAIL. Filename conventions are NOT trusted.
+          mongo_target() {
+            local u d
+            u="$(grep -E '^MONGO_URL=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+            d="$(grep -E '^DB_NAME=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+            [ -n "$u" ] && printf '%s|%s' "$u" "$d"
+          }
+          container_target() {
+            docker inspect "$1" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+              | awk -F= '/^MONGO_URL=/{u=substr($0,11)} /^DB_NAME=/{d=substr($0,9)} END{if(u!="")printf "%s|%s",u,d}'
+          }
+          TEST_TARGET="$(mongo_target "$TEST_ENV_FILE")"
+          if [ -z "$TEST_TARGET" ]; then
+            echo "TEST_DB_ISOLATION=FAIL"
+            echo "ERROR: MONGO_URL missing from the test env file"
+            exit 1
+          fi
+          LIVE_SOURCES_FOUND=0
+          ISOLATION_OK=1
+          check_live() {
+            [ -z "$2" ] && return 0
+            LIVE_SOURCES_FOUND=$((LIVE_SOURCES_FOUND+1))
+            if [ "$2" = "$TEST_TARGET" ]; then
+              echo "MATCH: Test Mongo target equals the Live target discovered via: $1"
+              ISOLATION_OK=0
+            fi
+          }
+          if [ -n "$LIVE_ENV_FILE" ] && [ -f "$LIVE_ENV_FILE" ]; then
+            check_live "LIVE_RAHAAL_ENV_FILE" "$(mongo_target "$LIVE_ENV_FILE")"
+          fi
+          if [ -f /etc/rahaal.env ]; then
+            check_live "/etc/rahaal.env" "$(mongo_target /etc/rahaal.env)"
+          fi
+          if [ -n "$LIVE_CONTAINER" ]; then
+            check_live "live container ($LIVE_CONTAINER)" "$(container_target "$LIVE_CONTAINER")"
+          fi
+          check_live "container rahaal-live" "$(container_target rahaal-live)"
+          if [ "$ISOLATION_OK" != "1" ]; then
+            echo "TEST_DB_ISOLATION=FAIL"
+            echo "ERROR: Test points at the LIVE Mongo database — refusing to start the container or run any migration"
+            exit 1
+          fi
+          if [ "$LIVE_SOURCES_FOUND" = "0" ]; then
+            echo "TEST_DB_ISOLATION=FAIL"
+            echo "ERROR: no Live Mongo source found to compare against (set repo var LIVE_RAHAAL_ENV_FILE or LIVE_RAHAAL_CONTAINER) — refusing to proceed UNVERIFIED"
+            exit 1
+          fi
+          echo "TEST_DB_ISOLATION=OK (compared against ${LIVE_SOURCES_FOUND} live source(s))"
 
           echo "===== REPLACE TEST CONTAINER ====="
           docker rm -f "$TEST_CONTAINER" 2>/dev/null || true
@@ -88,8 +198,34 @@ jobs:
           echo "===== WAIT FOR STARTUP ====="
           sleep 15
 
+          echo "===== VERIFY ENV INSIDE CONTAINER ====="
+          SEED_VAL="$(docker exec "$TEST_CONTAINER" printenv SEED_TEST_ACCOUNTS || true)"
+          URL_VAL="$(docker exec "$TEST_CONTAINER" printenv NEXT_PUBLIC_BASE_URL || true)"
+          DB_VAL="$(docker exec "$TEST_CONTAINER" printenv DB_NAME || true)"
+          echo "SEED_TEST_ACCOUNTS=$SEED_VAL"
+          echo "NEXT_PUBLIC_BASE_URL=$URL_VAL"
+          echo "DB_NAME=$DB_VAL"
+          if [ "$SEED_VAL" != "true" ]; then
+            echo "ERROR: SEED_TEST_ACCOUNTS did not reach the container"
+            exit 1
+          fi
+          if [ "$URL_VAL" != "https://rahaal-test.targetmediagrp.com" ]; then
+            echo "ERROR: NEXT_PUBLIC_BASE_URL inside container is not the Test URL"
+            exit 1
+          fi
+          case "$DB_VAL" in
+            *_test) : ;;
+            *)
+              echo "ERROR: DB_NAME inside container is not a dedicated *_test database"
+              exit 1
+              ;;
+          esac
+          echo "CONTAINER ENV OK"
+
           echo "===== HEALTH CHECK ====="
           curl -fsS "http://127.0.0.1:${TEST_PORT}/" >/dev/null
+          # Hit an API route too — this triggers the server init (incl. test-account seeding)
+          curl -fsS "http://127.0.0.1:${TEST_PORT}/api/health" >/dev/null
 
           echo "===== REMOVE TRANSFER FILE ====="
           rm -f /root/rahaal-test-image.tar.gz
@@ -124,3 +260,28 @@ jobs:
           done
           echo "Rahaal Test public health FAILED"
           exit 1
+
+      - name: Test Accounts Login Check (owner@gmail.com / taha@gmail.com)
+        run: |
+          echo "===== TEST ACCOUNTS LOGIN CHECK ====="
+          for acct in owner@gmail.com taha@gmail.com; do
+            ok=""
+            for i in {1..6}; do
+              code=$(curl -ksS -o /tmp/login_resp.json -w "%{http_code}" \
+                -X POST "https://rahaal-test.targetmediagrp.com/api/auth/login" \
+                -H "Content-Type: application/json" \
+                -d "{\"email\":\"${acct}\",\"password\":\"123456\"}" || true)
+              echo "${acct} attempt ${i}/6 → HTTP ${code}"
+              if [ "$code" = "200" ]; then
+                ok="yes"
+                break
+              fi
+              sleep 5
+            done
+            if [ "$ok" != "yes" ]; then
+              echo "LOGIN FAILED for ${acct}"
+              cat /tmp/login_resp.json || true
+              exit 1
+            fi
+          done
+          echo "TEST ACCOUNTS LOGIN OK (owner + user)"
