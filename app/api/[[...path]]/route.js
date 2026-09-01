@@ -320,6 +320,32 @@ async function seedInitial(db) {
   }
   await seedTenantDefaults(db, demo.id)
 
+  // v3.87.2 — Fixed TEST-ONLY accounts (owner@gmail.com / taha@gmail.com), both attached
+  // to the demo tenant so Owner-vs-User can be compared inside the SAME office.
+  // Gating: runs ONLY when SEED_TEST_ACCOUNTS=true is set, or the deployment's public
+  // URL contains 'rahaal-test' (the Test container). Live is never gated in, and the
+  // global DISABLE_AUTO_SEED=true guard above still short-circuits everything on Live.
+  const isTestEnv = process.env.SEED_TEST_ACCOUNTS === 'true' || (process.env.NEXT_PUBLIC_BASE_URL || '').includes('rahaal-test')
+  if (isTestEnv) {
+    const testAccounts = [
+      { email: 'owner@gmail.com', name: 'Owner Test Account', role: 'owner' },
+      { email: 'taha@gmail.com', name: 'Taha Test User', role: 'staff' }, // normal user — NOT admin/owner
+    ]
+    for (const acc of testAccounts) {
+      const existing = await admins.findOne({ email: acc.email })
+      const setDoc = {
+        tenant_id: demo.id, name: acc.name, role: acc.role, active: true,
+        password_hash: bcrypt.hashSync('123456', 8),
+      }
+      if (existing) {
+        await admins.updateOne({ email: acc.email }, { $set: setDoc }) // no duplicates — role/password refreshed
+      } else {
+        await admins.insertOne({ id: uuidv4(), email: acc.email, ...setDoc, permissions: {}, created_at: new Date() })
+      }
+    }
+    console.log('[seed] test accounts ensured (owner@gmail.com owner / taha@gmail.com staff) on demo tenant')
+  }
+
   // Backfill referral codes for any existing tenants missing one
   const missingRef = await tenants.find({ $or: [{ referral_code: { $exists: false } }, { referral_code: null }] }).toArray()
   for (const t of missingRef) await ensureReferralCode(db, t.id)
