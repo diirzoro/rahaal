@@ -66,6 +66,7 @@ jobs:
              TEST_ENV_FILE='/root/rahaal_env_test' \
              LEGACY_ENV_FILE='${{ vars.TEST_RAHAAL_ENV_FILE }}' \
              LIVE_ENV_FILE='${{ vars.LIVE_RAHAAL_ENV_FILE }}' \
+             LIVE_CONTAINER='${{ vars.LIVE_RAHAAL_CONTAINER }}' \
              bash -s" <<'REMOTE'
 
           set -e
@@ -112,6 +113,60 @@ jobs:
           sed -i '/^DISABLE_AUTO_SEED=/d' "$TEST_ENV_FILE"
           chmod 600 "$TEST_ENV_FILE"
           echo "Test env file enforced OK"
+
+          echo "===== TEST/LIVE DB ISOLATION GUARD ====="
+          # HIGHEST PRIORITY: the container enables SEED_TEST_ACCOUNTS + a destructive
+          # one-time COA migration. It must NEVER run against the Live database.
+          # We compare the Mongo TARGET (connection string + DB name) of the Test env
+          # against every discoverable Live source. Secrets are NEVER printed — only
+          # TEST_DB_ISOLATION=OK / FAIL. Filename conventions are NOT trusted.
+          mongo_target() {
+            local u d
+            u="$(grep -E '^MONGO_URL=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+            d="$(grep -E '^DB_NAME=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+            [ -n "$u" ] && printf '%s|%s' "$u" "$d"
+          }
+          container_target() {
+            docker inspect "$1" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+              | awk -F= '/^MONGO_URL=/{u=substr($0,11)} /^DB_NAME=/{d=substr($0,9)} END{if(u!="")printf "%s|%s",u,d}'
+          }
+          TEST_TARGET="$(mongo_target "$TEST_ENV_FILE")"
+          if [ -z "$TEST_TARGET" ]; then
+            echo "TEST_DB_ISOLATION=FAIL"
+            echo "ERROR: MONGO_URL missing from the test env file"
+            exit 1
+          fi
+          LIVE_SOURCES_FOUND=0
+          ISOLATION_OK=1
+          check_live() {
+            [ -z "$2" ] && return 0
+            LIVE_SOURCES_FOUND=$((LIVE_SOURCES_FOUND+1))
+            if [ "$2" = "$TEST_TARGET" ]; then
+              echo "MATCH: Test Mongo target equals the Live target discovered via: $1"
+              ISOLATION_OK=0
+            fi
+          }
+          if [ -n "$LIVE_ENV_FILE" ] && [ -f "$LIVE_ENV_FILE" ]; then
+            check_live "LIVE_RAHAAL_ENV_FILE" "$(mongo_target "$LIVE_ENV_FILE")"
+          fi
+          if [ -f /etc/rahaal.env ]; then
+            check_live "/etc/rahaal.env" "$(mongo_target /etc/rahaal.env)"
+          fi
+          if [ -n "$LIVE_CONTAINER" ]; then
+            check_live "live container ($LIVE_CONTAINER)" "$(container_target "$LIVE_CONTAINER")"
+          fi
+          check_live "container rahaal-live" "$(container_target rahaal-live)"
+          if [ "$ISOLATION_OK" != "1" ]; then
+            echo "TEST_DB_ISOLATION=FAIL"
+            echo "ERROR: Test points at the LIVE Mongo database — refusing to start the container or run any migration"
+            exit 1
+          fi
+          if [ "$LIVE_SOURCES_FOUND" = "0" ]; then
+            echo "TEST_DB_ISOLATION=FAIL"
+            echo "ERROR: no Live Mongo source found to compare against (set repo var LIVE_RAHAAL_ENV_FILE or LIVE_RAHAAL_CONTAINER) — refusing to proceed UNVERIFIED"
+            exit 1
+          fi
+          echo "TEST_DB_ISOLATION=OK (compared against ${LIVE_SOURCES_FOUND} live source(s))"
 
           echo "===== REPLACE TEST CONTAINER ====="
           docker rm -f "$TEST_CONTAINER" 2>/dev/null || true
