@@ -111,6 +111,22 @@ jobs:
           echo "SEED_TEST_ACCOUNTS=true" >> "$TEST_ENV_FILE"
           # DISABLE_AUTO_SEED is a Live-only guard — it must NOT block seeding in Test:
           sed -i '/^DISABLE_AUTO_SEED=/d' "$TEST_ENV_FILE"
+          # v3.87.6 — FULLY SEPARATE TEST DATABASE (never share Live data):
+          # The app selects its database exclusively via DB_NAME
+          # (client.db(process.env.DB_NAME)), so enforcing a dedicated *_test DB name
+          # is a hard data boundary even on a shared Mongo server. The isolation guard
+          # below stays authoritative and still fails if the resolved target equals Live.
+          CURRENT_DB="$(grep -E '^DB_NAME=' "$TEST_ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+          case "$CURRENT_DB" in
+            *_test)
+              echo "DB_NAME already a dedicated test database"
+              ;;
+            *)
+              sed -i '/^DB_NAME=/d' "$TEST_ENV_FILE"
+              echo "DB_NAME=rahaal_test" >> "$TEST_ENV_FILE"
+              echo "DB_NAME enforced to dedicated test database: rahaal_test"
+              ;;
+          esac
           chmod 600 "$TEST_ENV_FILE"
           echo "Test env file enforced OK"
 
@@ -185,8 +201,10 @@ jobs:
           echo "===== VERIFY ENV INSIDE CONTAINER ====="
           SEED_VAL="$(docker exec "$TEST_CONTAINER" printenv SEED_TEST_ACCOUNTS || true)"
           URL_VAL="$(docker exec "$TEST_CONTAINER" printenv NEXT_PUBLIC_BASE_URL || true)"
+          DB_VAL="$(docker exec "$TEST_CONTAINER" printenv DB_NAME || true)"
           echo "SEED_TEST_ACCOUNTS=$SEED_VAL"
           echo "NEXT_PUBLIC_BASE_URL=$URL_VAL"
+          echo "DB_NAME=$DB_VAL"
           if [ "$SEED_VAL" != "true" ]; then
             echo "ERROR: SEED_TEST_ACCOUNTS did not reach the container"
             exit 1
@@ -195,6 +213,13 @@ jobs:
             echo "ERROR: NEXT_PUBLIC_BASE_URL inside container is not the Test URL"
             exit 1
           fi
+          case "$DB_VAL" in
+            *_test) : ;;
+            *)
+              echo "ERROR: DB_NAME inside container is not a dedicated *_test database"
+              exit 1
+              ;;
+          esac
           echo "CONTAINER ENV OK"
 
           echo "===== HEALTH CHECK ====="
