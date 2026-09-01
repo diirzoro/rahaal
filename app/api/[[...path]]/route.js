@@ -198,6 +198,63 @@ const AFFILIATE_COMMISSION_RATE = 0.10
 const AFFILIATE_MIN_CASHOUT_INDIVIDUAL = 10
 const AFFILIATE_MIN_CASHOUT_OFFICE = 50
 
+// v3.87.4 — Shared COA v2 rebuild (used by POST /coa/rebuild AND the one-time TEST
+// auto-migration). Wipes the tenant's trial operational/financial data, reseeds the
+// hierarchical tree, re-codes boxes/clients/suppliers under the correct parents
+// (strict parent-prefix, 7-digit L4) and zeroes balances. Currency is NEVER a COA
+// level — one box account per box regardless of SAR/USD/YER.
+async function rebuildTenantCoa(db, T, byEmail) {
+  const wiped = {}
+  // FULL operational wipe: never leave half an operation behind (a booking whose
+  // journal entries were deleted). Financial docs + their operational sources +
+  // linked Meraaj trial bookings + linked booking documents (and their stored blobs)
+  // all go together. meraaj_inbound_events (global dedup markers, no tenant_id) are
+  // kept intentionally — they prevent old webhook replays from re-creating bookings.
+  const docKeys = (await db.collection('booking_documents').find({ tenant_id: T }).project({ 'storage.object_key': 1 }).toArray())
+    .map(d => d?.storage?.object_key).filter(Boolean)
+  if (docKeys.length) {
+    const rBlobs = await db.collection('document_blobs').deleteMany({ tenant_id: T, object_key: { $in: docKeys } })
+    wiped.document_blobs = rBlobs.deletedCount
+  }
+  for (const col of ['journal_entries', 'vouchers', 'tickets', 'visas', 'services', 'currency_exchanges', 'refunds', 'cashout_requests', 'package_bookings', 'meraaj_inbound_bookings', 'booking_documents']) {
+    const r = await db.collection(col).deleteMany({ tenant_id: T })
+    wiped[col] = r.deletedCount
+  }
+  await db.collection('accounts').deleteMany({ tenant_id: T })
+  await seedCoaTree(db, T) // NEW correct tree only — boxes/settings of the tenant are preserved
+  // Re-code the EXISTING boxes/clients/suppliers under the correct parents and zero balances.
+  const recode = { boxes: 0, clients: 0, suppliers: 0 }
+  const boxes = await db.collection('boxes').find({ tenant_id: T }).sort({ created_at: 1 }).toArray()
+  let cashSeq = 0, bankSeq = 0
+  for (const bx of boxes) {
+    const isBank = bx.type === 'bank'
+    const parent = isBank ? COA.BANKS : COA.CASHBOXES
+    const seq = isBank ? ++bankSeq : ++cashSeq
+    await db.collection('boxes').updateOne({ id: bx.id, tenant_id: T }, { $set: { parent_code: parent, account_code: `${parent}${String(seq).padStart(3, '0')}`, account_parent_code: parent, account_seq: seq, balances: emptyBalances() } })
+    recode.boxes++
+  }
+  await db.collection('accounts').updateOne({ tenant_id: T, code: COA.CASHBOXES }, { $set: { next_child_seq: cashSeq || 1 } })
+  await db.collection('accounts').updateOne({ tenant_id: T, code: COA.BANKS }, { $set: { next_child_seq: bankSeq || 1 } })
+  let cSeq = 0
+  for (const c of await db.collection('clients').find({ tenant_id: T }).sort({ created_at: 1 }).toArray()) {
+    cSeq++
+    await db.collection('clients').updateOne({ id: c.id, tenant_id: T }, { $set: { account_code: `${COA.CLIENTS}${String(cSeq).padStart(3, '0')}`, account_parent_code: COA.CLIENTS, account_seq: cSeq, balances: emptyBalances() } })
+    recode.clients++
+  }
+  await db.collection('accounts').updateOne({ tenant_id: T, code: COA.CLIENTS }, { $set: { next_child_seq: cSeq || 0 } })
+  let sSeq = 0
+  for (const s of await db.collection('suppliers').find({ tenant_id: T }).sort({ created_at: 1 }).toArray()) {
+    sSeq++
+    await db.collection('suppliers').updateOne({ id: s.id, tenant_id: T }, { $set: { account_code: `${COA.SUPPLIERS}${String(sSeq).padStart(3, '0')}`, account_parent_code: COA.SUPPLIERS, account_seq: sSeq, balances: emptyBalances() } })
+    recode.suppliers++
+  }
+  await db.collection('accounts').updateOne({ tenant_id: T, code: COA.SUPPLIERS }, { $set: { next_child_seq: sSeq || 0 } })
+  await db.collection('tenant_settings').updateOne({ tenant_id: T }, { $set: { coa_version: 2, coa_rebuilt_at: new Date(), coa_rebuilt_by: byEmail } }, { upsert: true })
+  await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'coa_rebuild', wiped, recode, by: byEmail, at: new Date() })
+  const treeCount = await db.collection('accounts').countDocuments({ tenant_id: T })
+  return { wiped, recode, tree_accounts: treeCount }
+}
+
 async function seedInitial(db) {
   // Production safety guard (permanent architecture rule):
   // When DISABLE_AUTO_SEED=true is set in the environment, skip ALL seed / insert / delete /
@@ -346,6 +403,18 @@ async function seedInitial(db) {
       }
     }
     console.log('[seed] test accounts ensured (owner@gmail.com owner / taha@gmail.com staff) on demo tenant')
+
+    // v3.87.4 — ONE-TIME COA v2 auto-migration for the demo tenant on TEST environments.
+    // The deployed Test server has its OWN database where the demo tenant may still
+    // carry the pre-v3.87 chart (currency-named cashbox accounts, clients under 1301...).
+    // Guarded by tenant_settings.coa_version — runs exactly once per database, TEST only.
+    // Live is protected: no SEED_TEST_ACCOUNTS flag + DISABLE_AUTO_SEED=true guard above.
+    const demoTs = await db.collection('tenant_settings').findOne({ tenant_id: demo.id })
+    if (!demoTs || demoTs.coa_version !== 2) {
+      console.log('[seed] TEST env: demo tenant COA is pre-v2 — running one-time rebuild')
+      const mig = await rebuildTenantCoa(db, demo.id, 'coa-v2-auto-migration@test')
+      console.log('[seed] COA v2 migration done:', JSON.stringify(mig.recode), 'tree =', mig.tree_accounts)
+    }
   }
 
   // Backfill referral codes for any existing tenants missing one
@@ -6586,56 +6655,8 @@ async function handleRoute(request, { params }) {
       if (sess.user.role !== 'owner') return bad('إعادة بناء الدليل متاحة لمالك المكتب فقط', 403)
       const b = await request.json()
       if (b.confirm !== 'REBUILD-COA') return bad('أرسل confirm: "REBUILD-COA" للتأكيد — هذه العملية تحذف كل البيانات المحاسبية التجريبية')
-      const wiped = {}
-      // v3.87 — FULL operational wipe: never leave half an operation behind (a booking
-      // whose journal entries were deleted). Financial docs + their operational sources
-      // + linked Meraaj trial bookings + linked booking documents (and their stored
-      // blobs) all go together. meraaj_inbound_events (global dedup markers, no
-      // tenant_id) are kept intentionally — they prevent old webhook replays from
-      // re-creating wiped bookings.
-      const docKeys = (await db.collection('booking_documents').find({ tenant_id: T }).project({ 'storage.object_key': 1 }).toArray())
-        .map(d => d?.storage?.object_key).filter(Boolean)
-      if (docKeys.length) {
-        const rBlobs = await db.collection('document_blobs').deleteMany({ tenant_id: T, object_key: { $in: docKeys } })
-        wiped.document_blobs = rBlobs.deletedCount
-      }
-      for (const col of ['journal_entries', 'vouchers', 'tickets', 'visas', 'services', 'currency_exchanges', 'refunds', 'cashout_requests', 'package_bookings', 'meraaj_inbound_bookings', 'booking_documents']) {
-        const r = await db.collection(col).deleteMany({ tenant_id: T })
-        wiped[col] = r.deletedCount
-      }
-      await db.collection('accounts').deleteMany({ tenant_id: T })
-      await seedCoaTree(db, T) // NEW correct tree only — boxes/settings of the tenant are preserved
-      // Re-code the EXISTING boxes/clients/suppliers under the correct parents and zero balances.
-      const recode = { boxes: 0, clients: 0, suppliers: 0 }
-      const boxes = await db.collection('boxes').find({ tenant_id: T }).sort({ created_at: 1 }).toArray()
-      let cashSeq = 0, bankSeq = 0
-      for (const bx of boxes) {
-        const isBank = bx.type === 'bank'
-        const parent = isBank ? COA.BANKS : COA.CASHBOXES
-        const seq = isBank ? ++bankSeq : ++cashSeq
-        await db.collection('boxes').updateOne({ id: bx.id, tenant_id: T }, { $set: { parent_code: parent, account_code: `${parent}${String(seq).padStart(3, '0')}`, account_parent_code: parent, account_seq: seq, balances: emptyBalances() } })
-        recode.boxes++
-      }
-      await db.collection('accounts').updateOne({ tenant_id: T, code: COA.CASHBOXES }, { $set: { next_child_seq: cashSeq || 1 } })
-      await db.collection('accounts').updateOne({ tenant_id: T, code: COA.BANKS }, { $set: { next_child_seq: bankSeq || 1 } })
-      let cSeq = 0
-      for (const c of await db.collection('clients').find({ tenant_id: T }).sort({ created_at: 1 }).toArray()) {
-        cSeq++
-        await db.collection('clients').updateOne({ id: c.id, tenant_id: T }, { $set: { account_code: `${COA.CLIENTS}${String(cSeq).padStart(3, '0')}`, account_parent_code: COA.CLIENTS, account_seq: cSeq, balances: emptyBalances() } })
-        recode.clients++
-      }
-      await db.collection('accounts').updateOne({ tenant_id: T, code: COA.CLIENTS }, { $set: { next_child_seq: cSeq || 0 } })
-      let sSeq = 0
-      for (const s of await db.collection('suppliers').find({ tenant_id: T }).sort({ created_at: 1 }).toArray()) {
-        sSeq++
-        await db.collection('suppliers').updateOne({ id: s.id, tenant_id: T }, { $set: { account_code: `${COA.SUPPLIERS}${String(sSeq).padStart(3, '0')}`, account_parent_code: COA.SUPPLIERS, account_seq: sSeq, balances: emptyBalances() } })
-        recode.suppliers++
-      }
-      await db.collection('accounts').updateOne({ tenant_id: T, code: COA.SUPPLIERS }, { $set: { next_child_seq: sSeq || 0 } })
-      await db.collection('tenant_settings').updateOne({ tenant_id: T }, { $set: { coa_version: 2, coa_rebuilt_at: new Date(), coa_rebuilt_by: sess.user.email } }, { upsert: true })
-      await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'coa_rebuild', wiped, recode, by: sess.user.email, at: new Date() })
-      const treeCount = await db.collection('accounts').countDocuments({ tenant_id: T })
-      return ok({ rebuilt: true, wiped, recode, tree_accounts: treeCount, coa_version: 2 })
+      const result = await rebuildTenantCoa(db, T, sess.user.email)
+      return ok({ rebuilt: true, ...result, coa_version: 2 })
     }
 
     // Dashboard
