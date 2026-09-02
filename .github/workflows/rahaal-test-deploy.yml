@@ -1,8 +1,14 @@
 name: Deploy Rahaal Test
 
+# v3.87.7 — DEPLOYMENT POLICY (workflow-only change):
+#   • Test deploys ONLY after an actual push to main (merge). Feature branches,
+#     Emergent saves to feature branches, PRs and manual dispatch NEVER deploy.
+#   • Every build/SSH/SCP/Docker/deploy step carries an explicit push-to-main guard.
+#   • Live promotion stays a separate manual workflow (PROMOTE confirmation + main guard).
+#   • The Test/Live database-isolation guard inside the deploy script is UNCHANGED.
 on:
   push:
-    branches-ignore:
+    branches:
       - main
 
 concurrency:
@@ -11,23 +17,28 @@ concurrency:
 
 jobs:
   deploy-test:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/checkout@v4
 
       - name: Build Rahaal test image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
           docker build -t "rahaal:test-${SHORT_SHA}" .
 
       - name: Export Docker image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
           docker save "rahaal:test-${SHORT_SHA}" | gzip > rahaal-test-image.tar.gz
 
       - name: Prepare SSH
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           mkdir -p ~/.ssh
 
@@ -40,6 +51,7 @@ jobs:
             >> ~/.ssh/known_hosts
 
       - name: Verify SSH connection
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           ssh \
             -i ~/.ssh/rahaal_test_key \
@@ -47,6 +59,7 @@ jobs:
             "echo SSH_CONNECTION_OK"
 
       - name: Upload image to server
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           scp \
             -i ~/.ssh/rahaal_test_key \
@@ -54,6 +67,7 @@ jobs:
             "${{ vars.TEST_SERVER_USER }}@${{ vars.TEST_SERVER_HOST }}:/root/rahaal-test-image.tar.gz"
 
       - name: Deploy Rahaal Test
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
 
@@ -247,6 +261,7 @@ jobs:
           REMOTE
 
       - name: Public Health Check (rahaal-test.targetmediagrp.com)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           echo "===== PUBLIC HEALTH CHECK ====="
           for i in {1..12}; do
@@ -262,6 +277,7 @@ jobs:
           exit 1
 
       - name: Test Accounts Login Check (owner@gmail.com / taha@gmail.com)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           echo "===== TEST ACCOUNTS LOGIN CHECK ====="
           for acct in owner@gmail.com taha@gmail.com; do
