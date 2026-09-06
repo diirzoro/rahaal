@@ -6,7 +6,7 @@ import crypto from 'crypto'
 import sharp from 'sharp'
 // v3.88 — COA Migration Framework: single source of truth for the COA template,
 // per-tenant versioning, audit/classification and controlled reset/preserve migrations.
-import { seedCoaTemplate, applyResetMigration } from '@/lib/coa'
+import { seedCoaTemplate, applyResetMigration, upsertTenantSettingsDefaults } from '@/lib/coa'
 
 // v3.47 — Package image optimization settings (applied ONCE at upload; centralized — adjust here)
 const IMG_MAX_DIM = 1200        // longest side in px (aspect ratio preserved, never enlarged)
@@ -105,8 +105,11 @@ async function seedTenantDefaults(db, tenantId) {
   ])
   // NOTE: next_child_seq stores the LAST USED sequence (the generator increments first) —
   // seed boxes consumed seq 1 under CASHBOXES/BANKS, so the stored value stays 1.
-  await db.collection('tenant_settings').insertOne({
-    id: uuidv4(), tenant_id: t,
+  // v3.88.1 — BLOCKER-1 fix: seedCoaTree() above already upserted the tenant_settings
+  // document (coa_version stamp). The old raw insertOne here created a SECOND document
+  // for every new tenant. Delegated to the framework's single-doc upsert — creating a
+  // new tenant now results in exactly ONE tenant_settings document.
+  await upsertTenantSettingsDefaults(db, t, {
     agency_name: '', logo_base64: '', header: '', footer: '', tax_id: '', commercial_id: '',
     phone: '', address: '', email: '', primary_color: '#1e3a8a',
     base_currency: BASE_CURRENCY,
@@ -181,6 +184,8 @@ async function rebuildTenantCoa(db, T, byEmail) {
   // destructive path and it is never automatic in production: it is reached solely via
   // the explicit owner-confirmed endpoint (confirm: "REBUILD-COA") or the TEST-env
   // demo bootstrap. allowWipe acknowledges that explicit authorization.
+  // v3.88.1 — BLOCKER-2: even with allowWipe, lib/coa.js refuses a full reset on the
+  // live server (DISABLE_AUTO_SEED=true) whenever the tenant has financial documents.
   const res = await applyResetMigration(db, T, byEmail, { allowWipe: true })
   return { wiped: res.wiped || {}, recode: res.recode || {}, tree_accounts: res.tree_accounts || 0 }
 }
@@ -203,6 +208,8 @@ async function seedInitial(db) {
     await db.collection('clients').createIndex({ tenant_id: 1, account_code: 1 }, { unique: true, sparse: true, name: 'unique_tenant_client_code' })
     await db.collection('suppliers').createIndex({ tenant_id: 1, account_code: 1 }, { unique: true, sparse: true, name: 'unique_tenant_supplier_code' })
     await db.collection('boxes').createIndex({ tenant_id: 1, account_code: 1 }, { unique: true, sparse: true, name: 'unique_tenant_box_code' })
+    // v3.88.1 — BLOCKER-1 hard guard: at most ONE tenant_settings document per tenant.
+    await db.collection('tenant_settings').createIndex({ tenant_id: 1 }, { unique: true, sparse: true, name: 'unique_tenant_settings' })
   } catch (e) { /* Indexes may already exist */ }
 
   // Migrate rate schema: flat number → { transfer, buy, sell, min, max, remarks }
@@ -6572,8 +6579,18 @@ async function handleRoute(request, { params }) {
       if (sess.user.role !== 'owner') return bad('إعادة بناء الدليل متاحة لمالك المكتب فقط', 403)
       const b = await request.json()
       if (b.confirm !== 'REBUILD-COA') return bad('أرسل confirm: "REBUILD-COA" للتأكيد — هذه العملية تحذف كل البيانات المحاسبية التجريبية')
-      const result = await rebuildTenantCoa(db, T, sess.user.email)
-      return ok({ rebuilt: true, ...result, coa_version: 2 })
+      // v3.88.1 — BLOCKER-2: on the live server (DISABLE_AUTO_SEED=true) the framework
+      // refuses a full wipe for any tenant that has financial documents. Surface that
+      // refusal as a clear 403 instead of a generic 500.
+      try {
+        const result = await rebuildTenantCoa(db, T, sess.user.email)
+        return ok({ rebuilt: true, ...result, coa_version: 2 })
+      } catch (e) {
+        if (/RESET (blocked|refused)/.test(String(e?.message))) {
+          return bad('إعادة البناء الكاملة مرفوضة: هذا المكتب لديه حركات مالية فعلية — الحذف الشامل ممنوع على خادم الإنتاج. استخدم مسار الترقية بدون حذف (PRESERVE).', 403)
+        }
+        throw e
+      }
     }
 
     // Dashboard

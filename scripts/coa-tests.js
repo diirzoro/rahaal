@@ -234,6 +234,57 @@ async function cleanup(db, tenantIds) {
     const jVal = await coa.validateTenant(db, tJ)
     check('J: PRESERVE يصلح الشجرة الهجينة الإنتاجية بالكامل', jRes.result === 'success' && jVal.ok, jVal.problems.join('|'))
 
+    // ============ K. BLOCKER-1: new tenant → exactly ONE tenant_settings doc ============
+    // Mirrors the real new-tenant bootstrap: seedCoaTemplate (stamps coa_version via
+    // upsert) followed by the defaults upsert — must merge into the SAME document.
+    const tK = await makeTenant(db, 'K مستند إعدادات واحد'); created.push(tK)
+    await coa.seedCoaTemplate(db, tK)
+    await coa.upsertTenantSettingsDefaults(db, tK, {
+      agency_name: '', primary_color: '#1e3a8a', base_currency: 'YER',
+      rates: { USD: { transfer: 1554 }, SAR: { transfer: 410 }, YER: { transfer: 1 } },
+      updated_at: new Date(),
+    })
+    const kCount = await db.collection('tenant_settings').countDocuments({ tenant_id: tK })
+    const kTs = await db.collection('tenant_settings').findOne({ tenant_id: tK })
+    const kAccs = await db.collection('accounts').countDocuments({ tenant_id: tK })
+    check('K: مستأجر جديد → مستند tenant_settings واحد فقط + coa_version=2 + 28 حساباً',
+      kCount === 1 && kTs?.coa_version === 2 && kAccs === 28 && !!kTs?.id && kTs?.base_currency === 'YER',
+      `settings_docs=${kCount} coa_version=${kTs?.coa_version} accs=${kAccs}`)
+    await coa.upsertTenantSettingsDefaults(db, tK, { agency_name: 'وكالة الاختبار' })
+    const kCount2 = await db.collection('tenant_settings').countDocuments({ tenant_id: tK })
+    const kTs2 = await db.collection('tenant_settings').findOne({ tenant_id: tK })
+    check('K: إعادة تشغيل upsert الإعدادات لا تنشئ مستنداً ثانياً (idempotent)',
+      kCount2 === 1 && kTs2?.agency_name === 'وكالة الاختبار' && kTs2?.id === kTs?.id && kTs2?.coa_version === 2,
+      `settings_docs=${kCount2}`)
+
+    // ============ L. BLOCKER-2: PRODUCTION → full reset forbidden when tx > 0 ============
+    // DISABLE_AUTO_SEED=true is the permanent live-server flag. Even the owner endpoint's
+    // explicit { allowWipe: true } must be refused, and the tenant data must stay intact.
+    const tL = await makeTenant(db, 'L إنتاج محمي'); created.push(tL)
+    await seedV1(db, tL)
+    const pL = await addParties(db, tL)
+    await addV1Transactions(db, tL, pL)
+    const lBefore = await tenantStateHash(db, tL)
+    const prevSeedFlag = process.env.DISABLE_AUTO_SEED
+    let lBlocked = false, lMsg = ''
+    try {
+      process.env.DISABLE_AUTO_SEED = 'true' // simulate production
+      await coa.applyResetMigration(db, tL, 'tests', { allowWipe: true })
+    } catch (e) { lBlocked = /RESET blocked on PRODUCTION/.test(e.message); lMsg = e.message }
+    finally {
+      if (prevSeedFlag === undefined) delete process.env.DISABLE_AUTO_SEED
+      else process.env.DISABLE_AUTO_SEED = prevSeedFlag
+    }
+    const lAfter = await tenantStateHash(db, tL)
+    const lJeCount = await db.collection('journal_entries').countDocuments({ tenant_id: tL })
+    check('L: على الإنتاج — Full Reset مرفوض رغم allowWipe لمستأجر لديه حركات', lBlocked, lMsg)
+    check('L: بيانات المستأجر بقيت كما هي تماماً بعد الرفض (hash مطابق + القيود سليمة)',
+      lBefore === lAfter && lJeCount === 2, `je=${lJeCount}`)
+    // sanity: the same explicit wipe still works OUTSIDE production (test-env bootstrap)
+    const lRes = await coa.applyResetMigration(db, tL, 'tests', { allowWipe: true })
+    const lVal = await coa.validateTenant(db, tL)
+    check('L: خارج الإنتاج — allowWipe الصريح ما زال يعمل (بيئة الاختبار)', lRes.result === 'success' && lVal.ok, lVal.problems.join('|'))
+
     console.log(`\n=== COA MIGRATION TESTS: ${pass} passed, ${fail} failed ===`)
   } finally {
     await cleanup(db, created)

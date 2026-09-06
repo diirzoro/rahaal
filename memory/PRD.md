@@ -95,3 +95,9 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 
 ## Test Credentials
 See /app/memory/test_credentials.md
+
+## v3.88.1 (completed — awaiting user approval before any push/merge)
+- PR Blocker 1: tenant_settings is now guaranteed ONE doc per tenant — lib/coa.js upsertTenantSettingsDefaults() (upsert + $setOnInsert id) replaces raw insertOne in seedTenantDefaults; unique sparse index unique_tenant_settings added in seedInitial.
+- PR Blocker 2: applyResetMigration ignores allowWipe on production (DISABLE_AUTO_SEED=true) when tenant has transactions → 'RESET blocked on PRODUCTION'; /coa/rebuild returns Arabic 403. Non-prod behavior unchanged.
+- PR Blocker 3: no git remote in workspace — sync of tenent-updates with GitHub main must be done via PR "Update branch" or Save-to-GitHub (reported to user).
+- Tests: coa-tests.js scenarios K & L added → 27/27 PASS on isolated DB.
