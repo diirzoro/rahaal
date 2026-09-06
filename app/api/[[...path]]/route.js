@@ -4,6 +4,9 @@ import { NextResponse } from 'next/server'
 import bcrypt from 'bcryptjs'
 import crypto from 'crypto'
 import sharp from 'sharp'
+// v3.88 — COA Migration Framework: single source of truth for the COA template,
+// per-tenant versioning, audit/classification and controlled reset/preserve migrations.
+import { seedCoaTemplate, applyResetMigration, upsertTenantSettingsDefaults, ensureTenantSettingsUniqueIndex } from '@/lib/coa'
 
 // v3.47 — Package image optimization settings (applied ONCE at upload; centralized — adjust here)
 const IMG_MAX_DIM = 1200        // longest side in px (aspect ratio preserved, never enlarged)
@@ -74,41 +77,11 @@ const round2n = (n) => Math.round((Number(n) || 0) * 100) / 100
 // v3.87 — the COA tree seeding is a standalone function so the REBUILD endpoint can
 // re-create the tree for an EXISTING tenant without duplicating boxes/settings.
 async function seedCoaTree(db, t) {
-  const acc = db.collection('accounts')
-  const now = new Date()
-  // v3.87 — CORRECT hierarchical tree: every child code starts with its parent's prefix.
-  // Currency is a DIMENSION inside box/party balances — NEVER a level in this tree.
-  const g = (code, name_ar, type, parent, extra = {}) => ({ id: uuidv4(), tenant_id: t, code, name_ar, type, parent, is_group: true, created_at: now, ...extra })
-  const leaf = (code, name_ar, type, parent, extra = {}) => ({ id: uuidv4(), tenant_id: t, code, name_ar, type, parent, is_group: false, created_at: now, ...extra })
-  await acc.insertMany([
-    g(COA.ASSETS, 'الأصول', 'asset', null),
-    g(COA.CURRENT_ASSETS, 'الأصول المتداولة', 'asset', COA.ASSETS),
-    g(COA.CASHBOXES, 'الصناديق', 'asset', COA.CURRENT_ASSETS, { next_child_seq: 1 }),
-    g(COA.BANKS, 'البنوك والمحافظ', 'asset', COA.CURRENT_ASSETS, { next_child_seq: 1 }),
-    g(COA.CLIENTS, 'العملاء / ذمم مدينة', 'asset', COA.CURRENT_ASSETS),
-    g(COA.FIXED_ASSETS, 'الأصول الثابتة / غير المتداولة', 'asset', COA.ASSETS),    g(COA.LIABILITIES, 'الخصوم / الالتزامات', 'liability', null),
-    g(COA.CURRENT_LIABS, 'الالتزامات المتداولة', 'liability', COA.LIABILITIES),
-    g(COA.SUPPLIERS, 'الموردون والوكلاء (دائنون)', 'liability', COA.CURRENT_LIABS),
-    g(COA.LONGTERM_LIABS, 'الالتزامات طويلة الأجل / غير المتداولة', 'liability', COA.LIABILITIES),
-    g(COA.EQUITY, 'حقوق الملكية', 'equity', null),
-    g(COA.EQUITY_GROUP, 'رأس المال وحقوق الملكية', 'equity', COA.EQUITY),
-    leaf(COA.CAPITAL, 'رأس المال', 'equity', COA.EQUITY_GROUP),
-    leaf(COA.RETAINED_EARNINGS, 'الأرباح المبقاة', 'equity', COA.EQUITY_GROUP),
-    leaf(COA.OPENING_EQUITY, OPENING_EQUITY_NAME, 'equity', COA.EQUITY_GROUP, { is_system: true }),
-    g(COA.REVENUES, 'الإيرادات', 'revenue', null),
-    g(COA.REV_GROUP, 'إيرادات النشاط', 'revenue', COA.REVENUES),
-    leaf(COA.REV_TICKETS, 'إيرادات عمولات التذاكر', 'revenue', COA.REV_GROUP),
-    leaf(COA.REV_VISAS, 'إيرادات عمولات التأشيرات والموافقات', 'revenue', COA.REV_GROUP),
-    leaf(COA.REV_SERVICES, 'إيرادات خدمات إضافية', 'revenue', COA.REV_GROUP),
-    leaf(COA.FX_PNL, 'أرباح وخسائر فروق العملات (مصارفة)', 'revenue', COA.REV_GROUP),
-    leaf(COA.REV_CANCEL_FEES, 'رسوم إلغاء واسترداد', 'revenue', COA.REV_GROUP),
-    g(COA.EXPENSES, 'المصروفات', 'expense', null),
-    g(COA.OPEX_GROUP, 'مصاريف تشغيلية', 'expense', COA.EXPENSES),
-    g(COA.ADMIN_GROUP, 'مصاريف إدارية وعمومية', 'expense', COA.EXPENSES),
-    g(COA.COMM_DIFF_GROUP, 'فروق العمولات', 'expense', COA.EXPENSES),
-    g(COA.OPEX, 'مصاريف تشغيلية (تفصيلي)', 'expense', COA.OPEX_GROUP),
-    leaf(COA.FX_ADJUST, 'فروق عملة وتسويات', 'expense', COA.ADMIN_GROUP),
-  ])
+  // v3.88 — delegated to the COA Migration Framework (lib/coa.js) — SINGLE source of
+  // truth for the 28-account template. Also stamps tenant_settings.coa_version so every
+  // NEW tenant is born already at CURRENT_COA_VERSION. Idempotent (refuses if any
+  // accounts already exist for the tenant).
+  return seedCoaTemplate(db, t)
 }
 async function seedTenantDefaults(db, tenantId) {
   const acc = db.collection('accounts')
@@ -132,8 +105,11 @@ async function seedTenantDefaults(db, tenantId) {
   ])
   // NOTE: next_child_seq stores the LAST USED sequence (the generator increments first) —
   // seed boxes consumed seq 1 under CASHBOXES/BANKS, so the stored value stays 1.
-  await db.collection('tenant_settings').insertOne({
-    id: uuidv4(), tenant_id: t,
+  // v3.88.1 — BLOCKER-1 fix: seedCoaTree() above already upserted the tenant_settings
+  // document (coa_version stamp). The old raw insertOne here created a SECOND document
+  // for every new tenant. Delegated to the framework's single-doc upsert — creating a
+  // new tenant now results in exactly ONE tenant_settings document.
+  await upsertTenantSettingsDefaults(db, t, {
     agency_name: '', logo_base64: '', header: '', footer: '', tax_id: '', commercial_id: '',
     phone: '', address: '', email: '', primary_color: '#1e3a8a',
     base_currency: BASE_CURRENCY,
@@ -204,55 +180,16 @@ const AFFILIATE_MIN_CASHOUT_OFFICE = 50
 // (strict parent-prefix, 7-digit L4) and zeroes balances. Currency is NEVER a COA
 // level — one box account per box regardless of SAR/USD/YER.
 async function rebuildTenantCoa(db, T, byEmail) {
-  const wiped = {}
-  // FULL operational wipe: never leave half an operation behind (a booking whose
-  // journal entries were deleted). Financial docs + their operational sources +
-  // linked Meraaj trial bookings + linked booking documents (and their stored blobs)
-  // all go together. meraaj_inbound_events (global dedup markers, no tenant_id) are
-  // kept intentionally — they prevent old webhook replays from re-creating bookings.
-  const docKeys = (await db.collection('booking_documents').find({ tenant_id: T }).project({ 'storage.object_key': 1 }).toArray())
-    .map(d => d?.storage?.object_key).filter(Boolean)
-  if (docKeys.length) {
-    const rBlobs = await db.collection('document_blobs').deleteMany({ tenant_id: T, object_key: { $in: docKeys } })
-    wiped.document_blobs = rBlobs.deletedCount
-  }
-  for (const col of ['journal_entries', 'vouchers', 'tickets', 'visas', 'services', 'currency_exchanges', 'refunds', 'cashout_requests', 'package_bookings', 'meraaj_inbound_bookings', 'booking_documents']) {
-    const r = await db.collection(col).deleteMany({ tenant_id: T })
-    wiped[col] = r.deletedCount
-  }
-  await db.collection('accounts').deleteMany({ tenant_id: T })
-  await seedCoaTree(db, T) // NEW correct tree only — boxes/settings of the tenant are preserved
-  // Re-code the EXISTING boxes/clients/suppliers under the correct parents and zero balances.
-  const recode = { boxes: 0, clients: 0, suppliers: 0 }
-  const boxes = await db.collection('boxes').find({ tenant_id: T }).sort({ created_at: 1 }).toArray()
-  let cashSeq = 0, bankSeq = 0
-  for (const bx of boxes) {
-    const isBank = bx.type === 'bank'
-    const parent = isBank ? COA.BANKS : COA.CASHBOXES
-    const seq = isBank ? ++bankSeq : ++cashSeq
-    await db.collection('boxes').updateOne({ id: bx.id, tenant_id: T }, { $set: { parent_code: parent, account_code: `${parent}${String(seq).padStart(3, '0')}`, account_parent_code: parent, account_seq: seq, balances: emptyBalances() } })
-    recode.boxes++
-  }
-  await db.collection('accounts').updateOne({ tenant_id: T, code: COA.CASHBOXES }, { $set: { next_child_seq: cashSeq || 1 } })
-  await db.collection('accounts').updateOne({ tenant_id: T, code: COA.BANKS }, { $set: { next_child_seq: bankSeq || 1 } })
-  let cSeq = 0
-  for (const c of await db.collection('clients').find({ tenant_id: T }).sort({ created_at: 1 }).toArray()) {
-    cSeq++
-    await db.collection('clients').updateOne({ id: c.id, tenant_id: T }, { $set: { account_code: `${COA.CLIENTS}${String(cSeq).padStart(3, '0')}`, account_parent_code: COA.CLIENTS, account_seq: cSeq, balances: emptyBalances() } })
-    recode.clients++
-  }
-  await db.collection('accounts').updateOne({ tenant_id: T, code: COA.CLIENTS }, { $set: { next_child_seq: cSeq || 0 } })
-  let sSeq = 0
-  for (const s of await db.collection('suppliers').find({ tenant_id: T }).sort({ created_at: 1 }).toArray()) {
-    sSeq++
-    await db.collection('suppliers').updateOne({ id: s.id, tenant_id: T }, { $set: { account_code: `${COA.SUPPLIERS}${String(sSeq).padStart(3, '0')}`, account_parent_code: COA.SUPPLIERS, account_seq: sSeq, balances: emptyBalances() } })
-    recode.suppliers++
-  }
-  await db.collection('accounts').updateOne({ tenant_id: T, code: COA.SUPPLIERS }, { $set: { next_child_seq: sSeq || 0 } })
-  await db.collection('tenant_settings').updateOne({ tenant_id: T }, { $set: { coa_version: 2, coa_rebuilt_at: new Date(), coa_rebuilt_by: byEmail } }, { upsert: true })
-  await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'coa_rebuild', wiped, recode, by: byEmail, at: new Date() })
-  const treeCount = await db.collection('accounts').countDocuments({ tenant_id: T })
-  return { wiped, recode, tree_accounts: treeCount }
+  // v3.88 — delegated to the COA Migration Framework (lib/coa.js). This is the ONLY
+  // destructive path and it is never automatic in production: it is reached solely via
+  // the explicit owner-confirmed endpoint (confirm: "REBUILD-COA") or the TEST-env
+  // demo bootstrap. allowWipe acknowledges that explicit authorization.
+  // v3.88.2 — DEFAULT-DENY: even with allowWipe, lib/coa.js refuses a full reset for a
+  // tenant holding financial documents unless the environment is POSITIVELY proven to
+  // be a test one (db name ends in _test/_tests AND ALLOW_DESTRUCTIVE_COA_RESET=true).
+  // Production protection no longer depends on DISABLE_AUTO_SEED.
+  const res = await applyResetMigration(db, T, byEmail, { allowWipe: true })
+  return { wiped: res.wiped || {}, recode: res.recode || {}, tree_accounts: res.tree_accounts || 0 }
 }
 
 async function seedInitial(db) {
@@ -273,6 +210,11 @@ async function seedInitial(db) {
     await db.collection('clients').createIndex({ tenant_id: 1, account_code: 1 }, { unique: true, sparse: true, name: 'unique_tenant_client_code' })
     await db.collection('suppliers').createIndex({ tenant_id: 1, account_code: 1 }, { unique: true, sparse: true, name: 'unique_tenant_supplier_code' })
     await db.collection('boxes').createIndex({ tenant_id: 1, account_code: 1 }, { unique: true, sparse: true, name: 'unique_tenant_box_code' })
+    // v3.88.2 — BLOCKER-1 hard guard: at most ONE tenant_settings document per tenant.
+    // A read-only duplicate audit runs FIRST (lib/coa.js): on duplicates NOTHING is
+    // deleted or merged, the index is NOT created, and a loud manual_review warning is
+    // logged — the failure is never silently swallowed by this try/catch.
+    await ensureTenantSettingsUniqueIndex(db)
   } catch (e) { /* Indexes may already exist */ }
 
   // Migrate rate schema: flat number → { transfer, buy, sell, min, max, remarks }
@@ -296,26 +238,13 @@ async function seedInitial(db) {
     if (needUpdate) await db.collection('tenant_settings').updateOne({ id: s.id }, { $set: { rates: newRates, base_currency: BASE_CURRENCY } })
   }
 
-  // Migration: ensure FX 4104 account exists for every tenant
+  // v3.88 — REMOVED: the old piecemeal COA backfills (4104/4105 with parent '41') that
+  // produced HYBRID v1/v2 trees in production (parent '41' never existed in v1 → orphans).
+  // Startup now performs NO structural COA mutation on existing tenants. Old tenants are
+  // upgraded exclusively through the controlled, versioned migration:
+  //   node scripts/coa-migrate.js --audit | --dry-run | --apply   (see lib/coa.js)
   const allTenants = await db.collection('tenants').find({}).toArray()
   for (const tn of allTenants) {
-    const has = await db.collection('accounts').findOne({ tenant_id: tn.id, code: COA.FX_PNL })
-    if (!has) {
-      await db.collection('accounts').insertOne({
-        id: uuidv4(), tenant_id: tn.id, code: COA.FX_PNL,
-        name_ar: 'أرباح وخسائر فروق العملات (مصارفة)',
-        type: 'revenue', parent: COA.REV_GROUP, is_group: false, created_at: new Date(),
-      })
-    }
-    // v3.5 — Backfill 4105 (refund fees) if missing
-    const hasRefund = await db.collection('accounts').findOne({ tenant_id: tn.id, code: COA.REV_CANCEL_FEES })
-    if (!hasRefund) {
-      await db.collection('accounts').insertOne({
-        id: uuidv4(), tenant_id: tn.id, code: COA.REV_CANCEL_FEES,
-        name_ar: 'رسوم إلغاء واسترداد',
-        type: 'revenue', parent: COA.REV_GROUP, is_group: false, created_at: new Date(),
-      })
-    }
     if (!tn.journal_quota) {
       const usedCount = await db.collection('journal_entries').countDocuments({ tenant_id: tn.id })
       await db.collection('tenants').updateOne({ id: tn.id }, { $set: { journal_quota: { used: usedCount, limit: 500, top_ups: [] } } })
@@ -412,8 +341,15 @@ async function seedInitial(db) {
     const demoTs = await db.collection('tenant_settings').findOne({ tenant_id: demo.id })
     if (!demoTs || demoTs.coa_version !== 2) {
       console.log('[seed] TEST env: demo tenant COA is pre-v2 — running one-time rebuild')
-      const mig = await rebuildTenantCoa(db, demo.id, 'coa-v2-auto-migration@test')
-      console.log('[seed] COA v2 migration done:', JSON.stringify(mig.recode), 'tree =', mig.tree_accounts)
+      try {
+        const mig = await rebuildTenantCoa(db, demo.id, 'coa-v2-auto-migration@test')
+        console.log('[seed] COA v2 migration done:', JSON.stringify(mig.recode), 'tree =', mig.tree_accounts)
+      } catch (e) {
+        // v3.88.2 — default-deny guard may refuse the wipe (env not positively proven as
+        // test). Never crash bootstrap: the demo tenant simply stays on its current COA
+        // until migrated through the controlled CLI path (scripts/coa-migrate.js).
+        console.warn('[seed] COA v2 auto-migration skipped by guard:', e.message)
+      }
     }
   }
 
@@ -6655,8 +6591,18 @@ async function handleRoute(request, { params }) {
       if (sess.user.role !== 'owner') return bad('إعادة بناء الدليل متاحة لمالك المكتب فقط', 403)
       const b = await request.json()
       if (b.confirm !== 'REBUILD-COA') return bad('أرسل confirm: "REBUILD-COA" للتأكيد — هذه العملية تحذف كل البيانات المحاسبية التجريبية')
-      const result = await rebuildTenantCoa(db, T, sess.user.email)
-      return ok({ rebuilt: true, ...result, coa_version: 2 })
+      // v3.88.2 — DEFAULT-DENY: the framework refuses a full wipe for any tenant that
+      // has financial documents in EVERY environment that is not positively proven to
+      // be a test one. Surface that refusal as a clear 403 instead of a generic 500.
+      try {
+        const result = await rebuildTenantCoa(db, T, sess.user.email)
+        return ok({ rebuilt: true, ...result, coa_version: 2 })
+      } catch (e) {
+        if (/RESET (blocked|refused)/.test(String(e?.message))) {
+          return bad('إعادة البناء الكاملة مرفوضة: هذا المكتب لديه حركات مالية فعلية — الحذف الشامل ممنوع افتراضياً في جميع البيئات. استخدم مسار الترقية بدون حذف (PRESERVE).', 403)
+        }
+        throw e
+      }
     }
 
     // Dashboard
