@@ -6,7 +6,7 @@ import crypto from 'crypto'
 import sharp from 'sharp'
 // v3.88 — COA Migration Framework: single source of truth for the COA template,
 // per-tenant versioning, audit/classification and controlled reset/preserve migrations.
-import { seedCoaTemplate, applyResetMigration, upsertTenantSettingsDefaults } from '@/lib/coa'
+import { seedCoaTemplate, applyResetMigration, upsertTenantSettingsDefaults, ensureTenantSettingsUniqueIndex } from '@/lib/coa'
 
 // v3.47 — Package image optimization settings (applied ONCE at upload; centralized — adjust here)
 const IMG_MAX_DIM = 1200        // longest side in px (aspect ratio preserved, never enlarged)
@@ -184,8 +184,10 @@ async function rebuildTenantCoa(db, T, byEmail) {
   // destructive path and it is never automatic in production: it is reached solely via
   // the explicit owner-confirmed endpoint (confirm: "REBUILD-COA") or the TEST-env
   // demo bootstrap. allowWipe acknowledges that explicit authorization.
-  // v3.88.1 — BLOCKER-2: even with allowWipe, lib/coa.js refuses a full reset on the
-  // live server (DISABLE_AUTO_SEED=true) whenever the tenant has financial documents.
+  // v3.88.2 — DEFAULT-DENY: even with allowWipe, lib/coa.js refuses a full reset for a
+  // tenant holding financial documents unless the environment is POSITIVELY proven to
+  // be a test one (db name ends in _test/_tests AND ALLOW_DESTRUCTIVE_COA_RESET=true).
+  // Production protection no longer depends on DISABLE_AUTO_SEED.
   const res = await applyResetMigration(db, T, byEmail, { allowWipe: true })
   return { wiped: res.wiped || {}, recode: res.recode || {}, tree_accounts: res.tree_accounts || 0 }
 }
@@ -208,8 +210,11 @@ async function seedInitial(db) {
     await db.collection('clients').createIndex({ tenant_id: 1, account_code: 1 }, { unique: true, sparse: true, name: 'unique_tenant_client_code' })
     await db.collection('suppliers').createIndex({ tenant_id: 1, account_code: 1 }, { unique: true, sparse: true, name: 'unique_tenant_supplier_code' })
     await db.collection('boxes').createIndex({ tenant_id: 1, account_code: 1 }, { unique: true, sparse: true, name: 'unique_tenant_box_code' })
-    // v3.88.1 — BLOCKER-1 hard guard: at most ONE tenant_settings document per tenant.
-    await db.collection('tenant_settings').createIndex({ tenant_id: 1 }, { unique: true, sparse: true, name: 'unique_tenant_settings' })
+    // v3.88.2 — BLOCKER-1 hard guard: at most ONE tenant_settings document per tenant.
+    // A read-only duplicate audit runs FIRST (lib/coa.js): on duplicates NOTHING is
+    // deleted or merged, the index is NOT created, and a loud manual_review warning is
+    // logged — the failure is never silently swallowed by this try/catch.
+    await ensureTenantSettingsUniqueIndex(db)
   } catch (e) { /* Indexes may already exist */ }
 
   // Migrate rate schema: flat number → { transfer, buy, sell, min, max, remarks }
@@ -336,8 +341,15 @@ async function seedInitial(db) {
     const demoTs = await db.collection('tenant_settings').findOne({ tenant_id: demo.id })
     if (!demoTs || demoTs.coa_version !== 2) {
       console.log('[seed] TEST env: demo tenant COA is pre-v2 — running one-time rebuild')
-      const mig = await rebuildTenantCoa(db, demo.id, 'coa-v2-auto-migration@test')
-      console.log('[seed] COA v2 migration done:', JSON.stringify(mig.recode), 'tree =', mig.tree_accounts)
+      try {
+        const mig = await rebuildTenantCoa(db, demo.id, 'coa-v2-auto-migration@test')
+        console.log('[seed] COA v2 migration done:', JSON.stringify(mig.recode), 'tree =', mig.tree_accounts)
+      } catch (e) {
+        // v3.88.2 — default-deny guard may refuse the wipe (env not positively proven as
+        // test). Never crash bootstrap: the demo tenant simply stays on its current COA
+        // until migrated through the controlled CLI path (scripts/coa-migrate.js).
+        console.warn('[seed] COA v2 auto-migration skipped by guard:', e.message)
+      }
     }
   }
 
@@ -6579,15 +6591,15 @@ async function handleRoute(request, { params }) {
       if (sess.user.role !== 'owner') return bad('إعادة بناء الدليل متاحة لمالك المكتب فقط', 403)
       const b = await request.json()
       if (b.confirm !== 'REBUILD-COA') return bad('أرسل confirm: "REBUILD-COA" للتأكيد — هذه العملية تحذف كل البيانات المحاسبية التجريبية')
-      // v3.88.1 — BLOCKER-2: on the live server (DISABLE_AUTO_SEED=true) the framework
-      // refuses a full wipe for any tenant that has financial documents. Surface that
-      // refusal as a clear 403 instead of a generic 500.
+      // v3.88.2 — DEFAULT-DENY: the framework refuses a full wipe for any tenant that
+      // has financial documents in EVERY environment that is not positively proven to
+      // be a test one. Surface that refusal as a clear 403 instead of a generic 500.
       try {
         const result = await rebuildTenantCoa(db, T, sess.user.email)
         return ok({ rebuilt: true, ...result, coa_version: 2 })
       } catch (e) {
         if (/RESET (blocked|refused)/.test(String(e?.message))) {
-          return bad('إعادة البناء الكاملة مرفوضة: هذا المكتب لديه حركات مالية فعلية — الحذف الشامل ممنوع على خادم الإنتاج. استخدم مسار الترقية بدون حذف (PRESERVE).', 403)
+          return bad('إعادة البناء الكاملة مرفوضة: هذا المكتب لديه حركات مالية فعلية — الحذف الشامل ممنوع افتراضياً في جميع البيئات. استخدم مسار الترقية بدون حذف (PRESERVE).', 403)
         }
         throw e
       }

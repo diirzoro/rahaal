@@ -257,37 +257,73 @@ async function cleanup(db, tenantIds) {
       kCount2 === 1 && kTs2?.agency_name === 'وكالة الاختبار' && kTs2?.id === kTs?.id && kTs2?.coa_version === 2,
       `settings_docs=${kCount2}`)
 
-    // ============ L. BLOCKER-2: PRODUCTION → full reset forbidden when tx > 0 ============
-    // DISABLE_AUTO_SEED=true is the permanent live-server flag. Even the owner endpoint's
-    // explicit { allowWipe: true } must be refused, and the tenant data must stay intact.
-    const tL = await makeTenant(db, 'L إنتاج محمي'); created.push(tL)
-    await seedV1(db, tL)
-    const pL = await addParties(db, tL)
-    await addV1Transactions(db, tL, pL)
-    const lBefore = await tenantStateHash(db, tL)
+    // ============ L. BLOCKER-2 v2: Full Reset — DEFAULT-DENY (بدون اعتماد على DISABLE_AUTO_SEED) ============
+    // L1 (طلب المستخدم): tx>0 + DISABLE_AUTO_SEED غير موجود + قاعدة ليست _test + allowWipe:true → مرفوض والبيانات لا تتغير
     const prevSeedFlag = process.env.DISABLE_AUTO_SEED
+    const prevAllowFlag = process.env.ALLOW_DESTRUCTIVE_COA_RESET
+    delete process.env.DISABLE_AUTO_SEED
+    delete process.env.ALLOW_DESTRUCTIVE_COA_RESET
+    const gdb = client.db('rahaal_coa_guardcheck') // scratch DB — deliberately NOT ending in _test
+    const tL = await makeTenant(gdb, 'L حارس افتراضي') // cleaned via dropDatabase in finally
+    await seedV1(gdb, tL)
+    const pL = await addParties(gdb, tL)
+    await addV1Transactions(gdb, tL, pL)
+    const lBefore = await tenantStateHash(gdb, tL)
     let lBlocked = false, lMsg = ''
-    try {
-      process.env.DISABLE_AUTO_SEED = 'true' // simulate production
-      await coa.applyResetMigration(db, tL, 'tests', { allowWipe: true })
-    } catch (e) { lBlocked = /RESET blocked on PRODUCTION/.test(e.message); lMsg = e.message }
-    finally {
-      if (prevSeedFlag === undefined) delete process.env.DISABLE_AUTO_SEED
-      else process.env.DISABLE_AUTO_SEED = prevSeedFlag
-    }
-    const lAfter = await tenantStateHash(db, tL)
-    const lJeCount = await db.collection('journal_entries').countDocuments({ tenant_id: tL })
-    check('L: على الإنتاج — Full Reset مرفوض رغم allowWipe لمستأجر لديه حركات', lBlocked, lMsg)
-    check('L: بيانات المستأجر بقيت كما هي تماماً بعد الرفض (hash مطابق + القيود سليمة)',
+    try { await coa.applyResetMigration(gdb, tL, 'tests', { allowWipe: true }) }
+    catch (e) { lBlocked = /RESET blocked/.test(e.message); lMsg = e.message }
+    const lAfter = await tenantStateHash(gdb, tL)
+    const lJeCount = await gdb.collection('journal_entries').countDocuments({ tenant_id: tL })
+    check('L1: tx>0 + بدون DISABLE_AUTO_SEED + قاعدة ليست _test + allowWipe → RESET مرفوض افتراضياً', lBlocked, lMsg)
+    check('L1: بيانات المستأجر لم تتغير إطلاقاً بعد الرفض (hash مطابق + القيود سليمة)',
       lBefore === lAfter && lJeCount === 2, `je=${lJeCount}`)
-    // sanity: the same explicit wipe still works OUTSIDE production (test-env bootstrap)
-    const lRes = await coa.applyResetMigration(db, tL, 'tests', { allowWipe: true })
-    const lVal = await coa.validateTenant(db, tL)
-    check('L: خارج الإنتاج — allowWipe الصريح ما زال يعمل (بيئة الاختبار)', lRes.result === 'success' && lVal.ok, lVal.problems.join('|'))
+    // L2: اسم قاعدة _tests وحده لا يكفي — لا بد من ALLOW_DESTRUCTIVE_COA_RESET=true معه
+    const tL2 = await makeTenant(db, 'L2 نصف إثبات'); created.push(tL2)
+    await seedV1(db, tL2)
+    const pL2 = await addParties(db, tL2)
+    await addV1Transactions(db, tL2, pL2)
+    let l2Blocked = false, l2Msg = ''
+    try { await coa.applyResetMigration(db, tL2, 'tests', { allowWipe: true }) }
+    catch (e) { l2Blocked = /RESET blocked/.test(e.message); l2Msg = e.message }
+    check('L2: اسم قاعدة اختبارية وحده لا يكفي بدون ALLOW_DESTRUCTIVE_COA_RESET (الشرطان معاً)', l2Blocked, l2Msg)
+    // L3: بيئة اختبار مثبتة إيجابياً (اسم _tests + العلم الصريح) → allowWipe يعمل
+    process.env.ALLOW_DESTRUCTIVE_COA_RESET = 'true'
+    const l3 = await coa.applyResetMigration(db, tL2, 'tests', { allowWipe: true })
+    const l3Val = await coa.validateTenant(db, tL2)
+    check('L3: بيئة اختبار مثبتة إيجابياً (اسم + علم صريح) → allowWipe يعمل', l3.result === 'success' && l3Val.ok, l3Val.problems.join('|'))
+    if (prevAllowFlag === undefined) delete process.env.ALLOW_DESTRUCTIVE_COA_RESET
+    else process.env.ALLOW_DESTRUCTIVE_COA_RESET = prevAllowFlag
+    if (prevSeedFlag !== undefined) process.env.DISABLE_AUTO_SEED = prevSeedFlag
+
+    // ============ M. BLOCKER-1 v2: تدقيق التكرارات قبل إنشاء unique index ============
+    // duplicates موجودة → لا حذف، لا دمج، لا فهرس — تحذير صريح + manual_review فقط.
+    await db.collection('tenant_settings').dropIndex('unique_tenant_settings').catch(() => {})
+    const tM = await makeTenant(db, 'M تكرارات'); created.push(tM)
+    const dupA = uuidv4(), dupB = uuidv4()
+    await db.collection('tenant_settings').insertMany([
+      { id: dupA, tenant_id: tM, agency_name: 'نسخة أولى', created_at: new Date() },
+      { id: dupB, tenant_id: tM, agency_name: 'نسخة ثانية', created_at: new Date() },
+    ])
+    const mAudit = await coa.auditTenantSettingsDuplicates(db)
+    const mRes = await coa.ensureTenantSettingsUniqueIndex(db)
+    const mDocs = await db.collection('tenant_settings').countDocuments({ tenant_id: tM })
+    const mIdx = (await db.collection('tenant_settings').indexes()).map(i => i.name)
+    check('M: التدقيق يكتشف التكرار → manual_review، لا حذف، ولا يتظاهر أن الفهرس موجود',
+      mAudit.some(d => d.tenant_id === tM && d.count === 2) && mRes.created === false &&
+      mRes.classification === 'manual_review' && mDocs === 2 && !mIdx.includes('unique_tenant_settings'),
+      `docs=${mDocs} created=${mRes.created} class=${mRes.classification}`)
+    // بعد معالجة يدوية (حذف النسخة الثانية هنا كفعل اختباري صريح — ليس من كود الإنتاج) → الفهرس يُنشأ
+    await db.collection('tenant_settings').deleteOne({ id: dupB, tenant_id: tM })
+    const mRes2 = await coa.ensureTenantSettingsUniqueIndex(db)
+    const mIdx2 = (await db.collection('tenant_settings').indexes()).map(i => i.name)
+    check('M: بعد إزالة التكرار يدوياً → التدقيق نظيف والفهرس الفريد يُنشأ فعلاً',
+      mRes2.created === true && mRes2.classification === 'ok' && mIdx2.includes('unique_tenant_settings'))
+    await db.collection('tenant_settings').dropIndex('unique_tenant_settings').catch(() => {}) // نترك قاعدة الاختبار محايدة لإعادة التشغيل
 
     console.log(`\n=== COA MIGRATION TESTS: ${pass} passed, ${fail} failed ===`)
   } finally {
     await cleanup(db, created)
+    await client.db('rahaal_coa_guardcheck').dropDatabase().catch(() => {}) // scratch guard-test DB (L1)
     const leftovers = await db.collection('tenants').countDocuments({})
     console.log(`cleanup done — synthetic tenants removed, leftover tenants in ${TEST_DB}: ${leftovers}`)
     await client.close()
