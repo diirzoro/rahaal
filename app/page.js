@@ -4549,11 +4549,16 @@ function ChartScreen() {
     try { await api(`/accounts/${a.id}`, { method: 'DELETE' }); load(); toast.success('تم الحذف') }
     catch (e) { toast.error(e.message) }
   }
-  const byType = { asset: rows.filter(r => r.type === 'asset'), liability: rows.filter(r => r.type === 'liability'), revenue: rows.filter(r => r.type === 'revenue'), expense: rows.filter(r => r.type === 'expense') }
-  const typeLabel = { asset: 'الأصول', liability: 'الخصوم', revenue: 'الإيرادات', expense: 'المصروفات' }
-  const typeGrad = { asset: 'grad-brand', liability: 'grad-rose', revenue: 'grad-green', expense: 'grad-gold' }
+  // v3.88.3 — Equity added as a first-class account type (COA v2 already contains the
+  // equity section 3/31/31xx — the UI simply never offered it in the type dropdown).
+  const byType = { asset: rows.filter(r => r.type === 'asset'), liability: rows.filter(r => r.type === 'liability'), equity: rows.filter(r => r.type === 'equity'), revenue: rows.filter(r => r.type === 'revenue'), expense: rows.filter(r => r.type === 'expense') }
+  const typeLabel = { asset: 'الأصول', liability: 'الخصوم', equity: 'حقوق الملكية', revenue: 'الإيرادات', expense: 'المصروفات' }
+  const typeGrad = { asset: 'grad-brand', liability: 'grad-rose', equity: 'grad-purple', revenue: 'grad-green', expense: 'grad-gold' }
   // Build a tree: group by parent code
-  const eligibleParents = rows.filter(r => r.type === form.type)
+  // v3.88.3 — parents are ALWAYS same-type only (unchanged rule). For Equity specifically,
+  // only GROUP accounts are offered as parents (per COA v2 the 3xx groups) — the other four
+  // types keep their existing parent filtering exactly as before.
+  const eligibleParents = rows.filter(r => r.type === form.type && (form.type !== 'equity' || r.is_group))
   const buildTree = (list) => {
     const map = new Map(); list.forEach(a => map.set(a.code, { ...a, children: [] }))
     const roots = []
@@ -4582,7 +4587,7 @@ function ChartScreen() {
   )
 
   // v3.10.0 — Full-tree renderer with sub_entities (clients/suppliers/boxes)
-  const typeColor = { asset: 'text-emerald-700 bg-emerald-50 border-emerald-200', liability: 'text-rose-700 bg-rose-50 border-rose-200', revenue: 'text-blue-700 bg-blue-50 border-blue-200', expense: 'text-amber-700 bg-amber-50 border-amber-200' }
+  const typeColor = { asset: 'text-emerald-700 bg-emerald-50 border-emerald-200', liability: 'text-rose-700 bg-rose-50 border-rose-200', equity: 'text-violet-700 bg-violet-50 border-violet-200', revenue: 'text-blue-700 bg-blue-50 border-blue-200', expense: 'text-amber-700 bg-amber-50 border-amber-200' }
   const subEntityIcon = { client: '👤', supplier: '🏭', box: '💰' }
   const matchesSearch = (text) => !treeSearch || String(text || '').toLowerCase().includes(treeSearch.toLowerCase())
   const nodeMatches = (node) => {
@@ -4716,6 +4721,7 @@ function ChartScreen() {
                 <SelectContent>
                   <SelectItem value="asset">الأصول (Assets)</SelectItem>
                   <SelectItem value="liability">الخصوم (Liabilities)</SelectItem>
+                  <SelectItem value="equity">حقوق الملكية (Equity)</SelectItem>
                   <SelectItem value="revenue">الإيرادات (Revenue)</SelectItem>
                   <SelectItem value="expense">المصروفات (Expenses)</SelectItem>
                 </SelectContent>
