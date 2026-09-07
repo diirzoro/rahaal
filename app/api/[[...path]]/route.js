@@ -5718,6 +5718,10 @@ async function handleRoute(request, { params }) {
     if (route === '/accounts' && method === 'POST') {
       const b = await request.json()
       if (!b.name_ar || !b.type) return bad('الاسم والنوع مطلوبان')
+      // v3.88.3 — type whitelist: the five COA v2 types only (equity now first-class).
+      if (!['asset', 'liability', 'equity', 'revenue', 'expense'].includes(b.type)) {
+        return bad('نوع الحساب غير صالح — الأنواع المسموحة: أصول، خصوم، حقوق ملكية، إيرادات، مصروفات')
+      }
       // v3.87 — HIERARCHICAL CODING (hard rule): a child's code ALWAYS starts with its
       // parent's prefix. Auto-generation delegates to generateSubAccountCode (atomic,
       // collision-safe, level-aware). Manual codes are validated against the same rules.

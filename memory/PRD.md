@@ -101,3 +101,6 @@ See /app/memory/test_credentials.md
 - PR Blocker 2 (hardened): Full Reset is DENIED BY DEFAULT for any tenant with transactions, in every environment. The ONLY exception is a positively-proven test env: DB name ends in _test/_tests AND ALLOW_DESTRUCTIVE_COA_RESET=true (both required). No longer depends on DISABLE_AUTO_SEED. /coa/rebuild returns Arabic 403; TEST bootstrap auto-migration wrapped so a guard refusal never crashes startup.
 - PR Blocker 3: no git remote in workspace — sync of tenent-updates with GitHub main must be done via PR "Update branch" or Save-to-GitHub (reported to user).
 - Tests: coa-tests.js scenarios K (single settings doc), L1/L2/L3 (default-deny guard incl. non-_test DB + no env flags), M (duplicate audit blocks index, nothing deleted) → 30/30 PASS on isolated DBs.
+
+## v3.88.3 (completed)
+- Equity (حقوق الملكية) added as a selectable account type in the add-account dialog. FE: type option + display maps (byType/typeLabel/typeGrad/typeColor) + equity parents restricted to equity GROUP accounts only (other types' parent filtering unchanged). BE: 5-type whitelist on POST /accounts (equity first-class); parent-type match & hierarchical coding were already generic. No migration/backfill; existing accounts and COA v2 structure untouched. API tests 12/12 + UI screenshots verified.
