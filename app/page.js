@@ -203,7 +203,7 @@ function RahaalFooter({ dark = false }) {
       </div>
       <div className="flex items-center justify-center gap-3 pt-2 border-t border-slate-700/30">
         <TargetMediaBadge dark={dark} />
-        <span className={textCol}>© 2025</span>
+        <span className={textCol}>© {new Date().getFullYear()}</span>
       </div>
     </div>
   )
@@ -4538,15 +4538,17 @@ function ChartScreen() {
   }, [open, editing])
   const save = async () => {
     if (!form.code || !form.name_ar) return toast.error('الرمز والاسم مطلوبان')
+    // v3.88.4 — U-010: invalid codes are REJECTED with a clear message — never silently modified
+    if (!editing && !/^\d+$/.test(form.code)) return toast.error(`رمز الحساب "${form.code}" غير صالح — يجب أن يكون أرقاماً فقط (لن يُعدَّل تلقائياً)`)
     try {
       if (editing) await api(`/accounts/${editing.id}`, { method: 'PUT', body: { name_ar: form.name_ar, type: form.type, parent: form.parent || null, is_group: form.is_group, notes: form.notes } })
       else await api('/accounts', { method: 'POST', body: form })
-      setOpen(false); setEditing(null); load(); toast.success(editing ? 'تم التعديل' : 'تمت الإضافة')
+      setOpen(false); setEditing(null); load(); loadTree(); toast.success(editing ? 'تم التعديل' : 'تمت الإضافة') // v3.88.4 — U-008: refresh the TREE view too
     } catch (e) { toast.error(e.message) }
   }
   const del = async (a) => {
     if (!(await askConfirm({ title: 'حذف الحساب المحاسبي', desc: `حذف الحساب ${a.code} — ${a.name_ar}؟`, variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
-    try { await api(`/accounts/${a.id}`, { method: 'DELETE' }); load(); toast.success('تم الحذف') }
+    try { await api(`/accounts/${a.id}`, { method: 'DELETE' }); load(); loadTree(); toast.success('تم الحذف') } // v3.88.4 — U-008
     catch (e) { toast.error(e.message) }
   }
   // v3.88.3 — Equity added as a first-class account type (COA v2 already contains the
@@ -4728,7 +4730,7 @@ function ChartScreen() {
               </Select>
             </Field>
             <Field label="رمز الحساب" required>
-              <Input dir="ltr" value={form.code} onChange={e => setForm({ ...form, code: e.target.value.replace(/[^0-9]/g,'') })} disabled={!!editing} placeholder="مثال: 1102" />
+              <Input dir="ltr" value={form.code} onChange={e => setForm({ ...form, code: e.target.value })} disabled={!!editing} placeholder="مثال: 1102" />
             </Field>
             <div className="md:col-span-2"><Field label="اسم الحساب (عربي)" required>
               <Input value={form.name_ar} onChange={e => setForm({ ...form, name_ar: e.target.value })} placeholder="مثال: صندوق فرع عدن" />
@@ -4765,7 +4767,12 @@ function ChartScreen() {
 }
 
 // v3.87 — journal ref-type Arabic labels
-const JE_REF_LABEL = { manual: 'قيد يدوي', manual_dual: 'قيد مزدوج', opening: 'قيد افتتاحي', opening_close: 'إقفال أرصدة افتتاحية', ticket: 'تذكرة', visa: 'تأشيرة', service: 'خدمة', voucher: 'سند', fx: 'مصارفة' }
+// v3.88.4 — DEP-001/DEP-002: environment-aware public origin — the Test environment must
+// only ever emit Test URLs (referral/invite links, extension setup). Live and previews
+// keep the official domain (preview links are ephemeral — official is the safe default).
+const publicSiteOrigin = () => { try { if (/rahaal-test/.test(window.location.hostname)) return window.location.origin } catch { /* SSR */ } return 'https://rahaal.targetmediagrp.com' }
+
+const JE_REF_LABEL = { manual: 'قيد يدوي', manual_dual: 'قيد مزدوج', opening: 'قيد افتتاحي', opening_close: 'إقفال أرصدة افتتاحية', opening_balance: 'رصيد سابق', ticket: 'تذكرة', visa: 'تأشيرة', service: 'خدمة', voucher: 'سند', receipt: 'سند قبض', payment: 'سند صرف', fx: 'مصارفة', fx_buy: 'شراء عملة', fx_sell: 'بيع عملة', refund: 'استرداد', year_close: 'إقفال سنة مالية', package_booking: 'حجز باكج', meraaj_settle: 'تسوية معراج' } // v3.88.4 — U-004: full labels, no raw technical names
 
 // v3.87 — OPENING BALANCE ENTRY: user enters ONE side only (account/box/client/supplier +
 // currency + amount + debit/credit) — the system auto-balances against 3103.
@@ -5924,7 +5931,7 @@ function YearCloseScreen() {
                 </div>
               </div>
               <div className={`p-4 rounded-lg border-2 ${(previewData.net_profit_base || previewData.net_profit || 0) >= 0 ? 'bg-blue-50 border-blue-300' : 'bg-orange-50 border-orange-300'}`}>
-                <div className="text-xs text-slate-600 mb-1">صافي {(previewData.net_profit_base || previewData.net_profit || 0) >= 0 ? 'الربح' : 'الخسارة'} — يُرحّل إلى 3900 الأرباح المُدوّرة</div>
+                <div className="text-xs text-slate-600 mb-1">صافي {(previewData.net_profit_base || previewData.net_profit || 0) >= 0 ? 'الربح' : 'الخسارة'} — يُرحّل إلى 3102 الأرباح المبقاة (COA v2)</div>
                 <div className={`text-2xl font-black ${(previewData.net_profit_base || previewData.net_profit || 0) >= 0 ? 'text-blue-700' : 'text-orange-700'}`}>{Number(previewData.net_profit_base || previewData.net_profit || 0).toFixed(2)}</div>
               </div>
               <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 p-2 rounded">⚠️ بعد الإقفال، لن يمكن إضافة أو تعديل قيود بتاريخ {closing?.year} إلا بصلاحية استثنائية.</div>
@@ -6006,7 +6013,7 @@ function StatementReport() {
       <tr>
         <td>${fmtDate(r.date)}</td>
         <td style="font-size:11px;">${escHtml(r.description)}</td>
-        <td><span style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:10px;">${escHtml(r.ref_type || '')}</span></td>
+        <td><span style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:10px;">${escHtml(JE_REF_LABEL[r.ref_type] || r.ref_type || '')}</span></td>
         <td><b>${r.currency}</b></td>
         <td style="text-align:left; color:#1e40af; font-weight:600;">${r.debit ? fmt(r.debit, r.currency) : '—'}</td>
         <td style="text-align:left; color:#b91c1c; font-weight:600;">${r.credit ? fmt(r.credit, r.currency) : '—'}</td>
@@ -6258,7 +6265,7 @@ function StatementReport() {
               <TableRow key={i}>
                 <TableCell className="text-xs">{fmtDate(r.date)}</TableCell>
                 <TableCell className="text-xs">{r.description}</TableCell>
-                <TableCell className="text-xs"><Badge variant="outline">{r.ref_type}</Badge></TableCell>
+                <TableCell className="text-xs"><Badge variant="outline">{JE_REF_LABEL[r.ref_type] || r.ref_type}</Badge></TableCell>
                 <TableCell><Badge variant="secondary">{r.currency}</Badge></TableCell>
                 <TableCell className="text-left text-blue-700">{r.debit ? fmt(r.debit, r.currency) : '—'}</TableCell>
                 <TableCell className="text-left text-rose-700">{r.credit ? fmt(r.credit, r.currency) : '—'}</TableCell>
@@ -6497,7 +6504,7 @@ function ReferralsTab() {
   if (loading) return <div className="text-center py-10 text-slate-400"><Loader2 className="w-6 h-6 animate-spin mx-auto" /> جاري التحميل...</div>
   if (!data) return null
   // v3.9.16 — Unified official domain for referral links (avoids ephemeral preview URLs)
-  const OFFICIAL_DOMAIN = 'https://rahaal.targetmediagrp.com'
+  const OFFICIAL_DOMAIN = publicSiteOrigin() // v3.88.4 — DEP-002: Test emits Test links only
   const fullLink = `${OFFICIAL_DOMAIN}/signup?ref=${data.code}`
   const copy = (text) => { navigator.clipboard.writeText(text); toast.success('📋 تم النسخ') }
   const shareWhatsApp = () => {
@@ -6809,7 +6816,7 @@ const HELP_SCREENS = [
   ], workflow: ['حدد النوع (شراء/بيع)', 'أدخل مبلغ العملة الرئيسية', 'أدخل المبلغ المقابل بالعملة الثانية', 'اختر الصندوقين', 'حفظ — قيد مركب مع هامش ربح 4103'] },
   { id: 'extension', icon: '🔌', title: 'إضافة المتصفح (Chrome Extension)', color: 'from-indigo-500 to-purple-600', purpose: 'استخراج بيانات التذاكر والتأشيرات تلقائياً من مواقع الحجز والـ PDF', fields: [
     { name: 'PAT Token', required: true, desc: 'مفتاح شخصي تولّده من إعدادات المكتب — إضافة المتصفح' },
-    { name: 'رابط الخادم', required: true, desc: 'https://rahaal.targetmediagrp.com' },
+    { name: 'رابط الخادم', required: true, desc: publicSiteOrigin() }, // v3.88.4 — DEP-001: never hardcode an environment URL
   ], workflow: ['نزّل rahal-extension.zip من الرابط الرسمي', 'فك الضغط وثبّت الإضافة في Chrome (Load Unpacked)', 'الصق PAT Token + رابط الخادم', 'افتح صفحة تذكرة/تأشيرة — اضغط أيقونة رحّال — قراءة الصفحة', 'راجع البيانات — اضغط "سحب إلى رحّال"', 'الحصة المجانية: 30 قراءة لكل مكتب Trial'] },
 ]
 
@@ -10124,7 +10131,10 @@ function OfficeSettings() {
   }
 
   const addUser = async () => {
-    if (!newUser.name || !newUser.email || !newUser.password) return toast.error('املأ الحقول')
+    // v3.88.4 — S-002: field-specific validation with clear reasons (mirrors backend)
+    if (!newUser.name || !newUser.name.trim()) return toast.error('اسم الموظف مطلوب')
+    if (!newUser.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newUser.email.trim())) return toast.error('البريد الإلكتروني غير صالح — مثال: name@example.com')
+    if (!newUser.password || newUser.password.length < 6) return toast.error('كلمة المرور يجب ألا تقل عن 6 أحرف')
     try {
       setAddingUser(true)
       await api('/tenant/users', { method: 'POST', body: newUser })
@@ -10204,7 +10214,8 @@ function OfficeSettings() {
               <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end mb-4 p-3 bg-slate-50 rounded-lg">
                 <Field label="الاسم"><Input value={newUser.name} onChange={e => setNewUser({ ...newUser, name: e.target.value })} /></Field>
                 <Field label="البريد"><Input dir="ltr" value={newUser.email} onChange={e => setNewUser({ ...newUser, email: e.target.value })} /></Field>
-                <Field label="كلمة المرور"><Input dir="ltr" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} /></Field>
+                {/* v3.88.4 — S-001: proper password field — masked with autocomplete isolation */}
+                <Field label="كلمة المرور"><Input dir="ltr" type="password" autoComplete="new-password" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} /></Field>
                 <Button onClick={addUser} disabled={addingUser} className="grad-brand text-white gap-2">{addingUser ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} إضافة موظف</Button>
               </div>
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 text-xs text-amber-900">
@@ -10925,7 +10936,7 @@ function OutOfQuotaModal({ open, onOpenChange, tenant }) {
     api('/referrals').then(r => setRefCode(r.code)).catch(() => {})
   }, [open])
   // v3.9.18 — Official domain only for invite links (WhatsApp + copy)
-  const inviteLink = `https://rahaal.targetmediagrp.com/signup?ref=${refCode}`
+  const inviteLink = `${publicSiteOrigin()}/signup?ref=${refCode}` // v3.88.4 — DEP-002
   const shareWA = () => {
     const msg = `🎁 انضم إلى منصة رحّال (Rahaal ERP)!\nاحصل على 30 قيد تجريبي مجاناً + أكسب +50 قيد إضافي عبر رابط الإحالة:\n${inviteLink}`
     window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')

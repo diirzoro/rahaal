@@ -72,6 +72,26 @@ const COA = {
 const OPENING_EQUITY_NAME = 'تسوية الأرصدة الافتتاحية'
 // v3.87 — numeric rounding helper (2 decimals)
 const round2n = (n) => Math.round((Number(n) || 0) * 100) / 100
+// v3.88.4 — F-007/F-008: every posting must reach the FINAL postable (leaf) account.
+// Parties (boxes/clients/suppliers) carry their own 7-digit leaf account_code — use it;
+// the group code remains ONLY as a last-resort fallback for legacy parties never re-coded.
+const partyLeafCode = (party, fallbackGroup) => {
+  const c = party && party.account_code ? String(party.account_code) : ''
+  return c.length >= 7 ? c : fallbackGroup
+}
+// v3.88.4 — F-017/U-014: unified BUSINESS-TIMEZONE (UTC+3) day boundaries for every
+// financial-report date filter (from = start of day, to = end of day), plus a date-safe
+// $expr builder that tolerates legacy string-typed dates alongside Date-typed ones
+// (opening entries stored dates as strings — NO data migration, query handles both).
+const bizDayStart = (s) => new Date(`${String(s).slice(0, 10)}T00:00:00.000+03:00`)
+const bizDayEnd = (s) => new Date(`${String(s).slice(0, 10)}T23:59:59.999+03:00`)
+const bizTodayISO = () => new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10)
+const dateRangeExpr = (field, fromDate, toDate) => {
+  const conds = []
+  if (fromDate) conds.push({ $gte: [{ $toDate: `$${field}` }, fromDate] })
+  if (toDate) conds.push({ $lte: [{ $toDate: `$${field}` }, toDate] })
+  return conds.length ? { $expr: conds.length === 1 ? conds[0] : { $and: conds } } : null
+}
 
 // ================= Seeding =================
 // v3.87 — the COA tree seeding is a standalone function so the REBUILD endpoint can
@@ -575,6 +595,8 @@ async function validateJournalLines(db, tenantId, lines) {
   if (!Array.isArray(lines) || lines.length === 0) return { ok: true }
   // Cache parent + sub-account codes to avoid many queries
   const acctCodes = new Set((await db.collection('accounts').find({ tenant_id: tenantId }).project({ code: 1 }).toArray()).map(a => a.code))
+  // v3.88.4 — F-008: group accounts NEVER receive direct postings — leaf accounts only.
+  const groupCodes = new Set((await db.collection('accounts').find({ tenant_id: tenantId, is_group: true }).project({ code: 1 }).toArray()).map(a => a.code))
   const clientCodes = new Set((await db.collection('clients').find({ tenant_id: tenantId }).project({ account_code: 1 }).toArray()).map(x => x.account_code).filter(Boolean))
   const supplierCodes = new Set((await db.collection('suppliers').find({ tenant_id: tenantId }).project({ account_code: 1 }).toArray()).map(x => x.account_code).filter(Boolean))
   const boxCodes = new Set((await db.collection('boxes').find({ tenant_id: tenantId }).project({ account_code: 1 }).toArray()).map(x => x.account_code).filter(Boolean))
@@ -592,6 +614,8 @@ async function validateJournalLines(db, tenantId, lines) {
     if (code && code !== 'MANUAL') {
       const exists = acctCodes.has(code) || clientCodes.has(code) || supplierCodes.has(code) || boxCodes.has(code)
       if (!exists) return { ok: false, error: `الحساب "${code}" غير موجود في دليل الحسابات — السطر ${i + 1}` }
+      // v3.88.4 — F-008: block direct posting to Group accounts
+      if (hasAmount && groupCodes.has(code)) return { ok: false, error: `الحساب "${code}" حساب مجموعة (تصنيف) — الترحيل يكون على الحساب التفصيلي النهائي فقط (السطر ${i + 1})` }
     }
   }
   return { ok: true }
@@ -659,6 +683,12 @@ async function reverseTransactionEffects(db, T, kind, doc) {
       await updateBalance(db, 'clients', { id: doc.client_id, tenant_id: T }, doc.currency, -doc.sale_price)
     }
     await updateBalance(db, 'suppliers', { id: doc.supplier_id, tenant_id: T }, doc.currency, -doc.cost)
+    // v3.88.4 — F-020: the partner commission-share was NEVER reversed — every edit of a
+    // partner-share document drifted the partner's balance by -share. Reverse it too.
+    if ((Number(doc.commission_share_amount) || 0) > 0 && doc.commission_partner_id) {
+      const pcol = doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
+      await updateBalance(db, pcol, { id: doc.commission_partner_id, tenant_id: T }, doc.currency, +Number(doc.commission_share_amount))
+    }
   } else if (kind === 'vouchers') {
     if (doc.type === 'receipt') {
       await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.amount)
@@ -683,6 +713,44 @@ async function reverseTransactionEffects(db, T, kind, doc) {
     if (accCounter && accCounter.updateBalance) {
       await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, doc.counter_currency, -debitAmtCounter * accCounter.debitSign)
     }
+  }
+}
+
+// v3.88.4 — F-020: exact inverse of reverseTransactionEffects — used ONLY to restore the
+// original effects when an edit fails AFTER the reversal step. Guarantees the invariant:
+// old effect reversed exactly once, then either the new effect applied once (success) or
+// the old effect restored once (failure) — never a double reversal, never data loss.
+async function restoreTransactionEffects(db, T, kind, doc) {
+  if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
+    if (doc.payment_method === 'cash' && doc.box_id) {
+      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, +doc.sale_price)
+    } else {
+      await updateBalance(db, 'clients', { id: doc.client_id, tenant_id: T }, doc.currency, +doc.sale_price)
+    }
+    await updateBalance(db, 'suppliers', { id: doc.supplier_id, tenant_id: T }, doc.currency, +doc.cost)
+    if ((Number(doc.commission_share_amount) || 0) > 0 && doc.commission_partner_id) {
+      const pcol = doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
+      await updateBalance(db, pcol, { id: doc.commission_partner_id, tenant_id: T }, doc.currency, -Number(doc.commission_share_amount))
+    }
+  } else if (kind === 'vouchers') {
+    if (doc.type === 'receipt') {
+      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, +doc.amount)
+      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
+    } else {
+      await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.amount)
+      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
+      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+    }
+  } else if (kind === 'fx') {
+    const refCur = doc.currency_ref || { kind: 'box', id: doc.box_currency_id }
+    const refCounter = doc.counter_ref || { kind: 'box', id: doc.box_counter_id }
+    const accCur = await resolveAccountRef(db, T, refCur)
+    const accCounter = await resolveAccountRef(db, T, refCounter)
+    const debitAmtCur = doc.type === 'buy' ? doc.amount : -doc.amount
+    const debitAmtCounter = doc.type === 'buy' ? -doc.counter_amount : doc.counter_amount
+    if (accCur && accCur.updateBalance) await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, doc.currency, +debitAmtCur * accCur.debitSign)
+    if (accCounter && accCounter.updateBalance) await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, doc.counter_currency, +debitAmtCounter * accCounter.debitSign)
   }
 }
 
@@ -746,7 +814,7 @@ async function handleRoute(request, { params }) {
     const db = await connectToMongo()
 
     // Health
-    if (route === '/' || route === '/root') return ok({ ok: true, app: 'Rahaal ERP', version: '2.0-saas' })
+    if (route === '/' || route === '/root') return ok({ ok: true, app: 'Rahaal ERP', version: '3.88.4' }) // v3.88.4 — U-007: version unified with release line
 
     // ============ HEALTH CHECK (public, no auth — for uptime monitors) ============
     if (route === '/health' && method === 'GET') {
@@ -3566,7 +3634,9 @@ async function handleRoute(request, { params }) {
     if (route === '/tenant/users' && method === 'POST') {
       if (sess.user.role !== 'owner') return bad('غير مصرح', 403)
       const b = await request.json()
-      if (!b.email || !b.password || !b.name) return bad('الحقول مطلوبة')
+      if (!b.name || !String(b.name).trim()) return bad('اسم الموظف مطلوب') // v3.88.4 — S-002: field-specific validation
+      if (!b.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(b.email).trim())) return bad('البريد الإلكتروني غير صالح — مثال: name@example.com')
+      if (!b.password || String(b.password).length < 6) return bad('كلمة المرور يجب ألا تقل عن 6 أحرف')
       // v2.8 — Plan tier gate: only Gold plan tenants can self-create users
       const tenantFull = await db.collection('tenants').findOne({ id: T })
       const tier = tenantFull?.plan_tier || 'standard'
@@ -3696,7 +3766,13 @@ async function handleRoute(request, { params }) {
       const t = await db.collection('tenants').findOne({ id: T })
       const affiliate = t.affiliate || { balance_usd: 0, total_earned_usd: 0, total_withdrawn_usd: 0, commission_rate: AFFILIATE_COMMISSION_RATE, is_individual: false }
       // v3.9.18 — Always use official domain for affiliate links (never expose Emergent preview URLs)
-      const link = `https://rahaal.targetmediagrp.com/signup?ref=${code}`
+      // v3.88.4 — DEP-002: environment-aware referral origin — the Test server must never
+      // emit links pointing at Live. Derived from the request host; Live/preview keep the
+      // official domain (preview links are ephemeral, official is the safe default there).
+      const _refHost = request.headers.get('x-forwarded-host') || request.headers.get('host') || ''
+      const _refProto = request.headers.get('x-forwarded-proto') || 'https'
+      const _refOrigin = /rahaal-test/.test(_refHost) ? `${_refProto}://${_refHost}` : 'https://rahaal.targetmediagrp.com'
+      const link = `${_refOrigin}/signup?ref=${code}`
       const invitees = await db.collection('tenants').find({ referred_by: T }).sort({ created_at: -1 }).toArray()
       const activated = invitees.filter(x => x.activation_confirmed).length
       const withdrawals = await db.collection('cashout_requests').find({ tenant_id: T }).sort({ created_at: -1 }).limit(20).toArray()
@@ -3859,65 +3935,83 @@ async function handleRoute(request, { params }) {
       if (!orig) return bad('السجل الأصلي غير موجود', 404)
       if (orig.is_refunded) return bad('هذا السجل تم استرداده مسبقاً')
 
+      // v3.88.4 — F-010 ROOT-CAUSE REWRITE:
+      //  • The ORIGINAL journal entry is KEPT (audit trail) — a real linked REVERSAL JE is created.
+      //  • Zero-value refund journals are rejected — "Success" can never hide a no-op reversal.
+      //  • Cash refunds no longer double-hit the box (old flow reversed the FULL sale from the
+      //    box via reverseTransactionEffects and then deducted refund_to_client AGAIN).
+      //  • Cached balances are updated by the exact NET deltas of the reversal JE (once).
       const supplierPenalty = Number(b.supplier_penalty) || 0
       const officeFee = Number(b.office_fee) || 0
+      if (Number(b.supplier_penalty) < 0 || Number(b.office_fee) < 0) return bad('لا تُقبل قيم سالبة في غرامة المورد أو رسوم المكتب')
       const cur = orig.currency
       const cost = Number(orig.cost) || 0
       const sale = Number(orig.sale_price) || 0
+      if (supplierPenalty > cost) return bad(`غرامة المورد (${supplierPenalty}) أكبر من تكلفة الحجز الأصلية (${cost})`)
       const commission = +(sale - cost).toFixed(2)
       const refundToClient = +(sale - supplierPenalty - officeFee).toFixed(2)
       if (refundToClient < 0) return bad('مجموع الغرامة ورسوم المكتب أكبر من قيمة البيع')
 
-      // Reverse original balances effects
-      await reverseTransactionEffects(db, T, refType + 's', orig)
-      // Delete the original JE (so the reversal is auditable via a fresh refund JE)
-      const origJe = await db.collection('journal_entries').findOne({ ref_id: orig.id, tenant_id: T })
-      if (origJe) await db.collection('journal_entries').deleteOne({ id: origJe.id })
-
-      // Re-apply partial effects:
-      // Client: only pays the retained portion (supplier_penalty + office_fee) — so add that as their receivable
-      const clientRetained = +(supplierPenalty + officeFee).toFixed(2)
-      // Supplier: keeps supplier_penalty; we owe them supplierPenalty (not full cost)
-      await updateBalance(db, 'clients', { id: orig.client_id, tenant_id: T }, cur, clientRetained)
-      await updateBalance(db, 'suppliers', { id: orig.supplier_id, tenant_id: T }, cur, supplierPenalty)
-      // If original was cash, we need to record the cash refund out of box
+      const partnerShare = Number(orig.commission_share_amount) || 0
+      const officeCommission = +(commission - partnerShare).toFixed(2)
+      const supplierReturned = +(cost - supplierPenalty).toFixed(2)
       const wasCash = orig.payment_method === 'cash'
       const box = wasCash && orig.box_id ? await db.collection('boxes').findOne({ id: orig.box_id, tenant_id: T }) : null
+      if (wasCash && !box) return bad('صندوق العملية الأصلية غير موجود — لا يمكن تنفيذ الاسترداد النقدي')
+
+      // ---- Build the REVERSAL JE (posts to LEAF accounts — F-007) ----
       const refundJeLines = []
-      if (wasCash && box) {
-        // Client got their money back from box: reduce box balance by refundToClient
-        await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, -refundToClient)
-        refundJeLines.push({ account_code: box.type === 'cash' ? COA.CASHBOXES : COA.BANKS, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: 0, credit: refundToClient })
+      if (refundToClient > 0) {
+        if (wasCash) {
+          refundJeLines.push({ account_code: partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS), account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: 0, credit: refundToClient })
+        } else {
+          const cliDoc = orig.client_id ? await db.collection('clients').findOne({ id: orig.client_id, tenant_id: T }) : null
+          refundJeLines.push({ account_code: partyLeafCode(cliDoc, COA.CLIENTS), account_name: 'العملاء', party_type: 'client', party_id: orig.client_id, party_name: orig.client_name, debit: 0, credit: refundToClient })
+        }
       }
-      // Refund JE — reversal + fees
-      // Client side: retained on account (they still owe us penalty + fee) — Debit client
-      if (clientRetained > 0) refundJeLines.push({ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: orig.client_id, party_name: orig.client_name, debit: clientRetained, credit: 0 })
-      // Supplier: they keep supplier_penalty — Credit supplier
-      if (supplierPenalty > 0) refundJeLines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: orig.supplier_id, party_name: orig.supplier_name, debit: 0, credit: supplierPenalty })
-      // Office fee: revenue 4104
+      if (supplierReturned > 0) {
+        const supDoc = await db.collection('suppliers').findOne({ id: orig.supplier_id, tenant_id: T })
+        refundJeLines.push({ account_code: partyLeafCode(supDoc, COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: orig.supplier_id, party_name: orig.supplier_name, debit: supplierReturned, credit: 0 })
+      }
+      const revAccount = refType === 'ticket' ? COA.REV_TICKETS : refType === 'visa' ? COA.REV_VISAS : COA.REV_SERVICES
+      if (officeCommission > 0) refundJeLines.push({ account_code: revAccount, account_name: 'عكس إيراد الحجز', party_type: 'revenue', party_id: null, party_name: 'عكس إيراد الحجز', debit: officeCommission, credit: 0 })
+      else if (officeCommission < 0) refundJeLines.push({ account_code: revAccount, account_name: 'عكس إيراد الحجز', party_type: 'revenue', party_id: null, party_name: 'عكس إيراد الحجز', debit: 0, credit: Math.abs(officeCommission) })
+      if (partnerShare > 0 && orig.commission_partner_id) {
+        const pCol = orig.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
+        const pDoc = await db.collection(pCol).findOne({ id: orig.commission_partner_id, tenant_id: T })
+        refundJeLines.push({ account_code: partyLeafCode(pDoc, orig.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS), account_name: 'شريك عمولة (عكس)', party_type: orig.commission_partner_type, party_id: orig.commission_partner_id, party_name: orig.commission_partner_name || 'شريك عمولة', debit: partnerShare, credit: 0 })
+      }
       if (officeFee > 0) refundJeLines.push({ account_code: COA.REV_CANCEL_FEES, account_name: 'رسوم إلغاء واسترداد', party_type: 'revenue', party_id: null, party_name: 'رسوم استرداد', debit: 0, credit: officeFee })
-      // For non-cash refunds, we need a balancing line since debit=clientRetained, credit=supplierPenalty+officeFee=clientRetained (already balanced!) ✓
-      // For cash refunds: debit clientRetained, credit refundToClient+supplierPenalty+officeFee = refundToClient + clientRetained = sale ✓ hmm — need also to debit revenue 4101 for reversal
-      // Actually simpler: on cash refunds, add a debit line reversing sale
+
+      // Zero-value / unbalanced reversal guards
+      const rDebit = +refundJeLines.reduce((s, l) => s + (l.debit || 0), 0).toFixed(2)
+      const rCredit = +refundJeLines.reduce((s, l) => s + (l.credit || 0), 0).toFixed(2)
+      if (refundJeLines.length === 0 || (rDebit === 0 && rCredit === 0)) return bad('لا يوجد أثر مالي للاسترداد — قيد استرداد بقيمة صفر مرفوض')
+      if (Math.abs(rDebit - rCredit) > 0.01) return bad(`قيد الاسترداد غير متوازن (مدين ${rDebit} ≠ دائن ${rCredit}) — راجع بيانات الحجز الأصلي`)
+
+      // ---- Cached balances: apply the exact same NET deltas — exactly ONCE ----
       if (wasCash) {
-        // Reverse the original sale-side revenue that we had. Debit revenue by the commission (loss of earned commission).
-        if (commission > 0) refundJeLines.push({ account_code: refType === 'ticket' ? COA.REV_TICKETS : refType === 'visa' ? COA.REV_VISAS : COA.REV_SERVICES, account_name: 'إيرادات (عكس)', party_type: 'revenue', party_id: null, party_name: 'عكس إيراد الحجز', debit: commission, credit: 0 })
-        // And debit cost as expense reversal (we no longer owe supplier full cost — supplier keeps only penalty)
-        const supplierReturned = +(cost - supplierPenalty).toFixed(2)
-        if (supplierReturned > 0) refundJeLines.push({ account_code: COA.SUPPLIERS, account_name: 'استرجاع من المورد', party_type: 'supplier', party_id: orig.supplier_id, party_name: orig.supplier_name, debit: supplierReturned, credit: 0 })
+        if (refundToClient > 0) await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, -refundToClient)
+      } else if (orig.client_id && refundToClient > 0) {
+        await updateBalance(db, 'clients', { id: orig.client_id, tenant_id: T }, cur, -refundToClient)
+      }
+      if (supplierReturned > 0) await updateBalance(db, 'suppliers', { id: orig.supplier_id, tenant_id: T }, cur, -supplierReturned)
+      if (partnerShare > 0 && orig.commission_partner_id) {
+        const pCol2 = orig.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
+        await updateBalance(db, pCol2, { id: orig.commission_partner_id, tenant_id: T }, cur, +partnerShare)
       }
 
-      await createJournalEntry(db, T, {
+      const refundJe = await createJournalEntry(db, T, {
         date: new Date(b.date || Date.now()),
-        description: `استرداد ${refType === 'ticket' ? 'تذكرة' : refType === 'visa' ? 'تأشيرة' : 'خدمة'} — ${orig.passenger_name || orig.beneficiary_name || orig.client_name}${b.reason ? ` (${b.reason})` : ''}`,
+        description: `استرداد ${refType === 'ticket' ? 'تذكرة' : refType === 'visa' ? 'تأشيرة' : 'خدمة'} — ${orig.passenger_name || orig.beneficiary_name || orig.client_name}${b.reason ? ` (${b.reason})` : ''} — عكس مرتبط بالحركة الأصلية`,
         ref_type: 'refund', ref_id: orig.id, currency: cur, lines: refundJeLines,
       }, { skipQuota: true })
 
-      // Mark original as refunded (soft)
+      // Mark original as refunded (soft) — original doc & JE stay for the audit trail
       await db.collection(coll).updateOne({ id: orig.id, tenant_id: T }, { $set: {
-        is_refunded: true, refunded_at: new Date(), refunded_by: sess.user.email,
+        is_refunded: true, status: 'refunded', refunded_at: new Date(), refunded_by: sess.user.email,
         refund_supplier_penalty: supplierPenalty, refund_office_fee: officeFee, refund_to_client: refundToClient,
-        refund_reason: b.reason || '',
+        refund_reason: b.reason || '', refund_je_id: refundJe.id,
       } })
 
       // Store refund record
@@ -3930,6 +4024,7 @@ async function handleRoute(request, { params }) {
         passenger_name: orig.passenger_name || orig.beneficiary_name || '',
         reason: b.reason || '', notes: b.notes || '',
         payment_method: orig.payment_method, was_cash: wasCash,
+        refund_je_id: refundJe.id, // v3.88.4 — F-010: audit link to the reversal JE
         date: new Date(b.date || Date.now()),
         created_by: sess.user.email, created_at: new Date(),
       }
@@ -4201,6 +4296,8 @@ async function handleRoute(request, { params }) {
     if (route === '/packages' && method === 'POST') {
       const b = await request.json()
       if (!b.name || !b.package_type) return bad('الاسم والنوع مطلوبان')
+      // v3.88.4 — D-001: the package end date can never precede its start date
+      if (b.start_date && b.end_date && new Date(b.end_date) < new Date(b.start_date)) return bad('تاريخ نهاية الباكج لا يمكن أن يسبق تاريخ البداية')
       // v3.15 — Room-type pricing / v3.20 — extended with age tiers (sale_child, sale_infant)
       const roomPricing = sanitizeRoomPricing(b.room_pricing)
       // v3.20 — Dual pricing mode: 'direct' (room+age matrix, B2B) | 'components' (assembled from components)
@@ -4226,6 +4323,13 @@ async function handleRoute(request, { params }) {
     if (pkgIdMatch && method === 'PATCH') {
       const b = await request.json()
       const upd = {}
+      // v3.88.4 — D-001: validate MERGED dates (end ≥ start) before saving partial updates
+      if (b.start_date !== undefined || b.end_date !== undefined) {
+        const curP = await db.collection('packages').findOne({ id: pkgIdMatch[1], tenant_id: T }, { projection: { start_date: 1, end_date: 1 } })
+        const effStart = b.start_date !== undefined ? (b.start_date ? new Date(b.start_date) : null) : (curP?.start_date || null)
+        const effEnd = b.end_date !== undefined ? (b.end_date ? new Date(b.end_date) : null) : (curP?.end_date || null)
+        if (effStart && effEnd && effEnd < effStart) return bad('تاريخ نهاية الباكج لا يمكن أن يسبق تاريخ البداية')
+      }
       // v3.31 — start_date now editable too (needed for full editing after duplication)
       for (const k of ['name', 'package_type', 'notes', 'start_date', 'end_date', 'status']) if (b[k] !== undefined) upd[k] = (k === 'end_date' || k === 'start_date') && b[k] ? new Date(b[k]) : b[k]
       // v3.31 — currency editable ONLY while the package has no bookings (accounting safety)
@@ -4820,21 +4924,22 @@ async function handleRoute(request, { params }) {
         await db.collection('package_transports').updateOne({ id: newTransport.id, tenant_id: T }, { $set: { seats_booked: newBooked, status: newStatus } })
       }
       const lines = []
-      if (newPay === 'cash') lines.push({ account_code: box.type === 'cash' ? COA.CASHBOXES : COA.BANKS, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
-      else lines.push({ account_code: COA.CLIENTS, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
+      if (newPay === 'cash') lines.push({ account_code: partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS), account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
+      else lines.push({ account_code: partyLeafCode(cli, COA.CLIENTS), account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
       const supGrouped = {}
       for (const c of newSnapshots) {
         if (!c.supplier_id || !c.cost_total) continue
         supGrouped[c.supplier_id] = supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }
         supGrouped[c.supplier_id].amount += c.cost_total
       }
-      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
+      const supDocsJE = Object.fromEntries((await db.collection('suppliers').find({ tenant_id: T, id: { $in: Object.keys(supGrouped) } }).toArray()).map(s => [s.id, s])) // v3.88.4 — F-007
+      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: partyLeafCode(supDocsJE[sid], COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
       // v3.19 — Balanced JE: revenue = sale - Σ(supplier credits) - partnerShare (mirrors POST logic)
       const supSumJE = +Object.values(supGrouped).reduce((s, x) => s + +x.amount.toFixed(2), 0).toFixed(2)
       const commissionJE = +(total_sale - supSumJE).toFixed(2)
       const revenueNet = +(commissionJE - newPartnerShare).toFixed(2)
       if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkgDoc.name}`, debit: 0, credit: revenueNet })
-      if (newPartnerShare > 0) lines.push({ account_code: pcType === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS, account_name: pcType === 'supplier' ? 'الموردون' : 'العملاء', party_type: pcType, party_id: pcId, party_name: pcName || 'شريك عمولة', debit: 0, credit: newPartnerShare })
+      if (newPartnerShare > 0) { const pcDoc = pcId ? await db.collection(pcType === 'supplier' ? 'suppliers' : 'clients').findOne({ id: pcId, tenant_id: T }) : null; lines.push({ account_code: partyLeafCode(pcDoc, pcType === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS), account_name: pcType === 'supplier' ? 'الموردون' : 'العملاء', party_type: pcType, party_id: pcId, party_name: pcName || 'شريك عمولة', debit: 0, credit: newPartnerShare }) }
       await createJournalEntry(db, T, {
         date: oldJe?.date || updatedBooking.created_at || new Date(),
         description: `تسجيل ${updatedBooking.pilgrim_name} في ${pkgDoc.name} — ${newPax} فرد (تعديل)${newPartnerShare > 0 ? ` — عمولة مشتركة ${newPartnerShare} مع ${pcName || 'شريك'}` : ''}`,
@@ -5048,16 +5153,17 @@ async function handleRoute(request, { params }) {
       }
       // Single combined JE — mathematically balanced: revenue = sale - Σ(supplier credits) - partnerShare
       const lines = []
-      if (payMethod === 'cash') lines.push({ account_code: box.type === 'cash' ? COA.CASHBOXES : COA.BANKS, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
-      else lines.push({ account_code: COA.CLIENTS, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
+      if (payMethod === 'cash') lines.push({ account_code: partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS), account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
+      else lines.push({ account_code: partyLeafCode(cli, COA.CLIENTS), account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
       const supGrouped = {}
       for (let i = 0; i < comps.length; i++) { const c = comps[i]; supGrouped[c.supplier_id] = (supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }); supGrouped[c.supplier_id].amount += compTotals[i].cost_total * costFactor }
+      const supDocsPB = Object.fromEntries((await db.collection('suppliers').find({ tenant_id: T, id: { $in: Object.keys(supGrouped) } }).toArray()).map(s => [s.id, s])) // v3.88.4 — F-007
       let supSum = 0
-      for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
+      for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: partyLeafCode(supDocsPB[sid], COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
       const commissionJE = +(total_sale - supSum).toFixed(2)
       const revenueNet = +(commissionJE - partnerShare).toFixed(2)
       if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name}`, debit: 0, credit: revenueNet })
-      if (partnerShare > 0) lines.push({ account_code: bookingDoc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS, account_name: bookingDoc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: bookingDoc.commission_partner_type, party_id: bookingDoc.commission_partner_id, party_name: bookingDoc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+      if (partnerShare > 0) { const pbPartnerDoc = bookingDoc.commission_partner_id ? await db.collection(bookingDoc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients').findOne({ id: bookingDoc.commission_partner_id, tenant_id: T }) : null; lines.push({ account_code: partyLeafCode(pbPartnerDoc, bookingDoc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS), account_name: bookingDoc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: bookingDoc.commission_partner_type, party_id: bookingDoc.commission_partner_id, party_name: bookingDoc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare }) }
       await createJournalEntry(db, T, {
         date: new Date(), description: `تسجيل ${bookingDoc.pilgrim_name} في ${pkg.name} — ${pax} فرد${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${bookingDoc.commission_partner_name}` : ''}`,
         ref_type: 'package_booking', ref_id: bookingDoc.id, currency: cur, lines,
@@ -5196,6 +5302,17 @@ async function handleRoute(request, { params }) {
     }
     if (route === '/rates' && method === 'POST') {
       const body = await request.json()
+      // v3.88.4 — F-003: coherent bounds per currency — min ≤ buy ≤ transfer ≤ sell ≤ max.
+      // Inverted bounds are rejected instead of silently stored.
+      for (const [ccy, r] of Object.entries(body.rates || {})) {
+        if (!r || typeof r !== 'object') continue
+        const named = [['الحد الأدنى', Number(r.min)], ['الشراء', Number(r.buy)], ['التحويل', Number(r.transfer)], ['البيع', Number(r.sell)], ['الحد الأعلى', Number(r.max)]]
+        if (named.some(([, v]) => Number.isFinite(v) && v < 0)) return bad(`أسعار ${ccy}: لا تُقبل قيم سالبة`)
+        const seq = named.filter(([, v]) => Number.isFinite(v) && v > 0)
+        for (let i = 1; i < seq.length; i++) {
+          if (seq[i][1] < seq[i - 1][1]) return bad(`أسعار ${ccy} غير متسقة: ${seq[i - 1][0]} (${seq[i - 1][1]}) أكبر من ${seq[i][0]} (${seq[i][1]}) — الترتيب الصحيح: أدنى ≤ شراء ≤ تحويل ≤ بيع ≤ أعلى`)
+        }
+      }
       await db.collection('tenant_settings').updateOne(tf, { $set: { rates: body.rates, updated_at: new Date() } }, { upsert: true })
       return ok({ success: true })
     }
@@ -5205,6 +5322,7 @@ async function handleRoute(request, { params }) {
     if (route === '/clients' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم العميل مطلوب')
+      if (b.credit_limit !== undefined && Number(b.credit_limit) < 0) return bad('سقف الائتمان لا يقبل قيمة سالبة') // v3.88.4 — F-005
       const parent_code = String(b.parent_code || COA.CLIENTS) // v3.9.3 — default to العملاء (مدينون)
       let accountInfo = {}
       try { accountInfo = await generateSubAccountCode(db, T, parent_code) } catch (e) { return bad(e.message) }
@@ -5223,6 +5341,7 @@ async function handleRoute(request, { params }) {
     const clientIdMatch = route.match(/^\/clients\/([^/]+)$/)
     if (clientIdMatch && method === 'PUT') {
       const b = await request.json()
+      if (b.credit_limit !== undefined && Number(b.credit_limit) < 0) return bad('سقف الائتمان لا يقبل قيمة سالبة') // v3.88.4 — F-005
       const upd = {}
       for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes', 'parent_code', 'credit_limit', 'credit_currency', 'is_frozen']) if (b[k] !== undefined) upd[k] = k === 'credit_limit' ? (Number(b[k]) || 0) : k === 'is_frozen' ? !!b[k] : b[k]
       await db.collection('clients').updateOne({ id: clientIdMatch[1], tenant_id: T }, { $set: upd })
@@ -6330,7 +6449,13 @@ async function handleRoute(request, { params }) {
           if (kind === 'tickets') result = await createTicket(db, T, newBody, opts)
           else if (kind === 'visas') result = await createVisa(db, T, newBody, opts)
           else if (kind === 'services') result = await createService(db, T, newBody, opts)
-          if (result.error) { failed++; errors.push({ id: docId, error: result.error }) } else updated++
+          if (result.error) {
+            failed++; errors.push({ id: docId, error: result.error })
+            // v3.88.4 — F-020: restore the original record/JE/balances on failure
+            await db.collection(coll).insertOne(oldDoc).catch(() => {})
+            if (oldJe) await db.collection('journal_entries').insertOne(oldJe).catch(() => {})
+            await restoreTransactionEffects(db, T, kind, oldDoc)
+          } else updated++
         } catch (e) {
           failed++
           errors.push({ id: docId, error: e.message })
@@ -6406,8 +6531,13 @@ async function handleRoute(request, { params }) {
       else if (kind === 'vouchers') result = await createVoucher(db, T, { ...b, type: b.type || oldDoc.type }, opts)
       else if (kind === 'fx') result = await createFx(db, T, { ...b, type: b.type || oldDoc.type }, opts)
       if (result.error) {
-        // Best-effort restore: re-apply original doc (though balances may be inconsistent — client should refresh)
-        return bad(result.error)
+        // v3.88.4 — F-020: REAL restore-on-error (the old comment promised a restore that
+        // never existed — a failed edit used to leave the record deleted and its balances
+        // reversed). Re-insert the original doc + JE and re-apply the original effects.
+        await db.collection(coll).insertOne(oldDoc).catch(() => {})
+        if (oldJe) await db.collection('journal_entries').insertOne(oldJe).catch(() => {})
+        await restoreTransactionEffects(db, T, kind, oldDoc)
+        return bad(`${result.error} — لم يُطبق أي تغيير: تمت استعادة السجل والقيد والأرصدة الأصلية كما كانت`)
       }
       return ok(result.doc)
     }
@@ -6491,7 +6621,7 @@ async function handleRoute(request, { params }) {
       const targetLine = { account_code: accountCode, account_name: accountName, party_type: partyType, party_id: partyId, party_name: accountName, debit: side === 'debit' ? amount : 0, credit: side === 'credit' ? amount : 0 }
       const equityLine = { account_code: COA.OPENING_EQUITY, account_name: OPENING_EQUITY_NAME, debit: side === 'credit' ? amount : 0, credit: side === 'debit' ? amount : 0 }
       const je = {
-        id: uuidv4(), tenant_id: T, date, currency, ref_type: 'opening', ref_id: null,
+        id: uuidv4(), tenant_id: T, date: bizDayStart(date), currency, ref_type: 'opening', ref_id: null, // v3.88.4 — F-017: Date-typed (was string)
         description: `قيد افتتاحي — ${accountName}${b.note ? ' — ' + String(b.note).slice(0, 300) : ''}`,
         lines: [targetLine, equityLine], created_by: sess.user.email, created_at: new Date(),
       }
@@ -6539,7 +6669,7 @@ async function handleRoute(request, { params }) {
         if (Math.abs(net) < 0.01) continue
         const amt = Math.abs(net)
         const je = {
-          id: uuidv4(), tenant_id: T, date, currency: r._id, ref_type: 'opening_close', ref_id: null,
+          id: uuidv4(), tenant_id: T, date: bizDayStart(date), currency: r._id, ref_type: 'opening_close', ref_id: null, // v3.88.4 — F-017: Date-typed (was string)
           description: `إقفال الأرصدة الافتتاحية (${r._id}) إلى ${targetAcct.name_ar}`,
           lines: net > 0
             ? [{ account_code: COA.OPENING_EQUITY, account_name: OPENING_EQUITY_NAME, debit: amt, credit: 0 }, { account_code: target, account_name: targetAcct.name_ar, debit: 0, credit: amt }]
@@ -6707,47 +6837,72 @@ async function handleRoute(request, { params }) {
       if (!year || year < 2000 || year > 2100) return bad('السنة المالية غير صالحة')
       const closedYears = sess.tenant?.closed_years || []
       if (closedYears.includes(year)) return bad(`السنة ${year} مقفلة بالفعل`)
-      // Aggregate revenues and expenses for the year via journal_entries.lines
-      const start = new Date(year, 0, 1); const end = new Date(year + 1, 0, 1)
-      const jes = await db.collection('journal_entries').find({ tenant_id: T, date: { $gte: start, $lt: end } }).toArray()
-      let totalRevenue = 0, totalExpense = 0
-      const accountTotals = {} // account_code → { name, debit, credit }
+      // v3.88.4 — F-018 PREFLIGHT (no auto-creation of accounts):
+      //  1) Retained Earnings must EXIST in the chart — COA v2 = 3102. The old code posted
+      //     to a hardcoded '3900' that does not exist in the tree.
+      //  2) It must be a postable LEAF equity account (not a group, active).
+      //  3) The year must actually contain journal activity.
+      //  4) Unposted-entries queue & Maker/Checker: N/A — the system posts entries
+      //     immediately and has no approval workflow (documented, not skipped silently).
+      const reAcct = await db.collection('accounts').findOne({ tenant_id: T, code: COA.RETAINED_EARNINGS })
+      if (!reAcct) return bad(`Preflight: حساب الأرباح المبقاة (${COA.RETAINED_EARNINGS}) غير موجود في شجرة الحسابات — رحّل الدليل إلى COA v2 أولاً (لن يُنشأ الحساب تلقائياً)`)
+      if (reAcct.is_group) return bad(`Preflight: حساب الأرباح المبقاة (${COA.RETAINED_EARNINGS}) حساب مجموعة — يجب أن يكون حساباً تفصيلياً قابلاً للقيد`)
+      if (reAcct.type !== 'equity') return bad(`Preflight: الحساب (${COA.RETAINED_EARNINGS}) ليس ضمن حقوق الملكية`)
+      if (reAcct.is_active === false) return bad(`Preflight: حساب الأرباح المبقاة (${COA.RETAINED_EARNINGS}) غير نشط`)
+      // v3.88.4 — aggregate revenues/expenses PER CURRENCY (the old code mixed all
+      // currencies into one USD-labelled JE) — string/Date-safe business-TZ filter.
+      const yStart = bizDayStart(`${year}-01-01`), yEnd = bizDayEnd(`${year}-12-31`)
+      const jes = await db.collection('journal_entries').find({ tenant_id: T, ref_type: { $ne: 'year_close' }, ...dateRangeExpr('date', yStart, yEnd) }).toArray()
+      if (jes.length === 0) return bad(`Preflight: لا توجد قيود في السنة ${year}`)
+      const perCcy = {} // ccy → { code → { name, debit, credit } }
       for (const je of jes) {
         for (const ln of (je.lines || [])) {
           const code = ln.account_code || ''
-          if (!accountTotals[code]) accountTotals[code] = { name: ln.account_name, debit: 0, credit: 0 }
-          accountTotals[code].debit += Number(ln.debit || 0)
-          accountTotals[code].credit += Number(ln.credit || 0)
-          if (code.startsWith('4')) totalRevenue += Number(ln.credit || 0) - Number(ln.debit || 0)
-          if (code.startsWith('5')) totalExpense += Number(ln.debit || 0) - Number(ln.credit || 0)
+          if (!code.startsWith('4') && !code.startsWith('5')) continue
+          const ccy = ln.currency || je.currency || BASE_CURRENCY
+          if (!perCcy[ccy]) perCcy[ccy] = {}
+          if (!perCcy[ccy][code]) perCcy[ccy][code] = { name: ln.account_name, debit: 0, credit: 0 }
+          perCcy[ccy][code].debit += Number(ln.debit || 0)
+          perCcy[ccy][code].credit += Number(ln.credit || 0)
         }
       }
-      const netProfit = +(totalRevenue - totalExpense).toFixed(2)
-      // Build closing JE lines: debit each revenue by its balance, credit each expense by its balance, plus RE 3900
-      const closingLines = []
-      for (const [code, t] of Object.entries(accountTotals)) {
-        const bal = +(t.credit - t.debit).toFixed(2)
-        if (code.startsWith('4') && bal !== 0) closingLines.push({ account_code: code, account_name: t.name, debit: bal, credit: 0 })
-        if (code.startsWith('5') && bal !== 0) closingLines.push({ account_code: code, account_name: t.name, debit: 0, credit: Math.abs(bal) })
+      const results = []
+      for (const [ccy, accountTotals] of Object.entries(perCcy)) {
+        const closingLines = []
+        let net = 0
+        for (const [code, t] of Object.entries(accountTotals)) {
+          if (code.startsWith('4')) {
+            const bal = +(t.credit - t.debit).toFixed(2)
+            if (bal === 0) continue
+            closingLines.push(bal > 0 ? { account_code: code, account_name: t.name, debit: bal, credit: 0 } : { account_code: code, account_name: t.name, debit: 0, credit: Math.abs(bal) })
+            net += bal
+          } else {
+            const ebal = +(t.debit - t.credit).toFixed(2)
+            if (ebal === 0) continue
+            closingLines.push(ebal > 0 ? { account_code: code, account_name: t.name, debit: 0, credit: ebal } : { account_code: code, account_name: t.name, debit: Math.abs(ebal), credit: 0 })
+            net -= ebal
+          }
+        }
+        net = +net.toFixed(2)
+        if (closingLines.length === 0) continue
+        if (net > 0) closingLines.push({ account_code: COA.RETAINED_EARNINGS, account_name: reAcct.name_ar, debit: 0, credit: net })
+        else if (net < 0) closingLines.push({ account_code: COA.RETAINED_EARNINGS, account_name: reAcct.name_ar, debit: Math.abs(net), credit: 0 })
+        const closingJe = await createJournalEntry(db, T, {
+          date: new Date(`${year}-12-31T23:59:59+03:00`),
+          description: `🔒 قيد إقفال السنة المالية ${year} (${ccy}) — تصفير الإيرادات والمصروفات وترحيل الصافي إلى الأرباح المبقاة (${COA.RETAINED_EARNINGS})`,
+          ref_type: 'year_close', ref_id: `close-${year}`, currency: ccy,
+          lines: closingLines.map(l => ({ ...l, currency: ccy, party_type: null, party_id: null, party_name: l.account_name })),
+        }, { skipQuota: true })
+        results.push({ currency: ccy, net_profit: net, closing_je_id: closingJe.id, lines_count: closingLines.length })
       }
-      // Retained Earnings balancing line
-      if (netProfit > 0) closingLines.push({ account_code: '3900', account_name: 'الأرباح المُدوّرة', debit: 0, credit: netProfit })
-      else if (netProfit < 0) closingLines.push({ account_code: '3900', account_name: 'الأرباح المُدوّرة', debit: Math.abs(netProfit), credit: 0 })
-      if (closingLines.length === 0) return bad(`لا توجد قيود إيرادات أو مصروفات في السنة ${year}`)
-      const closingJe = await createJournalEntry(db, T, {
-        date: new Date(year, 11, 31, 23, 59, 59),
-        description: `🔒 قيد إقفال السنة المالية ${year} — تصفير الإيرادات والمصروفات وترحيل صافي الربح (${netProfit >= 0 ? 'ربح' : 'خسارة'}) إلى الأرباح المُدوّرة`,
-        ref_type: 'year_close',
-        ref_id: `close-${year}`,
-        currency: 'USD',
-        lines: closingLines,
-      }, { skipQuota: true })
+      if (results.length === 0) return bad(`لا توجد قيود إيرادات أو مصروفات في السنة ${year}`)
       // Mark tenant year as closed
       await db.collection('tenants').updateOne({ id: T }, {
         $addToSet: { closed_years: year },
-        $set: { [`year_closes.${year}`]: { closed_at: new Date(), closed_by: sess.user.id, net_profit: netProfit, revenue: totalRevenue, expense: totalExpense } },
+        $set: { [`year_closes.${year}`]: { closed_at: new Date(), closed_by: sess.user.id, per_currency: results } },
       })
-      return ok({ ok: true, year, net_profit: netProfit, total_revenue: totalRevenue, total_expense: totalExpense, closing_je_id: closingJe.id, lines_count: closingLines.length })
+      const netTotal = +results.reduce((s, r) => s + r.net_profit, 0).toFixed(2)
+      return ok({ ok: true, year, per_currency: results, net_profit: netTotal, retained_earnings_account: COA.RETAINED_EARNINGS, closing_je_id: results[0].closing_je_id, lines_count: results.reduce((s, r) => s + r.lines_count, 0) })
     }
 
     if (route === '/accounting/reopen-year' && method === 'POST') {
@@ -7675,6 +7830,10 @@ async function createTicket(db, T, b, opts = {}) {
   }
   doc.commission_share_amount = partnerShare
   const officeNetCommission = +(commission - partnerShare).toFixed(2)
+  // v3.88.4 — F-007: the partner-commission line must post to the partner's LEAF account
+  const partnerDoc = (partnerShare > 0 && doc.commission_partner_id)
+    ? await db.collection(doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients').findOne({ id: doc.commission_partner_id, tenant_id: T })
+    : null
   await db.collection('tickets').insertOne(doc)
   // Balance updates + journal
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
@@ -7688,17 +7847,17 @@ async function createTicket(db, T, b, opts = {}) {
   const lines = []
   if (paymentMethod === 'cash') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: box.type === 'cash' ? COA.CASHBOXES : COA.BANKS, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
+    lines.push({ account_code: partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS), account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
   } else {
     await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
+    lines.push({ account_code: partyLeafCode(cli, COA.CLIENTS), account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
   }
-  lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
+  lines.push({ account_code: partyLeafCode(sup, COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
   if (officeNetCommission !== 0) {
     lines.push({ account_code: COA.REV_TICKETS, account_name: 'إيرادات عمولات التذاكر', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التذاكر', debit: 0, credit: officeNetCommission })
   }
   if (partnerShare > 0) {
-    lines.push({ account_code: doc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS, account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+    lines.push({ account_code: partyLeafCode(partnerDoc, doc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS), account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
   }
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}حجز تذكرة ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} PNR ${doc.pnr || '-'} — ${cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
@@ -7792,6 +7951,10 @@ async function createVisa(db, T, b, opts = {}) {
   }
   doc.commission_share_amount = partnerShare
   const officeNetCommission = +(commission - partnerShare).toFixed(2)
+  // v3.88.4 — F-007: the partner-commission line must post to the partner's LEAF account
+  const partnerDoc = (partnerShare > 0 && doc.commission_partner_id)
+    ? await db.collection(doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients').findOne({ id: doc.commission_partner_id, tenant_id: T })
+    : null
   await db.collection('visas').insertOne(doc)
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
   if (partnerShare > 0 && doc.commission_partner_id) {
@@ -7801,17 +7964,17 @@ async function createVisa(db, T, b, opts = {}) {
   const lines = []
   if (paymentMethod === 'cash') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: box.type === 'cash' ? COA.CASHBOXES : COA.BANKS, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
+    lines.push({ account_code: partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS), account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
   } else {
     await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
+    lines.push({ account_code: partyLeafCode(cli, COA.CLIENTS), account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
   }
-  lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
+  lines.push({ account_code: partyLeafCode(sup, COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
   if (officeNetCommission !== 0) {
     lines.push({ account_code: COA.REV_VISAS, account_name: 'إيرادات عمولات التأشيرات', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التأشيرات', debit: 0, credit: officeNetCommission })
   }
   if (partnerShare > 0) {
-    lines.push({ account_code: doc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS, account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+    lines.push({ account_code: partyLeafCode(partnerDoc, doc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS), account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
   }
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.passenger_name || cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
@@ -7851,6 +8014,10 @@ async function createService(db, T, b, opts = {}) {
   if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ الخدمة/المستند)` } // v3.80
   if (!b.supplier_id) return { error: 'المورد/المزود مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
+  // v3.88.4 — F-001: reject negative amounts (same rule tickets/visas had since v3.10.2 —
+  // services were the only path missing it). Values are rejected, NEVER abs()-coerced.
+  const numFieldsSvc = ['cost', 'sale_price', 'discount', 'commission', 'commission_share_value']
+  for (const f of numFieldsSvc) if (b[f] !== undefined && Number(b[f]) < 0) return { error: `القيمة السالبة غير مسموحة في الحقل: ${f}` }
   // v3.9.14 — Period lock: prevent creating records in a closed year
   if (b.date) {
     const yr = new Date(b.date).getFullYear()
@@ -7923,6 +8090,10 @@ async function createService(db, T, b, opts = {}) {
   }
   doc.commission_share_amount = partnerShare
   const officeNetCommission = +(commission - partnerShare).toFixed(2)
+  // v3.88.4 — F-007: the partner-commission line must post to the partner's LEAF account
+  const partnerDoc = (partnerShare > 0 && doc.commission_partner_id)
+    ? await db.collection(doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients').findOne({ id: doc.commission_partner_id, tenant_id: T })
+    : null
   await db.collection('services').insertOne(doc)
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
   if (partnerShare > 0 && doc.commission_partner_id) {
@@ -7932,17 +8103,17 @@ async function createService(db, T, b, opts = {}) {
   const lines = []
   if (paymentMethod === 'cash') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: box.type === 'cash' ? COA.CASHBOXES : COA.BANKS, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
+    lines.push({ account_code: partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS), account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
   } else {
     await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: COA.CLIENTS, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
+    lines.push({ account_code: partyLeafCode(cli, COA.CLIENTS), account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
   }
-  lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
+  lines.push({ account_code: partyLeafCode(sup, COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
   if (officeNetCommission !== 0) {
     lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيرادات ${doc.service_type}`, debit: 0, credit: officeNetCommission })
   }
   if (partnerShare > 0) {
-    lines.push({ account_code: doc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS, account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+    lines.push({ account_code: partyLeafCode(partnerDoc, doc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS), account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
   }
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.beneficiary_name || cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
@@ -7959,13 +8130,14 @@ async function createVoucher(db, T, b, opts = {}) {
   if (Number(b.amount) < 0) return { error: 'لا يُسمح بمبلغ سالب في السند' }
   if (amount <= 0) return { error: 'المبلغ يجب أن يكون أكبر من صفر' }
   let partyName = ''
+  let partyDoc = null // v3.88.4 — F-007: keep the party doc to post to its LEAF account
   let coaAccount = null // v3.79 — real COA account for expense/revenue vouchers
   if (b.party_type === 'client') {
     const c = await db.collection('clients').findOne({ id: b.party_id, tenant_id: T })
-    if (!c) return { error: 'العميل غير موجود' }; partyName = c.name
+    if (!c) return { error: 'العميل غير موجود' }; partyName = c.name; partyDoc = c
   } else if (b.party_type === 'supplier') {
     const s = await db.collection('suppliers').findOne({ id: b.party_id, tenant_id: T })
-    if (!s) return { error: 'المورد غير موجود' }; partyName = s.name
+    if (!s) return { error: 'المورد غير موجود' }; partyName = s.name; partyDoc = s
   } else if (b.party_type === 'expense') {
     if (b.type !== 'payment') return { error: 'المصروف متاح في سند الصرف فقط' }
     // v3.79 — expense MUST be a real account from the chart of accounts (not free text).
@@ -7976,6 +8148,10 @@ async function createVoucher(db, T, b, opts = {}) {
       if (coaAccount.type !== 'expense') return { error: `الحساب "${coaAccount.name_ar}" ليس حساب مصروف` }
       if (coaAccount.is_group) return { error: 'اختر حساب مصروف فرعياً — الحساب الأب للتصنيف فقط ولا تُسجل عليه حركة' }
       partyName = coaAccount.name_ar
+    } else if (!opts.existingId) {
+      // v3.88.4 — U-012: a NEW expense voucher must post to a REAL postable expense
+      // account from the chart — a text description alone is no longer accepted.
+      return { error: 'اختر حساب المصروف من دليل الحسابات — لا يكفي كتابة وصف نصي، ويُمنع اختيار حساب مجموعة' }
     } else {
       partyName = b.party_name || 'مصروف تشغيلي'
     }
@@ -8010,17 +8186,17 @@ async function createVoucher(db, T, b, opts = {}) {
     if (b.party_type === 'client') await updateBalance(db, 'clients', { id: b.party_id, tenant_id: T }, b.currency, +amount)
   }
   const lines = []
-  const boxAccCode = box.type === 'cash' ? COA.CASHBOXES : COA.BANKS
+  const boxAccCode = partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS) // v3.88.4 — F-007
   if (b.type === 'receipt') {
     lines.push({ account_code: boxAccCode, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: amount, credit: 0 })
-    if (b.party_type === 'client') lines.push({ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
-    if (b.party_type === 'supplier') lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
+    if (b.party_type === 'client') lines.push({ account_code: partyLeafCode(partyDoc, COA.CLIENTS), account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
+    if (b.party_type === 'supplier') lines.push({ account_code: partyLeafCode(partyDoc, COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
     // v3.79 — revenue posts to the SELECTED revenue account (statement-able independent account)
     if (b.party_type === 'revenue') lines.push({ account_code: coaAccount.code, account_name: coaAccount.name_ar, party_type: 'account', party_id: coaAccount.id, party_name: coaAccount.name_ar, debit: 0, credit: amount })
     if (b.party_type === 'expense') lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيراد متنوع', party_type: 'revenue', party_id: null, party_name: 'إيراد متنوع', debit: 0, credit: amount })
   } else {
-    if (b.party_type === 'supplier') lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
-    if (b.party_type === 'client') lines.push({ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
+    if (b.party_type === 'supplier') lines.push({ account_code: partyLeafCode(partyDoc, COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
+    if (b.party_type === 'client') lines.push({ account_code: partyLeafCode(partyDoc, COA.CLIENTS), account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
     // v3.79 — expense posts to the SELECTED expense account; legacy free-text keeps generic 5101
     if (b.party_type === 'expense') {
       if (coaAccount) lines.push({ account_code: coaAccount.code, account_name: coaAccount.name_ar, party_type: 'account', party_id: coaAccount.id, party_name: coaAccount.name_ar, debit: amount, credit: 0 })
@@ -8040,15 +8216,15 @@ async function resolveAccountRef(db, T, ref) {
   if (!ref || !ref.id) return null
   if (ref.kind === 'client') {
     const d = await db.collection('clients').findOne({ id: ref.id, tenant_id: T })
-    return d ? { kind: 'client', id: d.id, name: d.name, code: COA.CLIENTS, updateBalance: true, collection: 'clients', debitSign: +1 } : null
+    return d ? { kind: 'client', id: d.id, name: d.name, code: partyLeafCode(d, COA.CLIENTS), updateBalance: true, collection: 'clients', debitSign: +1 } : null
   }
   if (ref.kind === 'supplier') {
     const d = await db.collection('suppliers').findOne({ id: ref.id, tenant_id: T })
-    return d ? { kind: 'supplier', id: d.id, name: d.name, code: COA.SUPPLIERS, updateBalance: true, collection: 'suppliers', debitSign: -1 } : null
+    return d ? { kind: 'supplier', id: d.id, name: d.name, code: partyLeafCode(d, COA.SUPPLIERS), updateBalance: true, collection: 'suppliers', debitSign: -1 } : null
   }
   if (ref.kind === 'box') {
     const d = await db.collection('boxes').findOne({ id: ref.id, tenant_id: T })
-    return d ? { kind: 'box', id: d.id, name: d.name_ar, code: d.type === 'cash' ? COA.CASHBOXES : COA.BANKS, updateBalance: true, collection: 'boxes', debitSign: +1 } : null
+    return d ? { kind: 'box', id: d.id, name: d.name_ar, code: partyLeafCode(d, d.type === 'cash' ? COA.CASHBOXES : COA.BANKS), updateBalance: true, collection: 'boxes', debitSign: +1 } : null
   }
   if (ref.kind === 'account') {
     const d = await db.collection('accounts').findOne({ id: ref.id, tenant_id: T })
@@ -8075,6 +8251,32 @@ async function createFx(db, T, b, opts = {}) {
   const accCounter = await resolveAccountRef(db, T, refCounter)
   if (!accCur || !accCounter) return { error: payment_method === 'cash' ? 'اختر صناديق العملتين' : 'اختر الحسابين للطرفين' }
   const rates = (await db.collection('tenant_settings').findOne({ tenant_id: T }))?.rates || DEFAULT_RATES
+  // v3.88.4 — F-004: sanity-check the rate against the registered reference range BEFORE
+  // accepting the exchange. Base pairs use the currency's own min/max; cross pairs are
+  // compared to the implied cross of the two transfer rates (±10%). A wildly deviant
+  // rate is blocked with a clear message instead of silently producing huge FX losses.
+  const FX_TOLERANCE = 0.10
+  const fxBoundsErr = (() => {
+    const r1 = rates[b.currency] || {}, r2 = rates[b.counter_currency] || {}
+    if (b.counter_currency === BASE_CURRENCY) {
+      const mn = Number(r1.min) || 0, mx = Number(r1.max) || 0
+      if (mn > 0 && rate < mn) return `سعر الصرف ${rate} أقل من الحد الأدنى المسجل (${mn}) لعملة ${b.currency}`
+      if (mx > 0 && rate > mx) return `سعر الصرف ${rate} أعلى من الحد الأعلى المسجل (${mx}) لعملة ${b.currency}`
+    } else if (b.currency === BASE_CURRENCY) {
+      const inv = rate > 0 ? 1 / rate : 0
+      const mn = Number(r2.min) || 0, mx = Number(r2.max) || 0
+      if (mn > 0 && inv < mn) return `السعر الضمني ${inv.toFixed(4)} أقل من الحد الأدنى المسجل (${mn}) لعملة ${b.counter_currency}`
+      if (mx > 0 && inv > mx) return `السعر الضمني ${inv.toFixed(4)} أعلى من الحد الأعلى المسجل (${mx}) لعملة ${b.counter_currency}`
+    } else {
+      const t1 = Number(r1.transfer) || 0, t2 = Number(r2.transfer) || 0
+      if (t1 > 0 && t2 > 0) {
+        const implied = t1 / t2
+        if (implied > 0 && Math.abs(rate - implied) / implied > FX_TOLERANCE) return `سعر الصرف ${rate} منحرف أكثر من ${FX_TOLERANCE * 100}% عن السعر المرجعي (${implied.toFixed(4)}) للزوج ${b.currency}/${b.counter_currency}`
+      }
+    }
+    return null
+  })()
+  if (fxBoundsErr && !b.allow_rate_override) return { error: `⚠️ ${fxBoundsErr} — صحّح السعر أو حدّث نطاقات أسعار الصرف من الإعدادات أولاً` }
   const inBase = toBase(amount, b.currency, rates)
   const outBase = toBase(counter_amount, b.counter_currency, rates)
   const fx_gain_base = +(b.type === 'buy' ? (inBase - outBase) : (outBase - inBase)).toFixed(4)
@@ -8099,6 +8301,16 @@ async function createFx(db, T, b, opts = {}) {
     fx_gain_base, fx_gain_usd: fx_gain_base,
     created_at: opts.createdAt || new Date(),
     ...(opts.existingId ? { updated_at: new Date() } : {}),
+  }
+  // v3.88.4 — F-004: an exchange can never drive a box below zero — the paying side
+  // must hold enough balance in the paid currency (clients/suppliers/COA refs are exempt).
+  const fxPayRef = b.type === 'buy' ? accCounter : accCur
+  const fxPayCcy = b.type === 'buy' ? b.counter_currency : b.currency
+  const fxPayAmt = b.type === 'buy' ? counter_amount : amount
+  if (fxPayRef.kind === 'box') {
+    const payBox = await db.collection('boxes').findOne({ id: fxPayRef.id, tenant_id: T })
+    const payBal = Number(payBox?.balances?.[fxPayCcy]) || 0
+    if (payBal - fxPayAmt < -0.005) return { error: `رصيد الصندوق "${fxPayRef.name}" بعملة ${fxPayCcy} (${payBal.toLocaleString()}) لا يكفي لدفع ${fxPayAmt.toLocaleString()} — لا يُسمح برصيد صندوق سالب في الصرافة` }
   }
   await db.collection('currency_exchanges').insertOne(doc)
   // Balance updates — only for accounts that track balances (client/supplier/box); COA accounts skip.
@@ -8213,18 +8425,20 @@ async function createManualJournal(db, T, b, opts = {}) {
 
 async function computeDashboard(db, T) {
   const now = new Date()
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const todayStart = bizDayStart(bizTodayISO()) // v3.88.4 — U-001/U-014: business-TZ day boundary
   const monthAgo = new Date(now); monthAgo.setDate(monthAgo.getDate() - 30)
   const tf = { tenant_id: T }
   const rates = (await db.collection('tenant_settings').findOne(tf))?.rates || DEFAULT_RATES
 
-  const [ticketsToday, visasToday, servicesToday, ticketsMonth, visasMonth, servicesMonth] = await Promise.all([
+  const [ticketsToday, visasToday, servicesToday, ticketsMonth, visasMonth, servicesMonth, vouchersTodayCount, fxTodayCount] = await Promise.all([
     db.collection('tickets').find({ ...tf, date: { $gte: todayStart } }).toArray(),
     db.collection('visas').find({ ...tf, date: { $gte: todayStart } }).toArray(),
     db.collection('services').find({ ...tf, date: { $gte: todayStart } }).toArray(),
     db.collection('tickets').find({ ...tf, date: { $gte: monthAgo } }).toArray(),
     db.collection('visas').find({ ...tf, date: { $gte: monthAgo } }).toArray(),
     db.collection('services').find({ ...tf, date: { $gte: monthAgo } }).toArray(),
+    db.collection('vouchers').countDocuments({ ...tf, date: { $gte: todayStart } }),
+    db.collection('currency_exchanges').countDocuments({ ...tf, date: { $gte: todayStart } }),
   ])
   const kpiSales = { USD: 0, SAR: 0, YER: 0 }, kpiProfit = { USD: 0, SAR: 0, YER: 0 }
   for (const t of [...ticketsToday, ...visasToday, ...servicesToday]) { kpiSales[t.currency] += t.sale_price || 0; kpiProfit[t.currency] += t.commission || 0 }
@@ -8301,8 +8515,11 @@ async function computeDashboard(db, T) {
   return {
     kpi: {
       sales_today: kpiSales, profit_today: kpiProfit,
-      count_today: ticketsToday.length + visasToday.length + servicesToday.length,
+      // v3.88.4 — U-001: the daily movement count now includes ALL financial documents
+      // (tickets + visas + services + vouchers + exchanges) so it matches the movements list.
+      count_today: ticketsToday.length + visasToday.length + servicesToday.length + vouchersTodayCount + fxTodayCount,
       tickets_today: ticketsToday.length, visas_today: visasToday.length, services_today: servicesToday.length,
+      vouchers_today: vouchersTodayCount, fx_today: fxTodayCount,
     },
     line: Object.values(dayMap),
     pie: Object.entries(pieMap).map(([name, value]) => ({ name, value: +value.toFixed(2) })).filter(x => x.value > 0),
@@ -8312,9 +8529,12 @@ async function computeDashboard(db, T) {
 }
 
 async function reportProfits(db, T, q) {
-  const from = q.from ? new Date(q.from) : new Date(0)
-  const to = q.to ? new Date(q.to) : new Date(); to.setHours(23,59,59,999)
-  const tf = { tenant_id: T, date: { $gte: from, $lte: to } }
+  // v3.88.4 — F-013: refunded/cancelled documents are EXCLUDED — the report reflects the
+  // NET activity after cancellation/refund. F-017/U-014: business-TZ (UTC+3) boundaries
+  // with string/Date-safe filtering (no data migration).
+  const from = q.from ? bizDayStart(q.from) : new Date(0)
+  const to = q.to ? bizDayEnd(q.to) : bizDayEnd(bizTodayISO())
+  const tf = { tenant_id: T, is_refunded: { $ne: true }, ...dateRangeExpr('date', from, to) }
   const [tickets, visas, services] = await Promise.all([
     db.collection('tickets').find(tf).sort({ date: 1 }).toArray(),
     db.collection('visas').find(tf).sort({ date: 1 }).toArray(),
@@ -8333,66 +8553,103 @@ async function reportStatement(db, T, q) {
   const { party_type, party_id } = q
   if (!party_type || !party_id) throw new Error('نوع الطرف والمعرف مطلوبان')
 
-  // Time period filter
-  let dateFilter = null
-  const now = new Date()
+  // v3.88.4 — F-016/F-017/U-014: unified business-TZ (UTC+3) day boundaries + string/Date-safe
+  // filtering (legacy opening entries stored string dates — $toDate covers both types).
+  let startDate = null, endDate = null
   if (q.period === 'day') {
-    const d = q.day ? new Date(q.day) : now
-    dateFilter = { $gte: new Date(d.getFullYear(), d.getMonth(), d.getDate()), $lte: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23,59,59,999) }
+    const d = q.day || bizTodayISO()
+    startDate = bizDayStart(d); endDate = bizDayEnd(d)
   } else if (q.period === 'month') {
-    const [y, m] = (q.month || `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`).split('-').map(Number)
-    dateFilter = { $gte: new Date(y, m-1, 1), $lte: new Date(y, m, 0, 23,59,59,999) }
+    const m = q.month || bizTodayISO().slice(0, 7)
+    const [y, mo] = m.split('-').map(Number)
+    const lastDay = new Date(Date.UTC(y, mo, 0)).getUTCDate()
+    startDate = bizDayStart(`${m}-01`); endDate = bizDayEnd(`${m}-${String(lastDay).padStart(2, '0')}`)
   } else if (q.period === 'range') {
-    const start = q.from ? new Date(q.from) : new Date(0)
-    const end = q.to ? new Date(q.to) : new Date(); end.setHours(23,59,59,999)
-    dateFilter = { $gte: start, $lte: end }
+    startDate = q.from ? bizDayStart(q.from) : null
+    endDate = q.to ? bizDayEnd(q.to) : bizDayEnd(bizTodayISO())
   } else if (q.period === 'up_to_date' && q.to) {
-    const end = new Date(q.to); end.setHours(23,59,59,999)
-    dateFilter = { $lte: end }
+    endDate = bizDayEnd(q.to)
   }
 
-  const filter = { tenant_id: T }
-  if (dateFilter) filter.date = dateFilter
-
-  const jes = await db.collection('journal_entries').find(filter).sort({ date: 1, created_at: 1 }).toArray()
-  const rows = []
-  const run = { USD: 0, SAR: 0, YER: 0 }
-  const totals = { USD: { d: 0, c: 0 }, SAR: { d: 0, c: 0 }, YER: { d: 0, c: 0 } }
-  for (const je of jes) {
-    for (const l of je.lines || []) {
-      if (l.party_type === party_type && l.party_id === party_id) {
-        const cur = l.currency || je.currency
-        if (!['USD','SAR','YER'].includes(cur)) continue
-        let delta = 0
-        if (party_type === 'client') delta = (l.debit || 0) - (l.credit || 0)
-        else if (party_type === 'supplier') delta = (l.credit || 0) - (l.debit || 0)
-        else if (party_type === 'box') delta = (l.debit || 0) - (l.credit || 0)
-        else delta = (l.debit || 0) - (l.credit || 0)  // generic COA account (asset convention)
-        run[cur] += delta
-        totals[cur].d += l.debit || 0
-        totals[cur].c += l.credit || 0
-        rows.push({ date: je.date, description: je.description, ref_type: je.ref_type, currency: cur, debit: l.debit || 0, credit: l.credit || 0, balance: run[cur] })
-      }
-    }
-  }
-
-  let party = null
+  // Resolve the party/account FIRST — needed for unified account-code matching (F-009)
+  let party = null, acct = null
   if (party_type === 'client') party = await db.collection('clients').findOne({ id: party_id, tenant_id: T })
   else if (party_type === 'supplier') party = await db.collection('suppliers').findOne({ id: party_id, tenant_id: T })
   else if (party_type === 'box') {
     const b = await db.collection('boxes').findOne({ id: party_id, tenant_id: T })
-    if (b) party = { id: b.id, name: b.name_ar, phone: '', balances: b.balances }
+    if (b) party = { id: b.id, name: b.name_ar, phone: '', balances: b.balances, account_code: b.account_code }
   } else if (party_type === 'account') {
-    const a = await db.collection('accounts').findOne({ id: party_id, tenant_id: T })
-    if (a) party = { id: a.id, name: `${a.code} — ${a.name_ar || a.name}`, phone: '', balances: {} }
+    acct = await db.collection('accounts').findOne({ id: party_id, tenant_id: T })
+    if (acct) party = { id: acct.id, name: `${acct.code} — ${acct.name_ar || acct.name}`, phone: '', balances: {} }
+  }
+
+  // v3.88.4 — F-009: ONE matching rule across Journal/Ledger/Statement/Trial-Balance.
+  // Party lines match by (party_type + party_id) OR the party's own leaf account_code.
+  // Plain COA accounts match by account_code — the old party_id-only rule returned ZERO
+  // for accounts like 5101999 whose lines carry party_type 'account'/'revenue'/'expense'.
+  const partyAccountCode = (party && party.account_code) || null
+  const matchesLine = (l) => {
+    if (party_type === 'account') return !!acct && (l.account_code === acct.code || (l.party_type === 'account' && l.party_id === party_id))
+    if (l.party_type === party_type && l.party_id === party_id) return true
+    return !!partyAccountCode && l.account_code === partyAccountCode
+  }
+  const signOf = (l) => {
+    if (party_type === 'supplier') return (l.credit || 0) - (l.debit || 0)
+    if (party_type === 'account' && acct && ['liability', 'equity', 'revenue'].includes(acct.type)) return (l.credit || 0) - (l.debit || 0)
+    return (l.debit || 0) - (l.credit || 0)
+  }
+
+  const rows = []
+  const run = { USD: 0, SAR: 0, YER: 0 }
+  const totals = { USD: { d: 0, c: 0 }, SAR: { d: 0, c: 0 }, YER: { d: 0, c: 0 } }
+  const opening = { USD: 0, SAR: 0, YER: 0 }
+
+  // v3.88.4 — F-016: everything BEFORE the period start is the OPENING BALANCE —
+  // a period statement never starts from zero when prior activity exists.
+  if (startDate) {
+    const priorJes = await db.collection('journal_entries').find({ tenant_id: T, ...dateRangeExpr('date', null, new Date(startDate.getTime() - 1)) }).toArray()
+    for (const je of priorJes) for (const l of je.lines || []) {
+      if (!matchesLine(l)) continue
+      const cur = l.currency || je.currency
+      if (!['USD', 'SAR', 'YER'].includes(cur)) continue
+      opening[cur] += signOf(l)
+    }
+    for (const c of ['USD', 'SAR', 'YER']) {
+      opening[c] = +opening[c].toFixed(2)
+      run[c] = opening[c]
+      if (Math.abs(opening[c]) >= 0.005) rows.push({ date: startDate, description: 'رصيد سابق (قبل بداية الفترة)', ref_type: 'opening_balance', currency: c, debit: 0, credit: 0, balance: run[c] })
+    }
+  }
+
+  const rangeExpr = dateRangeExpr('date', startDate, endDate)
+  const jes = await db.collection('journal_entries').find({ tenant_id: T, ...(rangeExpr || {}) }).sort({ date: 1, created_at: 1 }).toArray()
+  for (const je of jes) {
+    for (const l of je.lines || []) {
+      if (!matchesLine(l)) continue
+      const cur = l.currency || je.currency
+      if (!['USD', 'SAR', 'YER'].includes(cur)) continue
+      run[cur] += signOf(l)
+      totals[cur].d += l.debit || 0
+      totals[cur].c += l.credit || 0
+      rows.push({ date: je.date, description: je.description, ref_type: je.ref_type, currency: cur, debit: l.debit || 0, credit: l.credit || 0, balance: +run[cur].toFixed(2) })
+    }
   }
 
   // Currency display mode: 'all_summary' | 'all_detail' | 'USD' | 'SAR' | 'YER'
   const mode = q.currency_mode || 'all_detail'
   let finalRows = rows
-  if (['USD','SAR','YER'].includes(mode)) finalRows = rows.filter(r => r.currency === mode)
+  if (['USD', 'SAR', 'YER'].includes(mode)) finalRows = rows.filter(r => r.currency === mode)
 
-  const summary = CURRENCIES.map(c => ({ currency: c, total_debit: +totals[c].d.toFixed(2), total_credit: +totals[c].c.toFixed(2), balance: +run[c].toFixed(2) }))
+  // v3.88.4 — F-006/F-014: the summary derives from the SAME ledger rows as the movements
+  // (same account, same currency, same date range): opening + movements = closing.
+  const summary = CURRENCIES.map(c => ({
+    currency: c,
+    opening_balance: +(opening[c] || 0).toFixed(2),
+    total_debit: +totals[c].d.toFixed(2),
+    total_credit: +totals[c].c.toFixed(2),
+    balance: +run[c].toFixed(2),
+    closing_balance: +run[c].toFixed(2),
+  }))
 
   return {
     party: party ? { id: party.id, name: party.name, phone: party.phone, balances: party.balances } : null,
@@ -8418,42 +8675,53 @@ async function reportTrialBalance(db, T) {
   return { rows, totals }
 }
 async function reportIncome(db, T, q) {
-  // v3.9.14 — accept year param
+  // v3.88.4 — F-012 ROOT-CAUSE REWRITE: the income statement now derives from the JOURNAL
+  // (classified 4xxx revenue / 5xxx expense lines) — the single accounting truth — instead
+  // of re-summing operational documents, which ignored manual journal entries and expense
+  // vouchers posted to real COA accounts. year_close entries are excluded (they zero the
+  // year), so a closed year still shows its true activity.
   let from, to
   if (q.year) {
     const yr = parseInt(q.year)
-    from = new Date(yr, 0, 1); to = new Date(yr, 11, 31, 23, 59, 59)
+    from = bizDayStart(`${yr}-01-01`); to = bizDayEnd(`${yr}-12-31`)
   } else {
-    from = q.from ? new Date(q.from) : new Date(0)
-    to = q.to ? new Date(q.to) : new Date(); to.setHours(23,59,59,999)
+    from = q.from ? bizDayStart(q.from) : new Date(0)
+    to = q.to ? bizDayEnd(q.to) : bizDayEnd(bizTodayISO())
   }
-  const tf = { tenant_id: T, date: { $gte: from, $lte: to } }
   const rates = (await db.collection('tenant_settings').findOne({ tenant_id: T }))?.rates || DEFAULT_RATES
-  const [tickets, visas, services, vouchers, jes] = await Promise.all([
-    db.collection('tickets').find(tf).toArray(),
-    db.collection('visas').find(tf).toArray(),
-    db.collection('services').find(tf).toArray(),
-    db.collection('vouchers').find({ ...tf, type: 'payment', party_type: 'expense' }).toArray(),
-    db.collection('journal_entries').find(tf).toArray(),
-  ])
-  const rev = { tickets: {USD:0,SAR:0,YER:0}, visas: {USD:0,SAR:0,YER:0}, services: {USD:0,SAR:0,YER:0}, other: {USD:0,SAR:0,YER:0} }
-  for (const t of tickets) rev.tickets[t.currency] += t.commission || 0
-  for (const v of visas) rev.visas[v.currency] += v.commission || 0
-  for (const s of services) rev.services[s.currency] += s.commission || 0
-  const exp = { USD:0, SAR:0, YER:0 }
-  for (const p of vouchers) exp[p.currency] += p.amount || 0
-  // FX gain/loss from account 4104 (already stored in BASE currency = YER)
+  const jes = await db.collection('journal_entries').find({ tenant_id: T, ref_type: { $ne: 'year_close' }, ...dateRangeExpr('date', from, to) }).toArray()
+  const zero = () => ({ USD: 0, SAR: 0, YER: 0 })
+  const rev = { tickets: zero(), visas: zero(), services: zero(), other: zero() }
+  const exp = zero()
+  const expenseAccounts = {} // code → { code, name, per-currency net }
   let fx_gain_base = 0
   for (const je of jes) {
     for (const l of je.lines || []) {
-      if (l.account_code === COA.FX_PNL) fx_gain_base += (l.credit || 0) - (l.debit || 0)
+      const code = String(l.account_code || '')
+      if (code === COA.FX_PNL) { fx_gain_base += (l.credit || 0) - (l.debit || 0); continue }
+      const cur = l.currency || je.currency
+      if (!['USD', 'SAR', 'YER'].includes(cur)) continue
+      if (code.startsWith('4')) {
+        const net = (l.credit || 0) - (l.debit || 0)
+        const bucket = code === COA.REV_TICKETS ? 'tickets' : code === COA.REV_VISAS ? 'visas' : code === COA.REV_SERVICES ? 'services' : 'other'
+        rev[bucket][cur] += net
+      } else if (code.startsWith('5')) {
+        const net = (l.debit || 0) - (l.credit || 0)
+        exp[cur] += net
+        if (!expenseAccounts[code]) expenseAccounts[code] = { code, name: l.account_name || code, USD: 0, SAR: 0, YER: 0 }
+        expenseAccounts[code][cur] = +(expenseAccounts[code][cur] + net).toFixed(2)
+      }
     }
   }
+  for (const bkt of Object.values(rev)) for (const c of ['USD', 'SAR', 'YER']) bkt[c] = +bkt[c].toFixed(2)
+  for (const c of ['USD', 'SAR', 'YER']) exp[c] = +exp[c].toFixed(2)
   const totalRevBase = Object.values(rev).reduce((s, cur) => s + Object.entries(cur).reduce((ss, [c, v]) => ss + toBase(v, c, rates), 0), 0) + fx_gain_base
   const totalExpBase = Object.entries(exp).reduce((s, [c, v]) => s + toBase(v, c, rates), 0)
   return {
     base_currency: BASE_CURRENCY,
+    source: 'journal', // v3.88.4 — F-012 marker
     revenue: rev, expenses: exp,
+    expense_accounts: Object.values(expenseAccounts),
     fx_gain_base: +fx_gain_base.toFixed(2),
     total_revenue_base: +totalRevBase.toFixed(2),
     total_expenses_base: +totalExpBase.toFixed(2),
