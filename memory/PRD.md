@@ -104,3 +104,12 @@ See /app/memory/test_credentials.md
 
 ## v3.88.3 (completed)
 - Equity (حقوق الملكية) added as a selectable account type in the add-account dialog. FE: type option + display maps (byType/typeLabel/typeGrad/typeColor) + equity parents restricted to equity GROUP accounts only (other types' parent filtering unchanged). BE: 5-type whitelist on POST /accounts (equity first-class); parent-type match & hierarchical coding were already generic. No migration/backfill; existing accounts and COA v2 structure untouched. API tests 12/12 + UI screenshots verified.
+
+## v3.88.4 (FIX-ONLY audit round — completed, NOT TESTED per user instruction)
+- Accounting integrity: leaf-account posting everywhere (no group postings), refund engine rewritten (kept original JE + linked reversal, no zero-value refunds, cash double-hit fixed), real restore-on-error on edits, partner-share reversal fixed, negative service costs rejected.
+- Reports: statement opening/closing balances + unified account matching + business-TZ date filters (string/Date safe); income statement journal-based; profits exclude refunded; year-close per-currency into 3102 with preflight (no 3900, no auto-create).
+- Guards: rate bounds (min≤buy≤transfer≤sell≤max), FX deviation ±10% + no negative box, credit_limit≥0, expense voucher requires real COA account, package end≥start.
+- Env isolation: publicSiteOrigin() — Test emits Test URLs only (referral/invite/extension), BE referral link host-aware.
+- UI: ref-type Arabic labels, dynamic © year, version 3.88.4, chart tree refresh after save/del, no silent account-code rewriting, password field masked + field-specific employee validation.
+- NOT executed (approval needed): F-021 platform-fee independent revenue JE (accounting design), P-001 phone E.164 unification, E-001/B-001 server env & mongodump (infra), any migration/backfill/historical reconciliation.
+- v3.88.5 (PR#15 review): atomic restore-on-edit (no swallowed errors, replaceOne upsert, loud 500 on restore failure), strict leaf-account resolution before first write (no silent Group fallback — legacy parties get clear re-link error), refund math verified (20k-case simulation, 0 unbalanced), emergent.yml timestamp excluded from working tree.
