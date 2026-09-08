@@ -112,3 +112,4 @@ See /app/memory/test_credentials.md
 - Env isolation: publicSiteOrigin() — Test emits Test URLs only (referral/invite/extension), BE referral link host-aware.
 - UI: ref-type Arabic labels, dynamic © year, version 3.88.4, chart tree refresh after save/del, no silent account-code rewriting, password field masked + field-specific employee validation.
 - NOT executed (approval needed): F-021 platform-fee independent revenue JE (accounting design), P-001 phone E.164 unification, E-001/B-001 server env & mongodump (infra), any migration/backfill/historical reconciliation.
+- v3.88.5 (PR#15 review): atomic restore-on-edit (no swallowed errors, replaceOne upsert, loud 500 on restore failure), strict leaf-account resolution before first write (no silent Group fallback — legacy parties get clear re-link error), refund math verified (20k-case simulation, 0 unbalanced), emergent.yml timestamp excluded from working tree.

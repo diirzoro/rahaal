@@ -72,12 +72,18 @@ const COA = {
 const OPENING_EQUITY_NAME = 'تسوية الأرصدة الافتتاحية'
 // v3.87 — numeric rounding helper (2 decimals)
 const round2n = (n) => Math.round((Number(n) || 0) * 100) / 100
-// v3.88.4 — F-007/F-008: every posting must reach the FINAL postable (leaf) account.
-// Parties (boxes/clients/suppliers) carry their own 7-digit leaf account_code — use it;
-// the group code remains ONLY as a last-resort fallback for legacy parties never re-coded.
-const partyLeafCode = (party, fallbackGroup) => {
+// v3.88.5 — F-007/F-008 STRICT (review round): every posting must reach the FINAL postable
+// (leaf) account. NO silent Group fallback: a legacy party that was never linked to a leaf
+// account throws a clear, coded error BEFORE any write — a new financial entry can never
+// land on a Group account. Remedy for the user: re-link parties to the chart (relinkParties
+// runs in seeding and in the COA migration), then retry. Historical entries are untouched.
+// (The second argument is intentionally IGNORED — kept only for call-site compatibility.)
+const partyLeafCode = (party, _ignoredLegacyFallback) => {
   const c = party && party.account_code ? String(party.account_code) : ''
-  return c.length >= 7 ? c : fallbackGroup
+  if (c.length >= 7) return c
+  const e = new Error(`لا يمكن الترحيل: الطرف "${(party && (party.name || party.name_ar)) || 'غير معروف'}" غير مربوط بحساب تفصيلي (Leaf) في دليل الحسابات — أعد ربط الأطراف بالدليل ثم أعد المحاولة. لن يُسجَّل أي قيد جديد على حساب مجموعة`)
+  e.code = 'PARTY_NO_LEAF_ACCOUNT'
+  throw e
 }
 // v3.88.4 — F-017/U-014: unified BUSINESS-TIMEZONE (UTC+3) day boundaries for every
 // financial-report date filter (from = start of day, to = end of day), plus a date-safe
@@ -4863,6 +4869,14 @@ async function handleRoute(request, { params }) {
         newPartnerShare = pcMode === 'percent' ? +(commission * (pcValue / 100)).toFixed(2) : +pcValue.toFixed(2)
         newPartnerShare = Math.min(newPartnerShare, commission)
       }
+      // v3.88.5 — F-007 STRICT: resolve LEAF accounts BEFORE any balance write (fails loudly
+      // with zero side-effects for legacy parties — never a silent Group fallback)
+      const payLeafA = newPay === 'cash' ? partyLeafCode(box) : partyLeafCode(cli)
+      const supIdsA = [...new Set(newSnapshots.filter(c => c.supplier_id && c.cost_total).map(c => c.supplier_id))]
+      const supDocsJE = Object.fromEntries((await db.collection('suppliers').find({ tenant_id: T, id: { $in: supIdsA } }).toArray()).map(s => [s.id, s]))
+      for (const sid of supIdsA) partyLeafCode(supDocsJE[sid])
+      const pcDocA = (newPartnerShare > 0 && pcId) ? await db.collection(pcType === 'supplier' ? 'suppliers' : 'clients').findOne({ id: pcId, tenant_id: T }) : null
+      const pcLeafA = pcDocA ? partyLeafCode(pcDocA) : null
       if (newPay === 'cash') {
         await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
       } else {
@@ -4924,22 +4938,21 @@ async function handleRoute(request, { params }) {
         await db.collection('package_transports').updateOne({ id: newTransport.id, tenant_id: T }, { $set: { seats_booked: newBooked, status: newStatus } })
       }
       const lines = []
-      if (newPay === 'cash') lines.push({ account_code: partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS), account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
-      else lines.push({ account_code: partyLeafCode(cli, COA.CLIENTS), account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
+      if (newPay === 'cash') lines.push({ account_code: payLeafA, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
+      else lines.push({ account_code: payLeafA, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
       const supGrouped = {}
       for (const c of newSnapshots) {
         if (!c.supplier_id || !c.cost_total) continue
         supGrouped[c.supplier_id] = supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }
         supGrouped[c.supplier_id].amount += c.cost_total
       }
-      const supDocsJE = Object.fromEntries((await db.collection('suppliers').find({ tenant_id: T, id: { $in: Object.keys(supGrouped) } }).toArray()).map(s => [s.id, s])) // v3.88.4 — F-007
-      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: partyLeafCode(supDocsJE[sid], COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
+      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: partyLeafCode(supDocsJE[sid]), account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
       // v3.19 — Balanced JE: revenue = sale - Σ(supplier credits) - partnerShare (mirrors POST logic)
       const supSumJE = +Object.values(supGrouped).reduce((s, x) => s + +x.amount.toFixed(2), 0).toFixed(2)
       const commissionJE = +(total_sale - supSumJE).toFixed(2)
       const revenueNet = +(commissionJE - newPartnerShare).toFixed(2)
       if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkgDoc.name}`, debit: 0, credit: revenueNet })
-      if (newPartnerShare > 0) { const pcDoc = pcId ? await db.collection(pcType === 'supplier' ? 'suppliers' : 'clients').findOne({ id: pcId, tenant_id: T }) : null; lines.push({ account_code: partyLeafCode(pcDoc, pcType === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS), account_name: pcType === 'supplier' ? 'الموردون' : 'العملاء', party_type: pcType, party_id: pcId, party_name: pcName || 'شريك عمولة', debit: 0, credit: newPartnerShare }) }
+      if (newPartnerShare > 0) lines.push({ account_code: pcLeafA, account_name: pcType === 'supplier' ? 'الموردون' : 'العملاء', party_type: pcType, party_id: pcId, party_name: pcName || 'شريك عمولة', debit: 0, credit: newPartnerShare }) // v3.88.5 — pre-resolved leaf
       await createJournalEntry(db, T, {
         date: oldJe?.date || updatedBooking.created_at || new Date(),
         description: `تسجيل ${updatedBooking.pilgrim_name} في ${pkgDoc.name} — ${newPax} فرد (تعديل)${newPartnerShare > 0 ? ` — عمولة مشتركة ${newPartnerShare} مع ${pcName || 'شريك'}` : ''}`,
@@ -5143,6 +5156,14 @@ async function handleRoute(request, { params }) {
           }
         })
       }
+      // v3.88.5 — F-007 STRICT: resolve LEAF accounts BEFORE any balance write (fails loudly
+      // with zero side-effects for legacy parties — never a silent Group fallback)
+      const payLeafPB = payMethod === 'cash' ? partyLeafCode(box) : partyLeafCode(cli)
+      const supIdsPB = [...new Set(comps.map(c => c.supplier_id))]
+      const supDocsPB = Object.fromEntries((await db.collection('suppliers').find({ tenant_id: T, id: { $in: supIdsPB } }).toArray()).map(s => [s.id, s]))
+      for (const sid of supIdsPB) partyLeafCode(supDocsPB[sid])
+      const pbPartnerDocPre = (partnerShare > 0 && bookingDoc.commission_partner_id) ? await db.collection(bookingDoc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients').findOne({ id: bookingDoc.commission_partner_id, tenant_id: T }) : null
+      const partnerLeafPB = pbPartnerDocPre ? partyLeafCode(pbPartnerDocPre) : null
       // Balances (v3.19: costFactor distributes any cost-discount proportionally over suppliers)
       if (payMethod === 'cash') await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
       else await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
@@ -5153,17 +5174,16 @@ async function handleRoute(request, { params }) {
       }
       // Single combined JE — mathematically balanced: revenue = sale - Σ(supplier credits) - partnerShare
       const lines = []
-      if (payMethod === 'cash') lines.push({ account_code: partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS), account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
-      else lines.push({ account_code: partyLeafCode(cli, COA.CLIENTS), account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
+      if (payMethod === 'cash') lines.push({ account_code: payLeafPB, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
+      else lines.push({ account_code: payLeafPB, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
       const supGrouped = {}
       for (let i = 0; i < comps.length; i++) { const c = comps[i]; supGrouped[c.supplier_id] = (supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }); supGrouped[c.supplier_id].amount += compTotals[i].cost_total * costFactor }
-      const supDocsPB = Object.fromEntries((await db.collection('suppliers').find({ tenant_id: T, id: { $in: Object.keys(supGrouped) } }).toArray()).map(s => [s.id, s])) // v3.88.4 — F-007
       let supSum = 0
-      for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: partyLeafCode(supDocsPB[sid], COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
+      for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: partyLeafCode(supDocsPB[sid]), account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
       const commissionJE = +(total_sale - supSum).toFixed(2)
       const revenueNet = +(commissionJE - partnerShare).toFixed(2)
       if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name}`, debit: 0, credit: revenueNet })
-      if (partnerShare > 0) { const pbPartnerDoc = bookingDoc.commission_partner_id ? await db.collection(bookingDoc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients').findOne({ id: bookingDoc.commission_partner_id, tenant_id: T }) : null; lines.push({ account_code: partyLeafCode(pbPartnerDoc, bookingDoc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS), account_name: bookingDoc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: bookingDoc.commission_partner_type, party_id: bookingDoc.commission_partner_id, party_name: bookingDoc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare }) }
+      if (partnerShare > 0) lines.push({ account_code: partnerLeafPB, account_name: bookingDoc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: bookingDoc.commission_partner_type, party_id: bookingDoc.commission_partner_id, party_name: bookingDoc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare }) // v3.88.5 — pre-resolved leaf
       await createJournalEntry(db, T, {
         date: new Date(), description: `تسجيل ${bookingDoc.pilgrim_name} في ${pkg.name} — ${pax} فرد${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${bookingDoc.commission_partner_name}` : ''}`,
         ref_type: 'package_booking', ref_id: bookingDoc.id, currency: cur, lines,
@@ -6446,15 +6466,22 @@ async function handleRoute(request, { params }) {
           await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
           const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at }
           let result
-          if (kind === 'tickets') result = await createTicket(db, T, newBody, opts)
-          else if (kind === 'visas') result = await createVisa(db, T, newBody, opts)
-          else if (kind === 'services') result = await createService(db, T, newBody, opts)
+          try {
+            if (kind === 'tickets') result = await createTicket(db, T, newBody, opts)
+            else if (kind === 'visas') result = await createVisa(db, T, newBody, opts)
+            else if (kind === 'services') result = await createService(db, T, newBody, opts)
+          } catch (createErr) { result = { error: createErr.message } } // v3.88.5 — F-020: same restore path
           if (result.error) {
             failed++; errors.push({ id: docId, error: result.error })
-            // v3.88.4 — F-020: restore the original record/JE/balances on failure
-            await db.collection(coll).insertOne(oldDoc).catch(() => {})
-            if (oldJe) await db.collection('journal_entries').insertOne(oldJe).catch(() => {})
-            await restoreTransactionEffects(db, T, kind, oldDoc)
+            // v3.88.5 — F-020 ATOMIC RESTORE: never swallowed — a restore failure ABORTS the batch
+            try {
+              await db.collection(coll).replaceOne({ id: docId, tenant_id: T }, oldDoc, { upsert: true })
+              if (oldJe) await db.collection('journal_entries').replaceOne({ id: oldJe.id, tenant_id: T }, oldJe, { upsert: true })
+              await restoreTransactionEffects(db, T, kind, oldDoc)
+            } catch (restoreErr) {
+              console.error(`[F-020] CRITICAL: bulk restore failed for ${kind}/${docId}:`, restoreErr)
+              return bad(`توقفت المعالجة: فشلت الاستعادة التلقائية للسجل ${docId} (${restoreErr.message}) — يلزم فحص يدوي فوري. تم تحديث ${updated} وفشل ${failed} قبل التوقف`, 500)
+            }
           } else updated++
         } catch (e) {
           failed++
@@ -6525,18 +6552,29 @@ async function handleRoute(request, { params }) {
       // Step 4: Re-create with same id + skip quota (edit doesn't count against limit)
       let result
       const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at }
-      if (kind === 'tickets') result = await createTicket(db, T, b, opts)
-      else if (kind === 'visas') result = await createVisa(db, T, b, opts)
-      else if (kind === 'services') result = await createService(db, T, b, opts)
-      else if (kind === 'vouchers') result = await createVoucher(db, T, { ...b, type: b.type || oldDoc.type }, opts)
-      else if (kind === 'fx') result = await createFx(db, T, { ...b, type: b.type || oldDoc.type }, opts)
+      try {
+        if (kind === 'tickets') result = await createTicket(db, T, b, opts)
+        else if (kind === 'visas') result = await createVisa(db, T, b, opts)
+        else if (kind === 'services') result = await createService(db, T, b, opts)
+        else if (kind === 'vouchers') result = await createVoucher(db, T, { ...b, type: b.type || oldDoc.type }, opts)
+        else if (kind === 'fx') result = await createFx(db, T, { ...b, type: b.type || oldDoc.type }, opts)
+      } catch (createErr) {
+        // v3.88.5 — F-020: thrown errors (e.g. PARTY_NO_LEAF_ACCOUNT) take the SAME restore path
+        result = { error: createErr.message }
+      }
       if (result.error) {
-        // v3.88.4 — F-020: REAL restore-on-error (the old comment promised a restore that
-        // never existed — a failed edit used to leave the record deleted and its balances
-        // reversed). Re-insert the original doc + JE and re-apply the original effects.
-        await db.collection(coll).insertOne(oldDoc).catch(() => {})
-        if (oldJe) await db.collection('journal_entries').insertOne(oldJe).catch(() => {})
-        await restoreTransactionEffects(db, T, kind, oldDoc)
+        // v3.88.5 — F-020 ATOMIC RESTORE (review round): restore failures are NEVER swallowed.
+        // replaceOne+upsert is idempotent (safe even if the failed create partially inserted a
+        // doc with the same id); order is doc → JE → balances, and ANY restore failure aborts
+        // with a loud 500 — balances can never be restored while the doc/JE restore failed.
+        try {
+          await db.collection(coll).replaceOne({ id: docId, tenant_id: T }, oldDoc, { upsert: true })
+          if (oldJe) await db.collection('journal_entries').replaceOne({ id: oldJe.id, tenant_id: T }, oldJe, { upsert: true })
+          await restoreTransactionEffects(db, T, kind, oldDoc)
+        } catch (restoreErr) {
+          console.error(`[F-020] CRITICAL: restore failed for ${kind}/${docId}:`, restoreErr)
+          return bad(`فشل التعديل (${result.error}) ثم فشلت الاستعادة التلقائية (${restoreErr.message}) — لا تُعد المحاولة؛ يلزم فحص يدوي فوري للسجل ${docId} وقيده وأرصدته`, 500)
+        }
         return bad(`${result.error} — لم يُطبق أي تغيير: تمت استعادة السجل والقيد والأرصدة الأصلية كما كانت`)
       }
       return ok(result.doc)
@@ -7834,6 +7872,12 @@ async function createTicket(db, T, b, opts = {}) {
   const partnerDoc = (partnerShare > 0 && doc.commission_partner_id)
     ? await db.collection(doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients').findOne({ id: doc.commission_partner_id, tenant_id: T })
     : null
+  // v3.88.5 — F-007 STRICT: resolve LEAF accounts BEFORE the first write — a legacy party
+  // without a leaf account fails HERE with ZERO side-effects (no doc, no JE, no balances).
+  const boxLeaf = paymentMethod === 'cash' ? partyLeafCode(box) : null
+  const cliLeaf = paymentMethod === 'cash' ? null : partyLeafCode(cli)
+  const supLeaf = partyLeafCode(sup)
+  const partnerLeaf = partnerDoc ? partyLeafCode(partnerDoc) : null
   await db.collection('tickets').insertOne(doc)
   // Balance updates + journal
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
@@ -7847,17 +7891,17 @@ async function createTicket(db, T, b, opts = {}) {
   const lines = []
   if (paymentMethod === 'cash') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS), account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
+    lines.push({ account_code: boxLeaf, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
   } else {
     await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: partyLeafCode(cli, COA.CLIENTS), account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
+    lines.push({ account_code: cliLeaf, account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
   }
-  lines.push({ account_code: partyLeafCode(sup, COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
+  lines.push({ account_code: supLeaf, account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
   if (officeNetCommission !== 0) {
     lines.push({ account_code: COA.REV_TICKETS, account_name: 'إيرادات عمولات التذاكر', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التذاكر', debit: 0, credit: officeNetCommission })
   }
   if (partnerShare > 0) {
-    lines.push({ account_code: partyLeafCode(partnerDoc, doc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS), account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+    lines.push({ account_code: partnerLeaf, account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
   }
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}حجز تذكرة ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} PNR ${doc.pnr || '-'} — ${cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
@@ -7955,6 +7999,10 @@ async function createVisa(db, T, b, opts = {}) {
   const partnerDoc = (partnerShare > 0 && doc.commission_partner_id)
     ? await db.collection(doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients').findOne({ id: doc.commission_partner_id, tenant_id: T })
     : null
+  // v3.88.5 — F-007 STRICT: resolve LEAF accounts BEFORE the first write (zero side-effects)
+  const boxLeaf = paymentMethod === 'cash' ? partyLeafCode(box) : null
+  const cliLeaf = paymentMethod === 'cash' ? null : partyLeafCode(cli)
+  const supLeaf = partyLeafCode(sup)
   await db.collection('visas').insertOne(doc)
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
   if (partnerShare > 0 && doc.commission_partner_id) {
@@ -7964,17 +8012,17 @@ async function createVisa(db, T, b, opts = {}) {
   const lines = []
   if (paymentMethod === 'cash') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS), account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
+    lines.push({ account_code: boxLeaf, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
   } else {
     await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: partyLeafCode(cli, COA.CLIENTS), account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
+    lines.push({ account_code: cliLeaf, account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
   }
-  lines.push({ account_code: partyLeafCode(sup, COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
+  lines.push({ account_code: supLeaf, account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
   if (officeNetCommission !== 0) {
     lines.push({ account_code: COA.REV_VISAS, account_name: 'إيرادات عمولات التأشيرات', party_type: 'revenue', party_id: null, party_name: 'إيرادات عمولات التأشيرات', debit: 0, credit: officeNetCommission })
   }
   if (partnerShare > 0) {
-    lines.push({ account_code: partyLeafCode(partnerDoc, doc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS), account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+    lines.push({ account_code: partnerLeaf, account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
   }
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.passenger_name || cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
@@ -8094,6 +8142,11 @@ async function createService(db, T, b, opts = {}) {
   const partnerDoc = (partnerShare > 0 && doc.commission_partner_id)
     ? await db.collection(doc.commission_partner_type === 'supplier' ? 'suppliers' : 'clients').findOne({ id: doc.commission_partner_id, tenant_id: T })
     : null
+  // v3.88.5 — F-007 STRICT: resolve LEAF accounts BEFORE the first write (zero side-effects)
+  const boxLeaf = paymentMethod === 'cash' ? partyLeafCode(box) : null
+  const cliLeaf = paymentMethod === 'cash' ? null : partyLeafCode(cli)
+  const supLeaf = partyLeafCode(sup)
+  const partnerLeaf = partnerDoc ? partyLeafCode(partnerDoc) : null
   await db.collection('services').insertOne(doc)
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
   if (partnerShare > 0 && doc.commission_partner_id) {
@@ -8103,17 +8156,17 @@ async function createService(db, T, b, opts = {}) {
   const lines = []
   if (paymentMethod === 'cash') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS), account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
+    lines.push({ account_code: boxLeaf, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: sale, credit: 0 })
   } else {
     await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, b.currency, sale)
-    lines.push({ account_code: partyLeafCode(cli, COA.CLIENTS), account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
+    lines.push({ account_code: cliLeaf, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: sale, credit: 0 })
   }
-  lines.push({ account_code: partyLeafCode(sup, COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
+  lines.push({ account_code: supLeaf, account_name: 'الموردون', party_type: 'supplier', party_id: sup.id, party_name: sup.name, debit: 0, credit: cost })
   if (officeNetCommission !== 0) {
     lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيرادات ${doc.service_type}`, debit: 0, credit: officeNetCommission })
   }
   if (partnerShare > 0) {
-    lines.push({ account_code: partyLeafCode(partnerDoc, doc.commission_partner_type === 'supplier' ? COA.SUPPLIERS : COA.CLIENTS), account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
+    lines.push({ account_code: partnerLeaf, account_name: doc.commission_partner_type === 'supplier' ? 'الموردون' : 'العملاء', party_type: doc.commission_partner_type, party_id: doc.commission_partner_id, party_name: doc.commission_partner_name || 'شريك عمولة', debit: 0, credit: partnerShare })
   }
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.beneficiary_name || cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
@@ -8175,6 +8228,9 @@ async function createVoucher(db, T, b, opts = {}) {
     description: b.description || '', created_at: opts.createdAt || new Date(),
     ...(opts.existingId ? { updated_at: new Date() } : {}),
   }
+  // v3.88.5 — F-007 STRICT: resolve LEAF accounts BEFORE the first write (zero side-effects)
+  const boxLeafV = partyLeafCode(box)
+  const partyLeafV = partyDoc ? partyLeafCode(partyDoc) : null
   await db.collection('vouchers').insertOne(doc)
   if (b.type === 'receipt') {
     await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, b.currency, +amount)
@@ -8186,17 +8242,17 @@ async function createVoucher(db, T, b, opts = {}) {
     if (b.party_type === 'client') await updateBalance(db, 'clients', { id: b.party_id, tenant_id: T }, b.currency, +amount)
   }
   const lines = []
-  const boxAccCode = partyLeafCode(box, box.type === 'cash' ? COA.CASHBOXES : COA.BANKS) // v3.88.4 — F-007
+  const boxAccCode = boxLeafV // v3.88.5 — F-007 STRICT (pre-resolved before any write)
   if (b.type === 'receipt') {
     lines.push({ account_code: boxAccCode, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: amount, credit: 0 })
-    if (b.party_type === 'client') lines.push({ account_code: partyLeafCode(partyDoc, COA.CLIENTS), account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
-    if (b.party_type === 'supplier') lines.push({ account_code: partyLeafCode(partyDoc, COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
+    if (b.party_type === 'client') lines.push({ account_code: partyLeafV, account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
+    if (b.party_type === 'supplier') lines.push({ account_code: partyLeafV, account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: 0, credit: amount })
     // v3.79 — revenue posts to the SELECTED revenue account (statement-able independent account)
     if (b.party_type === 'revenue') lines.push({ account_code: coaAccount.code, account_name: coaAccount.name_ar, party_type: 'account', party_id: coaAccount.id, party_name: coaAccount.name_ar, debit: 0, credit: amount })
     if (b.party_type === 'expense') lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيراد متنوع', party_type: 'revenue', party_id: null, party_name: 'إيراد متنوع', debit: 0, credit: amount })
   } else {
-    if (b.party_type === 'supplier') lines.push({ account_code: partyLeafCode(partyDoc, COA.SUPPLIERS), account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
-    if (b.party_type === 'client') lines.push({ account_code: partyLeafCode(partyDoc, COA.CLIENTS), account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
+    if (b.party_type === 'supplier') lines.push({ account_code: partyLeafV, account_name: 'الموردون', party_type: 'supplier', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
+    if (b.party_type === 'client') lines.push({ account_code: partyLeafV, account_name: 'العملاء', party_type: 'client', party_id: b.party_id, party_name: partyName, debit: amount, credit: 0 })
     // v3.79 — expense posts to the SELECTED expense account; legacy free-text keeps generic 5101
     if (b.party_type === 'expense') {
       if (coaAccount) lines.push({ account_code: coaAccount.code, account_name: coaAccount.name_ar, party_type: 'account', party_id: coaAccount.id, party_name: coaAccount.name_ar, debit: amount, credit: 0 })
