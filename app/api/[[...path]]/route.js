@@ -5895,6 +5895,8 @@ async function handleRoute(request, { params }) {
       const pAccNC = await db.collection('accounts').findOne({ tenant_id: T, code: parentNC })
       if (!pAccNC) return bad('الحساب الأب غير موجود')
       if (parentNC.length >= 7) return bad(`الحساب ${parentNC} حساب تحليلي نهائي (L4) — لا يمكن إنشاء حسابات تحته`)
+      // v3.89.1 — BLOCKER 2 FIX: mirror the POST guard — previews only under Group accounts
+      if (!pAccNC.is_group) return bad(`الحساب الأب ${parentNC} ليس حساب مجموعة (Group) — لا يمكن إنشاء حسابات فرعية إلا تحت حسابات المجموعات`)
       const seqPadNC = parentNC.length === 1 ? 1 : parentNC.length === 2 ? 2 : 3
       const seqCapNC = parentNC.length === 1 ? 9 : parentNC.length === 2 ? 99 : 999
       let seqNC = (Number(pAccNC.next_child_seq) || 0) + 1
@@ -5925,6 +5927,9 @@ async function handleRoute(request, { params }) {
         const pAcc = await db.collection('accounts').findOne({ tenant_id: T, code: parentStr })
         if (!pAcc) return bad('الحساب الأب غير موجود')
         if (parentStr.length >= 7) return bad(`الحساب ${parentStr} حساب تحليلي نهائي (L4) — لا يمكن إنشاء حسابات تحته`)
+        // v3.89.1 — BLOCKER 2 FIX (backend guard, not UI-only): children are allowed ONLY under
+        // Group accounts — posting-level (leaf) accounts can never become parents.
+        if (!pAcc.is_group) return bad(`الحساب الأب ${parentStr} ليس حساب مجموعة (Group) — لا يمكن إنشاء حسابات فرعية إلا تحت حسابات المجموعات`)
         if (b.type && pAcc.type && b.type !== pAcc.type) return bad(`نوع الحساب يجب أن يطابق نوع الأب (${pAcc.type})`)
       }
       if (!code) {
@@ -7346,13 +7351,11 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
     const dupJe = await db.collection('journal_entries').findOne({ tenant_id: T, meraaj_booking_ref: inbound.meraaj_booking_ref })
     if (dupJe) throw new Error('يوجد قيد مالي مسبق لنفس مرجع معراج — مُنع الترحيل المكرر (idempotent)')
   }
-  // 4) Balances: client owes total_sale; suppliers are owed their costs
-  await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
-  for (let i = 0; i < comps.length; i++) {
-    if (compTotals[i].cost_total > 0) await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, compTotals[i].cost_total)
-  }
-  // 5) Balanced Journal Entry: debit client = credit suppliers + revenue
-  const lines = [{ account_code: COA.CLIENTS, account_name: 'العملاء', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 }]
+  // 4) v3.89.1 — BLOCKER 1 FIX: journal lines must reference REAL leaf (postable) accounts.
+  // COA.CLIENTS (1103) / COA.SUPPLIERS (2101) are GROUP accounts — F-008 rejects direct postings.
+  // Resolve every leaf account_code BEFORE any financial write (clean abort on failure).
+  if (!cli.account_code) throw new Error('حساب "شبكة معراج" بلا كود حساب تحليلي نهائي — تعذر الترحيل')
+  const lines = [{ account_code: cli.account_code, account_name: cli.name, party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 }]
   const supGrouped = {}
   for (let i = 0; i < comps.length; i++) {
     const c = comps[i]
@@ -7360,26 +7363,57 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
     supGrouped[c.supplier_id] = supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }
     supGrouped[c.supplier_id].amount += compTotals[i].cost_total
   }
+  const supIds = Object.keys(supGrouped)
+  const supDocs = supIds.length ? await db.collection('suppliers').find({ tenant_id: T, id: { $in: supIds } }, { projection: { id: 1, account_code: 1, name: 1 } }).toArray() : []
+  const supLeafById = Object.fromEntries(supDocs.map(s => [s.id, s.account_code]))
   let supSum = 0
-  for (const [sid, x] of Object.entries(supGrouped)) { const amt = +x.amount.toFixed(2); supSum += amt; lines.push({ account_code: COA.SUPPLIERS, account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt }) }
+  for (const [sid, x] of Object.entries(supGrouped)) {
+    const leaf = supLeafById[sid]
+    if (!leaf) throw new Error(`المورد «${x.name}» بلا كود حساب تحليلي نهائي — تعذر الترحيل`)
+    const amt = +x.amount.toFixed(2); supSum += amt
+    lines.push({ account_code: leaf, account_name: x.name, party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: amt })
+  }
   const revenueNet = +(total_sale - supSum).toFixed(2)
   if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name} — معراج`, debit: 0, credit: revenueNet })
-  let je = null
+  // 5) v3.89.1 — BLOCKER 3 FIX (concurrency-safe idempotency): atomic single-winner CLAIM on the
+  // inbound doc (findOneAndUpdate is atomic per document) — NOT check-then-insert. Two concurrent
+  // approvals of the same order: exactly ONE wins the claim, the other aborts before any write.
+  const claim = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
+    { id: inbound.id, tenant_id: T, financial_posted: { $ne: true } },
+    { $set: { financial_posted: true, financial_posted_at: new Date() } },
+    { returnDocument: 'before' }
+  )
+  const claimedDoc = claim && (claim.value !== undefined ? claim.value : claim)
+  if (!claimedDoc) throw new Error('الأثر المالي لهذا الطلب منفذ مسبقاً أو قيد التنفيذ الآن — مُنع الترحيل المكرر (idempotent)')
+  // v3.89.1 — BLOCKER 3 FIX (atomicity): balances + journal + booking succeed TOGETHER or are
+  // fully compensated in reverse order — no partial financial operation can survive.
+  let je = null, balancesApplied = false, releaseClaim = async () => {
+    try { await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, { $set: { financial_posted: false }, $unset: { financial_posted_at: '' } }) } catch { }
+  }
   try {
+    await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
+    for (let i = 0; i < comps.length; i++) {
+      if (compTotals[i].cost_total > 0) await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, compTotals[i].cost_total)
+    }
+    balancesApplied = true
     je = await createJournalEntry(db, T, {
       date: new Date(),
       description: `اعتماد حجز معراج ${inbound.meraaj_booking_ref || ''} — ${inbound.buyer_office_name} في ${pkg.name} (${totalPax} فرد، صافي ${total_sale} ${cur})`,
       ref_type: 'package_booking', ref_id: bookingDoc.id, currency: cur, lines,
     }, { extra: { meraaj_booking_ref: inbound.meraaj_booking_ref || null } }) // v3.89 — idempotency marker
-  } catch (jeErr) {
-    // roll back balances if the JE was blocked (e.g. quota exceeded)
-    await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, -total_sale)
-    for (let i = 0; i < comps.length; i++) {
-      if (compTotals[i].cost_total > 0) await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, -compTotals[i].cost_total)
+    await db.collection('package_bookings').insertOne(bookingDoc)
+  } catch (opErr) {
+    // best-effort compensation in REVERSE order (journal → balances → claim)
+    try { if (je?.id) await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T }) } catch { }
+    if (balancesApplied) {
+      try { await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, -total_sale) } catch { }
+      for (let i = 0; i < comps.length; i++) {
+        if (compTotals[i].cost_total > 0) { try { await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, -compTotals[i].cost_total) } catch { } }
+      }
     }
-    throw new Error(jeErr.message || 'تعذر إنشاء القيد المحاسبي')
+    await releaseClaim()
+    throw new Error(opErr.message || 'تعذر تنفيذ الأثر المالي لاعتماد حجز معراج')
   }
-  await db.collection('package_bookings').insertOne(bookingDoc)
   await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, {
     $set: { status: 'approved', approved_at: new Date(), approved_by: actor?.id || 'auto', booking_id: bookingDoc.id, client_id: cli.id, client_name: cli.name },
     $push: { history: { $each: [ // v3.73 — audit trail

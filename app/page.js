@@ -4589,7 +4589,8 @@ function ChartScreen() {
   // v3.88.3 — parents are ALWAYS same-type only (unchanged rule). For Equity specifically,
   // only GROUP accounts are offered as parents (per COA v2 the 3xx groups) — the other four
   // types keep their existing parent filtering exactly as before.
-  const eligibleParents = rows.filter(r => r.type === form.type && (form.type !== 'equity' || r.is_group))
+  // v3.89.1 — BLOCKER 2 FIX: parents can ONLY be Group accounts (matches the backend guard)
+  const eligibleParents = rows.filter(r => r.type === form.type && r.is_group)
   // v3.89 — Task 2: keep the prefilled parent visible even if outside the default filter
   const parentOptions = form.parent && !eligibleParents.some(p => p.code === form.parent)
     ? [...eligibleParents, ...rows.filter(r => r.code === form.parent)]
@@ -4613,7 +4614,7 @@ function ChartScreen() {
           {node.is_group && <Badge variant="outline" className="text-xs">مجموعة</Badge>}
         </div>
         <div className="flex items-center gap-1 opacity-60 hover:opacity-100">
-          {node.id && String(node.code || '').length < 7 && (
+          {node.id && node.is_group === true && (
             <Button size="sm" variant="ghost" title={`➕ إضافة حساب فرعي تحت ${node.code}`} onClick={() => { setEditing(null); setPrefill({ type: node.type, parent: String(node.code) }); setOpen(true) }} className="h-6 w-6 p-0 text-emerald-600"><Plus className="w-3.5 h-3.5" /></Button>
           )}
           <Button size="sm" variant="ghost" onClick={() => { setEditing(node); setOpen(true) }} className="h-6 w-6 p-0"><Pencil className="w-3 h-3" /></Button>
@@ -4657,7 +4658,7 @@ function ChartScreen() {
             {node.is_parent && <Badge variant="outline" className="text-[10px] shrink-0 bg-white">🌳 شجري · {node.next_child_seq} فرع</Badge>}
           </div>
           <div className="flex items-center gap-1 opacity-70 hover:opacity-100 shrink-0">
-            {node.id && String(node.code || '').length < 7 && (
+            {node.id && node.is_group === true && (
               <Button size="sm" variant="ghost" title={`➕ إضافة حساب فرعي تحت ${node.code}`} onClick={() => { setEditing(null); setPrefill({ type: node.type, parent: String(node.code) }); setOpen(true) }} className="h-6 w-6 p-0 text-emerald-600"><Plus className="w-3.5 h-3.5" /></Button>
             )}
             <Button size="sm" variant="ghost" onClick={() => { setEditing({ id: node.id, code: node.code, name_ar: node.name, type: node.type, parent: node.parent, is_group: node.is_group }); setOpen(true) }} className="h-6 w-6 p-0"><Pencil className="w-3 h-3" /></Button>

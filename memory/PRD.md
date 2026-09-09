@@ -123,3 +123,8 @@ See /app/memory/test_credentials.md
 6. شبكة معراج: حساب عميل موحد "شبكة معراج" (is_meraaj_network=true، leaf تحت 1103 العملاء) يُنشأ lazily عند أول اعتماد (upsert ذري، بدون migration). القيد المالي عند الاعتماد فقط (كان كذلك). Idempotency مزدوج: package_bookings.meraaj_booking_ref + journal_entries.meraaj_booking_ref (عبر opts.extra في createJournalEntry). العملاء القدامى "معراج — مكتب X" لم يُمسّوا.
 7. COA v2 محمي: لا تعديل على lib/coa.js أو القوالب؛ next-code قراءة فقط؛ حظر الترحيل على Group Accounts قائم كما هو.
 الملفات: app/api/[[...path]]/route.js + app/page.js فقط.
+
+## v3.89.1 — إصلاح 3 Blockers من مراجعة PR #16 (NOT TESTED بطلب المستخدم)
+- B1: قيود اعتماد معراج تستخدم الحسابات النهائية cli.account_code وsupplier.account_code (لا 1103/2101 المجمّعة) مع party_id الصحيح؛ حلّ الأكواد قبل أي كتابة مالية.
+- B2: زر + يظهر فقط عند node.is_group===true (العرضان) + حارس خادم في POST /accounts وnext-code يرفض أباً غير Group + eligibleParents مجموعات فقط.
+- B3: Idempotency متزامنة عبر Claim ذري (findOneAndUpdate على financial_posted بالطلب الوارد — فائز واحد فقط) + Atomicity: balances→JE→booking داخل try/catch بتعويض عكسي كامل (حذف القيد، عكس الأرصدة، تحرير الـClaim) — لا Partial Financial Operation.
