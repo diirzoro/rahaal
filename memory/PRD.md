@@ -141,3 +141,8 @@ See /app/memory/test_credentials.md
 - releaseOpLock يحذف فقط {_id + owner_token} — لا حذف أعمى بالـ_id (يمنع حذف A لقفل B بعد stale-takeover).
 - stale cleanup يحذف فقط النسخة المقروءة بالضبط (created_at + owner_token إن وجد) — قفل أحدث لا يُمس.
 - طُبق على meraaj_post:* (اكتساب + تحريران) وmeraaj_net_client:* (اكتساب + finally).
+
+## v3.89.4 — F-PR16-001 (QA) — NOT TESTED بطلب المستخدم
+- الجذر: تحقق هاتف المستفيد في createService كان يقبل beneficiary_whatsapp كبديل، والواجهة تنسخ أول إدخال هاتف للواتساب — مسح الهاتف يُبقي الواتساب → حفظ بلا هاتف مع أثر مالي.
+- الإصلاح: تحقق صارم لـbeneficiary_phone وحده (خادم createService سطر ~8259 + مرآة واجهة). الرفض قبل أي Balance/Journal. يغطي Create وEdit (كل المسارات تمر بـcreateService — insertOne وحيد).
+- F-PR16-002: pilgrim_name ليس Required في الخادم (POST /packages/:id/bookings) ولا في addBooking — لا نجمة ولا تغيير حسب التعليمات.
