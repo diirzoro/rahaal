@@ -128,3 +128,10 @@ See /app/memory/test_credentials.md
 - B1: قيود اعتماد معراج تستخدم الحسابات النهائية cli.account_code وsupplier.account_code (لا 1103/2101 المجمّعة) مع party_id الصحيح؛ حلّ الأكواد قبل أي كتابة مالية.
 - B2: زر + يظهر فقط عند node.is_group===true (العرضان) + حارس خادم في POST /accounts وnext-code يرفض أباً غير Group + eligibleParents مجموعات فقط.
 - B3: Idempotency متزامنة عبر Claim ذري (findOneAndUpdate على financial_posted بالطلب الوارد — فائز واحد فقط) + Atomicity: balances→JE→booking داخل try/catch بتعويض عكسي كامل (حذف القيد، عكس الأرصدة، تحرير الـClaim) — لا Partial Financial Operation.
+
+## v3.89.2 — تصليب Blocker 3 (مراجعة PR #16 جولة 2) — NOT TESTED بطلب المستخدم
+- appliedBalances[]: تتبع كل Balance write منفرداً وعكس ما نجح فقط (لا Boolean واحد).
+- تعويض journal_quota.used بـ$inc:-1 (بشرط >0) + حذف القيد بـref_id (يغطي orphan JE).
+- Mutex على هوية الطلب meraaj_booking_ref عبر op_locks (_id uniqueness مدمجة — لا Index جديد) + فحوصات التكرار داخل الـMutex + الـClaim على inbound doc باقٍ كحزام. Stale TTL 120s.
+- إنشاء حساب "شبكة معراج" داخل Mutex (meraaj_net_client:tenant) + قراءة حتمية sort(created_at:1) + انتظار محدود للخاسر. اقتراح مؤجل بالتقرير: partial unique index على {tenant_id, is_meraaj_network}.
+- helpers جديدة: acquireOpLock/releaseOpLock. مجموعة op_locks تُنشأ تلقائياً عند أول استخدام.

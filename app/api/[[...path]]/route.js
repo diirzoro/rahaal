@@ -7261,6 +7261,26 @@ function computeMeraajMarketPricing(roomPricingArr, mode, value, direction, chil
 // v3.53 — Shared Meraaj booking approval engine: converts an inbound marketplace booking into a
 // real package booking + balanced journal entry. Used by BOTH the manual approve endpoint and
 // the optional per-office AUTO-APPROVE setting (tenant_settings.meraaj_auto_approve).
+// v3.89.2 — minimal cross-process mutex backed by MongoDB's BUILT-IN _id uniqueness guarantee
+// (no new index, no migration). insertOne on a taken _id throws E11000 → lock is held elsewhere.
+// Stale locks (crashed holder) self-heal after staleMs.
+async function acquireOpLock(db, lockId, staleMs = 120000) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { await db.collection('op_locks').insertOne({ _id: lockId, created_at: new Date() }); return true }
+    catch (e) {
+      if (e?.code !== 11000) throw e
+      const existing = await db.collection('op_locks').findOne({ _id: lockId })
+      if (existing && (Date.now() - new Date(existing.created_at).getTime()) > staleMs) {
+        try { await db.collection('op_locks').deleteOne({ _id: lockId, created_at: existing.created_at }) } catch { }
+        continue // retry the insert once after clearing the stale lock
+      }
+      return false
+    }
+  }
+  return false
+}
+async function releaseOpLock(db, lockId) { try { await db.collection('op_locks').deleteOne({ _id: lockId }) } catch { } }
+
 async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
   const actorName = actor === null ? 'auto_approve' : (actor.name || actor.email || actor.id || 'owner') // v3.73 — audit
   const pkg = await db.collection('packages').findOne({ id: inbound.package_id, tenant_id: T })
@@ -7271,29 +7291,45 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
   // Legacy per-office clients created before v3.89 are untouched (no historical data changes).
   const clientName = `معراج — ${inbound.buyer_office_name}`.slice(0, 120) // kept for display/audit only
   const MERAAJ_NET_NAME = 'شبكة معراج'
-  let cli = await db.collection('clients').findOne({ tenant_id: T, is_meraaj_network: true })
+  // v3.89.2 — deterministic canonical read (oldest-first): every caller converges on ONE account
+  // even if a historical duplicate ever existed (no data is touched — read-side convergence only).
+  const findMeraajNetCli = () => db.collection('clients').find({ tenant_id: T, is_meraaj_network: true }).sort({ created_at: 1 }).limit(1).next()
+  let cli = await findMeraajNetCli()
   if (!cli) {
     // Name fallback (in case the office created it manually) — tag it so future lookups are stable
     cli = await db.collection('clients').findOne({ tenant_id: T, name: MERAAJ_NET_NAME })
     if (cli) await db.collection('clients').updateOne({ id: cli.id, tenant_id: T }, { $set: { is_meraaj_network: true } })
   }
   if (!cli) {
-    let accountInfo = {}
-    try { accountInfo = await generateSubAccountCode(db, T, COA.CLIENTS) } catch (e) { throw new Error(e.message) }
-    const newCli = {
-      id: uuidv4(), tenant_id: T, name: MERAAJ_NET_NAME, phone: '', whatsapp: '',
-      address: '', email: '', notes: 'حساب موحد — كل مبيعات معراج نتورك الواردة تُرحَّل على هذا الحساب (ذمم مدينة)',
-      parent_code: COA.CLIENTS, ...accountInfo, is_meraaj_network: true,
-      credit_limit: 0, credit_currency: inbound.currency, is_frozen: false,
-      balances: emptyBalances(), created_at: new Date(),
+    // v3.89.2 — one-account-per-tenant under concurrency WITHOUT a new unique index:
+    // creation is serialized via an _id-mutex (built-in uniqueness); losers wait briefly
+    // and re-read. DB-level guarantee (partial unique index) proposed in the report — deferred.
+    const cliLockId = `meraaj_net_client:${T}`
+    if (await acquireOpLock(db, cliLockId, 60000)) {
+      try {
+        cli = await findMeraajNetCli() // double-check under the lock
+        if (!cli) {
+          let accountInfo = {}
+          try { accountInfo = await generateSubAccountCode(db, T, COA.CLIENTS) } catch (e) { throw new Error(e.message) }
+          const newCli = {
+            id: uuidv4(), tenant_id: T, name: MERAAJ_NET_NAME, phone: '', whatsapp: '',
+            address: '', email: '', notes: 'حساب موحد — كل مبيعات معراج نتورك الواردة تُرحَّل على هذا الحساب (ذمم مدينة)',
+            parent_code: COA.CLIENTS, ...accountInfo, is_meraaj_network: true,
+            credit_limit: 0, credit_currency: inbound.currency, is_frozen: false,
+            balances: emptyBalances(), created_at: new Date(),
+          }
+          await db.collection('clients').insertOne(newCli)
+          cli = newCli
+        }
+      } finally { await releaseOpLock(db, cliLockId) }
+    } else {
+      // another approval is creating the account right now — bounded wait, then re-read
+      for (let w = 0; w < 10 && !cli; w++) {
+        await new Promise(r => setTimeout(r, 300))
+        cli = await findMeraajNetCli()
+      }
+      if (!cli) throw new Error('حساب "شبكة معراج" قيد الإنشاء من عملية متزامنة — أعد المحاولة خلال لحظات')
     }
-    // Atomic upsert guards the rare double-approve race: only ONE unified account per tenant, ever.
-    const upRes = await db.collection('clients').findOneAndUpdate(
-      { tenant_id: T, is_meraaj_network: true },
-      { $setOnInsert: newCli },
-      { upsert: true, returnDocument: 'after' }
-    )
-    cli = upRes?.value || upRes || newCli
   }
   const cur = inbound.currency
   const registrants = inbound.registrants || []
@@ -7342,15 +7378,7 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
     meraaj_inbound_id: inbound.id, // v3.73
     created_at: new Date(),
   }
-  // v3.73 — belt: NEVER create a second accounting booking for the same Meraaj booking_ref
-  // v3.89 — Task 6: hardened idempotency — the JOURNAL is also checked (duplicate posting for
-  // the same meraaj_order_id/booking_ref is impossible even if the booking doc was lost).
-  if (inbound.meraaj_booking_ref) {
-    const dupBk = await db.collection('package_bookings').findOne({ tenant_id: T, meraaj_booking_ref: inbound.meraaj_booking_ref, status: { $ne: 'cancelled' } })
-    if (dupBk) throw new Error('يوجد حجز محاسبي مسبق لنفس مرجع معراج — لن يُنشأ حجز مكرر')
-    const dupJe = await db.collection('journal_entries').findOne({ tenant_id: T, meraaj_booking_ref: inbound.meraaj_booking_ref })
-    if (dupJe) throw new Error('يوجد قيد مالي مسبق لنفس مرجع معراج — مُنع الترحيل المكرر (idempotent)')
-  }
+  // v3.89.2 — duplicate belts MOVED inside the order-identity mutex below (race-free check-then-act)
   // 4) v3.89.1 — BLOCKER 1 FIX: journal lines must reference REAL leaf (postable) accounts.
   // COA.CLIENTS (1103) / COA.SUPPLIERS (2101) are GROUP accounts — F-008 rejects direct postings.
   // Resolve every leaf account_code BEFORE any financial write (clean abort on failure).
@@ -7375,45 +7403,71 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
   }
   const revenueNet = +(total_sale - supSum).toFixed(2)
   if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkg.name} — معراج`, debit: 0, credit: revenueNet })
-  // 5) v3.89.1 — BLOCKER 3 FIX (concurrency-safe idempotency): atomic single-winner CLAIM on the
-  // inbound doc (findOneAndUpdate is atomic per document) — NOT check-then-insert. Two concurrent
-  // approvals of the same order: exactly ONE wins the claim, the other aborts before any write.
-  const claim = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
-    { id: inbound.id, tenant_id: T, financial_posted: { $ne: true } },
-    { $set: { financial_posted: true, financial_posted_at: new Date() } },
-    { returnDocument: 'before' }
-  )
-  const claimedDoc = claim && (claim.value !== undefined ? claim.value : claim)
-  if (!claimedDoc) throw new Error('الأثر المالي لهذا الطلب منفذ مسبقاً أو قيد التنفيذ الآن — مُنع الترحيل المكرر (idempotent)')
-  // v3.89.1 — BLOCKER 3 FIX (atomicity): balances + journal + booking succeed TOGETHER or are
-  // fully compensated in reverse order — no partial financial operation can survive.
-  let je = null, balancesApplied = false, releaseClaim = async () => {
-    try { await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, { $set: { financial_posted: false }, $unset: { financial_posted_at: '' } }) } catch { }
+  // 5) v3.89.2 — BLOCKER 3 FIX (hardened): concurrency-safe idempotency on the ORDER IDENTITY
+  // (meraaj_booking_ref) — not just this inbound doc. The mutex is backed by MongoDB's built-in
+  // _id uniqueness (no new index/migration) and serializes concurrent approvals even when TWO
+  // different inbound docs exist for the same Meraaj order. NOT check-then-insert: the duplicate
+  // checks run INSIDE the mutex, so check-then-act is race-free.
+  const postLockId = `meraaj_post:${T}:${inbound.meraaj_booking_ref || `inbound_${inbound.id}`}`
+  if (!(await acquireOpLock(db, postLockId, 120000))) {
+    throw new Error('اعتماد متزامن لنفس طلب معراج قيد التنفيذ الآن — مُنع الترحيل المكرر (idempotent)')
   }
+  // v3.89.2 — granular compensation ledger: EVERY successful balance write is tracked
+  // individually and reversed EXACTLY as applied (no single all-or-nothing boolean).
+  const appliedBalances = []
+  let je = null, quotaBumped = false, inboundClaimed = false
   try {
-    await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
-    for (let i = 0; i < comps.length; i++) {
-      if (compTotals[i].cost_total > 0) await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, compTotals[i].cost_total)
+    // Duplicate belts — race-free under the order mutex
+    if (inbound.meraaj_booking_ref) {
+      const dupBk = await db.collection('package_bookings').findOne({ tenant_id: T, meraaj_booking_ref: inbound.meraaj_booking_ref, status: { $ne: 'cancelled' } })
+      if (dupBk) throw new Error('يوجد حجز محاسبي مسبق لنفس مرجع معراج — لن يُنشأ حجز مكرر')
+      const dupJe = await db.collection('journal_entries').findOne({ tenant_id: T, meraaj_booking_ref: inbound.meraaj_booking_ref })
+      if (dupJe) throw new Error('يوجد قيد مالي مسبق لنفس مرجع معراج — مُنع الترحيل المكرر (idempotent)')
     }
-    balancesApplied = true
+    // Per-inbound-doc atomic claim (state marker + extra belt for ref-less orders)
+    const claim = await db.collection('meraaj_inbound_bookings').findOneAndUpdate(
+      { id: inbound.id, tenant_id: T, financial_posted: { $ne: true } },
+      { $set: { financial_posted: true, financial_posted_at: new Date() } },
+      { returnDocument: 'before' }
+    )
+    const claimedDoc = claim && (claim.value !== undefined ? claim.value : claim)
+    if (!claimedDoc) throw new Error('الأثر المالي لهذا الطلب منفذ مسبقاً — مُنع الترحيل المكرر (idempotent)')
+    inboundClaimed = true
+    // Balance writes — each one is recorded in the ledger the moment it succeeds
+    await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
+    appliedBalances.push({ coll: 'clients', id: cli.id, amount: total_sale })
+    for (let i = 0; i < comps.length; i++) {
+      if (compTotals[i].cost_total > 0) {
+        await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, compTotals[i].cost_total)
+        appliedBalances.push({ coll: 'suppliers', id: comps[i].supplier_id, amount: compTotals[i].cost_total })
+      }
+    }
     je = await createJournalEntry(db, T, {
       date: new Date(),
       description: `اعتماد حجز معراج ${inbound.meraaj_booking_ref || ''} — ${inbound.buyer_office_name} في ${pkg.name} (${totalPax} فرد، صافي ${total_sale} ${cur})`,
       ref_type: 'package_booking', ref_id: bookingDoc.id, currency: cur, lines,
     }, { extra: { meraaj_booking_ref: inbound.meraaj_booking_ref || null } }) // v3.89 — idempotency marker
+    quotaBumped = true // createJournalEntry increments journal_quota.used on success
     await db.collection('package_bookings').insertOne(bookingDoc)
   } catch (opErr) {
-    // best-effort compensation in REVERSE order (journal → balances → claim)
-    try { if (je?.id) await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T }) } catch { }
-    if (balancesApplied) {
-      try { await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, -total_sale) } catch { }
-      for (let i = 0; i < comps.length; i++) {
-        if (compTotals[i].cost_total > 0) { try { await updateBalance(db, 'suppliers', { id: comps[i].supplier_id, tenant_id: T }, cur, -compTotals[i].cost_total) } catch { } }
-      }
+    // v3.89.2 — UNIFIED best-effort rollback in REVERSE order (journal+quota → balances → claim):
+    // 1) Journal: delete by ref_id (bookingDoc.id is unique per attempt) — also covers the edge
+    //    where the JE doc was inserted but createJournalEntry threw before returning.
+    try { await db.collection('journal_entries').deleteMany({ tenant_id: T, ref_type: 'package_booking', ref_id: bookingDoc.id }) } catch { }
+    // 2) Quota: compensate createJournalEntry's $inc journal_quota.used (guarded, never below 0).
+    if (quotaBumped) { try { await db.collection('tenants').updateOne({ id: T, 'journal_quota.used': { $gt: 0 } }, { $inc: { 'journal_quota.used': -1 } }) } catch { } }
+    // 3) Balances: reverse EXACTLY the writes that succeeded — newest first.
+    for (const ab of [...appliedBalances].reverse()) {
+      try { await updateBalance(db, ab.coll, { id: ab.id, tenant_id: T }, cur, -ab.amount) } catch { }
     }
-    await releaseClaim()
+    // 4) Claim: release only if WE claimed it in this run.
+    if (inboundClaimed) { try { await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, { $set: { financial_posted: false }, $unset: { financial_posted_at: '' } }) } catch { } }
+    await releaseOpLock(db, postLockId)
     throw new Error(opErr.message || 'تعذر تنفيذ الأثر المالي لاعتماد حجز معراج')
   }
+  // success — release the in-flight mutex. Permanent idempotency = financial_posted flag +
+  // booking/journal records (checked above). A crash before this line self-heals via the 120s stale TTL.
+  await releaseOpLock(db, postLockId)
   await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, {
     $set: { status: 'approved', approved_at: new Date(), approved_by: actor?.id || 'auto', booking_id: bookingDoc.id, client_id: cli.id, client_name: cli.name },
     $push: { history: { $each: [ // v3.73 — audit trail
