@@ -673,7 +673,9 @@ async function createJournalEntry(db, tenantId, { date, description, ref_type, r
       }
     }
   }
-  const je = { id: opts.existingJeId || uuidv4(), tenant_id: tenantId, date: new Date(date || Date.now()), description, ref_type, ref_id, currency, lines, created_at: opts.createdAt || new Date() }
+  // v3.89 — opts.extra: optional passthrough marker fields (e.g. meraaj_booking_ref for
+  // idempotent Meraaj postings). Spread FIRST so extras can NEVER override core JE fields.
+  const je = { ...(opts.extra || {}), id: opts.existingJeId || uuidv4(), tenant_id: tenantId, date: new Date(date || Date.now()), description, ref_type, ref_id, currency, lines, created_at: opts.createdAt || new Date() }
   await db.collection('journal_entries').insertOne(je)
   if (!opts.skipQuota) await db.collection('tenants').updateOne({ id: tenantId }, { $inc: { 'journal_quota.used': 1 } })
   return je
@@ -4306,6 +4308,9 @@ async function handleRoute(request, { params }) {
       if (b.start_date && b.end_date && new Date(b.end_date) < new Date(b.start_date)) return bad('تاريخ نهاية الباكج لا يمكن أن يسبق تاريخ البداية')
       // v3.15 — Room-type pricing / v3.20 — extended with age tiers (sale_child, sale_infant)
       const roomPricing = sanitizeRoomPricing(b.room_pricing)
+      // v3.89 — Task 3: cost must not exceed sale price
+      const rpErr = roomPricingCostError(roomPricing)
+      if (rpErr) return bad(`🚫 ${rpErr} — لا يمكن أن تتجاوز التكلفة سعر البيع`)
       // v3.20 — Dual pricing mode: 'direct' (room+age matrix, B2B) | 'components' (assembled from components)
       const pricingMode = ['direct', 'components'].includes(b.pricing_mode) ? b.pricing_mode : (roomPricing.length > 0 ? 'direct' : 'components')
       const doc = {
@@ -4350,6 +4355,9 @@ async function handleRoute(request, { params }) {
       // v3.15 — Room-type pricing update / v3.20 — age tiers
       if (b.room_pricing !== undefined) {
         upd.room_pricing = sanitizeRoomPricing(b.room_pricing)
+        // v3.89 — Task 3: cost must not exceed sale price (edit flow too)
+        const rpErrU = roomPricingCostError(upd.room_pricing)
+        if (rpErrU) return bad(`🚫 ${rpErrU} — لا يمكن أن تتجاوز التكلفة سعر البيع`)
       }
       // v3.20 — Dual pricing mode update
       if (b.pricing_mode !== undefined && ['direct', 'components'].includes(b.pricing_mode)) {
@@ -4419,6 +4427,29 @@ async function handleRoute(request, { params }) {
       if (!sup) return bad('المورد غير موجود')
       // v3.20 — Dual pricing types: 'flat' (visa: fixed regardless of age), 'per_age' (transport), 'room_age' (hotel)
       const pricingType = ['flat', 'per_age', 'room_age'].includes(b.pricing_type) ? b.pricing_type : 'flat'
+      // v3.89 — Task 3: component cost must not exceed its sale price (any tier with sale > 0).
+      // Tiers with sale = 0 are skipped (direct-mode packages: the sale lives in the room matrix).
+      const compTierErr = (() => {
+        const tiers = [['cost_adult', 'sale_adult', 'بالغ'], ['cost_child', 'sale_child', 'طفل'], ['cost_infant', 'sale_infant', 'رضيع']]
+        if (pricingType === 'flat') {
+          const s = Number(b.sale_per_pax) || 0
+          if (s > 0 && (Number(b.cost_per_pax) || 0) > s) return `التكلفة (${Number(b.cost_per_pax) || 0}) أعلى من سعر البيع (${s})`
+        } else if (pricingType === 'per_age') {
+          for (const [ck, sk, lbl] of tiers) {
+            const s = Number(b[sk]) || 0
+            if (s > 0 && (Number(b[ck]) || 0) > s) return `فئة ${lbl}: التكلفة (${Number(b[ck]) || 0}) أعلى من سعر البيع (${s})`
+          }
+        } else if (pricingType === 'room_age') {
+          for (const rr of sanitizeRoomRates(b.room_rates)) {
+            for (const [ck, sk, lbl] of tiers) {
+              const s = Number(rr[sk]) || 0
+              if (s > 0 && (Number(rr[ck]) || 0) > s) return `غرفة «${rr.room_type}» — فئة ${lbl}: التكلفة (${Number(rr[ck]) || 0}) أعلى من سعر البيع (${s})`
+            }
+          }
+        }
+        return null
+      })()
+      if (compTierErr) return bad(`🚫 بند «${b.name}»: ${compTierErr} — لا يمكن أن تتجاوز التكلفة سعر البيع في الباقات/البرامج`)
       const doc = {
         id: uuidv4(), tenant_id: T, package_id: pkgCompMatch[1],
         name: b.name, component_type: b.component_type || 'other',  // visa/ticket/hotel/transport/other
@@ -5854,6 +5885,30 @@ async function handleRoute(request, { params }) {
       return ok(roots)
     }
 
+    // v3.89 — Task 1: READ-ONLY next-code preview for the Add Account form.
+    // Does NOT increment next_child_seq — the atomic generation still happens ONLY at POST
+    // /accounts (generateSubAccountCode), so previews can never cause collisions or renumbering.
+    if (route === '/accounts/next-code' && method === 'GET') {
+      const urlNC = new URL(request.url)
+      const parentNC = String(urlNC.searchParams.get('parent') || '').trim()
+      if (!parentNC) return bad('parent مطلوب')
+      const pAccNC = await db.collection('accounts').findOne({ tenant_id: T, code: parentNC })
+      if (!pAccNC) return bad('الحساب الأب غير موجود')
+      if (parentNC.length >= 7) return bad(`الحساب ${parentNC} حساب تحليلي نهائي (L4) — لا يمكن إنشاء حسابات تحته`)
+      const seqPadNC = parentNC.length === 1 ? 1 : parentNC.length === 2 ? 2 : 3
+      const seqCapNC = parentNC.length === 1 ? 9 : parentNC.length === 2 ? 99 : 999
+      let seqNC = (Number(pAccNC.next_child_seq) || 0) + 1
+      let codeNC = parentNC + String(seqNC).padStart(seqPadNC, '0')
+      let guardNC = 0
+      while (await accountCodeExists(db, T, codeNC)) {
+        if (++guardNC > 500) return bad('تعذر توليد رمز حساب — تواصل مع الدعم')
+        seqNC++
+        if (seqNC > seqCapNC) return bad(`امتلأ تسلسل الفرع ${parentNC} (الحد ${seqCapNC} حساباً) — أنشئ مجموعة جديدة`)
+        codeNC = parentNC + String(seqNC).padStart(seqPadNC, '0')
+      }
+      if (seqNC > seqCapNC) return bad(`امتلأ تسلسل الفرع ${parentNC} (الحد ${seqCapNC} حساباً) — أنشئ مجموعة جديدة`)
+      return ok({ next_code: codeNC, parent: parentNC, preview: true })
+    }
     if (route === '/accounts' && method === 'POST') {
       const b = await request.json()
       if (!b.name_ar || !b.type) return bad('الاسم والنوع مطلوبان')
@@ -6989,6 +7044,21 @@ function sanitizeFeatures(arr) {
     .filter((x, i, a) => a.indexOf(x) === i)
     .slice(0, 30)
 }
+// v3.89 — Task 3: cost must NEVER exceed the sale price in packages/programs.
+// Rule (uniform): every tier that has a sale price > 0 must satisfy cost <= sale.
+// Tiers with sale = 0 are skipped (free-infant policies / direct-mode components where the
+// sale comes from the room matrix) — this blocks the reported bug without breaking those flows.
+function roomPricingCostError(roomPricing) {
+  for (const r of (Array.isArray(roomPricing) ? roomPricing : [])) {
+    const saleA = Number(r.sale_per_pax) || 0
+    const saleC = (r.sale_child === null || r.sale_child === undefined) ? saleA : (Number(r.sale_child) || 0)
+    const saleI = Number(r.sale_infant) || 0
+    if (saleA > 0 && (Number(r.cost_adult) || 0) > saleA) return `غرفة «${r.type}»: تكلفة البالغ (${r.cost_adult}) أعلى من سعر البيع (${saleA})`
+    if (saleC > 0 && (Number(r.cost_child) || 0) > saleC) return `غرفة «${r.type}»: تكلفة الطفل (${r.cost_child}) أعلى من سعر البيع (${saleC})`
+    if (saleI > 0 && (Number(r.cost_infant) || 0) > saleI) return `غرفة «${r.type}»: تكلفة الرضيع (${r.cost_infant}) أعلى من سعر البيع (${saleI})`
+  }
+  return null
+}
 // Sanitize room_pricing array: [{type, sale_per_pax(adult), sale_child|null, sale_infant|null}]
 function sanitizeRoomPricing(arr) {  return (Array.isArray(arr) ? arr : [])
     .filter(r => r && String(r.type || '').trim())
@@ -7190,19 +7260,35 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
   const actorName = actor === null ? 'auto_approve' : (actor.name || actor.email || actor.id || 'owner') // v3.73 — audit
   const pkg = await db.collection('packages').findOne({ id: inbound.package_id, tenant_id: T })
   if (!pkg) throw new Error('الباكج غير موجود')
-  // 1) Buyer office as a credit client (auto-create once, reused afterwards)
-  const clientName = `معراج — ${inbound.buyer_office_name}`.slice(0, 120)
-  let cli = await db.collection('clients').findOne({ tenant_id: T, name: clientName })
+  // v3.89 — Task 6: UNIFIED "Meraaj Network" receivable — ALL inbound Meraaj postings hit ONE
+  // tenant-scoped, postable (leaf) account under Accounts Receivable (COA.CLIENTS group).
+  // Lazy creation (no migration): the account is created on FIRST approval for the tenant.
+  // Legacy per-office clients created before v3.89 are untouched (no historical data changes).
+  const clientName = `معراج — ${inbound.buyer_office_name}`.slice(0, 120) // kept for display/audit only
+  const MERAAJ_NET_NAME = 'شبكة معراج'
+  let cli = await db.collection('clients').findOne({ tenant_id: T, is_meraaj_network: true })
+  if (!cli) {
+    // Name fallback (in case the office created it manually) — tag it so future lookups are stable
+    cli = await db.collection('clients').findOne({ tenant_id: T, name: MERAAJ_NET_NAME })
+    if (cli) await db.collection('clients').updateOne({ id: cli.id, tenant_id: T }, { $set: { is_meraaj_network: true } })
+  }
   if (!cli) {
     let accountInfo = {}
     try { accountInfo = await generateSubAccountCode(db, T, COA.CLIENTS) } catch (e) { throw new Error(e.message) }
-    cli = {
-      id: uuidv4(), tenant_id: T, name: clientName, phone: '', whatsapp: '',
-      address: '', email: '', notes: `عميل آلي — مكتب مشترٍ عبر معراج نتورك`, parent_code: COA.CLIENTS, ...accountInfo,
+    const newCli = {
+      id: uuidv4(), tenant_id: T, name: MERAAJ_NET_NAME, phone: '', whatsapp: '',
+      address: '', email: '', notes: 'حساب موحد — كل مبيعات معراج نتورك الواردة تُرحَّل على هذا الحساب (ذمم مدينة)',
+      parent_code: COA.CLIENTS, ...accountInfo, is_meraaj_network: true,
       credit_limit: 0, credit_currency: inbound.currency, is_frozen: false,
       balances: emptyBalances(), created_at: new Date(),
     }
-    await db.collection('clients').insertOne(cli)
+    // Atomic upsert guards the rare double-approve race: only ONE unified account per tenant, ever.
+    const upRes = await db.collection('clients').findOneAndUpdate(
+      { tenant_id: T, is_meraaj_network: true },
+      { $setOnInsert: newCli },
+      { upsert: true, returnDocument: 'after' }
+    )
+    cli = upRes?.value || upRes || newCli
   }
   const cur = inbound.currency
   const registrants = inbound.registrants || []
@@ -7252,9 +7338,13 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
     created_at: new Date(),
   }
   // v3.73 — belt: NEVER create a second accounting booking for the same Meraaj booking_ref
+  // v3.89 — Task 6: hardened idempotency — the JOURNAL is also checked (duplicate posting for
+  // the same meraaj_order_id/booking_ref is impossible even if the booking doc was lost).
   if (inbound.meraaj_booking_ref) {
     const dupBk = await db.collection('package_bookings').findOne({ tenant_id: T, meraaj_booking_ref: inbound.meraaj_booking_ref, status: { $ne: 'cancelled' } })
     if (dupBk) throw new Error('يوجد حجز محاسبي مسبق لنفس مرجع معراج — لن يُنشأ حجز مكرر')
+    const dupJe = await db.collection('journal_entries').findOne({ tenant_id: T, meraaj_booking_ref: inbound.meraaj_booking_ref })
+    if (dupJe) throw new Error('يوجد قيد مالي مسبق لنفس مرجع معراج — مُنع الترحيل المكرر (idempotent)')
   }
   // 4) Balances: client owes total_sale; suppliers are owed their costs
   await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, total_sale)
@@ -7280,7 +7370,7 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
       date: new Date(),
       description: `اعتماد حجز معراج ${inbound.meraaj_booking_ref || ''} — ${inbound.buyer_office_name} في ${pkg.name} (${totalPax} فرد، صافي ${total_sale} ${cur})`,
       ref_type: 'package_booking', ref_id: bookingDoc.id, currency: cur, lines,
-    })
+    }, { extra: { meraaj_booking_ref: inbound.meraaj_booking_ref || null } }) // v3.89 — idempotency marker
   } catch (jeErr) {
     // roll back balances if the JE was blocked (e.g. quota exceeded)
     await updateBalance(db, 'clients', { id: cli.id, tenant_id: T }, cur, -total_sale)
@@ -8061,6 +8151,9 @@ async function createVisa(db, T, b, opts = {}) {
 async function createService(db, T, b, opts = {}) {
   if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ الخدمة/المستند)` } // v3.80
   if (!b.supplier_id) return { error: 'المورد/المزود مطلوب' }
+  // v3.89 — Task 4: beneficiary name & phone are MANDATORY for services (create + edit)
+  if (!String(b.beneficiary_name || '').trim()) return { error: 'اسم المستفيد مطلوب' }
+  if (!String(b.beneficiary_phone || b.beneficiary_whatsapp || '').trim()) return { error: 'رقم هاتف المستفيد مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   // v3.88.4 — F-001: reject negative amounts (same rule tickets/visas had since v3.10.2 —
   // services were the only path missing it). Values are rejected, NEVER abs()-coerced.

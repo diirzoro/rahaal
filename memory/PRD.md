@@ -113,3 +113,13 @@ See /app/memory/test_credentials.md
 - UI: ref-type Arabic labels, dynamic © year, version 3.88.4, chart tree refresh after save/del, no silent account-code rewriting, password field masked + field-specific employee validation.
 - NOT executed (approval needed): F-021 platform-fee independent revenue JE (accounting design), P-001 phone E.164 unification, E-001/B-001 server env & mongodump (infra), any migration/backfill/historical reconciliation.
 - v3.88.5 (PR#15 review): atomic restore-on-edit (no swallowed errors, replaceOne upsert, loud 500 on restore failure), strict leaf-account resolution before first write (no silent Group fallback — legacy parties get clear re-link error), refund math verified (20k-case simulation, 0 unbalanced), emergent.yml timestamp excluded from working tree.
+
+## Session v3.89 — FIX ONLY (7 نقاط تشغيلية ومحاسبية) — NOT TESTED (بطلب المستخدم)
+1. GET /api/accounts/next-code (معاينة كود فرعي، قراءة فقط) + التوليد النهائي الذري عند POST /accounts (code فارغ).
+2. زر ➕ داخل شجرة COA (العرضين) يفتح نموذج إضافة حساب فرعي مع تعبئة الأب/النوع/الكود تلقائياً (prefill + autoCode في page.js).
+3. منع التكلفة > سعر البيع: roomPricingCostError() في packages POST/PATCH + تحقق tiers في components POST + مرآة FE في save() للباقة. القاعدة: أي فئة سعر بيعها > 0 يجب أن تكون تكلفتها <= البيع (فئات البيع=0 تُتجاهل: رضيع مجاني/وضع direct).
+4. createService: beneficiary_name + beneficiary_phone إلزاميان (إنشاء + تعديل) + FE. ملاحظة: تعديل خدمات قديمة بلا اسم/هاتف مستفيد سيطلب تعبئتهما.
+5. نجوم (*) للحقول الإلزامية مطابقة للتحقق الفعلي: تذاكر (اسم/تاريخ سفر/هاتف)، تأشيرات (اسم/هاتف)، خدمات (مستفيد/هاتف)، باقات (النوع)، الحجوزات كانت موسومة مسبقاً. + جسر توافق تأشيرات: FE يرسل beneficiary_* بجانب passenger_* (الخادم يتحقق من beneficiary_*).
+6. شبكة معراج: حساب عميل موحد "شبكة معراج" (is_meraaj_network=true، leaf تحت 1103 العملاء) يُنشأ lazily عند أول اعتماد (upsert ذري، بدون migration). القيد المالي عند الاعتماد فقط (كان كذلك). Idempotency مزدوج: package_bookings.meraaj_booking_ref + journal_entries.meraaj_booking_ref (عبر opts.extra في createJournalEntry). العملاء القدامى "معراج — مكتب X" لم يُمسّوا.
+7. COA v2 محمي: لا تعديل على lib/coa.js أو القوالب؛ next-code قراءة فقط؛ حظر الترحيل على Group Accounts قائم كما هو.
+الملفات: app/api/[[...path]]/route.js + app/page.js فقط.
