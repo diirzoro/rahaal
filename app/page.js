@@ -2409,6 +2409,10 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
   const submit = async () => {
     // v3.9.22 — Unified payment: credit → client_id required; cash → box_id required
     if (!form.supplier_id) return toast.error('اختر المورد')
+    // v3.89 — Task 5: FE checks mirror backend mandatory fields exactly
+    if (!String(form.passenger_name || '').trim()) return toast.error('اسم المسافر مطلوب')
+    if (!form.travel_date) return toast.error('تاريخ السفر مطلوب')
+    if (!String(form.passenger_phone || form.passenger_whatsapp || '').trim()) return toast.error('رقم الجوال مطلوب')
     if (form.payment_method === 'credit' && !form.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
     if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
@@ -2438,9 +2442,9 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
             </Field>
             <Field label="رقم التذكرة / PNR"><Input value={form.pnr} onChange={e => setForm({ ...form, pnr: e.target.value })} /></Field>
             <Field label="خط السير"><Input value={form.route} onChange={e => setForm({ ...form, route: e.target.value })} placeholder="RUH - CAI" /></Field>
-            <Field label="اسم المسافر"><Input value={form.passenger_name} onChange={e => setForm({ ...form, passenger_name: e.target.value })} /></Field>
+            <Field label="اسم المسافر" required><Input value={form.passenger_name} onChange={e => setForm({ ...form, passenger_name: e.target.value })} /></Field>
             <Field label="رقم الجواز"><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value })} /></Field>
-            <Field label="تاريخ السفر"><Input type="date" value={form.travel_date} onChange={e => setForm({ ...form, travel_date: e.target.value })} /></Field>
+            <Field label="تاريخ السفر" required><Input type="date" value={form.travel_date} onChange={e => setForm({ ...form, travel_date: e.target.value })} /></Field>
           </div>
 
           {/* v3.2 — Travel mode + carrier + smart WhatsApp phone */}
@@ -2475,7 +2479,7 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
               📱 <span>بيانات التواصل — لتفعيل زر إرسال الواتساب مباشرة إلى المسافر</span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Field label="رقم هاتف المسافر"><Input dir="ltr" value={form.passenger_phone} onChange={e => {
+              <Field label="رقم هاتف المسافر" required><Input dir="ltr" value={form.passenger_phone} onChange={e => {
                 const v = e.target.value; setForm(f => ({ ...f, passenger_phone: v, passenger_whatsapp: f.passenger_whatsapp || v }))
               }} placeholder="777xxxxxxx أو 5xxxxxxxx" className="bg-white" /></Field>
               <Field label="رقم واتساب (إن اختلف عن الهاتف)"><Input dir="ltr" value={form.passenger_whatsapp} onChange={e => setForm({ ...form, passenger_whatsapp: e.target.value })} placeholder="اختياري — يستخدم رقم الهاتف افتراضياً" className="bg-white" /></Field>
@@ -3638,13 +3642,18 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
   const submit = async () => {
     // v3.9.22 — Unified payment: credit → client_id required; cash → box_id required
     if (!form.supplier_id) return toast.error('اختر المورد')
+    // v3.89 — Task 5: FE checks mirror backend mandatory fields exactly
+    if (!String(form.passenger_name || '').trim()) return toast.error('اسم صاحب التأشيرة / المعتمر مطلوب')
+    if (!String(form.passenger_phone || form.passenger_whatsapp || '').trim()) return toast.error('رقم الجوال مطلوب')
     if (form.payment_method === 'credit' && !form.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
     if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
     try {
       setSaving(true)
-      if (isEdit) await api(`/visas/${record.id}`, { method: 'PUT', body: form })
-      else await api('/visas', { method: 'POST', body: form })
+      // v3.89 — compatibility bridge: backend validates beneficiary_* while the form stores passenger_*
+      const body = { ...form, beneficiary_name: form.passenger_name, beneficiary_phone: form.passenger_phone, beneficiary_whatsapp: form.passenger_whatsapp }
+      if (isEdit) await api(`/visas/${record.id}`, { method: 'PUT', body })
+      else await api('/visas', { method: 'POST', body })
       onOpenChange(false); onSaved(); setForm(emptyForm)
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
@@ -3659,7 +3668,7 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
             <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
             <Field label="المورد 🔍" required><AccountAutocomplete type="supplier" value={form.supplier_id || null} onChange={(sel) => setForm({ ...form, supplier_id: sel?.id || '' })} placeholder="ابحث عن المورد بالاسم أو الكود..." /></Field>
             <Field label="سعر الصرف"><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
-            <Field label="اسم صاحب التأشيرة"><Input value={form.passenger_name} onChange={e => setForm({ ...form, passenger_name: e.target.value })} /></Field>
+            <Field label="اسم صاحب التأشيرة" required><Input value={form.passenger_name} onChange={e => setForm({ ...form, passenger_name: e.target.value })} /></Field>
             <Field label="رقم الجواز"><Input value={form.passport_no} onChange={e => setForm({ ...form, passport_no: e.target.value })} /></Field>
             <Field label="الجنسية"><Input value={form.nationality} onChange={e => setForm({ ...form, nationality: e.target.value })} /></Field>
           </div>
@@ -3680,7 +3689,7 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
               📱 <span>بيانات التواصل — لإرسال تنبيه واتساب قبل انتهاء التأشيرة</span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Field label="رقم هاتف المسافر"><Input dir="ltr" value={form.passenger_phone} onChange={e => {
+              <Field label="رقم هاتف المسافر" required><Input dir="ltr" value={form.passenger_phone} onChange={e => {
                 const v = e.target.value; setForm(f => ({ ...f, passenger_phone: v, passenger_whatsapp: f.passenger_whatsapp || v }))
               }} placeholder="777xxxxxxx" className="bg-white" /></Field>
               <Field label="رقم واتساب (إن اختلف)"><Input dir="ltr" value={form.passenger_whatsapp} onChange={e => setForm({ ...form, passenger_whatsapp: e.target.value })} placeholder="اختياري" className="bg-white" /></Field>
@@ -3967,6 +3976,9 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
   const submit = async () => {
     // v3.9.22 — Unified payment: credit → client_id required; cash → box_id required
     if (!form.supplier_id) return toast.error('اختر المورد / المزود')
+    // v3.89 — Task 4: beneficiary name & phone are mandatory (matches backend validation)
+    if (!String(form.beneficiary_name || '').trim()) return toast.error('اسم المستفيد مطلوب')
+    if (!String(form.beneficiary_phone || form.beneficiary_whatsapp || '').trim()) return toast.error('رقم هاتف المستفيد مطلوب')
     if (form.payment_method === 'credit' && !form.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
     if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')
@@ -3998,7 +4010,7 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
           <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c]}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="المورد / المزود 🔍" required><AccountAutocomplete type="supplier" value={form.supplier_id || null} onChange={(sel) => setForm({ ...form, supplier_id: sel?.id || '' })} placeholder="ابحث عن المورد بالاسم أو الكود..." /></Field>
           <Field label="سعر الصرف"><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} /></Field>
-          <Field label="اسم المستفيد"><Input value={form.beneficiary_name} onChange={e => setForm({ ...form, beneficiary_name: e.target.value })} placeholder="مثال: أحمد محمد" /></Field>
+          <Field label="اسم المستفيد" required><Input value={form.beneficiary_name} onChange={e => setForm({ ...form, beneficiary_name: e.target.value })} placeholder="مثال: أحمد محمد" /></Field>
           <Field label="الرقم المرجعي"><Input value={form.reference_no} onChange={e => setForm({ ...form, reference_no: e.target.value })} placeholder="مثال: HTL-2025-001" /></Field>
           <Field label="وصف مختصر"><Input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="مثال: 3 ليالٍ فندق البلد" /></Field>
         </div>
@@ -4008,7 +4020,7 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
             📱 <span>بيانات التواصل — لإرسال تفاصيل الخدمة أو تنبيهات عبر الواتساب</span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <Field label="رقم هاتف المستفيد"><Input dir="ltr" value={form.beneficiary_phone} onChange={e => {
+            <Field label="رقم هاتف المستفيد" required><Input dir="ltr" value={form.beneficiary_phone} onChange={e => {
               const v = e.target.value; setForm(f => ({ ...f, beneficiary_phone: v, beneficiary_whatsapp: f.beneficiary_whatsapp || v }))
             }} placeholder="777xxxxxxx" className="bg-white" /></Field>
             <Field label="رقم واتساب (اختياري)"><Input dir="ltr" value={form.beneficiary_whatsapp} onChange={e => setForm({ ...form, beneficiary_whatsapp: e.target.value })} className="bg-white" /></Field>
@@ -4521,6 +4533,9 @@ function ChartScreen() {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState({ code: '', name_ar: '', type: 'asset', parent: '', is_group: false, notes: '' })
+  // v3.89 — Task 1+2: inline sub-account creation (+ button) with auto-generated code preview
+  const [prefill, setPrefill] = useState(null)
+  const [autoCode, setAutoCode] = useState('')
   // v3.10.0 — Full tree view (parents + sub-entities: clients/suppliers/boxes)
   const [viewMode, setViewMode] = useState('tree') // 'tree' | 'classic'
   const [treeData, setTreeData] = useState([])
@@ -4534,15 +4549,29 @@ function ChartScreen() {
   useEffect(() => {
     if (!open) return
     if (editing) setForm({ code: editing.code || '', name_ar: editing.name_ar || '', type: editing.type || 'asset', parent: editing.parent || '', is_group: !!editing.is_group, notes: editing.notes || '' })
-    else setForm({ code: '', name_ar: '', type: 'asset', parent: '', is_group: false, notes: '' })
-  }, [open, editing])
+    else setForm({ code: '', name_ar: '', type: prefill?.type || 'asset', parent: prefill?.parent || '', is_group: false, notes: '' })
+  }, [open, editing, prefill])
+  // v3.89 — Task 1: fetch the auto-generated code PREVIEW when a parent is selected.
+  // The final code is still generated atomically at POST /accounts — zero collision risk.
+  useEffect(() => {
+    if (!open || editing) return
+    if (!form.parent) { setAutoCode(''); return }
+    let alive = true
+    api(`/accounts/next-code?parent=${encodeURIComponent(form.parent)}`)
+      .then(r => { if (alive) { setAutoCode(r.next_code); setForm(f => ({ ...f, code: r.next_code })) } })
+      .catch(() => { if (alive) setAutoCode('') })
+    return () => { alive = false }
+  }, [open, editing, form.parent])
   const save = async () => {
-    if (!form.code || !form.name_ar) return toast.error('الرمز والاسم مطلوبان')
+    if (!form.name_ar) return toast.error('الاسم مطلوب')
+    if (!form.code && !form.parent) return toast.error('الرمز مطلوب — أو اختر الحساب الأب ليتولد الرمز تلقائياً')
     // v3.88.4 — U-010: invalid codes are REJECTED with a clear message — never silently modified
-    if (!editing && !/^\d+$/.test(form.code)) return toast.error(`رمز الحساب "${form.code}" غير صالح — يجب أن يكون أرقاماً فقط (لن يُعدَّل تلقائياً)`)
+    if (!editing && form.code && !/^\d+$/.test(form.code)) return toast.error(`رمز الحساب "${form.code}" غير صالح — يجب أن يكون أرقاماً فقط (لن يُعدَّل تلقائياً)`)
     try {
       if (editing) await api(`/accounts/${editing.id}`, { method: 'PUT', body: { name_ar: form.name_ar, type: form.type, parent: form.parent || null, is_group: form.is_group, notes: form.notes } })
-      else await api('/accounts', { method: 'POST', body: form })
+      // v3.89 — when the code matches the auto-preview, send it EMPTY so the backend
+      // generates it atomically (collision-free even under concurrent creation)
+      else await api('/accounts', { method: 'POST', body: (form.parent && (!form.code || form.code === autoCode)) ? { ...form, code: '' } : form })
       setOpen(false); setEditing(null); load(); loadTree(); toast.success(editing ? 'تم التعديل' : 'تمت الإضافة') // v3.88.4 — U-008: refresh the TREE view too
     } catch (e) { toast.error(e.message) }
   }
@@ -4560,7 +4589,12 @@ function ChartScreen() {
   // v3.88.3 — parents are ALWAYS same-type only (unchanged rule). For Equity specifically,
   // only GROUP accounts are offered as parents (per COA v2 the 3xx groups) — the other four
   // types keep their existing parent filtering exactly as before.
-  const eligibleParents = rows.filter(r => r.type === form.type && (form.type !== 'equity' || r.is_group))
+  // v3.89.1 — BLOCKER 2 FIX: parents can ONLY be Group accounts (matches the backend guard)
+  const eligibleParents = rows.filter(r => r.type === form.type && r.is_group)
+  // v3.89 — Task 2: keep the prefilled parent visible even if outside the default filter
+  const parentOptions = form.parent && !eligibleParents.some(p => p.code === form.parent)
+    ? [...eligibleParents, ...rows.filter(r => r.code === form.parent)]
+    : eligibleParents
   const buildTree = (list) => {
     const map = new Map(); list.forEach(a => map.set(a.code, { ...a, children: [] }))
     const roots = []
@@ -4580,6 +4614,9 @@ function ChartScreen() {
           {node.is_group && <Badge variant="outline" className="text-xs">مجموعة</Badge>}
         </div>
         <div className="flex items-center gap-1 opacity-60 hover:opacity-100">
+          {node.id && node.is_group === true && (
+            <Button size="sm" variant="ghost" title={`➕ إضافة حساب فرعي تحت ${node.code}`} onClick={() => { setEditing(null); setPrefill({ type: node.type, parent: String(node.code) }); setOpen(true) }} className="h-6 w-6 p-0 text-emerald-600"><Plus className="w-3.5 h-3.5" /></Button>
+          )}
           <Button size="sm" variant="ghost" onClick={() => { setEditing(node); setOpen(true) }} className="h-6 w-6 p-0"><Pencil className="w-3 h-3" /></Button>
           <Button size="sm" variant="ghost" onClick={() => del(node)} className="h-6 w-6 p-0 text-rose-600"><Trash2 className="w-3 h-3" /></Button>
         </div>
@@ -4621,6 +4658,9 @@ function ChartScreen() {
             {node.is_parent && <Badge variant="outline" className="text-[10px] shrink-0 bg-white">🌳 شجري · {node.next_child_seq} فرع</Badge>}
           </div>
           <div className="flex items-center gap-1 opacity-70 hover:opacity-100 shrink-0">
+            {node.id && node.is_group === true && (
+              <Button size="sm" variant="ghost" title={`➕ إضافة حساب فرعي تحت ${node.code}`} onClick={() => { setEditing(null); setPrefill({ type: node.type, parent: String(node.code) }); setOpen(true) }} className="h-6 w-6 p-0 text-emerald-600"><Plus className="w-3.5 h-3.5" /></Button>
+            )}
             <Button size="sm" variant="ghost" onClick={() => { setEditing({ id: node.id, code: node.code, name_ar: node.name, type: node.type, parent: node.parent, is_group: node.is_group }); setOpen(true) }} className="h-6 w-6 p-0"><Pencil className="w-3 h-3" /></Button>
           </div>
         </div>
@@ -4710,7 +4750,7 @@ function ChartScreen() {
           ))}
         </div>
       )}
-      <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }}>
+      <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) { setEditing(null); setPrefill(null); setAutoCode('') } }}>
         <DialogContent dir="rtl" className="max-w-lg">
           <DialogHeader>
             <DialogTitle>{editing ? `تعديل حساب: ${editing.code}` : 'إضافة حساب جديد إلى الدليل المحاسبي'}</DialogTitle>
@@ -4730,7 +4770,10 @@ function ChartScreen() {
               </Select>
             </Field>
             <Field label="رمز الحساب" required>
-              <Input dir="ltr" value={form.code} onChange={e => setForm({ ...form, code: e.target.value })} disabled={!!editing} placeholder="مثال: 1102" />
+              <Input dir="ltr" value={form.code} onChange={e => setForm({ ...form, code: e.target.value })} disabled={!!editing} placeholder={form.parent ? 'يتولد تلقائياً...' : 'مثال: 1102'} />
+              {!editing && form.parent && autoCode && form.code === autoCode && (
+                <div className="text-[10px] text-emerald-600 font-semibold mt-1">✨ رمز تلقائي تحت الأب {form.parent} — يُثبَّت نهائياً عند الحفظ</div>
+              )}
             </Field>
             <div className="md:col-span-2"><Field label="اسم الحساب (عربي)" required>
               <Input value={form.name_ar} onChange={e => setForm({ ...form, name_ar: e.target.value })} placeholder="مثال: صندوق فرع عدن" />
@@ -4740,7 +4783,7 @@ function ChartScreen() {
                 <SelectTrigger><SelectValue placeholder="بدون (حساب رئيسي)" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">— لا يوجد أب (حساب رئيسي) —</SelectItem>
-                  {eligibleParents.map(p => (
+                  {parentOptions.map(p => (
                     <SelectItem key={p.id} value={p.code}>
                       {'   '.repeat(Math.max(0, (p.code?.length || 1) - 1))} {p.code} — {p.name_ar}
                     </SelectItem>
@@ -8721,6 +8764,41 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
       const badRoomAge = items.find(it => it.pricing_type === 'room_age' && rooms.filter(r => String(r.type || '').trim()).length === 0)
       if (badRoomAge) return toast.error('بند (غرفة + عمر) يحتاج تعريف أنواع الغرف أولاً في قسم التسكين')
     }
+    // v3.89 — Task 3: cost must never exceed the sale price (mirrors backend rule:
+    // every tier with a sale price > 0 must satisfy cost <= sale)
+    const costSaleErr = (() => {
+      for (const r of rooms.filter(x => String(x.type || '').trim())) {
+        const saleA = Number(r.sale_per_pax) || 0
+        const saleC = ((r.sale_child ?? '') === '') ? saleA : (Number(r.sale_child) || 0)
+        const saleI = Number(r.sale_infant) || 0
+        if (saleA > 0 && (Number(r.cost_adult) || 0) > saleA) return `غرفة «${r.type}»: تكلفة البالغ أعلى من سعر البيع`
+        if (saleC > 0 && (Number(r.cost_child) || 0) > saleC) return `غرفة «${r.type}»: تكلفة الطفل أعلى من سعر البيع`
+        if (saleI > 0 && (Number(r.cost_infant) || 0) > saleI) return `غرفة «${r.type}»: تكلفة الرضيع أعلى من سعر البيع`
+      }
+      if (!record && f.pricing_mode !== 'direct') {
+        const tiers = [['cost_adult', 'sale_adult', 'بالغ'], ['cost_child', 'sale_child', 'طفل'], ['cost_infant', 'sale_infant', 'رضيع']]
+        for (const it of items) {
+          if ((it.pricing_type || 'flat') === 'flat') {
+            const s = Number(it.sale) || 0
+            if (s > 0 && (Number(it.cost) || 0) > s) return `بند «${it.name || '؟'}»: التكلفة أعلى من سعر البيع`
+          } else if (it.pricing_type === 'per_age') {
+            for (const [ck, sk, lbl] of tiers) {
+              const s = Number(it[sk]) || 0
+              if (s > 0 && (Number(it[ck]) || 0) > s) return `بند «${it.name || '؟'}» (${lbl}): التكلفة أعلى من سعر البيع`
+            }
+          } else if (it.pricing_type === 'room_age') {
+            for (const [rt, rr] of Object.entries(it.room_rates || {})) {
+              for (const [ck, sk, lbl] of tiers) {
+                const s = Number(rr?.[sk]) || 0
+                if (s > 0 && (Number(rr?.[ck]) || 0) > s) return `بند «${it.name || '؟'}» — غرفة «${rt}» (${lbl}): التكلفة أعلى من سعر البيع`
+              }
+            }
+          }
+        }
+      }
+      return null
+    })()
+    if (costSaleErr) return toast.error(`🚫 ${costSaleErr} — لا يمكن أن تتجاوز التكلفة سعر البيع`)
     try {
       setSaving(true)
       const roomPricing = rooms.filter(r => String(r.type || '').trim()).map(r => ({ type: r.type, sale_per_pax: Number(r.sale_per_pax) || 0, sale_child: r.sale_child === '' || r.sale_child === null || r.sale_child === undefined ? null : Number(r.sale_child) || 0, sale_infant: r.sale_infant === '' || r.sale_infant === null || r.sale_infant === undefined ? null : Number(r.sale_infant) || 0, cost_adult: r.cost_adult === '' || r.cost_adult === null || r.cost_adult === undefined ? null : Number(r.cost_adult) || 0, cost_child: r.cost_child === '' || r.cost_child === null || r.cost_child === undefined ? null : Number(r.cost_child) || 0, cost_infant: r.cost_infant === '' || r.cost_infant === null || r.cost_infant === undefined ? null : Number(r.cost_infant) || 0 }))
@@ -8775,7 +8853,7 @@ function PackageDialog({ open, onOpenChange, record, onSaved }) {
         {/* Package info */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
           <div className="md:col-span-2"><Field label="اسم الباكج" required><Input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} placeholder="عمرة رجب 2026" /></Field></div>
-          <Field label="النوع"><Select value={f.package_type} onValueChange={v => setF({ ...f, package_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{PACKAGE_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
+          <Field label="النوع" required><Select value={f.package_type} onValueChange={v => setF({ ...f, package_type: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{PACKAGE_TYPES.map(t => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="العملة"><Select value={f.currency} onValueChange={v => setF({ ...f, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="تاريخ البداية"><Input type="date" value={f.start_date} onChange={e => setF({ ...f, start_date: e.target.value })} /></Field>
           <Field label="تاريخ النهاية"><Input type="date" value={f.end_date} onChange={e => setF({ ...f, end_date: e.target.value })} /></Field>
