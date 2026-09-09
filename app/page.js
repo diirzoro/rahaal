@@ -3977,8 +3977,9 @@ function ServiceDialog({ open, onOpenChange, clients, suppliers, rates, serviceT
     // v3.9.22 — Unified payment: credit → client_id required; cash → box_id required
     if (!form.supplier_id) return toast.error('اختر المورد / المزود')
     // v3.89 — Task 4: beneficiary name & phone are mandatory (matches backend validation)
+    // v3.89.4 — F-PR16-001: phone checked STRICTLY (no whatsapp fallback — mirrors backend)
     if (!String(form.beneficiary_name || '').trim()) return toast.error('اسم المستفيد مطلوب')
-    if (!String(form.beneficiary_phone || form.beneficiary_whatsapp || '').trim()) return toast.error('رقم هاتف المستفيد مطلوب')
+    if (!String(form.beneficiary_phone || '').trim()) return toast.error('رقم هاتف المستفيد مطلوب')
     if (form.payment_method === 'credit' && !form.client_id) return toast.error('اختر حساب القبض / العميل (للحجز الآجل)')
     if (form.payment_method === 'cash' && !form.box_id) return toast.error('اختر الصندوق / البنك (للنقد)')
     if (!form.cost || !form.sale_price) return toast.error('أدخل التكلفة وسعر البيع')

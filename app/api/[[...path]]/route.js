@@ -8255,8 +8255,13 @@ async function createService(db, T, b, opts = {}) {
   if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ الخدمة/المستند)` } // v3.80
   if (!b.supplier_id) return { error: 'المورد/المزود مطلوب' }
   // v3.89 — Task 4: beneficiary name & phone are MANDATORY for services (create + edit)
+  // v3.89.4 — F-PR16-001 FIX: beneficiary_phone is checked STRICTLY on its own. The old
+  // `|| b.beneficiary_whatsapp` fallback let a phone-less service through whenever whatsapp
+  // held any value (the UI auto-copies the first phone keystroke into whatsapp, so clearing
+  // the phone kept whatsapp filled → saved with FULL financial impact). Rejection happens
+  // HERE — before ANY balance / journal / financial write in this function.
   if (!String(b.beneficiary_name || '').trim()) return { error: 'اسم المستفيد مطلوب' }
-  if (!String(b.beneficiary_phone || b.beneficiary_whatsapp || '').trim()) return { error: 'رقم هاتف المستفيد مطلوب' }
+  if (!String(b.beneficiary_phone || '').trim()) return { error: 'رقم هاتف المستفيد مطلوب' }
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
   // v3.88.4 — F-001: reject negative amounts (same rule tickets/visas had since v3.10.2 —
   // services were the only path missing it). Values are rejected, NEVER abs()-coerced.
