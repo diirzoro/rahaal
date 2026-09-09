@@ -135,3 +135,9 @@ See /app/memory/test_credentials.md
 - Mutex على هوية الطلب meraaj_booking_ref عبر op_locks (_id uniqueness مدمجة — لا Index جديد) + فحوصات التكرار داخل الـMutex + الـClaim على inbound doc باقٍ كحزام. Stale TTL 120s.
 - إنشاء حساب "شبكة معراج" داخل Mutex (meraaj_net_client:tenant) + قراءة حتمية sort(created_at:1) + انتظار محدود للخاسر. اقتراح مؤجل بالتقرير: partial unique index على {tenant_id, is_meraaj_network}.
 - helpers جديدة: acquireOpLock/releaseOpLock. مجموعة op_locks تُنشأ تلقائياً عند أول استخدام.
+
+## v3.89.3 — Owner Token للأقفال (آخر Blocker بمراجعة PR #16) — NOT TESTED بطلب المستخدم
+- acquireOpLock يولّد owner_token (uuid) ويعيده كـhandle (أو null) بدل boolean.
+- releaseOpLock يحذف فقط {_id + owner_token} — لا حذف أعمى بالـ_id (يمنع حذف A لقفل B بعد stale-takeover).
+- stale cleanup يحذف فقط النسخة المقروءة بالضبط (created_at + owner_token إن وجد) — قفل أحدث لا يُمس.
+- طُبق على meraaj_post:* (اكتساب + تحريران) وmeraaj_net_client:* (اكتساب + finally).

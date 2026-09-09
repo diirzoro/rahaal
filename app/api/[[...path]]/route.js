@@ -7264,22 +7264,35 @@ function computeMeraajMarketPricing(roomPricingArr, mode, value, direction, chil
 // v3.89.2 — minimal cross-process mutex backed by MongoDB's BUILT-IN _id uniqueness guarantee
 // (no new index, no migration). insertOne on a taken _id throws E11000 → lock is held elsewhere.
 // Stale locks (crashed holder) self-heal after staleMs.
+// v3.89.3 — OWNER TOKEN: acquire returns a unique token (not a boolean); release deletes ONLY
+// {_id + owner_token}. A slow process that lost its lock to stale-cleanup can NEVER delete the
+// newer lock acquired by another process. Stale cleanup likewise deletes ONLY the exact doc it
+// read (owner_token + created_at) — never a fresher lock that replaced it in between.
 async function acquireOpLock(db, lockId, staleMs = 120000) {
+  const ownerToken = uuidv4()
   for (let attempt = 0; attempt < 2; attempt++) {
-    try { await db.collection('op_locks').insertOne({ _id: lockId, created_at: new Date() }); return true }
-    catch (e) {
+    try {
+      await db.collection('op_locks').insertOne({ _id: lockId, owner_token: ownerToken, created_at: new Date() })
+      return ownerToken // lock handle — required for release
+    } catch (e) {
       if (e?.code !== 11000) throw e
       const existing = await db.collection('op_locks').findOne({ _id: lockId })
       if (existing && (Date.now() - new Date(existing.created_at).getTime()) > staleMs) {
-        try { await db.collection('op_locks').deleteOne({ _id: lockId, created_at: existing.created_at }) } catch { }
+        // delete ONLY the exact stale version we read — a newer lock (different token) survives
+        const staleFilter = { _id: lockId, created_at: existing.created_at }
+        if (existing.owner_token) staleFilter.owner_token = existing.owner_token
+        try { await db.collection('op_locks').deleteOne(staleFilter) } catch { }
         continue // retry the insert once after clearing the stale lock
       }
-      return false
+      return null
     }
   }
-  return false
+  return null
 }
-async function releaseOpLock(db, lockId) { try { await db.collection('op_locks').deleteOne({ _id: lockId }) } catch { } }
+async function releaseOpLock(db, lockId, ownerToken) {
+  if (!ownerToken) return // never blind-delete by _id alone
+  try { await db.collection('op_locks').deleteOne({ _id: lockId, owner_token: ownerToken }) } catch { }
+}
 
 async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
   const actorName = actor === null ? 'auto_approve' : (actor.name || actor.email || actor.id || 'owner') // v3.73 — audit
@@ -7305,7 +7318,8 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
     // creation is serialized via an _id-mutex (built-in uniqueness); losers wait briefly
     // and re-read. DB-level guarantee (partial unique index) proposed in the report — deferred.
     const cliLockId = `meraaj_net_client:${T}`
-    if (await acquireOpLock(db, cliLockId, 60000)) {
+    const cliLockToken = await acquireOpLock(db, cliLockId, 60000) // v3.89.3 — owner-token handle
+    if (cliLockToken) {
       try {
         cli = await findMeraajNetCli() // double-check under the lock
         if (!cli) {
@@ -7321,7 +7335,7 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
           await db.collection('clients').insertOne(newCli)
           cli = newCli
         }
-      } finally { await releaseOpLock(db, cliLockId) }
+      } finally { await releaseOpLock(db, cliLockId, cliLockToken) }
     } else {
       // another approval is creating the account right now — bounded wait, then re-read
       for (let w = 0; w < 10 && !cli; w++) {
@@ -7409,7 +7423,8 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
   // different inbound docs exist for the same Meraaj order. NOT check-then-insert: the duplicate
   // checks run INSIDE the mutex, so check-then-act is race-free.
   const postLockId = `meraaj_post:${T}:${inbound.meraaj_booking_ref || `inbound_${inbound.id}`}`
-  if (!(await acquireOpLock(db, postLockId, 120000))) {
+  const postLockToken = await acquireOpLock(db, postLockId, 120000) // v3.89.3 — owner-token handle
+  if (!postLockToken) {
     throw new Error('اعتماد متزامن لنفس طلب معراج قيد التنفيذ الآن — مُنع الترحيل المكرر (idempotent)')
   }
   // v3.89.2 — granular compensation ledger: EVERY successful balance write is tracked
@@ -7462,12 +7477,12 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
     }
     // 4) Claim: release only if WE claimed it in this run.
     if (inboundClaimed) { try { await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, { $set: { financial_posted: false }, $unset: { financial_posted_at: '' } }) } catch { } }
-    await releaseOpLock(db, postLockId)
+    await releaseOpLock(db, postLockId, postLockToken)
     throw new Error(opErr.message || 'تعذر تنفيذ الأثر المالي لاعتماد حجز معراج')
   }
   // success — release the in-flight mutex. Permanent idempotency = financial_posted flag +
   // booking/journal records (checked above). A crash before this line self-heals via the 120s stale TTL.
-  await releaseOpLock(db, postLockId)
+  await releaseOpLock(db, postLockId, postLockToken)
   await db.collection('meraaj_inbound_bookings').updateOne({ id: inbound.id, tenant_id: T }, {
     $set: { status: 'approved', approved_at: new Date(), approved_by: actor?.id || 'auto', booking_id: bookingDoc.id, client_id: cli.id, client_name: cli.name },
     $push: { history: { $each: [ // v3.73 — audit trail
