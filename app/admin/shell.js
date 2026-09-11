@@ -19,7 +19,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import {
   LayoutDashboard, Building2, TrendingUp, Receipt, Calculator, ShieldCheck,
   Megaphone, DatabaseBackup, FileSearch, Settings2, Activity, Bell, BarChart3,
-  PanelRight, LogOut, Lock, BadgePercent, Inbox,
+  PanelRight, LogOut, Lock, BadgePercent, Inbox, Scale, Coins,
 } from 'lucide-react'
 import { useAuth } from '../shared'
 import AdminDashboard from './dashboard'
@@ -35,6 +35,9 @@ import AdminSystemCenter from './system' // v3.95 — Batch 3 (System Status/Env
 import AdminAuditCenter from './audit' // v3.95 — Batch 3 (Central Audit — READ-ONLY)
 import AdminHealthCenter from './health' // v3.95 — Batch 3 (System Health — READ-ONLY)
 import AdminNotifyCenter from './notifications' // v3.95 — Batch 3 (In-App Notifications)
+import AdminReportsCenter from './reports' // v3.96 — Batch 4 (Reports Center — READ-ONLY)
+import AdminDisputesCenter from './disputes' // v3.96 — Batch 4 (Disputes Center)
+import AdminCurrencyCenter from './currency' // v3.96 — Batch 4 (Currencies & FX)
 
 const SECTIONS = [
   { key: 'dashboard', label: 'نظرة عامة', icon: LayoutDashboard, phase: 1, ready: true },
@@ -51,7 +54,9 @@ const SECTIONS = [
   { key: 'audit', label: 'التدقيق والأمان', icon: FileSearch, phase: 5, ready: true },
   { key: 'health', label: 'صحة النظام', icon: Activity, phase: 5, ready: true },
   { key: 'notifications', label: 'التنبيهات', icon: Bell, phase: 5, ready: true },
-  { key: 'reports', label: 'التقارير', icon: BarChart3, phase: 8 },
+  { key: 'reports', label: 'مركز التقارير', icon: BarChart3, phase: 8, ready: true },
+  { key: 'disputes', label: 'مركز النزاعات', icon: Scale, phase: 8, ready: true },
+  { key: 'currency', label: 'العملات وأسعار الصرف', icon: Coins, phase: 8, ready: true },
   { key: 'legacy', label: 'اللوحة الكلاسيكية', icon: PanelRight, ready: true },
 ]
 
@@ -87,6 +92,9 @@ const AdminApp = ({ legacyPanel = null, announcements = null }) => {
     if (active === 'audit') return <AdminAuditCenter /> // v3.95 — Batch 3
     if (active === 'health') return <AdminHealthCenter /> // v3.95 — Batch 3
     if (active === 'notifications') return <AdminNotifyCenter onNavigate={setActive} /> // v3.95 — Batch 3
+    if (active === 'reports') return <AdminReportsCenter /> // v3.96 — Batch 4
+    if (active === 'disputes') return <AdminDisputesCenter /> // v3.96 — Batch 4
+    if (active === 'currency') return <AdminCurrencyCenter /> // v3.96 — Batch 4
     if (active === 'legacy') return legacyPanel || <PlaceholderSection section={current} />
     if (active === 'ads') {
       // v3.94 — Batch 2: the extended Ads Center replaces the embedded legacy manager

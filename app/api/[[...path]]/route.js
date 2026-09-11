@@ -18,6 +18,9 @@ import { adminAdsHandler, activeAnnouncementsFor } from '@/lib/adminAds' // v3.9
 import { adminSystemHandler } from '@/lib/adminSystem' // v3.95 — Batch 3 (Backup/Restore path/System)
 import { adminAuditHandler } from '@/lib/adminAudit' // v3.95 — Batch 3 (Central Audit + Health — READ-ONLY)
 import { adminNotifyHandler } from '@/lib/adminNotify' // v3.95 — Batch 3 (In-App Notifications)
+import { adminReportsHandler } from '@/lib/adminReports' // v3.96 — Batch 4 (Reports — READ-ONLY)
+import { adminDisputesHandler } from '@/lib/adminDisputes' // v3.96 — Batch 4 (Disputes)
+import { adminCurrencyHandler } from '@/lib/adminCurrency' // v3.96 — Batch 4 (Currencies & FX)
 
 // v3.47 — Package image optimization settings (applied ONCE at upload; centralized — adjust here)
 const IMG_MAX_DIM = 1200        // longest side in px (aspect ratio preserved, never enlarged)
@@ -1773,6 +1776,32 @@ async function handleRoute(request, { params }) {
           rS = await adminAuditHandler(db, route.slice('/admin/audit'.length), spS, ctxS)
         } else rS = await adminNotifyHandler(db, route.slice('/admin/notify'.length), method, spS, bodyS, sess)
         return rS?.error ? bad(rS.error, rS.status || 400) : ok(rS)
+      }
+
+      // v3.96 — Batch 4 delegations (modular): Reports (READ-ONLY, GET only),
+      // Disputes, Currencies & FX. ctx built from the REAL code constants.
+      if (route.startsWith('/admin/reports/') || route.startsWith('/admin/disputes') || route.startsWith('/admin/currency/')) {
+        let bodyB4 = null
+        if (method !== 'GET') { try { bodyB4 = await request.json() } catch { bodyB4 = {} } }
+        const baseB4 = process.env.NEXT_PUBLIC_BASE_URL || ''
+        const ctxB4 = {
+          currencies: CURRENCIES, baseCurrency: BASE_CURRENCY, defaultRates: DEFAULT_RATES,
+          envName: baseB4.includes('rahaal-test') ? 'Test' : /emergent|preview/i.test(baseB4) ? 'Preview' : 'Live',
+          versions: { root: '3.88.4', health: '3.9.28', backup_export: '3.9.20' },
+          keys: { MERAAJ_SHARED_SECRET: !!process.env.MERAAJ_SHARED_SECRET, MERAAJ_API_BASE_URL: !!process.env.MERAAJ_API_BASE_URL, MERAAJ_WEBHOOK_URL: !!process.env.MERAAJ_WEBHOOK_URL, MERAAJ_STORE_URL: !!process.env.MERAAJ_STORE_URL },
+          commConsts: { affiliateRate: AFFILIATE_COMMISSION_RATE, minCashoutIndividual: AFFILIATE_MIN_CASHOUT_INDIVIDUAL, minCashoutOffice: AFFILIATE_MIN_CASHOUT_OFFICE },
+        }
+        const spB4 = new URL(request.url).searchParams
+        let rB4
+        if (route.startsWith('/admin/reports/')) {
+          if (method !== 'GET') return bad('التقارير قراءة فقط', 405)
+          rB4 = await adminReportsHandler(db, route.slice('/admin/reports'.length), spB4, ctxB4)
+        } else if (route.startsWith('/admin/disputes')) {
+          rB4 = await adminDisputesHandler(db, route.slice('/admin/disputes'.length), method, spB4, bodyB4, sess)
+        } else {
+          rB4 = await adminCurrencyHandler(db, route.slice('/admin/currency'.length), method, spB4, bodyB4, sess, ctxB4)
+        }
+        return rB4?.error ? bad(rB4.error, rB4.status || 400) : ok(rB4)
       }
 
       // v3.91 — Phase 2: Office 360° (READ-ONLY — no writes, no balance recomputation).
