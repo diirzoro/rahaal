@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import * as XLSX from 'xlsx'
 import {
-  Plane, FileBadge2, LayoutDashboard, Users, Building2, ReceiptText, Wallet, Percent,
+  Plane, FileBadge2, LayoutDashboard, Users, Building2, ReceiptText, Wallet, Percent, Inbox, Bell,
   ArrowDownLeft, ArrowUpRight, ArrowRight, BookOpenText, BarChart3, PieChart as PieIcon,
   Plus, Search, Calendar, TrendingUp, DollarSign, Sparkles, LogOut,
   Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
@@ -39,6 +39,8 @@ import AdminStaffCenter from './admin/staff' // إدارة المستخدمين 
 import AdminPermsCenter from './admin/perms' // الأدوار والصلاحيات (v3.93)
 import AdminSalesCenter from './admin/sales' // مبيعات برنامج رحّال (v3.93)
 import AdminCommissionsCenter from './admin/commissions' // مركز العمولات (v3.94)
+import AdminNotifyCenter from './admin/notifications' // v4.3 — مركز التنبيهات (moved as-is)
+import AdminRequestsCenter from './admin/requests' // v4.3 — الطلبات المتخصصة القائمة (moved as-is)
 import { MeraajStoreScreen, BulkImportDialog } from './components-heavy'
 
 // ================================================================
@@ -1580,6 +1582,230 @@ function CommissionRulesManager() {
   )
 }
 
+// v4.3 — «مركز الطلبات»: the ONE operational registry (platform_orders). Sales are
+// order types here; the existing specialized requests aggregation is embedded below.
+function OrdersScreen({ salesOnly = false }) {
+  const [rows, setRows] = useState(null)
+  const [types, setTypes] = useState({ types: {}, status_labels: {} })
+  const [tenants, setTenants] = useState([])
+  const [fStatus, setFStatus] = useState('')
+  const [fType, setFType] = useState('')
+  const [q, setQ] = useState('')
+  const [detail, setDetail] = useState(null)
+  const [creating, setCreating] = useState(false)
+  const load = () => {
+    const qs = new URLSearchParams()
+    if (salesOnly) qs.set('category', 'sales')
+    if (fStatus) qs.set('status', fStatus)
+    if (fType) qs.set('type', fType)
+    if (q.trim()) qs.set('q', q.trim())
+    api(`/admin/orders?${qs}`).then(r => setRows(r.rows || [])).catch(e => toast.error(e.message))
+  }
+  useEffect(() => {
+    api('/admin/orders/types').then(setTypes).catch(() => {})
+    api('/admin/tenants').then(d => setTenants((d?.tenants || []).filter(t => !t.is_platform_org))).catch(() => {})
+  }, [])
+  useEffect(() => { load() }, [fStatus, fType, salesOnly])
+  const SL = types.status_labels || {}
+  const act = async (o, action, extra = {}, promptReason = true) => {
+    const reason = promptReason ? prompt('السبب (إلزامي):') : 'تحديث'
+    if (promptReason && !reason) return
+    try { await api(`/admin/orders/${o.id}`, { method: 'PATCH', body: { action, reason, ...extra } }); toast.success('✅ تم'); load(); if (detail?.order?.id === o.id) openDetail(o) } catch (e) { toast.error(e.message) }
+  }
+  const openDetail = async (o) => { try { setDetail(await api(`/admin/orders/${o.id}`)) } catch (e) { toast.error(e.message) } }
+  const exportCSV = () => {
+    const head = ['المرجع', 'النوع', 'المكتب', 'الحالة', 'الأولوية', 'المبلغ', 'العملة', 'المسؤول', 'الاستحقاق', 'أُنشئ']
+    const lines = (rows || []).map(o => [o.ref, o.type_label, o.tenant_name || '', SL[o.status] || o.status, o.priority, o.amount ?? '', o.currency, o.assigned_to || '', o.due_at ? String(o.due_at).slice(0, 10) : '', String(o.created_at).slice(0, 10)])
+    const csv = '\ufeff' + [head, ...lines].map(l => l.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = `rahaal-orders-${todayISO()}.csv`; a.click()
+  }
+  const stBadge = { new: 'bg-blue-100 text-blue-700', under_review: 'bg-indigo-100 text-indigo-700', needs_info: 'bg-purple-100 text-purple-700', awaiting_payment: 'bg-amber-100 text-amber-700', awaiting_approval: 'bg-orange-100 text-orange-700', approved: 'bg-emerald-100 text-emerald-700', rejected: 'bg-rose-100 text-rose-700', executed: 'bg-teal-100 text-teal-700', completed: 'bg-green-100 text-green-800', cancelled: 'bg-slate-200 text-slate-600' }
+  const openCount = (rows || []).filter(o => ['new', 'under_review', 'needs_info', 'awaiting_payment', 'awaiting_approval'].includes(o.status)).length
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h2 className="text-xl font-extrabold">{salesOnly ? '🧾 أوامر البيع (من مركز الطلبات — المصدر نفسه)' : '📥 مركز الطلبات'}</h2>
+          {!salesOnly && <div className="text-xs text-slate-500">السجل التشغيلي الموحد — المبيعات أنواع طلبات هنا (platform_orders) بلا نسخة ثانية</div>}
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <Input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && load()} placeholder="🔍 مرجع/مكتب..." className="h-9 w-40" />
+          <select value={fType} onChange={e => setFType(e.target.value)} className="h-9 rounded-md border px-2 text-xs bg-white"><option value="">كل الأنواع</option>{Object.entries(types.types || {}).filter(([, v]) => !salesOnly || v.category === 'sales').map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}</select>
+          <select value={fStatus} onChange={e => setFStatus(e.target.value)} className="h-9 rounded-md border px-2 text-xs bg-white"><option value="">كل الحالات</option>{Object.entries(SL).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+          <Button size="sm" variant="outline" onClick={exportCSV}>⬇️ CSV</Button>
+          <Button size="sm" onClick={() => setCreating(true)}>➕ طلب جديد</Button>
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">إجمالي (المعروض)</div><div className="text-xl font-black">{rows?.length ?? '—'}</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">مفتوحة</div><div className="text-xl font-black text-amber-600">{openCount}</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">متأخرة</div><div className="text-xl font-black text-rose-600">{(rows || []).filter(o => o.late).length}</div></CardContent></Card>
+      </div>
+      <Card><CardContent className="pt-4 overflow-x-auto">
+        <Table>
+          <TableHeader><TableRow><TableHead>المرجع</TableHead><TableHead>النوع</TableHead><TableHead>المكتب</TableHead><TableHead>المبلغ</TableHead><TableHead>الحالة</TableHead><TableHead>الأولوية</TableHead><TableHead>المسؤول</TableHead><TableHead>الاستحقاق</TableHead><TableHead className="text-left">إجراءات</TableHead></TableRow></TableHeader>
+          <TableBody>
+            {rows === null ? <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">جاري التحميل...</TableCell></TableRow>
+              : rows.map(o => (
+                <TableRow key={o.id} className={o.late ? 'bg-rose-50/60' : ''}>
+                  <TableCell className="font-mono text-xs font-bold">{o.ref}</TableCell>
+                  <TableCell className="text-xs">{o.type_label}<div className="text-[9px] text-slate-400">{o.category === 'sales' ? '🧾 مبيعات' : '🛠️ إداري'}{o.financial && ' · مالي'}</div></TableCell>
+                  <TableCell className="text-xs">{o.tenant_name || '—'}</TableCell>
+                  <TableCell className="text-xs font-bold">{o.amount != null ? `${o.currency === 'USD' ? '$' : o.currency + ' '}${o.amount}` : '—'}</TableCell>
+                  <TableCell><Badge className={`${stBadge[o.status]} hover:${stBadge[o.status]}`}>{SL[o.status] || o.status}</Badge>{o.late && <div className="text-[9px] text-rose-600 font-bold">⏰ متأخر</div>}</TableCell>
+                  <TableCell className="text-xs">{o.priority}</TableCell>
+                  <TableCell className="text-[10px]">{o.assigned_to || o.assigned_department || '—'}</TableCell>
+                  <TableCell className="text-[10px]">{o.due_at ? String(o.due_at).slice(0, 10) : '—'}</TableCell>
+                  <TableCell className="text-left"><div className="flex gap-1 justify-end flex-wrap">
+                    <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => openDetail(o)}>👁️ Timeline</Button>
+                    {['new', 'under_review', 'needs_info', 'awaiting_payment', 'awaiting_approval'].includes(o.status) && <>
+                      <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => { const a2 = prompt('تعيين إلى (بريد المدير أو اسم القسم):', o.assigned_to || ''); if (a2 === null) return; act(o, 'assign', { assignee: a2 }) }}>👤 تعيين</Button>
+                      <Button size="sm" variant="outline" className="h-7 text-[10px] text-emerald-700" onClick={() => act(o, 'approve')}>✅ اعتماد</Button>
+                      <Button size="sm" variant="outline" className="h-7 text-[10px] text-rose-600" onClick={() => act(o, 'reject')}>⛔ رفض</Button>
+                      <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => act(o, 'cancel')}>🚫 إلغاء</Button>
+                    </>}
+                    {o.status === 'approved' && <Button size="sm" variant="outline" className="h-7 text-[10px] text-teal-700" onClick={() => act(o, 'execute')}>⚙️ تنفيذ</Button>}
+                    {o.status === 'executed' && <Button size="sm" variant="outline" className="h-7 text-[10px] text-green-700" onClick={() => act(o, 'complete')}>🏁 إكمال</Button>}
+                    {['rejected', 'cancelled'].includes(o.status) && <>
+                      <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => act(o, 'reopen')}>↩️ إعادة فتح</Button>
+                      <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => act(o, 'archive')}>🗄️ أرشفة</Button>
+                    </>}
+                  </div></TableCell>
+                </TableRow>
+              ))}
+            {rows?.length === 0 && <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">لا طلبات — أنشئ الأول</TableCell></TableRow>}
+          </TableBody>
+        </Table>
+      </CardContent></Card>
+      {creating && <OrderCreateDialog types={types.types} tenants={tenants} salesOnly={salesOnly} onClose={() => setCreating(false)} onDone={() => { setCreating(false); load() }} />}
+      {detail && (
+        <Dialog open onOpenChange={() => setDetail(null)}><DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto" dir="rtl">
+          <DialogHeader><DialogTitle>📄 {detail.order?.ref} — {detail.order?.type_label}</DialogTitle>
+            <DialogDescription>{detail.order?.tenant_name || ''} · الحالة: {SL[detail.order?.status] || detail.order?.status} · أنشأه {detail.order?.created_by}</DialogDescription></DialogHeader>
+          {detail.order?.details && <div className="text-xs bg-slate-50 rounded p-2">{detail.order.details}</div>}
+          {(detail.commissions || []).length > 0 && <div className="text-xs bg-fuchsia-50 border border-fuchsia-200 rounded p-2">٪ عمولات مرتبطة: {detail.commissions.map(c => `${c.amount} ${c.currency} (${c.beneficiary_name})`).join(' · ')}</div>}
+          <div className="text-xs font-black">Timeline:</div>
+          <div className="space-y-1 max-h-64 overflow-y-auto">
+            {(detail.order?.events || []).slice().reverse().map((e, i) => (
+              <div key={i} className="text-[11px] p-2 rounded border bg-white flex justify-between gap-2">
+                <span><b>{e.type}</b> — {e.note}</span>
+                <span className="text-slate-400 font-mono whitespace-nowrap">{e.by?.split('@')[0]} · {e.at ? new Date(e.at).toLocaleString('ar-EG') : ''}</span>
+              </div>
+            ))}
+          </div>
+        </DialogContent></Dialog>
+      )}
+    </div>
+  )
+}
+
+function OrderCreateDialog({ types, tenants, salesOnly, onClose, onDone }) {
+  const [f, setF] = useState({ type: salesOnly ? 'new_subscription' : 'other', tenant_id: '', plan_key: '', amount: '', currency: 'USD', priority: 'normal', due_at: '', details: '' })
+  const [busy, setBusy] = useState(false)
+  const [opId] = useState(() => (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`)
+  const submit = async () => {
+    try {
+      setBusy(true)
+      const r = await api('/admin/orders', { method: 'POST', body: { ...f, amount: f.amount === '' ? undefined : Number(f.amount), op_id: opId } })
+      toast.success(r.duplicate ? 'ℹ️ الطلب موجود مسبقاً (منع التكرار)' : `✅ أُنشئ الطلب ${r.order.ref}`)
+      onDone()
+    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <Dialog open onOpenChange={v => { if (!v) onClose() }}><DialogContent className="max-w-lg" dir="rtl">
+      <DialogHeader><DialogTitle>➕ طلب جديد {salesOnly ? '(أمر بيع)' : ''}</DialogTitle><DialogDescription>رقم مرجعي موحد ORD تلقائي · Idempotency مفعلة</DialogDescription></DialogHeader>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="النوع *"><select value={f.type} onChange={e => setF({ ...f, type: e.target.value })} className="h-9 w-full rounded-md border px-2 text-xs bg-white">{Object.entries(types || {}).filter(([, v]) => !salesOnly || v.category === 'sales').map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}</select></Field>
+        <Field label="المكتب"><select value={f.tenant_id} onChange={e => setF({ ...f, tenant_id: e.target.value })} className="h-9 w-full rounded-md border px-2 text-xs bg-white"><option value="">— بلا —</option>{tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></Field>
+        <Field label="الباقة"><select value={f.plan_key} onChange={e => setF({ ...f, plan_key: e.target.value })} className="h-9 w-full rounded-md border px-2 text-xs bg-white"><option value="">—</option><option value="silver">سيلفر</option><option value="gold">جولد</option><option value="enterprise">إنتربرايز</option></select></Field>
+        <Field label="الأولوية"><select value={f.priority} onChange={e => setF({ ...f, priority: e.target.value })} className="h-9 w-full rounded-md border px-2 text-xs bg-white"><option value="low">منخفضة</option><option value="normal">عادية</option><option value="high">عالية</option><option value="critical">حرجة</option></select></Field>
+        <Field label="المبلغ"><Input type="number" min="0" value={f.amount} onChange={e => setF({ ...f, amount: e.target.value })} /></Field>
+        <Field label="العملة"><Input value={f.currency} onChange={e => setF({ ...f, currency: e.target.value.toUpperCase() })} dir="ltr" className="text-center" /></Field>
+        <Field label="تاريخ الاستحقاق"><Input type="date" value={f.due_at} onChange={e => setF({ ...f, due_at: e.target.value })} /></Field>
+      </div>
+      <Field label="التفاصيل"><Textarea rows={3} value={f.details} onChange={e => setF({ ...f, details: e.target.value })} /></Field>
+      <DialogFooter><Button variant="outline" onClick={onClose}>إلغاء</Button><Button onClick={submit} disabled={busy}>{busy ? '...' : '➕ إنشاء'}</Button></DialogFooter>
+    </DialogContent></Dialog>
+  )
+}
+
+// v4.3 — Program commissions LEDGER (platform_commissions): linked to platform_orders,
+// full snapshot, unique index against duplicates. Pay is blocked until financial linkage.
+function CommissionsLedger() {
+  const [rows, setRows] = useState(null)
+  const [labels, setLabels] = useState({})
+  const [rules, setRules] = useState([])
+  const [salesOrders, setSalesOrders] = useState([])
+  const load = () => {
+    api('/admin/commissions-ledger').then(r => { setRows(r.rows || []); setLabels(r.status_labels || {}) }).catch(e => toast.error(e.message))
+    api('/admin/commission-rules').then(r => setRules(r.rules || [])).catch(() => {})
+    api('/admin/orders?category=sales').then(r => setSalesOrders(r.rows || [])).catch(() => {})
+  }
+  useEffect(() => { load() }, [])
+  const createComm = async () => {
+    const activeRules = rules.filter(r => r.active !== false)
+    if (!salesOrders.length) return toast.error('لا أوامر بيع في مركز الطلبات بعد')
+    if (!activeRules.length) return toast.error('لا قواعد عمولة نشطة')
+    const oref = prompt(`مرجع أمر البيع:\n${salesOrders.slice(0, 8).map(o => `${o.ref} — ${o.tenant_name || ''} (${o.amount ?? '—'} ${o.currency})`).join('\n')}`)
+    if (!oref) return
+    const order = salesOrders.find(o => o.ref === oref.trim())
+    if (!order) return toast.error('مرجع غير موجود')
+    const rname = prompt(`اسم القاعدة:\n${activeRules.map(r => `${r.name} (${r.type === 'fixed' ? r.value : r.value + '%'})`).join('\n')}`, activeRules[0]?.name)
+    if (!rname) return
+    const rule = activeRules.find(r => r.name === rname.trim())
+    if (!rule) return toast.error('قاعدة غير موجودة')
+    const benef = prompt('المستفيد (بريد مستخدم/موظف قائم أو معرف مكتب — لا حسابات مسوقين):', rule.beneficiary_name || '')
+    if (!benef) return
+    try {
+      const r = await api('/admin/commissions-ledger', { method: 'POST', body: { order_id: order.id, rule_id: rule.id, beneficiary_key: benef, beneficiary_name: benef, reason: 'إنشاء عمولة من البيع' } })
+      toast.success(r.duplicate ? 'ℹ️ العمولة موجودة مسبقاً — لم تتكرر (Unique Index)' : `✅ أُنشئت عمولة ${r.commission.amount} ${r.commission.currency}`)
+      load()
+    } catch (e) { toast.error(e.message) }
+  }
+  const act = async (c, action) => {
+    const reason = prompt('السبب (إلزامي):'); if (!reason) return
+    try { await api(`/admin/commissions-ledger/${c.id}`, { method: 'PATCH', body: { action, reason } }); toast.success('✅ تم'); load() } catch (e) { toast.error(e.message) }
+  }
+  const stC = { pending: 'bg-slate-200 text-slate-700', due: 'bg-amber-100 text-amber-700', approved: 'bg-emerald-100 text-emerald-700', paid: 'bg-green-200 text-green-800', rejected: 'bg-rose-100 text-rose-700', cancelled: 'bg-slate-100 text-slate-500', reversed: 'bg-purple-100 text-purple-700' }
+  return (
+    <Card>
+      <CardHeader className="pb-2 flex flex-row items-center justify-between">
+        <CardTitle className="text-sm">💰 سجل عمولات البرنامج (platform_commissions — مرتبط بمركز الطلبات)</CardTitle>
+        <Button size="sm" onClick={createComm}>➕ عمولة من بيع</Button>
+      </CardHeader>
+      <CardContent>
+        {rows === null ? <div className="text-center text-slate-400 text-sm py-3">جاري التحميل...</div>
+          : rows.length === 0 ? <div className="text-center text-slate-400 text-sm py-3">لا عمولات مسجلة — أنشئ الأولى من أمر بيع</div>
+            : <Table>
+              <TableHeader><TableRow><TableHead>الطلب</TableHead><TableHead>المكتب/الباقة</TableHead><TableHead>القاعدة (Snapshot)</TableHead><TableHead>المستفيد</TableHead><TableHead className="text-center">الأساس ← العمولة</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">إجراءات</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {rows.map(c => (
+                  <TableRow key={c.id}>
+                    <TableCell className="font-mono text-xs font-bold">{c.order_ref}</TableCell>
+                    <TableCell className="text-xs">{c.tenant_name || '—'}<div className="text-[9px] text-slate-400">{c.plan_key || ''}</div></TableCell>
+                    <TableCell className="text-xs">{c.rule_name}<div className="text-[9px] text-slate-400">{c.rule_type === 'fixed' ? `ثابت ${c.rule_value}` : `${c.rule_value}%`}</div></TableCell>
+                    <TableCell className="text-xs">{c.beneficiary_name}<div className="text-[9px] text-slate-400">{c.beneficiary_type}</div></TableCell>
+                    <TableCell className="text-center text-xs">{c.basis} ← <b className="text-fuchsia-700">{c.amount} {c.currency}</b></TableCell>
+                    <TableCell><Badge className={`${stC[c.status]} hover:${stC[c.status]}`}>{labels[c.status] || c.status}</Badge></TableCell>
+                    <TableCell className="text-left"><div className="flex gap-1 justify-end flex-wrap">
+                      {c.status === 'pending' && <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => act(c, 'mark_due')}>⏳ استحقاق</Button>}
+                      {['pending', 'due'].includes(c.status) && <Button size="sm" variant="outline" className="h-7 text-[10px] text-emerald-700" onClick={() => act(c, 'approve')}>✅ اعتماد</Button>}
+                      {['due', 'approved'].includes(c.status) && <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => act(c, 'hold')}>⏸️ تعليق</Button>}
+                      {!['paid', 'reversed', 'cancelled', 'rejected'].includes(c.status) && <Button size="sm" variant="outline" className="h-7 text-[10px] text-rose-600" onClick={() => act(c, 'reject')}>⛔ رفض</Button>}
+                      {c.status === 'approved' && <Button size="sm" variant="outline" className="h-7 text-[10px] text-purple-700" onClick={() => act(c, 'reverse')}>↩️ عكس</Button>}
+                      {['pending', 'due'].includes(c.status) && <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => act(c, 'cancel')}>🚫 إلغاء</Button>}
+                      <Button size="sm" variant="outline" className="h-7 text-[10px] opacity-60" onClick={() => act(c, 'pay')}>💵 دفع</Button>
+                    </div></TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>}
+        <div className="text-[10px] text-slate-500 mt-2">المبلغ المعتمد/المدفوع لا يُعدل مباشرة — التصحيح بالعكس الموثق فقط · التكرار ممنوع بـUnique Index (طلب+قاعدة+مستفيد) · الدفع محجوب حتى اكتمال ربط سند الصرف</div>
+      </CardContent>
+    </Card>
+  )
+}
+
 function NewTenantDialog({ open, onOpenChange, onSaved }) {
   const [f, setF] = useState({ name: '', owner_name: '', owner_email: '', owner_password: '', max_users: 2, max_branches: 1, subscription: 'trial', referral_code: '' })
   const [saving, setSaving] = useState(false)
@@ -2059,12 +2285,15 @@ const NAV = [
   // v4.0 — Batch 2: old plans/pricing + subscriptions/installments restored inside TenantApp
   { id: 'platform-plans', label: 'الباقات والتسعير', icon: Wallet, color: 'from-emerald-700 to-teal-500', group: 'إدارة رحّال' },
   { id: 'platform-subs', label: 'الاشتراكات والأقساط', icon: ReceiptText, color: 'from-blue-700 to-indigo-500', group: 'إدارة رحّال' },
-  // v4.1 — Group 1 (moved as-is from the new admin shell): users + roles/permissions
-  { id: 'platform-users', label: 'إدارة المستخدمين', icon: Users, color: 'from-cyan-700 to-sky-500', group: 'إدارة رحّال' },
+  // v4.1 → v4.3: AdminStaffCenter IS the Rahaal managers section (admin realm only) — renamed per Group-3 directive; no separate managers system
+  { id: 'platform-users', label: 'مديرو رحّال', icon: Users, color: 'from-cyan-700 to-sky-500', group: 'إدارة رحّال' },
   { id: 'platform-roles', label: 'الأدوار والصلاحيات', icon: ShieldCheck, color: 'from-violet-700 to-purple-500', group: 'إدارة رحّال' },
   // v4.1 — Group 2 (moved as-is): Rahaal software sales + commissions center
   { id: 'platform-sales', label: 'مبيعات برنامج رحّال', icon: TrendingUp, color: 'from-green-700 to-emerald-500', group: 'إدارة رحّال' },
   { id: 'platform-commissions', label: 'مركز العمولات', icon: Percent, color: 'from-fuchsia-700 to-pink-500', group: 'إدارة رحّال' },
+  // v4.3 — Group 3: unified orders registry + notifications center
+  { id: 'platform-orders', label: 'مركز الطلبات', icon: Inbox, color: 'from-amber-700 to-orange-500', group: 'إدارة رحّال' },
+  { id: 'platform-notify', label: 'مركز التنبيهات', icon: Bell, color: 'from-rose-700 to-red-500', group: 'إدارة رحّال' },
   { id: 'platform-ads', label: 'الإعلانات والعروض', icon: ImageIcon, color: 'from-orange-600 to-amber-500', group: 'إدارة رحّال' },
   { id: 'help',      label: '📖 دليل الاستخدام', icon: BookOpenText, color: 'from-pink-600 to-rose-500' },
   { id: 'settings',  label: 'إعدادات المكتب', icon: Settings, color: 'from-slate-800 to-slate-600' },
@@ -11545,8 +11774,11 @@ function TenantApp({ onOpenPlatform = null }) {
         {tabAllowed && tab === 'platform-users' && <ErrorBoundary tabName="إدارة المستخدمين"><AdminStaffCenter /></ErrorBoundary>}
         {tabAllowed && tab === 'platform-roles' && <ErrorBoundary tabName="الأدوار والصلاحيات"><AdminPermsCenter /></ErrorBoundary>}
         {/* v4.2 — program sales replaces the travel-sales aggregation (unsuitable per user directive); commissions gains an operational rules manager */}
-        {tabAllowed && tab === 'platform-sales' && <ErrorBoundary tabName="مبيعات برنامج رحّال"><ProgramSalesScreen /></ErrorBoundary>}
-        {tabAllowed && tab === 'platform-commissions' && <ErrorBoundary tabName="مركز العمولات"><div className="space-y-4"><CommissionRulesManager /><AdminCommissionsCenter /></div></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-sales' && <ErrorBoundary tabName="مبيعات برنامج رحّال"><div className="space-y-6"><OrdersScreen salesOnly /><ProgramSalesScreen /></div></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-commissions' && <ErrorBoundary tabName="مركز العمولات"><div className="space-y-4"><CommissionRulesManager /><CommissionsLedger /><AdminCommissionsCenter /></div></ErrorBoundary>}
+        {/* v4.3 — Group 3: unified orders registry (+ existing specialized requests embedded) and notifications center (moved as-is) */}
+        {tabAllowed && tab === 'platform-orders' && <ErrorBoundary tabName="مركز الطلبات"><div className="space-y-6"><OrdersScreen /><div><div className="text-sm font-black text-slate-600 mb-2">📎 الطلبات المتخصصة القائمة (استعادة كلمات المرور / توثيق / سحب عمولات / معراج) — النظام القائم كما هو</div><AdminRequestsCenter /></div></div></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-notify' && <ErrorBoundary tabName="مركز التنبيهات"><AdminNotifyCenter /></ErrorBoundary>}
         {tabAllowed && tab === 'platform-ads' && <ErrorBoundary tabName="الإعلانات والعروض"><AnnouncementsManager /></ErrorBoundary>}
         {tabAllowed && tab === 'help' && <ErrorBoundary tabName="دليل الاستخدام"><HelpCenter setTab={setTab} /></ErrorBoundary>}
 

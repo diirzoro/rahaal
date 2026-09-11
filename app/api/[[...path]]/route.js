@@ -22,6 +22,7 @@ import { adminReportsHandler } from '@/lib/adminReports' // v3.96 — Batch 4 (R
 import { adminDisputesHandler } from '@/lib/adminDisputes' // v3.96 — Batch 4 (Disputes)
 import { adminCurrencyHandler } from '@/lib/adminCurrency' // v3.96 — Batch 4 (Currencies & FX)
 import { adminGate, adminCan, adminStaffHandler } from '@/lib/adminStaff' // v3.97 — Batch 5 (Admin realm + staff RBAC)
+import { adminOrdersHandler, adminCommissionsLedgerHandler } from '@/lib/adminOrders' // v4.3 — unified orders + commissions ledger
 import { adminGeoHandler } from '@/lib/adminGeo' // v3.97 — Batch 5 (Geo locations)
 import { adminPayFinHandler } from '@/lib/adminPayFin' // v3.97 — Batch 5 (Payment methods & financial entities)
 import { adminRefDataHandler } from '@/lib/adminRefData' // v3.97 — Batch 5 (Unified reference data)
@@ -1781,6 +1782,21 @@ async function handleRoute(request, { params }) {
         const rbac = { defaults: DEFAULT_STAFF_PERMISSIONS, templates: RBAC_ROLE_TEMPLATES, ownerAll: () => rbacAllPerms(true) }
         const rP = await adminPermsHandler(db, route.slice('/admin/perms'.length), method, new URL(request.url).searchParams, bodyP, sess, rbac)
         return rP?.error ? bad(rP.error, rP.status || 400) : ok(rP)
+      }
+
+      // v4.3 — UNIFIED ORDERS + PROGRAM COMMISSIONS LEDGER (platform_orders /
+      // platform_commissions). Sales are order TYPES here — no platform_sales.
+      if (route === '/admin/orders' || route.startsWith('/admin/orders/')) {
+        let bodyO = null
+        if (method !== 'GET') { try { bodyO = await request.json() } catch { bodyO = {} } }
+        const rO = await adminOrdersHandler(db, route.slice('/admin/orders'.length), method, new URL(request.url).searchParams, bodyO, sess)
+        return rO?.error ? bad(rO.error, rO.status || 400) : ok(rO)
+      }
+      if (route === '/admin/commissions-ledger' || route.startsWith('/admin/commissions-ledger/')) {
+        let bodyL = null
+        if (method !== 'GET') { try { bodyL = await request.json() } catch { bodyL = {} } }
+        const rL = await adminCommissionsLedgerHandler(db, route.slice('/admin/commissions-ledger'.length), method, new URL(request.url).searchParams, bodyL, sess)
+        return rL?.error ? bad(rL.error, rL.status || 400) : ok(rL)
       }
 
       // v3.94 — Batch 2 delegations (modular). Commissions & Requests = READ-ONLY (GET only).
