@@ -281,3 +281,6 @@ See /app/memory/test_credentials.md
 - «الصناديق والبنوك» (tab boxes): للسوبر أدمن فقط BoxesBanksHub = تبويب أول «الصناديق والحسابات» بالمكوّن الأصلي BoxesScreen حرفياً دون أي تعديل + تبويب «طرق الدفع والجهات المالية وحسابات الاستلام» (AdminPayFinCenter القائم: methods/entities/orders/overview فوق payment_methods/financial_entities). مستخدمو المكاتب يرون BoxesScreen مباشرة كما كان — صفر تغيير عليهم.
 - Sidebar: أُزيل مدخلا «مديرو رحّال» و«الأدوار والصلاحيات» (صارا تبويبات داخل المستخدمين والصلاحيات) — لا شيء آخر أُزيل. المالية والتشغيلية (مبيعات/طلبات/عمولات/تنبيهات/إعلانات/باقات/اشتراكات) بلا أي مساس. التقارير لم تُمس.
 - ملفات: page.js فقط + route.js (سطر fall-through واحد). صفر حذف Components/APIs/بيانات. مسار قرار التوثيق: POST /admin/office-verifications/:tenantId/decision {decision: verified|rejected, reason} — الرفض بسبب إلزامي.
+
+## v4.4.1 — تصحيح نهائي: نقل «العملات وأسعار الصرف»
+- AdminCurrencyCenter انتقل من PlatformSystemHub (إعدادات النظام) إلى BoxesBanksHub («الصناديق والبنوك») كتبويب مستقل بالترتيب: الصناديق والحسابات البنكية (BoxesScreen الأصلي) ← العملات وأسعار الصرف ← طرق الدفع والجهات المالية وحسابات الاستلام. لم يعد يظهر في إعدادات النظام. «حركة العملات» (المصارفة الفعلية) لم تُمس. نفس المكوّن/APIs/Collections — لا مصدر ثانٍ. ملف واحد: page.js.

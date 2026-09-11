@@ -1852,24 +1852,26 @@ function PlatformPeopleHub() {
   ]} />
 }
 
-// «إعدادات النظام» — one entry: general/maintenance, backup, audit&security, health, platform currencies
+// «إعدادات النظام» — one entry: general/maintenance, backup, audit&security, health
+// (v4.4.1 — «العملات وأسعار الصرف» moved OUT of system settings into «الصناديق والبنوك»)
 function PlatformSystemHub() {
   return <HubTabs tabs={[
     { key: 'system', label: '⚙️ عام وصيانة وبيئة', render: () => <AdminSystemCenter /> },
     { key: 'backup', label: '💾 النسخ الاحتياطي والاستعادة', render: () => <AdminBackupCenter /> },
     { key: 'audit', label: '🕵️ Audit & Security', render: () => <AdminAuditCenter /> },
     { key: 'health', label: '❤️ System Health', render: () => <AdminHealthCenter /> },
-    { key: 'currency', label: '💱 العملات وأسعار الصرف', render: () => <AdminCurrencyCenter /> },
   ]} />
 }
 
 // «الصناديق والبنوك» (super admin only wrapper): tab 1 = the ORIGINAL financial screen
-// untouched; extra tabs = platform payment methods & financial entities (adminPayFin).
-// Receipt/payment vouchers, sales, subscriptions, commissions and refunds all read
-// payment methods/entities from this single source (payment_methods/financial_entities).
+// untouched (boxes + bank accounts); then (v4.4.1 order): currencies & FX rates —
+// definitions/buy-sell rates/history (NOT «حركة العملات» which stays untouched for
+// actual exchange operations) — then payment methods & financial entities (with
+// receiving accounts). Single source: existing components/APIs/collections only.
 function BoxesBanksHub() {
   return <HubTabs tabs={[
-    { key: 'boxes', label: '🏦 الصناديق والحسابات (المحتوى الأصلي)', render: () => <BoxesScreen /> },
+    { key: 'boxes', label: '🏦 الصناديق والحسابات البنكية (المحتوى الأصلي)', render: () => <BoxesScreen /> },
+    { key: 'currency', label: '💱 العملات وأسعار الصرف', render: () => <AdminCurrencyCenter /> },
     { key: 'payfin', label: '💳 طرق الدفع والجهات المالية وحسابات الاستلام', render: () => <AdminPayFinCenter /> },
   ]} />
 }
