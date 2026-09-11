@@ -23,10 +23,11 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../shared'
 import AdminDashboard from './dashboard'
+import OfficesSection from './offices' // v3.91 — Phase 2
 
 const SECTIONS = [
   { key: 'dashboard', label: 'نظرة عامة', icon: LayoutDashboard, phase: 1, ready: true },
-  { key: 'offices', label: 'المكاتب / Office 360°', icon: Building2, phase: 2 },
+  { key: 'offices', label: 'المكاتب / Office 360°', icon: Building2, phase: 2, ready: true },
   { key: 'sales', label: 'المبيعات', icon: TrendingUp, phase: 3 },
   { key: 'vouchers', label: 'السندات', icon: Receipt, phase: 3 },
   { key: 'accounting', label: 'الحسابات والرقابة المالية', icon: Calculator, phase: 4 },
@@ -61,6 +62,7 @@ const AdminApp = ({ legacyPanel = null, announcements = null }) => {
 
   const renderContent = () => {
     if (active === 'dashboard') return <AdminDashboard onNavigate={setActive} />
+    if (active === 'offices') return <OfficesSection />
     if (active === 'legacy') return legacyPanel || <PlaceholderSection section={current} />
     if (active === 'ads') {
       return (

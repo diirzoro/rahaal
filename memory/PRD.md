@@ -154,3 +154,11 @@ See /app/memory/test_credentials.md
 - تعديل page.js: سطرا استيراد وتوجيه فقط. لا تغيير في route.js إطلاقاً.
 - حوكمة: شارة "قراءة فقط مالياً" بالهيدر والشريط الجانبي؛ آلية audit_logs الفعلية تُفعّل مع أول عمليات كتابة (مرحلة 2+).
 - المتبقي: المراحل 2–8 حسب خطة المستخدم. AUDIT-001 (3900/3102) مؤجل للتحقق قبل أي تغيير محاسبي.
+
+## v3.91 — Super Admin المرحلة 2 (المكاتب + Office 360°) — NOT TESTED بطلب المستخدم
+- API جديد وحيد (مبرر: كل مسارات المكتب تشتق T من الجلسة وsuper_admin بلا جلسة مكتب): GET /admin/tenants/:id/office360?tab= — قراءة فقط، منطقه في lib/admin360.js وسطر تفويض واحد في route.js. أرصدة مخزنة كما هي، لا إعادة حساب.
+- توسعة GET /admin/tenants: إرفاق owner {name,email,phone} من استعلام users القائم أصلاً (صفر استعلام إضافي).
+- واجهة: app/admin/offices.js (قائمة + بحث + Office360 بـ10 تبويبات lazy-cache) مربوطة في shell.js. Impersonation يعاد استخدامه كما هو. تبويب الاشتراك يعيد استخدام /admin/installments-overview بفلترة أمامية.
+- AUDIT-001 (فحص ثابت، بلا إصلاح): الخادم يرحل الإقفال إلى 3102 (RETAINED_EARNINGS ثابت في route.js:67 وlib/coa.js:28؛ تعليق 6939 يؤكد أن 3900 القديم لا وجود له بالشجرة وأُصلح). التضارب نص UI فقط: page.js:5902 و5921 يذكران "3900 الأرباح المدورة" بينما 5979 صحيح (3102). التوصية: توحيد النصين إلى 3102 لاحقاً بموافقة.
+- Data Gaps: لا last_login (النشاط مشتق من created_at)؛ الأرباح null (لا endpoint إداري موثوق)؛ القائمة لا تعرض عدد العمليات/COA/معراج (متاحة داخل 360)؛ الفروع = الحد max_branches لا العدد الفعلي؛ backup/export يعتمد جلسة مكتب.
+- عمليات تحتاج Audit لاحقاً: tenants POST/PATCH/toggle-status/topup/reset-password/impersonate/confirm-payment، pricing-config PUT، plans PUT، password-reset PATCH، office-verifications PATCH، announcements POST/PUT/DELETE، backup/export، (اختيارياً: قراءات office360).

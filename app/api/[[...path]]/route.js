@@ -7,6 +7,8 @@ import sharp from 'sharp'
 // v3.88 — COA Migration Framework: single source of truth for the COA template,
 // per-tenant versioning, audit/classification and controlled reset/preserve migrations.
 import { seedCoaTemplate, applyResetMigration, upsertTenantSettingsDefaults, ensureTenantSettingsUniqueIndex } from '@/lib/coa'
+// v3.91 — Phase 2: Office 360° READ-ONLY aggregations (modular — AUDIT-006)
+import { getOffice360 } from '@/lib/admin360'
 
 // v3.47 — Package image optimization settings (applied ONCE at upload; centralized — adjust here)
 const IMG_MAX_DIM = 1200        // longest side in px (aspect ratio preserved, never enlarged)
@@ -1622,6 +1624,16 @@ async function handleRoute(request, { params }) {
     if (route.startsWith('/admin/')) {
       if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
 
+      // v3.91 — Phase 2: Office 360° (READ-ONLY — no writes, no balance recomputation).
+      // Logic lives in lib/admin360.js; this is a single delegation line (AUDIT-006).
+      const office360Match = route.match(/^\/admin\/tenants\/([^/]+)\/office360$/)
+      if (office360Match && method === 'GET') {
+        const url360 = new URL(request.url)
+        const r360 = await getOffice360(db, office360Match[1], url360.searchParams.get('tab') || 'overview')
+        if (r360?.error) return bad(r360.error, 404)
+        return ok(r360)
+      }
+
       // v3.16 — Installments tracker (SaaS billing follow-up)
       if (route === '/admin/installments-overview' && method === 'GET') {
         const tenants = await db.collection('tenants').find({ billing_mode: 'installments' }).toArray()
@@ -1748,12 +1760,15 @@ async function handleRoute(request, { params }) {
         const users = await db.collection('users').find({ role: { $ne: 'super_admin' } }).toArray()
         const usersByTenant = {}
         for (const u of users) usersByTenant[u.tenant_id] = (usersByTenant[u.tenant_id] || 0) + 1
+        // v3.91 — Phase 2: attach owner info from the SAME users query (zero extra queries)
+        const ownersByTenant = {}
+        for (const u of users) if (u.role === 'owner' && u.tenant_id && !ownersByTenant[u.tenant_id]) ownersByTenant[u.tenant_id] = { name: u.name || null, email: u.email || null, phone: u.phone || u.whatsapp || null }
         const [tCount, vCount] = await Promise.all([
           db.collection('tickets').countDocuments(),
           db.collection('visas').countDocuments(),
         ])
         return ok({
-          tenants: tenants.map(t => ({ ...t, _id: undefined, users_count: usersByTenant[t.id] || 0 })),
+          tenants: tenants.map(t => ({ ...t, _id: undefined, users_count: usersByTenant[t.id] || 0, owner: ownersByTenant[t.id] || null })),
           global_stats: { tenants: tenants.length, tickets: tCount, visas: vCount },
         })
       }
