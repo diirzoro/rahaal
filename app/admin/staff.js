@@ -178,6 +178,19 @@ const AdminStaffCenter = () => {
                 <Button size="sm" variant="ghost" title="معاينة الصلاحيات الفعالة" onClick={() => showPreview(u)}><Eye className="w-3.5 h-3.5" /></Button>
                 {!u.is_main && can('edit') && <Button size="sm" variant="ghost" title="إسناد دور" onClick={() => { const rk = prompt(`مفتاح الدور (${roles.map(r => r.key).join(' / ')}):`, u.admin_role_key || ''); if (rk === null) return; patch(u, 'assign_role', { admin_role_key: rk || null }) }}><Pencil className="w-3.5 h-3.5" /></Button>}
                 {!u.is_main && can('manage') && <Button size="sm" variant="ghost" title="Overrides" onClick={() => setDlg({ type: 'overrides', user: u })}><ShieldCheck className="w-3.5 h-3.5" /></Button>}
+                {/* v4.2 — closure: profile edit + password reset + session termination (audited, reason mandatory) */}
+                {can('edit') && <Button size="sm" variant="ghost" title="تعديل البيانات (الاسم/الهاتف/المسمى/القسم)" onClick={() => {
+                  const name = prompt('الاسم:', u.name); if (name === null) return
+                  const phone = prompt('الهاتف:', u.phone || ''); if (phone === null) return
+                  const job_title = prompt('المسمى الوظيفي:', u.job_title || ''); if (job_title === null) return
+                  const department = prompt('القسم/النطاق (مثال: المالية، المبيعات، الدعم):', u.department || ''); if (department === null) return
+                  patch(u, 'edit_profile', { name, phone, job_title, department })
+                }}>📝</Button>}
+                {!u.is_main && can('manage') && <Button size="sm" variant="ghost" title="إعادة تعيين كلمة المرور (ينهي الجلسات)" onClick={async () => {
+                  const reason = prompt('السبب (إلزامي):'); if (!reason) return
+                  try { const r = await api(`/admin/staff/users/${u.id}`, { method: 'PATCH', body: { action: 'reset_password', reason } }); alert(`كلمة المرور الجديدة:\n${r.new_password}\n\nأُنهيت ${r.sessions_terminated} جلسة — سلّمها للمدير بقناة آمنة`); load() } catch (e) { toast.error(e.message) }
+                }}>🔑</Button>}
+                {!u.is_main && can('manage') && <Button size="sm" variant="ghost" title="إنهاء الجلسات النشطة" onClick={() => patch(u, 'terminate_sessions')}>🚪</Button>}
                 {!u.is_main && (can('activate') || can('disable')) && <Button size="sm" variant="ghost" title={u.active ? 'تعطيل (ينهي الجلسات)' : 'تفعيل'} onClick={() => patch(u, u.active ? 'disable' : 'activate')}><Power className="w-3.5 h-3.5" /></Button>}
               </div></TableCell>
             </TableRow>))}

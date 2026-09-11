@@ -1986,6 +1986,63 @@ async function handleRoute(request, { params }) {
         return ok({ success: true, config: merged, changes_logged: changes.length })
       }
 
+      // v4.2 — COMMISSION RULES became OPERATIONAL: stored in the EXISTING
+      // platform_settings collection (doc id 'commission_rules') — configuration,
+      // NOT financial records. The financial commissions LEDGER (accruals/payments)
+      // requires a NEW collection → pending explicit user approval (documented).
+      if (route === '/admin/commission-rules' && method === 'GET') {
+        const doc = await db.collection('platform_settings').findOne({ id: 'commission_rules' })
+        return ok({ rules: doc?.rules || [], updated_at: doc?.updated_at || null, updated_by: doc?.updated_by || null })
+      }
+      if (route === '/admin/commission-rules' && method === 'PUT') {
+        const b = await request.json()
+        if (!b.reason || !String(b.reason).trim()) return bad('السبب إلزامي لأي تغيير في قواعد العمولات')
+        const prevDoc = await db.collection('platform_settings').findOne({ id: 'commission_rules' })
+        const prevRules = prevDoc?.rules || []
+        const rules = (Array.isArray(b.rules) ? b.rules : []).slice(0, 50).map(r => ({
+          id: r.id || uuidv4(),
+          name: String(r.name || '').slice(0, 120),
+          type: r.type === 'fixed' ? 'fixed' : 'percent',
+          value: Math.max(0, Number(r.value) || 0),
+          applies_to: ['silver', 'gold', 'enterprise', 'all'].includes(r.applies_to) ? r.applies_to : 'all',
+          beneficiary_type: ['marketer', 'referrer_office', 'employee'].includes(r.beneficiary_type) ? r.beneficiary_type : 'marketer',
+          beneficiary_name: String(r.beneficiary_name || '').slice(0, 120),
+          start_at: r.start_at ? new Date(r.start_at) : null,
+          end_at: r.end_at ? new Date(r.end_at) : null,
+          priority: Number.isFinite(Number(r.priority)) ? Number(r.priority) : 0,
+          active: r.active !== false,
+          created_at: r.created_at ? new Date(r.created_at) : new Date(),
+        }))
+        for (const r of rules) {
+          if (!r.name.trim()) return bad('اسم القاعدة إلزامي')
+          if (r.type === 'percent' && r.value > 100) return bad(`نسبة العمولة في «${r.name}» لا تتجاوز 100%`)
+        }
+        // منع تداخل قاعدتين نشطتين على الباقة/المستفيد نفسه ضمن نافذة زمنية متقاطعة
+        const overlaps = (a, c) => {
+          const aS = a.start_at ? a.start_at.getTime() : -Infinity, aE = a.end_at ? a.end_at.getTime() : Infinity
+          const cS = c.start_at ? c.start_at.getTime() : -Infinity, cE = c.end_at ? c.end_at.getTime() : Infinity
+          return aS <= cE && cS <= aE
+        }
+        const act = rules.filter(r => r.active)
+        for (let i = 0; i < act.length; i++) for (let j = i + 1; j < act.length; j++) {
+          const a = act[i], c = act[j]
+          const samePlan = a.applies_to === c.applies_to || a.applies_to === 'all' || c.applies_to === 'all'
+          const sameBenef = a.beneficiary_type === c.beneficiary_type && (a.beneficiary_name || '') === (c.beneficiary_name || '')
+          if (samePlan && sameBenef && overlaps(a, c)) return bad(`⚠️ تعارض قواعد: «${a.name}» و«${c.name}» نشطتان على النطاق نفسه والمستفيد نفسه في فترة متقاطعة — عطّل إحداهما أو عدّل التواريخ`, 409)
+        }
+        await db.collection('platform_settings').updateOne({ id: 'commission_rules' }, { $set: { id: 'commission_rules', rules, updated_at: new Date(), updated_by: sess.user.email } }, { upsert: true })
+        try {
+          await db.collection('audit_logs').insertOne({
+            id: uuidv4(), category: 'commissions', at: new Date(), actor_id: sess.user.id, actor_email: sess.user.email,
+            action: 'commission_rules_update', target: { doc: 'commission_rules' },
+            before: { count: prevRules.length, rules: prevRules.map(r => ({ id: r.id, name: r.name, type: r.type, value: r.value, active: r.active })) },
+            after: { count: rules.length, rules: rules.map(r => ({ id: r.id, name: r.name, type: r.type, value: r.value, active: r.active })) },
+            reason: String(b.reason).slice(0, 300),
+          })
+        } catch { }
+        return ok({ success: true, rules })
+      }
+
       // v3.12 — Password reset requests inbox (admin-mediated forgot password)
       if (route === '/admin/password-reset-requests' && method === 'GET') {
         const reqs = await db.collection('password_reset_requests').find({}).sort({ created_at: -1 }).limit(200).toArray()

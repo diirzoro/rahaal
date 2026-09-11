@@ -292,7 +292,7 @@ const AdminPermsCenter = () => {
             </Select>
             <Input value={uf.q} onChange={e => setUf({ ...uf, q: e.target.value })} onKeyDown={e => e.key === 'Enter' && loadUsers()} placeholder="بحث بالاسم أو الإيميل..." className="w-56 h-9 bg-white text-xs" />
             <Button size="sm" variant="outline" onClick={loadUsers} className="gap-1"><Search className="w-3.5 h-3.5" /> بحث</Button>
-            <Badge variant="outline" className="gap-1 text-amber-700 border-amber-300 bg-amber-50 mr-auto"><Lock className="w-3 h-3" /> عرض فقط — الإسناد يتم من داخل كل مكتب</Badge>
+            <Badge variant="outline" className="gap-1 text-emerald-700 border-emerald-300 bg-emerald-50 mr-auto">✅ تشغيلي — إسناد الأدوار والـOverrides من هنا (v4.2)</Badge>
           </div>
           <div className="border rounded-lg overflow-x-auto">
             <Table>
@@ -311,7 +311,26 @@ const AdminPermsCenter = () => {
                         <TableCell><Badge variant="outline" className="text-xs">{u.role === 'owner' ? '👑 مالك' : u.role === 'staff' ? '👤 موظف' : u.role}{u.role_key ? ` · ${u.role_key}` : ''}</Badge></TableCell>
                         <TableCell className="text-xs font-bold">{u.overrides_count}</TableCell>
                         <TableCell><OnOff v={u.active} /></TableCell>
-                        <TableCell><Button size="sm" variant="outline" className="h-7 px-2 gap-1" onClick={() => setDlg({ type: 'preview', userId: u.id })}><Eye className="w-3 h-3" /> عرض</Button></TableCell>
+                        <TableCell><div className="flex gap-1">
+                          <Button size="sm" variant="outline" className="h-7 px-2 gap-1" onClick={() => setDlg({ type: 'preview', userId: u.id })}><Eye className="w-3 h-3" /> عرض</Button>
+                          {/* v4.2 — operational: assign role template + per-user override (staff only; owner/SA guarded server-side) */}
+                          {u.role === 'staff' && <Button size="sm" variant="outline" className="h-7 px-2" title="إسناد دور (يطبق صلاحيات القالب على المستخدم)" onClick={async () => {
+                            const activeRoles = (roles || []).filter(r => r.active !== false)
+                            const rk = prompt(`مفتاح الدور — المتاح:\n${activeRoles.map(r => `${r.key} = ${r.label}`).join('\n')}\n\n(اتركه فارغاً لإزالة الدور)`, u.role_key || '')
+                            if (rk === null) return
+                            const reason = prompt('السبب (إلزامي):'); if (!reason) return
+                            try { const r = await api(`/admin/perms/users/${u.id}`, { method: 'PATCH', body: { action: 'assign_role', role_key: rk || null, reason } }); toast.success(`✅ أُسند الدور — طُبقت ${r.applied_permissions} صلاحية`); loadUsers() } catch (e) { toast.error(e.message) }
+                          }}>🎭 إسناد</Button>}
+                          {u.role === 'staff' && <Button size="sm" variant="outline" className="h-7 px-2" title="Override صلاحية واحدة (منح/منع/إزالة)" onClick={async () => {
+                            const key = prompt(`مفتاح الصلاحية — أمثلة:\n${(permKeys || []).slice(0, 12).join('\n')}\n...`)
+                            if (!key) return
+                            const v = prompt('القيمة: 1 = منح | 0 = منع | فارغ = إزالة الـOverride (عودة للافتراضي)')
+                            if (v === null) return
+                            const reason = prompt('السبب (إلزامي):'); if (!reason) return
+                            const value = v === '' ? null : v === '1'
+                            try { await api(`/admin/perms/users/${u.id}`, { method: 'PATCH', body: { action: 'override', key, value, reason } }); toast.success('✅ طُبق الـOverride'); loadUsers() } catch (e) { toast.error(e.message) }
+                          }}>⚙️ Override</Button>}
+                        </div></TableCell>
                       </TableRow>
                     ))}
               </TableBody>

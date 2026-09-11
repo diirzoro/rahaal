@@ -1408,6 +1408,178 @@ function PlatformSubscriptionsScreen() {
   )
 }
 
+// v4.2 — «مبيعات برنامج رحّال»: PROGRAM sales (plans/subscriptions/renewals) built on
+// EXISTING data only (tenants + pricing_config + installments + confirm-payment) —
+// NO parallel sales engine, NO travel data (tickets/visas/services are excluded by design).
+// A true draft-sale object with its own timeline needs a NEW collection → pending approval.
+function ProgramSalesScreen() {
+  const [data, setData] = useState(null)
+  const [cfg, setCfg] = useState(null)
+  const [instRows, setInstRows] = useState([])
+  const [editing, setEditing] = useState(null)
+  const [instTarget, setInstTarget] = useState(null)
+  const [q, setQ] = useState('')
+  const [fPlan, setFPlan] = useState('all')
+  const [fStatus, setFStatus] = useState('all')
+  const load = async () => {
+    try {
+      const [d, c, ins] = await Promise.all([
+        api('/admin/tenants'),
+        api('/admin/pricing-config').catch(() => null),
+        api('/admin/installments-overview').catch(() => []),
+      ])
+      setData(d); setCfg(c); setInstRows(ins || [])
+    } catch (e) { toast.error(e.message) }
+  }
+  useEffect(() => { load() }, [])
+  const insById = {}; for (const r of instRows) insById[r.id] = r
+  const disc = cfg?.discount_enabled ? (Number(cfg.discount_percent) || 0) : 0
+  const saleRow = (t) => {
+    const p = (cfg?.plans || []).find(x => x.key === t.plan_tier)
+    const base = p ? Number(p.annual_price) || 0 : null
+    const final = base !== null ? Math.round(base * (100 - disc)) / 100 : null
+    const ins = insById[t.id]
+    const paidAmt = (ins?.installments || t.installments || []).filter(i => i.paid).reduce((s, i) => s + (Number(i.amount) || 0), 0)
+    const totalAmt = Number(t.subscription_price) || final || 0
+    const isPaid = t.subscription === 'paid' || t.activation_confirmed
+    const status = isPaid ? 'مدفوع/مفعل'
+      : paidAmt > 0 ? 'دفع جزئي'
+        : ['silver', 'gold', 'enterprise'].includes(t.plan_tier) ? 'بانتظار الدفع'
+          : 'تجريبي (بلا بيع)'
+    return { t, p, base, final, ins, paidAmt, totalAmt, remaining: Math.max(0, totalAmt - paidAmt), status, currency: p?.currency || 'USD' }
+  }
+  const rows = (data?.tenants || []).filter(t => !t.is_platform_org).map(saleRow)
+    .filter(r => (fPlan === 'all' || r.t.plan_tier === fPlan))
+    .filter(r => (fStatus === 'all' || r.status === fStatus))
+    .filter(r => !q.trim() || `${r.t.name} ${r.t.slug || ''}`.includes(q.trim()))
+  const confirmPayment = async (t) => {
+    if (!(await askConfirm({ title: 'اعتماد البيع وتأكيد الدفع', desc: `اعتماد بيع الباقة للمكتب "${t.name}"؟ يتحول لمدفوع فوراً (لا يمكن تنفيذه مرتين).`, icon: '💳', confirmLabel: 'اعتماد وتأكيد' }))) return
+    try { await api(`/admin/tenants/${t.id}/confirm-payment`, { method: 'POST' }); toast.success('✅ اعتُمد البيع — المكتب مدفوع'); load() } catch (e) { toast.error(e.message) }
+  }
+  const exportCSV = () => {
+    const head = ['المكتب', 'الباقة', 'الحالة', 'السعر الأساسي', 'الخصم%', 'السعر النهائي (مرجعي)', 'سعر الاشتراك المسجل', 'العملة', 'طريقة الدفع', 'المدفوع', 'المتبقي', 'بداية التفعيل', 'انتهاء الاشتراك']
+    const lines = rows.map(r => [r.t.name, r.t.plan_tier || '', r.status, r.base ?? '', disc, r.final ?? '', r.t.subscription_price || '', r.currency, r.t.billing_mode || '', r.paidAmt, r.remaining, r.t.activation_confirmed_at ? String(r.t.activation_confirmed_at).slice(0, 10) : '', r.t.subscription_expires_at ? String(r.t.subscription_expires_at).slice(0, 10) : ''])
+    const csv = '\ufeff' + [head, ...lines].map(l => l.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = `rahaal-program-sales-${todayISO()}.csv`; a.click()
+  }
+  const st = { 'مدفوع/مفعل': 'bg-emerald-100 text-emerald-700', 'دفع جزئي': 'bg-blue-100 text-blue-700', 'بانتظار الدفع': 'bg-amber-100 text-amber-700', 'تجريبي (بلا بيع)': 'bg-slate-100 text-slate-600' }
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h2 className="text-xl font-extrabold">📈 مبيعات برنامج رحّال</h2>
+          <div className="text-xs text-slate-500">بيع الباقات والاشتراكات والتجديد — فوق بيانات الاشتراكات القائمة (بلا تذاكر/تأشيرات/سفر)</div>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <Input value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 بحث..." className="h-9 w-44" />
+          <select value={fPlan} onChange={e => setFPlan(e.target.value)} className="h-9 rounded-md border px-2 text-xs bg-white"><option value="all">كل الباقات</option><option value="silver">سيلفر</option><option value="gold">جولد</option><option value="enterprise">إنتربرايز</option></select>
+          <select value={fStatus} onChange={e => setFStatus(e.target.value)} className="h-9 rounded-md border px-2 text-xs bg-white"><option value="all">كل الحالات</option><option>بانتظار الدفع</option><option>دفع جزئي</option><option>مدفوع/مفعل</option><option>تجريبي (بلا بيع)</option></select>
+          <Button size="sm" variant="outline" onClick={exportCSV}>⬇️ تصدير CSV</Button>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {['بانتظار الدفع', 'دفع جزئي', 'مدفوع/مفعل', 'تجريبي (بلا بيع)'].map(s => (
+          <Card key={s}><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">{s}</div><div className="text-xl font-black">{rows.filter(r => r.status === s).length}</div></CardContent></Card>
+        ))}
+      </div>
+      <Card><CardContent className="pt-4 overflow-x-auto">
+        <Table>
+          <TableHeader><TableRow>
+            <TableHead>المكتب العميل</TableHead><TableHead>الباقة</TableHead><TableHead>حالة البيع</TableHead>
+            <TableHead className="text-center">التسعير المرجعي الحالي</TableHead><TableHead className="text-center">سعر الاشتراك</TableHead>
+            <TableHead className="text-center">المدفوع / المتبقي</TableHead><TableHead>الدفع</TableHead><TableHead>البداية → الانتهاء</TableHead><TableHead className="text-left">إجراءات</TableHead>
+          </TableRow></TableHeader>
+          <TableBody>
+            {rows.map(({ t, p, base, final, ins, paidAmt, remaining, status, currency }) => {
+              const cur = currency === 'USD' ? '$' : `${currency} `
+              return (
+                <TableRow key={t.id}>
+                  <TableCell><div className="font-semibold text-sm">{t.name}</div><div className="text-[10px] text-slate-400 font-mono">{t.slug}</div></TableCell>
+                  <TableCell className="text-xs">{p ? `${p.icon} ${p.name_ar}` : (t.plan_tier || '—')}</TableCell>
+                  <TableCell><Badge className={`${st[status]} hover:${st[status]}`}>{status}</Badge></TableCell>
+                  <TableCell className="text-center text-xs">{base !== null ? <><span className={disc > 0 ? 'line-through text-slate-400' : 'font-bold'}>{cur}{base}</span>{disc > 0 && <> <b>{cur}{final}</b> <span className="text-rose-600">(-{disc}%)</span></>}</> : '—'}</TableCell>
+                  <TableCell className="text-center text-xs font-bold">{t.subscription_price ? `${cur}${t.subscription_price}` : '—'}</TableCell>
+                  <TableCell className="text-center text-xs"><span className="text-emerald-700 font-bold">{cur}{paidAmt}</span> / <span className="text-amber-700">{cur}{remaining}</span>{ins?.overdue && <Badge className="bg-rose-600 text-white text-[9px] mr-1">متأخر</Badge>}</TableCell>
+                  <TableCell className="text-xs">{t.billing_mode === 'annual' ? '📅 سنوي' : t.billing_mode === 'installments' ? `💳 أقساط ${ins ? `${ins.paid_count}/${ins.total_count}` : ''}` : '—'}</TableCell>
+                  <TableCell className="text-[10px]">{t.activation_confirmed_at ? String(t.activation_confirmed_at).slice(0, 10) : '—'} ← {t.subscription_expires_at ? String(t.subscription_expires_at).slice(0, 10) : '—'}</TableCell>
+                  <TableCell className="text-left"><div className="flex gap-1 justify-end flex-wrap">
+                    <Button size="sm" variant="outline" className="h-7 text-[11px]" title="مسودة البيع: الباقة/السعر/العملة/طريقة الدفع/التواريخ" onClick={() => setEditing(t)}>📝 مسودة/تعديل</Button>
+                    {!t.activation_confirmed && ['silver', 'gold', 'enterprise'].includes(t.plan_tier) && <Button size="sm" variant="outline" className="h-7 text-[11px] text-blue-600 border-blue-300" onClick={() => confirmPayment(t)}>💳 اعتماد البيع</Button>}
+                    <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => setInstTarget({ id: t.id, name: t.name, plan_tier: t.plan_tier, installments: (insById[t.id]?.installments) || t.installments || [], unlimited_journals: !!t.unlimited_journals })}>📅 الأقساط</Button>
+                  </div></TableCell>
+                </TableRow>
+              )
+            })}
+            {rows.length === 0 && <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">لا نتائج</TableCell></TableRow>}
+          </TableBody>
+        </Table>
+      </CardContent></Card>
+      <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ حدود موثقة: الإلغاء/الاسترداد المالي غير متاح — لا ربط بعد بين الاعتماد وسندات القبض (فجوة موثقة)، وسجل «مسودة بيع» مستقل بجدول حالات كامل يحتاج Collection جديدة بانتظار موافقتك.</div>
+      <EditTenantDialog tenant={editing} onOpenChange={v => { if (!v) setEditing(null) }} onSaved={() => { setEditing(null); load() }} />
+      <InstallmentsDialog row={instTarget} onClose={() => setInstTarget(null)} onChanged={load} />
+    </div>
+  )
+}
+
+// v4.2 — Commission RULES manager (operational): stored in the existing platform_settings
+// collection — the financial commissions LEDGER awaits approval for a new collection.
+function CommissionRulesManager() {
+  const [rules, setRules] = useState(null)
+  const [meta, setMeta] = useState({})
+  const load = () => api('/admin/commission-rules').then(r => { setRules(r.rules || []); setMeta({ at: r.updated_at, by: r.updated_by }) }).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [])
+  const save = async (next, reasonMsg) => {
+    const reason = prompt('السبب (إلزامي — يسجل في التدقيق):', reasonMsg || '')
+    if (!reason) return
+    try { await api('/admin/commission-rules', { method: 'PUT', body: { rules: next, reason } }); toast.success('✅ حُفظت قواعد العمولات'); load() } catch (e) { toast.error(e.message) }
+  }
+  const addRule = () => {
+    const name = prompt('اسم القاعدة:', ''); if (!name) return
+    const type = prompt('النوع: percent = نسبة | fixed = مبلغ ثابت', 'percent'); if (type === null) return
+    const value = prompt(type === 'fixed' ? 'المبلغ:' : 'النسبة %:', '10'); if (value === null) return
+    const applies = prompt('تطبق على: silver / gold / enterprise / all', 'all'); if (applies === null) return
+    const benef = prompt('اسم المستفيد (مسوق/جهة):', ''); if (benef === null) return
+    save([...(rules || []), { name, type: type === 'fixed' ? 'fixed' : 'percent', value: Number(value) || 0, applies_to: applies, beneficiary_type: 'marketer', beneficiary_name: benef, active: true, priority: (rules || []).length }], `إضافة قاعدة ${name}`)
+  }
+  if (rules === null) return <div className="text-center py-4 text-slate-400 text-sm">جاري تحميل قواعد العمولات...</div>
+  return (
+    <Card>
+      <CardHeader className="pb-2 flex flex-row items-center justify-between">
+        <CardTitle className="text-sm">📐 قواعد العمولات (تشغيلي — v4.2)</CardTitle>
+        <Button size="sm" onClick={addRule}>➕ إضافة قاعدة</Button>
+      </CardHeader>
+      <CardContent>
+        {rules.length === 0 ? <div className="text-center text-slate-400 text-sm py-3">لا قواعد بعد — أضف الأولى</div> : (
+          <Table>
+            <TableHeader><TableRow><TableHead>القاعدة</TableHead><TableHead>النوع/القيمة</TableHead><TableHead>النطاق</TableHead><TableHead>المستفيد</TableHead><TableHead>الفترة</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">—</TableHead></TableRow></TableHeader>
+            <TableBody>
+              {rules.map((r, i) => (
+                <TableRow key={r.id || i} className={r.active === false ? 'opacity-50' : ''}>
+                  <TableCell className="font-semibold text-sm">{r.name}</TableCell>
+                  <TableCell className="text-xs">{r.type === 'fixed' ? `💵 ثابت ${r.value}` : `٪ نسبة ${r.value}%`}</TableCell>
+                  <TableCell className="text-xs">{r.applies_to === 'all' ? 'كل الباقات' : r.applies_to}</TableCell>
+                  <TableCell className="text-xs">{r.beneficiary_name || '—'} <span className="text-slate-400">({r.beneficiary_type})</span></TableCell>
+                  <TableCell className="text-[10px]">{r.start_at ? String(r.start_at).slice(0, 10) : '∞'} ← {r.end_at ? String(r.end_at).slice(0, 10) : '∞'}</TableCell>
+                  <TableCell><Badge className={r.active !== false ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}>{r.active !== false ? 'نشطة' : 'معطلة'}</Badge></TableCell>
+                  <TableCell className="text-left"><div className="flex gap-1 justify-end">
+                    <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => {
+                      const value = prompt('القيمة الجديدة:', r.value); if (value === null) return
+                      save(rules.map((x, j) => j === i ? { ...x, value: Number(value) || 0 } : x), `تعديل قيمة ${r.name}`)
+                    }}>✏️ تعديل</Button>
+                    <Button size="sm" variant="outline" className={`h-7 text-[10px] ${r.active !== false ? 'text-rose-600' : 'text-emerald-600'}`} onClick={() => save(rules.map((x, j) => j === i ? { ...x, active: x.active === false } : x), `${r.active !== false ? 'تعطيل' : 'تفعيل'} ${r.name}`)}>{r.active !== false ? '⛔ تعطيل' : '✅ تفعيل'}</Button>
+                  </div></TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+        <div className="text-[10px] text-slate-500 mt-2">آخر تحديث: {meta.by || '—'} · {meta.at ? new Date(meta.at).toLocaleString('ar-EG') : '—'} — منع التداخل مفروض في الخادم (409) · كل حفظ يسجل في التدقيق بسبب إلزامي</div>
+        <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mt-2">⚠️ سجل عمليات العمولة المالي (استحقاق/اعتماد/دفع/عكس) يتطلب Collection مالية جديدة — متوقف بانتظار موافقتك الصريحة قبل الإنشاء.</div>
+      </CardContent>
+    </Card>
+  )
+}
+
 function NewTenantDialog({ open, onOpenChange, onSaved }) {
   const [f, setF] = useState({ name: '', owner_name: '', owner_email: '', owner_password: '', max_users: 2, max_branches: 1, subscription: 'trial', referral_code: '' })
   const [saving, setSaving] = useState(false)
@@ -11372,8 +11544,9 @@ function TenantApp({ onOpenPlatform = null }) {
         {/* v4.1 — moved AS-IS from the v3.91–3.97 admin shell (same components + same /api/admin/* APIs) */}
         {tabAllowed && tab === 'platform-users' && <ErrorBoundary tabName="إدارة المستخدمين"><AdminStaffCenter /></ErrorBoundary>}
         {tabAllowed && tab === 'platform-roles' && <ErrorBoundary tabName="الأدوار والصلاحيات"><AdminPermsCenter /></ErrorBoundary>}
-        {tabAllowed && tab === 'platform-sales' && <ErrorBoundary tabName="مبيعات برنامج رحّال"><AdminSalesCenter key="platform-sales" initialTab="sales" /></ErrorBoundary>}
-        {tabAllowed && tab === 'platform-commissions' && <ErrorBoundary tabName="مركز العمولات"><AdminCommissionsCenter /></ErrorBoundary>}
+        {/* v4.2 — program sales replaces the travel-sales aggregation (unsuitable per user directive); commissions gains an operational rules manager */}
+        {tabAllowed && tab === 'platform-sales' && <ErrorBoundary tabName="مبيعات برنامج رحّال"><ProgramSalesScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-commissions' && <ErrorBoundary tabName="مركز العمولات"><div className="space-y-4"><CommissionRulesManager /><AdminCommissionsCenter /></div></ErrorBoundary>}
         {tabAllowed && tab === 'platform-ads' && <ErrorBoundary tabName="الإعلانات والعروض"><AnnouncementsManager /></ErrorBoundary>}
         {tabAllowed && tab === 'help' && <ErrorBoundary tabName="دليل الاستخدام"><HelpCenter setTab={setTab} /></ErrorBoundary>}
 
