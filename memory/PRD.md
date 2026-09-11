@@ -146,3 +146,11 @@ See /app/memory/test_credentials.md
 - الجذر: تحقق هاتف المستفيد في createService كان يقبل beneficiary_whatsapp كبديل، والواجهة تنسخ أول إدخال هاتف للواتساب — مسح الهاتف يُبقي الواتساب → حفظ بلا هاتف مع أثر مالي.
 - الإصلاح: تحقق صارم لـbeneficiary_phone وحده (خادم createService سطر ~8259 + مرآة واجهة). الرفض قبل أي Balance/Journal. يغطي Create وEdit (كل المسارات تمر بـcreateService — insertOne وحيد).
 - F-PR16-002: pilgrim_name ليس Required في الخادم (POST /packages/:id/bookings) ولا في addBooking — لا نجمة ولا تغيير حسب التعليمات.
+
+## v3.90 — Super Admin المرحلة 1 (Shell + Dashboard) — NOT TESTED بطلب المستخدم
+- قرار AUDIT-002 (بأفضل تقدير بعد تخطي السؤال): اللوحة الجديدة داخل رحّال، تستوعب SuperAdminPanel القديم تدريجياً، وكل /api/admin/* أعيد استخدامها كما هي. اللوحة القديمة متاحة من عنصر "اللوحة الكلاسيكية" (تمرر كـprop legacyPanel) — صفر فقد وظيفي.
+- ملفات جديدة معيارية: app/admin/shell.js (Sidebar 13 قسماً + Header + Placeholders بمراحلها) و app/admin/dashboard.js (KPIs قراءة فقط من: /admin/tenants + password-reset-requests + installments-overview + office-verifications — بدون أي API جديد).
+- قسم "العروض والإعلانات" يعرض AnnouncementsManager القائم كما هو (prop) — التوسعة بالمرحلة 6.
+- تعديل page.js: سطرا استيراد وتوجيه فقط. لا تغيير في route.js إطلاقاً.
+- حوكمة: شارة "قراءة فقط مالياً" بالهيدر والشريط الجانبي؛ آلية audit_logs الفعلية تُفعّل مع أول عمليات كتابة (مرحلة 2+).
+- المتبقي: المراحل 2–8 حسب خطة المستخدم. AUDIT-001 (3900/3102) مؤجل للتحقق قبل أي تغيير محاسبي.

@@ -32,6 +32,7 @@ import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 // v3.87.5 — shared primitives + heavy screens extracted verbatim (structural move only)
 import { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_MAX_MB, DOC_MAX_FILE_BYTES, DOC_BATCH_MAX_MB, DOC_BATCH_MAX_BYTES, validateDocBatch, todayISO, api, AuthCtx, useAuth, Field, TopBar, ConfirmHost, askConfirm } from './shared'
+import AdminApp from './admin/shell' // v3.90 — Phase 1: modular Super Admin shell (reuses /api/admin/*)
 import { MeraajStoreScreen, BulkImportDialog } from './components-heavy'
 
 // ================================================================
@@ -11898,7 +11899,9 @@ function App() {
     <AuthCtx.Provider value={{ ...auth, refreshMe, logout }}>
       <TestEnvBadge />
       <ConfirmHost />
-      {auth.user.role === 'super_admin' ? <SuperAdminPanel /> : <TenantApp />}
+      {/* v3.90 — Phase 1: super_admin → new modular AdminApp shell. The legacy SuperAdminPanel
+          and AnnouncementsManager are passed in and REUSED inside it (zero loss, zero duplication) */}
+      {auth.user.role === 'super_admin' ? <AdminApp legacyPanel={<SuperAdminPanel />} announcements={<AnnouncementsManager />} /> : <TenantApp />}
     </AuthCtx.Provider>
   )
 }
