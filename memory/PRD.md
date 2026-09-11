@@ -177,3 +177,10 @@ See /app/memory/test_credentials.md
 - accountUsageCheck(): الاستخدام = تاريخ فعلي (journal_entries بالكود، vouchers.coa_account_code، وللسجل المرتبط: journals بالـparty_id + vouchers + tickets/visas/services + package_bookings + package_components + currency_exchanges بالـrecord id) + حزام رصيد غير صفري. "رصيد=0" لا يسمح بالحذف أبداً.
 - DELETE /accounts/:id: نظامي ممنوع؛ مجموعة بأبناء (حسابات أو سجلات تشغيلية تابعة) ممنوعة؛ مستخدم → رسالة "لا يمكن حذف الحساب لأنه مرتبط بعمليات أو قيود مالية. يمكنك إيقاف استخدامه أو تغيير اسمه بدلاً من حذفه."؛ غير مستخدم + مرتبط → حذف متسلسل آمن (السجل + الحساب) بعملية واحدة؛ لا إعادة ترقيم (next_child_seq لا يُمس).
 - FE: نص التأكيد "هل أنت متأكد من حذف الحساب؟ لا يمكن التراجع بعد الحذف." + toast يوضح الحذف المتسلسل.
+
+## v3.93 — Super Admin Phase 3 (مبيعات وسندات + محاسبة ورقابة + مركز الصلاحيات) — NOT TESTED بطلب المستخدم
+- الباك إند: lib/adminCenter.js (GET فقط — /admin/center/sales, /sales-detail, /vouchers, /accounting/*) وlib/adminPerms.js (/admin/perms/users, /user-preview, /roles CRUD مخصص فقط, /audit) مربوطة بـroute.js تحت حارس super_admin.
+- الواجهة: app/admin/sales.js (تبويبا مبيعات/سندات، فلاتر مكتب/نوع/حالة/عملة/دفع/تاريخ، تفاصيل قراءة فقط)، app/admin/accounting.js، app/admin/perms.js (أدوار: مدمج غير قابل للتعديل + مخصص بسبب إلزامي مسجل في audit_logs، مستخدمون قراءة فقط مع معاينة الصلاحيات الفعّالة والمصدر، سجل تدقيق).
+- shell.js: تفعيل تبويبات sales/vouchers/accounting/permissions (ready) مع key لإجبار remount بين المبيعات والسندات (initialTab).
+- الحوكمة: كل الشاشات المالية قراءة فقط صارمة — لا أزرار إنشاء/تعديل سندات أو قيود. القوالب المخصصة المفعّلة تندمج تلقائياً في /api/rbac/templates (محرك واحد). تعديل قالب لا يسري على المستخدمين الحاليين إلا بإعادة الإسناد.
+- Data gap موثق: last_login غير متتبع بالنظام — يظهر null.

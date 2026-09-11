@@ -9,6 +9,9 @@ import sharp from 'sharp'
 import { seedCoaTemplate, applyResetMigration, upsertTenantSettingsDefaults, ensureTenantSettingsUniqueIndex } from '@/lib/coa'
 // v3.91 — Phase 2: Office 360° READ-ONLY aggregations (modular — AUDIT-006)
 import { getOffice360 } from '@/lib/admin360'
+// v3.93 — Batch 1: Sales & Vouchers + Accounting oversight (read-only) + Permissions Center
+import { adminCenterHandler } from '@/lib/adminCenter'
+import { adminPermsHandler } from '@/lib/adminPerms'
 
 // v3.47 — Package image optimization settings (applied ONCE at upload; centralized — adjust here)
 const IMG_MAX_DIM = 1200        // longest side in px (aspect ratio preserved, never enlarged)
@@ -1702,12 +1705,28 @@ async function handleRoute(request, { params }) {
     // v3.45 — Role templates catalog for the permissions manager (owner only)
     if (route === '/rbac/templates' && method === 'GET') {
       if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
-      return ok({ templates: RBAC_ROLE_TEMPLATES(), defaults: DEFAULT_STAFF_PERMISSIONS })
+      // v3.93 — merge ACTIVE custom templates created in the Super Admin Permissions Center
+      // (single RBAC engine — customs are just extra templates offices can assign)
+      const customTpls = await db.collection('admin_role_templates').find({ active: true }, { projection: { _id: 0, key: 1, label: 1, desc: 1, perms: 1 } }).toArray().catch(() => [])
+      return ok({ templates: [...RBAC_ROLE_TEMPLATES(), ...customTpls], defaults: DEFAULT_STAFF_PERMISSIONS })
     }
 
     // ============ SUPER ADMIN ============
     if (route.startsWith('/admin/')) {
       if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+
+      // v3.93 — Batch 1 delegations (modular — AUDIT-006). Center = READ-ONLY (GET only).
+      if (route.startsWith('/admin/center/') && method === 'GET') {
+        const rC = await adminCenterHandler(db, route.slice('/admin/center'.length), new URL(request.url).searchParams)
+        return rC?.error ? bad(rC.error, rC.status || 400) : ok(rC)
+      }
+      if (route.startsWith('/admin/perms/')) {
+        let bodyP = null
+        if (method !== 'GET') { try { bodyP = await request.json() } catch { bodyP = {} } }
+        const rbac = { defaults: DEFAULT_STAFF_PERMISSIONS, templates: RBAC_ROLE_TEMPLATES, ownerAll: () => rbacAllPerms(true) }
+        const rP = await adminPermsHandler(db, route.slice('/admin/perms'.length), method, new URL(request.url).searchParams, bodyP, sess, rbac)
+        return rP?.error ? bad(rP.error, rP.status || 400) : ok(rP)
+      }
 
       // v3.91 — Phase 2: Office 360° (READ-ONLY — no writes, no balance recomputation).
       // Logic lives in lib/admin360.js; this is a single delegation line (AUDIT-006).

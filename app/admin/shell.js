@@ -24,14 +24,17 @@ import {
 import { useAuth } from '../shared'
 import AdminDashboard from './dashboard'
 import OfficesSection from './offices' // v3.91 — Phase 2
+import AdminSalesCenter from './sales' // v3.93 — Phase 3 (Sales & Vouchers — READ-ONLY)
+import AdminAccounting from './accounting' // v3.93 — Phase 3 (Accounting Control — READ-ONLY)
+import AdminPermsCenter from './perms' // v3.93 — Phase 3 (Permissions Center — RBAC)
 
 const SECTIONS = [
   { key: 'dashboard', label: 'نظرة عامة', icon: LayoutDashboard, phase: 1, ready: true },
   { key: 'offices', label: 'المكاتب / Office 360°', icon: Building2, phase: 2, ready: true },
-  { key: 'sales', label: 'المبيعات', icon: TrendingUp, phase: 3 },
-  { key: 'vouchers', label: 'السندات', icon: Receipt, phase: 3 },
-  { key: 'accounting', label: 'الحسابات والرقابة المالية', icon: Calculator, phase: 4 },
-  { key: 'permissions', label: 'الصلاحيات', icon: ShieldCheck, phase: 5 },
+  { key: 'sales', label: 'المبيعات', icon: TrendingUp, phase: 3, ready: true },
+  { key: 'vouchers', label: 'السندات', icon: Receipt, phase: 3, ready: true },
+  { key: 'accounting', label: 'الحسابات والرقابة المالية', icon: Calculator, phase: 3, ready: true },
+  { key: 'permissions', label: 'الصلاحيات', icon: ShieldCheck, phase: 3, ready: true },
   { key: 'ads', label: 'العروض والإعلانات', icon: Megaphone, phase: 6, ready: true },
   { key: 'backup', label: 'النسخ الاحتياطي والاستعادة', icon: DatabaseBackup, phase: 7 },
   { key: 'system', label: 'إدارة النظام', icon: Settings2, phase: 7 },
@@ -63,6 +66,10 @@ const AdminApp = ({ legacyPanel = null, announcements = null }) => {
   const renderContent = () => {
     if (active === 'dashboard') return <AdminDashboard onNavigate={setActive} />
     if (active === 'offices') return <OfficesSection />
+    if (active === 'sales') return <AdminSalesCenter key="sales" initialTab="sales" /> // v3.93 — Phase 3
+    if (active === 'vouchers') return <AdminSalesCenter key="vouchers" initialTab="vouchers" /> // v3.93 — Phase 3
+    if (active === 'accounting') return <AdminAccounting /> // v3.93 — Phase 3
+    if (active === 'permissions') return <AdminPermsCenter /> // v3.93 — Phase 3
     if (active === 'legacy') return legacyPanel || <PlaceholderSection section={current} />
     if (active === 'ads') {
       return (
