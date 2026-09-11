@@ -15,6 +15,9 @@ import { adminPermsHandler } from '@/lib/adminPerms'
 import { adminCommissionsHandler } from '@/lib/adminCommissions' // v3.94 — Batch 2 (READ-ONLY)
 import { adminRequestsHandler } from '@/lib/adminRequests' // v3.94 — Batch 2 (READ-ONLY)
 import { adminAdsHandler, activeAnnouncementsFor } from '@/lib/adminAds' // v3.94 — Batch 2 (extends announcements)
+import { adminSystemHandler } from '@/lib/adminSystem' // v3.95 — Batch 3 (Backup/Restore path/System)
+import { adminAuditHandler } from '@/lib/adminAudit' // v3.95 — Batch 3 (Central Audit + Health — READ-ONLY)
+import { adminNotifyHandler } from '@/lib/adminNotify' // v3.95 — Batch 3 (In-App Notifications)
 
 // v3.47 — Package image optimization settings (applied ONCE at upload; centralized — adjust here)
 const IMG_MAX_DIM = 1200        // longest side in px (aspect ratio preserved, never enlarged)
@@ -1740,6 +1743,36 @@ async function handleRoute(request, { params }) {
       if (route.startsWith('/admin/requests/') && method === 'GET') {
         const rRq = await adminRequestsHandler(db, route.slice('/admin/requests'.length), new URL(request.url).searchParams)
         return rRq?.error ? bad(rRq.error, rRq.status || 400) : ok(rRq)
+      }
+
+      // v3.95 — Batch 3 delegations (modular): System (backup/restore path/status/
+      // env/integrations/maintenance config), Central Audit (READ-ONLY, GET only),
+      // In-App Notifications. Environment/versions ctx built from REAL constants.
+      if (route.startsWith('/admin/system/') || route.startsWith('/admin/audit/') || route.startsWith('/admin/notify/')) {
+        let bodyS = null
+        if (method !== 'GET') { try { bodyS = await request.json() } catch { bodyS = {} } }
+        const baseS = process.env.NEXT_PUBLIC_BASE_URL || ''
+        const ctxS = {
+          envName: baseS.includes('rahaal-test') ? 'Test' : /emergent|preview/i.test(baseS) ? 'Preview' : 'Live',
+          baseHost: baseS.replace(/^https?:\/\//, '').split('/')[0] || null,
+          versions: { root: '3.88.4', health: '3.9.28', backup_export: '3.9.20' }, // as hardcoded in this file — shown as-is
+          dbNameSafe: process.env.DB_NAME || '(الافتراضي من الاتصال)',
+          keys: {
+            MERAAJ_SHARED_SECRET: !!process.env.MERAAJ_SHARED_SECRET,
+            MERAAJ_API_BASE_URL: !!process.env.MERAAJ_API_BASE_URL,
+            MERAAJ_WEBHOOK_URL: !!process.env.MERAAJ_WEBHOOK_URL,
+            MERAAJ_STORE_URL: !!process.env.MERAAJ_STORE_URL,
+          },
+          meraajHostSafe: (() => { try { return new URL(process.env.MERAAJ_API_BASE_URL || '').host || null } catch { return null } })(),
+        }
+        const spS = new URL(request.url).searchParams
+        let rS
+        if (route.startsWith('/admin/system/')) rS = await adminSystemHandler(db, route.slice('/admin/system'.length), method, spS, bodyS, sess, ctxS)
+        else if (route.startsWith('/admin/audit/')) {
+          if (method !== 'GET') return bad('سجل التدقيق قراءة فقط — لا تعديل ولا حذف', 405)
+          rS = await adminAuditHandler(db, route.slice('/admin/audit'.length), spS, ctxS)
+        } else rS = await adminNotifyHandler(db, route.slice('/admin/notify'.length), method, spS, bodyS, sess)
+        return rS?.error ? bad(rS.error, rS.status || 400) : ok(rS)
       }
 
       // v3.91 — Phase 2: Office 360° (READ-ONLY — no writes, no balance recomputation).

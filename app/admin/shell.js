@@ -30,6 +30,11 @@ import AdminPermsCenter from './perms' // v3.93 — Phase 3 (Permissions Center 
 import AdminCommissionsCenter from './commissions' // v3.94 — Batch 2 (Commissions — READ-ONLY)
 import AdminRequestsCenter from './requests' // v3.94 — Batch 2 (Requests — READ-ONLY)
 import AdminAdsCenter from './ads' // v3.94 — Batch 2 (extends AnnouncementsManager over the same API)
+import AdminBackupCenter from './backup' // v3.95 — Batch 3 (Backup & Restore path)
+import AdminSystemCenter from './system' // v3.95 — Batch 3 (System Status/Env/Integrations/Maintenance)
+import AdminAuditCenter from './audit' // v3.95 — Batch 3 (Central Audit — READ-ONLY)
+import AdminHealthCenter from './health' // v3.95 — Batch 3 (System Health — READ-ONLY)
+import AdminNotifyCenter from './notifications' // v3.95 — Batch 3 (In-App Notifications)
 
 const SECTIONS = [
   { key: 'dashboard', label: 'نظرة عامة', icon: LayoutDashboard, phase: 1, ready: true },
@@ -41,11 +46,11 @@ const SECTIONS = [
   { key: 'requests', label: 'مركز الطلبات', icon: Inbox, phase: 4, ready: true },
   { key: 'permissions', label: 'الصلاحيات', icon: ShieldCheck, phase: 3, ready: true },
   { key: 'ads', label: 'العروض والإعلانات', icon: Megaphone, phase: 6, ready: true },
-  { key: 'backup', label: 'النسخ الاحتياطي والاستعادة', icon: DatabaseBackup, phase: 7 },
-  { key: 'system', label: 'إدارة النظام', icon: Settings2, phase: 7 },
-  { key: 'audit', label: 'التدقيق والأمان', icon: FileSearch, phase: 8 },
-  { key: 'health', label: 'صحة النظام', icon: Activity, phase: 8 },
-  { key: 'notifications', label: 'التنبيهات', icon: Bell, phase: 8 },
+  { key: 'backup', label: 'النسخ الاحتياطي والاستعادة', icon: DatabaseBackup, phase: 5, ready: true },
+  { key: 'system', label: 'إدارة النظام', icon: Settings2, phase: 5, ready: true },
+  { key: 'audit', label: 'التدقيق والأمان', icon: FileSearch, phase: 5, ready: true },
+  { key: 'health', label: 'صحة النظام', icon: Activity, phase: 5, ready: true },
+  { key: 'notifications', label: 'التنبيهات', icon: Bell, phase: 5, ready: true },
   { key: 'reports', label: 'التقارير', icon: BarChart3, phase: 8 },
   { key: 'legacy', label: 'اللوحة الكلاسيكية', icon: PanelRight, ready: true },
 ]
@@ -77,6 +82,11 @@ const AdminApp = ({ legacyPanel = null, announcements = null }) => {
     if (active === 'commissions') return <AdminCommissionsCenter /> // v3.94 — Batch 2
     if (active === 'requests') return <AdminRequestsCenter /> // v3.94 — Batch 2
     if (active === 'permissions') return <AdminPermsCenter /> // v3.93 — Phase 3
+    if (active === 'backup') return <AdminBackupCenter /> // v3.95 — Batch 3
+    if (active === 'system') return <AdminSystemCenter /> // v3.95 — Batch 3
+    if (active === 'audit') return <AdminAuditCenter /> // v3.95 — Batch 3
+    if (active === 'health') return <AdminHealthCenter /> // v3.95 — Batch 3
+    if (active === 'notifications') return <AdminNotifyCenter onNavigate={setActive} /> // v3.95 — Batch 3
     if (active === 'legacy') return legacyPanel || <PlaceholderSection section={current} />
     if (active === 'ads') {
       // v3.94 — Batch 2: the extended Ads Center replaces the embedded legacy manager
