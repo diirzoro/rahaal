@@ -1573,11 +1573,24 @@ async function handleRoute(request, { params }) {
         if (ref) referredBy = ref.id
       }
       const myCode = genReferralCode()
+      // v4.0 — default trial plan: if the Super Admin picked one in pricing settings,
+      // its limits drive NEW signups; otherwise the legacy defaults (2 users / 1 branch / 30 entries).
+      let trialLimits = { max_users: 2, max_branches: 1, quota: 30, plan_tier: 'standard' }
+      try {
+        const cfgT = await getPricingConfig(db)
+        const dp = cfgT.default_trial_plan_key ? (cfgT.plans || []).find(p => p.key === cfgT.default_trial_plan_key && p.active !== false) : null
+        if (dp) trialLimits = {
+          max_users: Number(dp.max_users) === 0 ? 9999 : (Number(dp.max_users) || 2),
+          max_branches: Number(dp.max_branches) === 0 ? 9999 : (Number(dp.max_branches) || 1),
+          quota: Number(dp.quota_limit) > 0 ? Number(dp.quota_limit) : 30,
+          plan_tier: dp.key,
+        }
+      } catch { }
       const tenant = {
         id: uuidv4(), slug, name: b.name, status: 'active',
-        max_users: 2, max_branches: 1, subscription: 'trial',
-        plan_tier: 'standard', // v2.8 default tier (standard | silver | bronze | gold)
-        journal_quota: { used: 0, limit: 30, top_ups: [] }, // v2.8 — 30 free entries on signup (was 500)
+        max_users: trialLimits.max_users, max_branches: trialLimits.max_branches, subscription: 'trial',
+        plan_tier: trialLimits.plan_tier, // v2.8 default tier | v4.0 default trial plan key when configured
+        journal_quota: { used: 0, limit: trialLimits.quota, top_ups: [] }, // v2.8 — 30 free entries on signup (was 500)
         referral_code: myCode, referred_by: referredBy,
         referral_stats: { signups: 0, activations: 0, bonus_earned: 0 },
         activation_confirmed: false,
@@ -1897,10 +1910,17 @@ async function handleRoute(request, { params }) {
         }
       }
 
-      // v3.14 — Pricing config management (flexible discount + dynamic features)
+      // v3.14 → v4.0 — Pricing config management (flexible discount + dynamic features
+      // + per-plan description/currency/duration/quota/active/order + offer window +
+      // default trial plan). Every save is audited into the 'pricing_config_history'
+      // doc INSIDE the same platform_settings collection — no new collections.
       if (route === '/admin/pricing-config' && method === 'GET') {
         const cfg = await getPricingConfig(db)
         return ok({ ...cfg, _id: undefined })
+      }
+      if (route === '/admin/pricing-config/history' && method === 'GET') {
+        const h = await db.collection('platform_settings').findOne({ id: 'pricing_config_history' })
+        return ok({ entries: (h?.entries || []).slice().reverse() })
       }
       if (route === '/admin/pricing-config' && method === 'PUT') {
         const b = await request.json()
@@ -1908,24 +1928,60 @@ async function handleRoute(request, { params }) {
         if (b.discount_enabled !== undefined) upd.discount_enabled = !!b.discount_enabled
         if (b.discount_percent !== undefined) upd.discount_percent = Math.min(95, Math.max(0, Number(b.discount_percent) || 0))
         if (b.installments_count !== undefined) upd.installments_count = Math.max(1, Number(b.installments_count) || 5)
+        // v4.0 — offer window: when set, the discount applies ONLY inside the window
+        if (b.offer_start_at !== undefined) upd.offer_start_at = b.offer_start_at ? new Date(b.offer_start_at) : null
+        if (b.offer_end_at !== undefined) upd.offer_end_at = b.offer_end_at ? new Date(b.offer_end_at) : null
+        // v4.0 — default trial plan: drives limits for NEW public signups (never retroactive)
+        if (b.default_trial_plan_key !== undefined) upd.default_trial_plan_key = ['silver', 'gold', 'enterprise'].includes(b.default_trial_plan_key) ? b.default_trial_plan_key : null
         if (Array.isArray(b.plans)) {
           upd.plans = b.plans
             .filter(p => p && ['silver', 'gold', 'enterprise'].includes(p.key))
-            .map(p => ({
+            .map((p, i) => ({
               key: p.key,
               name_ar: String(p.name_ar || '').slice(0, 60),
               icon: String(p.icon || '').slice(0, 8),
+              description: String(p.description || '').slice(0, 300), // v4.0
+              currency: String(p.currency || 'USD').toUpperCase().slice(0, 8), // v4.0
+              duration_days: Math.max(1, Number(p.duration_days) || 365), // v4.0
               annual_price: Math.max(0, Number(p.annual_price) || 0),
               max_users: Math.max(0, Number(p.max_users) || 0),
               max_branches: Math.max(0, Number(p.max_branches) || 0),
+              quota_limit: Math.max(0, Number(p.quota_limit) || 0), // v4.0 — 0 = لا تُطبَّق حصة من الباقة
+              unlimited_journals: !!p.unlimited_journals, // v4.0 — الباقة تمنح قيوداً مفتوحة عند الإسناد
+              active: p.active !== false, // v4.0 — تفعيل/تعطيل ظهور الباقة للمشتركين
+              sort_order: Number.isFinite(Number(p.sort_order)) ? Number(p.sort_order) : i, // v4.0 — ترتيب الظهور
               features: (Array.isArray(p.features) ? p.features : []).map(f => String(f).slice(0, 120)).filter(Boolean).slice(0, 25),
             }))
         }
         const existing = await db.collection('platform_settings').findOne({ id: 'pricing_config' })
-        const merged = { ...(existing ? { ...DEFAULT_PRICING_CONFIG, ...existing } : DEFAULT_PRICING_CONFIG), ...upd }
+        const prevCfg = existing ? { ...DEFAULT_PRICING_CONFIG, ...existing } : DEFAULT_PRICING_CONFIG
+        const merged = { ...prevCfg, ...upd }
         delete merged._id // MongoDB immutable field must never be in $set
         await db.collection('platform_settings').updateOne({ id: 'pricing_config' }, { $set: merged }, { upsert: true })
-        return ok({ success: true, config: merged })
+        // v4.0 — audit trail (المنفذ، التاريخ، القيمة السابقة → الجديدة) field-by-field.
+        // NOTE: price/discount changes are NEVER retroactive — existing tenants keep
+        // their stored limits/prices until the admin explicitly re-assigns a plan.
+        const changes = []
+        for (const k of ['discount_enabled', 'discount_percent', 'installments_count', 'default_trial_plan_key', 'offer_start_at', 'offer_end_at']) {
+          if (upd[k] !== undefined && JSON.stringify(prevCfg[k] ?? null) !== JSON.stringify(merged[k] ?? null)) changes.push({ field: k, from: prevCfg[k] ?? null, to: merged[k] ?? null })
+        }
+        if (upd.plans) {
+          for (const np of upd.plans) {
+            const op = (prevCfg.plans || []).find(x => x.key === np.key) || {}
+            for (const f of ['name_ar', 'description', 'currency', 'duration_days', 'annual_price', 'max_users', 'max_branches', 'quota_limit', 'unlimited_journals', 'active', 'sort_order']) {
+              if (JSON.stringify(op[f] ?? null) !== JSON.stringify(np[f] ?? null)) changes.push({ field: `${np.key}.${f}`, from: op[f] ?? null, to: np[f] ?? null })
+            }
+            if (JSON.stringify(op.features || []) !== JSON.stringify(np.features || [])) changes.push({ field: `${np.key}.features`, from: `${(op.features || []).length} ميزة`, to: `${(np.features || []).length} ميزة` })
+          }
+        }
+        if (changes.length) {
+          await db.collection('platform_settings').updateOne(
+            { id: 'pricing_config_history' },
+            { $push: { entries: { $each: [{ at: new Date(), by: sess.user.email, changes }], $slice: -100 } } },
+            { upsert: true }
+          )
+        }
+        return ok({ success: true, config: merged, changes_logged: changes.length })
       }
 
       // v3.12 — Password reset requests inbox (admin-mediated forgot password)
@@ -2098,6 +2154,11 @@ async function handleRoute(request, { params }) {
         const tid = tenantIdMatch[1]
         if (method === 'PATCH') {
           const b = await request.json()
+          // v4.0 — «زيادة حصة القيود» has exactly ONE path: POST /admin/tenants/:id/topup.
+          // The old dual PATCH top_up_amount path is retired to prevent double-logging.
+          if (b.top_up_amount !== undefined) return bad('زيادة حصة القيود لها مسار مخصص واحد — استخدم زر «زيادة حصة القيود»')
+          const tCur = await db.collection('tenants').findOne({ id: tid })
+          if (!tCur) return bad('المكتب غير موجود', 404)
           const upd = {}
           if (b.status) upd.status = b.status
           if (b.name) upd.name = b.name
@@ -2105,7 +2166,7 @@ async function handleRoute(request, { params }) {
           if (b.max_branches !== undefined) upd.max_branches = b.max_branches === null ? null : Number(b.max_branches)
           if (b.quota_limit !== undefined) upd['journal_quota.limit'] = Number(b.quota_limit)
           if (b.plan_tier !== undefined) upd.plan_tier = b.plan_tier
-          // v3.14 — Assign 6-tier plan: auto-apply user/branch limits from pricing config
+          // v3.14 → v4.0 — Assign plan: auto-apply user/branch limits + plan quota + plan unlimited flag
           if (b.plan_key !== undefined && ['silver', 'gold', 'enterprise'].includes(b.plan_key)) {
             upd.plan_tier = b.plan_key
             const cfg = await getPricingConfig(db)
@@ -2113,13 +2174,33 @@ async function handleRoute(request, { params }) {
             if (p) {
               upd.max_users = Number(p.max_users) === 0 ? 9999 : Number(p.max_users)
               upd.max_branches = Number(p.max_branches) === 0 ? 9999 : Number(p.max_branches)
+              if (Number(p.quota_limit) > 0) upd['journal_quota.limit'] = Number(p.quota_limit) // v4.0
+              if (p.unlimited_journals === true) upd.unlimited_journals = true // v4.0
             }
           }
+          // v4.0 — LOWERING GUARD (server-enforced): never silently drop below the office's
+          // CURRENT user count. Nothing is auto-deleted — the admin must resolve the excess
+          // first (deactivate/delete users) and then retry the reduction.
+          if (upd.max_users !== undefined && upd.max_users !== null && Number(upd.max_users) > 0) {
+            const usersCount = await db.collection('users').countDocuments({ tenant_id: tid })
+            if (Number(upd.max_users) < usersCount) {
+              return bad(`⚠️ لا يمكن خفض حد المستخدمين إلى ${upd.max_users} — المكتب لديه ${usersCount} مستخدماً حالياً. عالج التجاوز أولاً (عطّل أو احذف مستخدمين) ثم أعد المحاولة`, 409)
+            }
+          }
+          // v4.0 — quota lowering guard: block reducing the journal quota below what is already used
+          if (upd['journal_quota.limit'] !== undefined) {
+            const usedNowQ = tCur.journal_quota?.used || 0
+            if (Number(upd['journal_quota.limit']) < usedNowQ) {
+              return bad(`⚠️ لا يمكن خفض حصة القيود إلى ${upd['journal_quota.limit']} — المكتب استخدم ${usedNowQ} قيداً بالفعل`, 409)
+            }
+          }
+          // NOTE: max_branches is stored/applied but has no operational entity to count yet
+          // (no branches collection exists) — documented gap, enforcement activates with the entity.
           // v3.14 — Billing mode: annual => unlimited journals immediately; installments => limited
           if (b.billing_mode !== undefined && ['annual', 'installments', null].includes(b.billing_mode)) {
             upd.billing_mode = b.billing_mode
             if (b.billing_mode === 'annual') upd.unlimited_journals = true
-            if (b.billing_mode === 'installments' && b.unlimited_journals === undefined) upd.unlimited_journals = false
+            if (b.billing_mode === 'installments' && b.unlimited_journals === undefined && upd.unlimited_journals === undefined) upd.unlimited_journals = false
           }
           // v3.14 — Manual unlimited-journals toggle (e.g. after final installment is paid)
           if (b.unlimited_journals !== undefined) upd.unlimited_journals = !!b.unlimited_journals
@@ -2127,19 +2208,6 @@ async function handleRoute(request, { params }) {
           if (b.subscription_price !== undefined) upd.subscription_price = Number(b.subscription_price) || 0
           if (b.subscription_expires_at !== undefined) upd.subscription_expires_at = b.subscription_expires_at ? new Date(b.subscription_expires_at) : null
           await db.collection('tenants').updateOne({ id: tid }, { $set: upd })
-          // Top-up quota
-          if (b.top_up_amount) {
-            const amt = Number(b.top_up_amount) || 0
-            if (amt > 0) {
-              await db.collection('tenants').updateOne(
-                { id: tid },
-                {
-                  $inc: { 'journal_quota.limit': amt },
-                  $push: { 'journal_quota.top_ups': { amount: amt, date: new Date(), by: sess.user.email, note: b.top_up_note || 'manual top-up' } }
-                }
-              )
-            }
-          }
           return ok({ success: true })
         }
         if (method === 'DELETE') {
@@ -2162,7 +2230,10 @@ async function handleRoute(request, { params }) {
         return ok({ success: true, status: newStatus })
       }
 
-      // v3.9.17 — Top-up: add journal-entries credits to tenant quota (Admin/Super Admin only)
+      // v3.9.17 → v4.0 — «زيادة حصة القيود» (THE single approved path — the old
+      // PATCH top_up_amount dual path is retired). Unified logging into
+      // journal_quota.top_ups (the original ledger): amount + reason + actor + date.
+      // wallet.topups dual-write removed. It adds JOURNAL QUOTA — not money.
       const topupMatch = route.match(/^\/admin\/tenants\/([^/]+)\/topup$/)
       if (topupMatch && method === 'POST') {
         const tid = topupMatch[1]
@@ -2170,15 +2241,22 @@ async function handleRoute(request, { params }) {
         if (!t) return bad('المكتب غير موجود', 404)
         const b = await request.json()
         const amount = parseInt(b.amount)
-        if (!amount || amount <= 0 || amount > 1000000) return bad('المبلغ يجب أن يكون بين 1 و 1,000,000 قيد')
+        if (!amount || amount <= 0 || amount > 1000000) return bad('المقدار يجب أن يكون بين 1 و 1,000,000 قيد')
         const note = String(b.note || '').slice(0, 200)
-        const currentLimit = t.journal_quota?.limit || 500
-        const newLimit = currentLimit + amount
+        if (!note.trim()) return bad('سبب الزيادة مطلوب')
+        const q = t.journal_quota || { used: 0, limit: 500, top_ups: [] }
+        const prevLimit = Number(q.limit) || 0
+        const newLimit = prevLimit + amount
+        const entry = { amount, note, date: new Date(), by: sess.user.email }
         await db.collection('tenants').updateOne({ id: tid }, {
-          $set: { 'journal_quota.limit': newLimit, 'journal_quota.last_topup_at': new Date() },
-          $push: { 'wallet.topups': { amount, note, at: new Date(), by: sess.user.email } },
+          $set: { 'journal_quota.limit': newLimit, 'journal_quota.last_topup_at': entry.date },
+          $push: { 'journal_quota.top_ups': entry },
         })
-        return ok({ success: true, tenant_id: tid, added: amount, new_limit: newLimit, prev_limit: currentLimit, note })
+        return ok({
+          success: true, tenant_id: tid,
+          added: amount, note, by: sess.user.email, at: entry.date,
+          quota: { prev_limit: prevLimit, new_limit: newLimit, used: Number(q.used) || 0, remaining: Math.max(0, newLimit - (Number(q.used) || 0)) },
+        })
       }
 
       // v3.9.17 — Reset password for the tenant's owner (Admin/Super Admin only)
@@ -3944,22 +4022,29 @@ async function handleRoute(request, { params }) {
     // Returns config with server-computed final prices based on the flexible discount.
     if (route === '/pricing' && method === 'GET') {
       const cfg = await getPricingConfig(db)
-      const disc = cfg.discount_enabled ? Math.min(95, Math.max(0, Number(cfg.discount_percent) || 0)) : 0
+      // v4.0 — offer window: when start/end dates are set, the discount only applies inside them
+      const nowP = new Date()
+      const inWindow = (!cfg.offer_start_at || new Date(cfg.offer_start_at) <= nowP) && (!cfg.offer_end_at || nowP <= new Date(cfg.offer_end_at))
+      const disc = (cfg.discount_enabled && inWindow) ? Math.min(95, Math.max(0, Number(cfg.discount_percent) || 0)) : 0
       const n = Number(cfg.installments_count) || 5
-      const plans = (cfg.plans || []).map(p => {
-        const annualOriginal = Number(p.annual_price) || 0
-        const annualFinal = Math.round(annualOriginal * (100 - disc)) / 100
-        const instOriginal = Math.round((annualOriginal / n) * 100) / 100
-        const instFinal = Math.round((annualFinal / n) * 100) / 100
-        return {
-          ...p,
-          pricing: {
-            annual: { original: annualOriginal, final: annualFinal },
-            installment: { count: n, original_per: instOriginal, final_per: instFinal, total_final: annualFinal },
-          },
-        }
-      })
-      return ok({ discount_enabled: cfg.discount_enabled, discount_percent: disc, installments_count: n, plans, current: { plan_tier: sess.tenant?.plan_tier || null, billing_mode: sess.tenant?.billing_mode || null, unlimited: isUnlimitedTenant(sess.tenant) } })
+      const plans = (cfg.plans || [])
+        .filter(p => p.active !== false) // v4.0 — الباقات المعطلة لا تظهر للمشتركين
+        .slice().sort((a, b2) => (Number(a.sort_order) || 0) - (Number(b2.sort_order) || 0)) // v4.0 — ترتيب الظهور
+        .map(p => {
+          const annualOriginal = Number(p.annual_price) || 0
+          const annualFinal = Math.round(annualOriginal * (100 - disc)) / 100
+          const instOriginal = Math.round((annualOriginal / n) * 100) / 100
+          const instFinal = Math.round((annualFinal / n) * 100) / 100
+          return {
+            ...p,
+            pricing: {
+              currency: p.currency || 'USD', // v4.0
+              annual: { original: annualOriginal, final: annualFinal, discount_value: Math.round((annualOriginal - annualFinal) * 100) / 100 }, // v4.0 — قيمة الخصم
+              installment: { count: n, original_per: instOriginal, final_per: instFinal, total_final: annualFinal },
+            },
+          }
+        })
+      return ok({ discount_enabled: !!(cfg.discount_enabled && inWindow), discount_percent: disc, installments_count: n, offer_start_at: cfg.offer_start_at || null, offer_end_at: cfg.offer_end_at || null, plans, current: { plan_tier: sess.tenant?.plan_tier || null, billing_mode: sess.tenant?.billing_mode || null, unlimited: isUnlimitedTenant(sess.tenant) } })
     }
 
     // v2.8 → v3.94 — Active announcements for tenant popup + banner

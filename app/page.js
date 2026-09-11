@@ -556,6 +556,7 @@ function SuperAdminPanel({ embedded = false }) {
   const [pricingOpen, setPricingOpen] = useState(false)
   const [instRows, setInstRows] = useState([])
   const [instTarget, setInstTarget] = useState(null)
+  const [quotaTarget, setQuotaTarget] = useState(null) // v4.0 — unified «زيادة حصة القيود» dialog
   const [tq, setTq] = useState('') // v3.99 — Batch 1: search/filter (embedded mode)
   const load = async () => {
     try {
@@ -769,13 +770,8 @@ function SuperAdminPanel({ embedded = false }) {
                               } catch (e) { toast.error(e.message) }
                             }}>💳 تأكيد دفع</Button>
                           )}
-                          {!embedded && <Button size="sm" variant="outline" className="text-emerald-600" onClick={async () => {
-                            const amt = await askConfirm({ title: 'إضافة رصيد قيود', desc: `إضافة رصيد قيود للمكتب "${t.name}"`, icon: '➕', confirmLabel: 'إضافة الرصيد', input: { label: 'عدد القيود', placeholder: '500', required: true }, inputDefault: '500' })
-                            if (!amt) return
-                            const n = Number(amt); if (!n || n < 1) return
-                            await api(`/admin/tenants/${t.id}`, { method: 'PATCH', body: { top_up_amount: n } })
-                            toast.success(`تم إضافة ${n} قيد`); load()
-                          }}><Plus className="w-3 h-3" /> رصيد</Button>}
+                          {/* v4.0 — renamed «رصيد» → «زيادة حصة القيود» + single unified POST /topup path */}
+                          {!embedded && <Button size="sm" variant="outline" className="text-emerald-600" onClick={() => setQuotaTarget(t)}><Plus className="w-3 h-3" /> زيادة حصة القيود</Button>}
                           <Button size="sm" variant="outline" onClick={() => setEditing(t)}><Settings className="w-3 h-3" /></Button>
                           {!embedded && <Button size="sm" variant="outline" className={t.status === 'active' ? 'text-amber-600' : 'text-emerald-600'}
                             onClick={async () => {
@@ -811,6 +807,7 @@ function SuperAdminPanel({ embedded = false }) {
       <AdminResetPasswordDialog req={resetTarget} onClose={() => setResetTarget(null)} onDone={load} />
       <PricingConfigDialog open={pricingOpen} onOpenChange={setPricingOpen} />
       <InstallmentsDialog row={instTarget} onClose={() => setInstTarget(null)} onChanged={load} />
+      <QuotaIncreaseDialog target={quotaTarget} onClose={() => setQuotaTarget(null)} onChanged={load} />
     </div>
   )
 }
@@ -976,80 +973,179 @@ function AdminResetPasswordDialog({ req, onClose, onDone }) {
   )
 }
 
-// v3.14 — Super Admin: pricing config (flexible discount toggle + dynamic features matrix)
-function PricingConfigDialog({ open, onOpenChange }) {
+// v3.14 → v4.0 — Super Admin: pricing config editor (the SAME old editor, extracted so it
+// can render as a full screen inside TenantApp «إدارة رحّال» AND as the legacy dialog).
+// v4.0 adds: description/currency/duration/quota/unlimited/active/sort per plan,
+// offer window, default trial plan, full price breakdown and the change-history log.
+function PricingConfigEditor({ asScreen = false, onDone }) {
   const [cfg, setCfg] = useState(null)
+  const [hist, setHist] = useState([])
   const [saving, setSaving] = useState(false)
-  useEffect(() => { if (open) api('/admin/pricing-config').then(setCfg).catch(e => toast.error(e.message)) }, [open])
+  const loadAll = () => {
+    api('/admin/pricing-config').then(setCfg).catch(e => toast.error(e.message))
+    api('/admin/pricing-config/history').then(h => setHist(h.entries || [])).catch(() => {})
+  }
+  useEffect(() => { loadAll() }, [])
   const setPlan = (key, patch) => setCfg(c => ({ ...c, plans: c.plans.map(p => p.key === key ? { ...p, ...patch } : p) }))
   const save = async () => {
     try {
       setSaving(true)
-      await api('/admin/pricing-config', { method: 'PUT', body: cfg })
-      toast.success('✅ تم حفظ إعدادات التسعير — تنعكس فوراً على واجهة المشتركين')
-      onOpenChange(false)
+      const r = await api('/admin/pricing-config', { method: 'PUT', body: cfg })
+      toast.success(`✅ تم حفظ إعدادات التسعير — سُجّل ${r.changes_logged || 0} تغييراً في السجل`)
+      loadAll()
+      onDone?.()
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
-  if (!cfg) return null
+  if (!cfg) return <div className="text-center py-8 text-slate-400"><Loader2 className="w-5 h-5 animate-spin inline" /> جاري التحميل...</div>
   const disc = cfg.discount_enabled ? (Number(cfg.discount_percent) || 0) : 0
   const n = Number(cfg.installments_count) || 5
+  const dateVal = (v) => v ? String(new Date(v).toISOString()).slice(0, 10) : ''
+  const FIELD_LABELS = { discount_enabled: 'تفعيل الخصم', discount_percent: 'نسبة الخصم %', installments_count: 'عدد الأقساط', default_trial_plan_key: 'الباقة الافتراضية للتجربة', offer_start_at: 'بداية العرض', offer_end_at: 'نهاية العرض', name_ar: 'الاسم', description: 'الوصف', currency: 'العملة', duration_days: 'مدة الاشتراك (يوم)', annual_price: 'السعر الأساسي', max_users: 'حد المستخدمين', max_branches: 'حد الفروع', quota_limit: 'حصة القيود', unlimited_journals: 'قيود مفتوحة', active: 'مفعّلة', sort_order: 'الترتيب', features: 'المزايا' }
+  const fieldLabel = (f) => { const [pk, fk] = String(f).includes('.') ? String(f).split('.') : [null, f]; const pl = pk ? (cfg.plans.find(p => p.key === pk)?.name_ar || pk) + ' — ' : ''; return pl + (FIELD_LABELS[fk] || fk) }
+  const fmtVal = (v) => v === true ? 'نعم' : v === false ? 'لا' : (v === null || v === undefined || v === '') ? '—' : String(v).length > 24 ? String(v).slice(0, 24) + '…' : String(v)
+  return (
+    <div className="space-y-4">
+      {asScreen && (
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h2 className="text-xl font-extrabold flex items-center gap-2">💲 الباقات والتسعير والخصومات</h2>
+            <div className="text-xs text-slate-500">أي تغيير ينعكس آلياً على شاشة الباقات لدى المشتركين — ولا يمس اشتراكات أو أقساطاً سابقة بأثر رجعي</div>
+          </div>
+          <Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? 'جارٍ الحفظ...' : '💾 حفظ ونشر التسعير'}</Button>
+        </div>
+      )}
+      {/* التسعير والخصومات — flexible discount + offer window + installments count */}
+      <div className={`p-3 rounded-lg border-2 ${cfg.discount_enabled ? 'bg-rose-50 border-rose-300' : 'bg-slate-50 border-slate-200'}`}>
+        <div className="text-xs font-black text-slate-700 mb-2">🔥 التسعير والخصومات</div>
+        <div className="flex items-center gap-4 flex-wrap">
+          <Button type="button" size="sm" onClick={() => setCfg({ ...cfg, discount_enabled: !cfg.discount_enabled })}
+            className={cfg.discount_enabled ? 'bg-rose-600 hover:bg-rose-700 text-white' : 'bg-slate-300 hover:bg-slate-400 text-slate-700'}>
+            {cfg.discount_enabled ? '🔥 الخصم مفعّل' : '⭕ الخصم متوقف'}
+          </Button>
+          <div className="flex items-center gap-2">
+            <Label className="text-xs">نسبة الخصم %</Label>
+            <Input type="number" min="0" max="95" value={cfg.discount_percent} onChange={e => setCfg({ ...cfg, discount_percent: Number(e.target.value) })} className="w-24 font-black text-center" disabled={!cfg.discount_enabled} />
+          </div>
+          <div className="flex items-center gap-2">
+            <Label className="text-xs">عدد الأقساط</Label>
+            <Input type="number" min="1" max="24" value={cfg.installments_count} onChange={e => setCfg({ ...cfg, installments_count: Number(e.target.value) })} className="w-20 font-black text-center" />
+          </div>
+          {/* v4.0 — offer window (فارغ = الخصم دائم ما دام مفعلاً) */}
+          <div className="flex items-center gap-2">
+            <Label className="text-xs">بداية العرض</Label>
+            <Input type="date" value={dateVal(cfg.offer_start_at)} onChange={e => setCfg({ ...cfg, offer_start_at: e.target.value || null })} className="w-36 text-xs" disabled={!cfg.discount_enabled} />
+          </div>
+          <div className="flex items-center gap-2">
+            <Label className="text-xs">نهاية العرض</Label>
+            <Input type="date" value={dateVal(cfg.offer_end_at)} onChange={e => setCfg({ ...cfg, offer_end_at: e.target.value || null })} className="w-36 text-xs" disabled={!cfg.discount_enabled} />
+          </div>
+        </div>
+        <div className="text-[10px] text-slate-500 mt-2">معنى الخصم: {disc}% خصم = المشترك يدفع {100 - disc}% من السعر الأساسي. إلغاء الخصم = 0%. ترك تاريخي العرض فارغين = خصم دائم ما دام مفعلاً.</div>
+      </div>
+      {/* إدارة الباقات — plans editor with live breakdown */}
+      <div className="text-xs font-black text-slate-700">📦 إدارة الباقات <span className="font-normal text-slate-400">(القيم الحالية افتراضية وقابلة للتعديل بالكامل)</span></div>
+      <div className="grid md:grid-cols-3 gap-3">
+        {cfg.plans.slice().sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)).map(p => {
+          const base = Number(p.annual_price) || 0
+          const final = Math.round(base * (100 - disc)) / 100
+          const discountValue = Math.round((base - final) * 100) / 100
+          const cur = (p.currency || 'USD') === 'USD' ? '$' : `${p.currency} `
+          return (
+            <Card key={p.key} className={`border-2 ${p.active === false ? 'opacity-60 border-dashed' : ''}`}>
+              <CardHeader className="pb-2 bg-slate-50">
+                <CardTitle className="text-sm flex items-center justify-between">
+                  <span>{p.icon} {p.name_ar} <span className="text-[10px] text-slate-400 font-mono">({p.key})</span></span>
+                  <Button type="button" size="sm" variant={p.active === false ? 'outline' : 'default'}
+                    className={p.active === false ? 'h-6 text-[10px] text-rose-600' : 'h-6 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white'}
+                    onClick={() => setPlan(p.key, { active: p.active === false })}>
+                    {p.active === false ? '⛔ معطّلة' : '✅ مفعّلة'}
+                  </Button>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="pt-3 space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <Field label="اسم الباقة"><Input value={p.name_ar} onChange={e => setPlan(p.key, { name_ar: e.target.value })} /></Field>
+                  <Field label="ترتيب الظهور"><Input type="number" min="0" value={p.sort_order ?? 0} onChange={e => setPlan(p.key, { sort_order: Number(e.target.value) })} /></Field>
+                </div>
+                <Field label="وصف الباقة"><Textarea rows={2} value={p.description || ''} onChange={e => setPlan(p.key, { description: e.target.value })} className="text-xs" placeholder="وصف يظهر للمشتركين..." /></Field>
+                <div className="grid grid-cols-3 gap-2">
+                  <Field label="السعر الأساسي"><Input type="number" min="0" value={p.annual_price} onChange={e => setPlan(p.key, { annual_price: Number(e.target.value) })} className="font-black" /></Field>
+                  <Field label="العملة"><Input value={p.currency || 'USD'} onChange={e => setPlan(p.key, { currency: e.target.value.toUpperCase() })} dir="ltr" className="text-center" /></Field>
+                  <Field label="المدة (يوم)"><Input type="number" min="1" value={p.duration_days || 365} onChange={e => setPlan(p.key, { duration_days: Number(e.target.value) })} /></Field>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <Field label="المستخدمون (0=∞)"><Input type="number" min="0" value={p.max_users} onChange={e => setPlan(p.key, { max_users: Number(e.target.value) })} /></Field>
+                  <Field label="الفروع (0=∞)"><Input type="number" min="0" value={p.max_branches} onChange={e => setPlan(p.key, { max_branches: Number(e.target.value) })} /></Field>
+                  <Field label="حصة القيود (0=يدوي)"><Input type="number" min="0" value={p.quota_limit || 0} onChange={e => setPlan(p.key, { quota_limit: Number(e.target.value) })} /></Field>
+                </div>
+                <div className="flex items-center justify-between p-2 rounded border bg-slate-50">
+                  <span className="text-[11px] font-bold">{p.unlimited_journals ? '♾️ الباقة تمنح قيوداً مفتوحة' : '🔒 قيود محدودة بالحصة'}</span>
+                  <Button type="button" size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => setPlan(p.key, { unlimited_journals: !p.unlimited_journals })}>{p.unlimited_journals ? 'إلغاء' : 'منح ∞'}</Button>
+                </div>
+                <label className="flex items-center gap-2 p-2 rounded border cursor-pointer bg-blue-50/50 text-[11px]">
+                  <input type="radio" name="default_trial_plan" checked={cfg.default_trial_plan_key === p.key} onChange={() => setCfg({ ...cfg, default_trial_plan_key: p.key })} />
+                  <span className="font-bold">الباقة الافتراضية للتجربة</span> <span className="text-slate-400">(حدودها تُطبق على التسجيلات الجديدة)</span>
+                </label>
+                <Field label={`المزايا (سطر لكل ميزة — ${(p.features || []).length})`}>
+                  <Textarea rows={5} value={(p.features || []).join('\n')} onChange={e => setPlan(p.key, { features: e.target.value.split('\n') })} className="text-xs" />
+                </Field>
+                {/* v4.0 — full breakdown: أساسي / نسبة / قيمة الخصم / نهائي */}
+                <div className="p-2 rounded bg-blue-50 border border-blue-200 text-[11px] space-y-0.5">
+                  <div className="font-bold text-blue-800">معاينة حية:</div>
+                  <div>السعر الأساسي: <b>{cur}{base}</b> · نسبة الخصم: <b>{disc}%</b> · قيمة الخصم: <b className="text-rose-600">-{cur}{discountValue}</b></div>
+                  <div>السعر النهائي سنوياً: {disc > 0 && <span className="line-through text-slate-400">{cur}{base}</span>} <b className="text-slate-900">{cur}{disc > 0 ? final : base}</b> <span className="text-slate-400">(يدفع {100 - disc}%)</span></div>
+                  <div>القسط: {disc > 0 && <span className="line-through text-slate-400">{cur}{Math.round((base / n) * 100) / 100}</span>} <b className="text-slate-900">{cur}{Math.round(((disc > 0 ? final : base) / n) * 100) / 100}</b> × {n}</div>
+                </div>
+              </CardContent>
+            </Card>
+          )
+        })}
+      </div>
+      <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ تذكير: مراقبة التأشيرات وإدارة البكجات متاحة في جميع الباقات بلا استثناء — أبقِها ضمن المزايا الثلاث. تغيير الأسعار/الخصم لا يمس اشتراكات أو أقساطاً قائمة — يسري على الجديد فقط، إلا بتدخل يدوي صريح على مكتب محدد.</div>
+      {!asScreen && (
+        <DialogFooter>
+          <Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? 'جارٍ الحفظ...' : '💾 حفظ ونشر التسعير'}</Button>
+        </DialogFooter>
+      )}
+      {/* v4.0 — change history: who / when / old → new */}
+      {asScreen && (
+        <Card>
+          <CardHeader className="pb-2"><CardTitle className="text-sm">🕘 سجل تغييرات الباقات والخصومات ({hist.length})</CardTitle></CardHeader>
+          <CardContent>
+            {hist.length === 0 ? <div className="text-center text-slate-400 text-sm py-3">لا توجد تغييرات مسجلة بعد — أول حفظ سيبدأ السجل</div> : (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {hist.map((h, i) => (
+                  <div key={i} className="p-2 rounded border bg-slate-50 text-[11px]">
+                    <div className="flex items-center justify-between font-bold text-slate-700">
+                      <span>👤 {h.by}</span>
+                      <span className="font-mono text-slate-500">{h.at ? new Date(h.at).toLocaleString('ar-EG') : '—'}</span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {(h.changes || []).map((c, j) => (
+                        <span key={j} className="px-1.5 py-0.5 rounded bg-white border text-slate-600">{fieldLabel(c.field)}: <b className="text-rose-600">{fmtVal(c.from)}</b> ← <b className="text-emerald-700">{fmtVal(c.to)}</b></span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+// Legacy thin wrapper — the old «💲 التسعير والخصومات» dialog now renders the SAME editor
+function PricingConfigDialog({ open, onOpenChange }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto" dir="rtl">
+      <DialogContent className="max-w-5xl max-h-[92vh] overflow-y-auto" dir="rtl">
         <DialogHeader>
           <DialogTitle>💲 إعدادات التسعير والخصومات</DialogTitle>
           <DialogDescription>أي تغيير هنا ينعكس آلياً على شاشة الباقات لدى جميع المشتركين</DialogDescription>
         </DialogHeader>
-        {/* Flexible discount */}
-        <div className={`p-3 rounded-lg border-2 ${cfg.discount_enabled ? 'bg-rose-50 border-rose-300' : 'bg-slate-50 border-slate-200'}`}>
-          <div className="flex items-center gap-4 flex-wrap">
-            <Button type="button" size="sm" onClick={() => setCfg({ ...cfg, discount_enabled: !cfg.discount_enabled })}
-              className={cfg.discount_enabled ? 'bg-rose-600 hover:bg-rose-700 text-white' : 'bg-slate-300 hover:bg-slate-400 text-slate-700'}>
-              {cfg.discount_enabled ? '🔥 الخصم مفعّل' : '⭕ الخصم متوقف'}
-            </Button>
-            <div className="flex items-center gap-2">
-              <Label className="text-xs">نسبة الخصم %</Label>
-              <Input type="number" min="0" max="95" value={cfg.discount_percent} onChange={e => setCfg({ ...cfg, discount_percent: Number(e.target.value) })} className="w-24 font-black text-center" disabled={!cfg.discount_enabled} />
-            </div>
-            <div className="flex items-center gap-2">
-              <Label className="text-xs">عدد الأقساط</Label>
-              <Input type="number" min="1" max="12" value={cfg.installments_count} onChange={e => setCfg({ ...cfg, installments_count: Number(e.target.value) })} className="w-20 font-black text-center" />
-            </div>
-          </div>
-        </div>
-        {/* Plans editor with live price preview */}
-        <div className="grid md:grid-cols-3 gap-3">
-          {cfg.plans.map(p => {
-            const final = Math.round(p.annual_price * (100 - disc)) / 100
-            return (
-              <Card key={p.key} className="border-2">
-                <CardHeader className="pb-2 bg-slate-50">
-                  <CardTitle className="text-sm">{p.icon} {p.name_ar} <span className="text-[10px] text-slate-400 font-mono">({p.key})</span></CardTitle>
-                </CardHeader>
-                <CardContent className="pt-3 space-y-2">
-                  <Field label="السعر السنوي الأساسي $"><Input type="number" min="0" value={p.annual_price} onChange={e => setPlan(p.key, { annual_price: Number(e.target.value) })} className="font-black" /></Field>
-                  <div className="grid grid-cols-2 gap-2">
-                    <Field label="حد المستخدمين (0=∞)"><Input type="number" min="0" value={p.max_users} onChange={e => setPlan(p.key, { max_users: Number(e.target.value) })} /></Field>
-                    <Field label="حد الفروع (0=∞)"><Input type="number" min="0" value={p.max_branches} onChange={e => setPlan(p.key, { max_branches: Number(e.target.value) })} /></Field>
-                  </div>
-                  <Field label={`المزايا (سطر لكل ميزة — ${(p.features || []).length})`}>
-                    <Textarea rows={6} value={(p.features || []).join('\n')} onChange={e => setPlan(p.key, { features: e.target.value.split('\n') })} className="text-xs" />
-                  </Field>
-                  <div className="p-2 rounded bg-blue-50 border border-blue-200 text-[11px] space-y-0.5">
-                    <div className="font-bold text-blue-800">معاينة حية:</div>
-                    <div>سنوي: {disc > 0 && <span className="line-through text-slate-400">${p.annual_price}</span>} <b className="text-slate-900">${disc > 0 ? final : p.annual_price}</b></div>
-                    <div>قسط: {disc > 0 && <span className="line-through text-slate-400">${Math.round((p.annual_price / n) * 100) / 100}</span>} <b className="text-slate-900">${Math.round(((disc > 0 ? final : p.annual_price) / n) * 100) / 100}</b> × {n}</div>
-                  </div>
-                </CardContent>
-              </Card>
-            )
-          })}
-        </div>
-        <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ تذكير: مراقبة التأشيرات وإدارة البكجات متاحة في جميع الباقات بلا استثناء — أبقِها ضمن المزايا الثلاث.</div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
-          <Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? 'جارٍ الحفظ...' : '💾 حفظ ونشر التسعير'}</Button>
-        </DialogFooter>
+        {open && <PricingConfigEditor onDone={() => onOpenChange(false)} />}
       </DialogContent>
     </Dialog>
   )
@@ -1131,6 +1227,176 @@ function InstallmentsDialog({ row, onClose, onChanged }) {
         <DialogFooter><Button variant="outline" onClick={onClose}>إغلاق</Button></DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// v4.0 — «زيادة حصة القيود» (renamed from the misleading «إضافة رصيد»): it raises the
+// JOURNAL-ENTRIES quota — it adds NO money to any wallet. ONE path only: POST /topup.
+function QuotaIncreaseDialog({ target, onClose, onChanged }) {
+  const [amount, setAmount] = useState(500)
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+  if (!target) return null
+  const q = target.journal_quota || { used: 0, limit: 0 }
+  const remaining = Math.max(0, (q.limit || 0) - (q.used || 0))
+  const submit = async () => {
+    const n = Number(amount)
+    if (!n || n < 1) return toast.error('أدخل مقدار الزيادة')
+    if (!note.trim()) return toast.error('سبب الزيادة مطلوب')
+    try {
+      setBusy(true)
+      const r = await api(`/admin/tenants/${target.id}/topup`, { method: 'POST', body: { amount: n, note } })
+      toast.success(`✅ زيدت حصة القيود: ${r.quota.prev_limit} ← ${r.quota.new_limit} (المتبقي الآن ${r.quota.remaining})`)
+      onChanged(); onClose()
+    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <Dialog open={!!target} onOpenChange={v => { if (!v) onClose() }}>
+      <DialogContent className="max-w-md" dir="rtl">
+        <DialogHeader>
+          <DialogTitle>➕ زيادة حصة القيود: {target.name}</DialogTitle>
+          <DialogDescription>تزيد حصة قيود اليومية فقط — لا تضيف أي أموال إلى محفظة المكتب</DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <div className="p-2 rounded border bg-slate-50"><div className="text-[10px] text-slate-500">الحصة الحالية</div><div className="font-black">{q.limit ?? 0}</div></div>
+          <div className="p-2 rounded border bg-amber-50"><div className="text-[10px] text-slate-500">المستخدم</div><div className="font-black text-amber-700">{q.used ?? 0}</div></div>
+          <div className="p-2 rounded border bg-emerald-50"><div className="text-[10px] text-slate-500">المتبقي</div><div className="font-black text-emerald-700">{remaining}</div></div>
+        </div>
+        <Field label="مقدار الزيادة (عدد القيود) *"><Input type="number" min="1" max="1000000" value={amount} onChange={e => setAmount(e.target.value)} className="font-black" /></Field>
+        <Field label="سبب الزيادة *"><Input value={note} onChange={e => setNote(e.target.value)} placeholder="مثال: تجديد اشتراك سنوي / تعويض / عرض ترويجي" /></Field>
+        <div className="text-[10px] text-slate-500">تُسجَّل العملية باسم المنفذ والتاريخ والسبب في سجل زيادات المكتب (top_ups).</div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>إلغاء</Button>
+          <Button onClick={submit} disabled={busy} className="bg-emerald-600 hover:bg-emerald-700 text-white">{busy ? '...' : '➕ تنفيذ الزيادة'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// v4.0 — Batch 2: «الاشتراكات والأقساط» screen inside TenantApp — reuses the OLD APIs
+// and dialogs verbatim (confirm-payment v2.8, installments v3.16, unlimited toggle v3.14,
+// EditTenantDialog overrides). Demo→Paid conversion lives here.
+function PlatformSubscriptionsScreen() {
+  const [data, setData] = useState(null)
+  const [instRows, setInstRows] = useState([])
+  const [instTarget, setInstTarget] = useState(null)
+  const [editing, setEditing] = useState(null)
+  const [quotaTarget, setQuotaTarget] = useState(null)
+  const [q, setQ] = useState('')
+  const load = async () => {
+    try {
+      const [d, ins] = await Promise.all([
+        api('/admin/tenants'),
+        api('/admin/installments-overview').catch(() => []),
+      ])
+      setData(d); setInstRows(ins || [])
+    } catch (e) { toast.error(e.message) }
+  }
+  useEffect(() => { load() }, [])
+  const insById = {}
+  for (const r of instRows) insById[r.id] = r
+  const tenants = (data?.tenants || []).filter(t => !t.is_platform_org && (!q.trim() || `${t.name} ${t.slug || ''}`.includes(q.trim())))
+  const trialCount = tenants.filter(t => (t.subscription || 'trial') === 'trial').length
+  const paidCount = tenants.filter(t => t.subscription === 'paid' || t.activation_confirmed).length
+  const overdueCount = instRows.filter(r => r.overdue).length
+  const confirmPayment = async (t) => {
+    if (!(await askConfirm({ title: 'تحويل إلى مدفوع (Demo → Paid)', desc: `تأكيد أن المكتب "${t.name}" قد دفع؟ سيُفعَّل الاشتراك المدفوع فوراً.`, icon: '💳', confirmLabel: 'تأكيد الدفع' }))) return
+    try {
+      const r = await api(`/admin/tenants/${t.id}/confirm-payment`, { method: 'POST' })
+      toast.success(r.referrer_bonus ? `✅ تم التأكيد + منح +${r.referrer_bonus.bonus_added} قيد إلى "${r.referrer_bonus.referrer_name}"` : '✅ تم تأكيد الدفع — المكتب مدفوع الآن')
+      load()
+    } catch (e) { toast.error(e.message) }
+  }
+  const toggleUnlimited = async (t) => {
+    const next = !t.unlimited_journals
+    if (!(await askConfirm({ title: next ? '♾️ فتح القيود المحاسبية' : '🔒 إغلاق القيود المحاسبية', desc: next ? `فتح قيود غير محدودة للمكتب "${t.name}"؟ (مثلاً بعد سداد آخر قسط أو دفع سنوي)` : `إعادة المكتب "${t.name}" إلى الحصة المحدودة؟`, icon: next ? '♾️' : '🔒', confirmLabel: 'تأكيد' }))) return
+    try { await api(`/admin/tenants/${t.id}`, { method: 'PATCH', body: { unlimited_journals: next } }); toast.success(next ? '♾️ فُتحت القيود' : '🔒 أُغلقت القيود'); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h2 className="text-xl font-extrabold">💳 الاشتراكات والأقساط</h2>
+          <div className="text-xs text-slate-500">التحويل من تجريبي إلى مدفوع، جدولة الأقساط، فتح/إغلاق القيود، وزيادة حصة القيود</div>
+        </div>
+        <Input value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 بحث بالاسم..." className="h-9 w-52" />
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">المكاتب</div><div className="text-xl font-black">{tenants.length}</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">تجريبي</div><div className="text-xl font-black text-amber-600">{trialCount}</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">مدفوع</div><div className="text-xl font-black text-emerald-600">{paidCount}</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">أقساط متأخرة</div><div className={`text-xl font-black ${overdueCount ? 'text-rose-600' : 'text-slate-700'}`}>{overdueCount}</div></CardContent></Card>
+      </div>
+      <Card>
+        <CardContent className="pt-4 overflow-x-auto">
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead>المكتب</TableHead>
+              <TableHead>الاشتراك</TableHead>
+              <TableHead>الباقة · الدفع</TableHead>
+              <TableHead className="text-center">حصة القيود</TableHead>
+              <TableHead className="text-center">الأقساط</TableHead>
+              <TableHead>انتهاء الاشتراك</TableHead>
+              <TableHead className="text-left">إجراءات</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>
+              {tenants.map(t => {
+                const qta = t.journal_quota || { used: 0, limit: 0 }
+                const ins = insById[t.id]
+                const isPaid = t.subscription === 'paid' || t.activation_confirmed
+                const expired = t.subscription_expires_at && new Date(t.subscription_expires_at) < new Date()
+                return (
+                  <TableRow key={t.id} className={ins?.overdue ? 'bg-rose-50/60' : ''}>
+                    <TableCell><div className="font-semibold text-sm">{t.name}</div><div className="text-[10px] text-slate-400 font-mono">{t.slug}</div></TableCell>
+                    <TableCell>
+                      {isPaid
+                        ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">💰 مدفوع</Badge>
+                        : <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">🧪 تجريبي</Badge>}
+                      {t.activation_confirmed && <div className="text-[9px] text-emerald-600 mt-0.5">✅ دفع مؤكد</div>}
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      <div>{t.plan_tier === 'silver' ? '🥈 سيلفر' : t.plan_tier === 'gold' ? '🥇 جولد' : t.plan_tier === 'enterprise' ? '🏢 إنتربرايز' : t.plan_tier || '—'}</div>
+                      <div className="text-[10px] text-slate-500">{t.billing_mode === 'annual' ? '📅 سنوي' : t.billing_mode === 'installments' ? '💳 أقساط' : '—'} {t.unlimited_journals && <span className="text-emerald-600 font-bold">♾️</span>}</div>
+                    </TableCell>
+                    <TableCell className="text-center">
+                      <div className="text-xs font-bold">{t.unlimited_journals ? '♾️ مفتوحة' : `${qta.used} / ${qta.limit}`}</div>
+                      {!t.unlimited_journals && <div className="text-[9px] text-slate-400">متبقٍ {Math.max(0, (qta.limit || 0) - (qta.used || 0))}</div>}
+                    </TableCell>
+                    <TableCell className="text-center">
+                      {ins && ins.total_count > 0 ? (
+                        <div>
+                          <span className="text-xs font-black">{ins.paid_count}/{ins.total_count}</span>
+                          {ins.overdue && <Badge className="bg-rose-600 text-white text-[9px] mr-1">متأخر</Badge>}
+                          {ins.all_paid && <Badge className="bg-emerald-600 text-white text-[9px] mr-1">مكتمل</Badge>}
+                        </div>
+                      ) : <span className="text-[10px] text-slate-400">بلا جدول</span>}
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      {t.subscription_expires_at ? <span className={expired ? 'text-rose-600 font-bold' : ''}>{String(t.subscription_expires_at).slice(0, 10)}{expired && ' ⚠️'}</span> : '—'}
+                    </TableCell>
+                    <TableCell className="text-left">
+                      <div className="flex gap-1 justify-end flex-wrap">
+                        {!t.activation_confirmed && <Button size="sm" variant="outline" className="h-7 text-[11px] text-blue-600 border-blue-300" onClick={() => confirmPayment(t)}>💳 تأكيد الدفع</Button>}
+                        <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => setInstTarget({ id: t.id, name: t.name, plan_tier: t.plan_tier, installments: (insById[t.id]?.installments) || t.installments || [], unlimited_journals: !!t.unlimited_journals })}>📅 الأقساط</Button>
+                        <Button size="sm" variant="outline" className={`h-7 text-[11px] ${t.unlimited_journals ? 'text-rose-600' : 'text-emerald-600'}`} onClick={() => toggleUnlimited(t)}>{t.unlimited_journals ? '🔒 إغلاق القيود' : '♾️ فتح القيود'}</Button>
+                        <Button size="sm" variant="outline" className="h-7 text-[11px] text-emerald-700" onClick={() => setQuotaTarget(t)}>➕ زيادة حصة القيود</Button>
+                        <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => setEditing(t)}><Settings className="w-3 h-3" /></Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+              {tenants.length === 0 && <TableRow><TableCell colSpan={7} className="text-center py-8 text-slate-400">لا توجد مكاتب</TableCell></TableRow>}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+      <InstallmentsDialog row={instTarget} onClose={() => setInstTarget(null)} onChanged={load} />
+      <EditTenantDialog tenant={editing} onOpenChange={v => { if (!v) setEditing(null) }} onSaved={() => { setEditing(null); load() }} />
+      <QuotaIncreaseDialog target={quotaTarget} onClose={() => setQuotaTarget(null)} onChanged={load} />
+    </div>
   )
 }
 
@@ -1610,6 +1876,9 @@ const NAV = [
   { id: 'affiliate', label: 'التسويق بالعمولة', icon: User, color: 'from-emerald-600 to-teal-500' },
   // v3.99 — Batch 1: old Super Admin sections merged into the shared sidebar (platform SA only — see canModule)
   { id: 'platform-offices', label: 'إدارة المكاتب', icon: Building2, color: 'from-slate-700 to-blue-600', group: 'إدارة رحّال' },
+  // v4.0 — Batch 2: old plans/pricing + subscriptions/installments restored inside TenantApp
+  { id: 'platform-plans', label: 'الباقات والتسعير', icon: Wallet, color: 'from-emerald-700 to-teal-500', group: 'إدارة رحّال' },
+  { id: 'platform-subs', label: 'الاشتراكات والأقساط', icon: ReceiptText, color: 'from-blue-700 to-indigo-500', group: 'إدارة رحّال' },
   { id: 'platform-ads', label: 'الإعلانات والعروض', icon: ImageIcon, color: 'from-orange-600 to-amber-500', group: 'إدارة رحّال' },
   { id: 'help',      label: '📖 دليل الاستخدام', icon: BookOpenText, color: 'from-pink-600 to-rose-500' },
   { id: 'settings',  label: 'إعدادات المكتب', icon: Settings, color: 'from-slate-800 to-slate-600' },
@@ -11083,6 +11352,9 @@ function TenantApp({ onOpenPlatform = null }) {
         {tabAllowed && tab === 'affiliate' && <ErrorBoundary tabName="التسويق بالعمولة"><AffiliateScreen /></ErrorBoundary>}
         {/* v3.99 — Batch 1: «إدارة رحّال» — the OLD live admin components reused as-is (embedded) */}
         {tabAllowed && tab === 'platform-offices' && <ErrorBoundary tabName="إدارة المكاتب"><SuperAdminPanel embedded /></ErrorBoundary>}
+        {/* v4.0 — Batch 2: the OLD pricing editor (v3.14) + subscriptions/installments (v3.16) reused as screens */}
+        {tabAllowed && tab === 'platform-plans' && <ErrorBoundary tabName="الباقات والتسعير"><PricingConfigEditor asScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-subs' && <ErrorBoundary tabName="الاشتراكات والأقساط"><PlatformSubscriptionsScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'platform-ads' && <ErrorBoundary tabName="الإعلانات والعروض"><AnnouncementsManager /></ErrorBoundary>}
         {tabAllowed && tab === 'help' && <ErrorBoundary tabName="دليل الاستخدام"><HelpCenter setTab={setTab} /></ErrorBoundary>}
 
@@ -11146,8 +11418,9 @@ function PricingPlans({ tenant }) {
     enterprise: { ring: 'border-indigo-400', head: 'bg-gradient-to-l from-indigo-100 to-blue-50', badge: 'bg-indigo-600' },
   }
   const contactWA = (p) => {
+    const cur = (p.pricing?.currency || 'USD') === 'USD' ? '$' : `${p.pricing?.currency || ''} `
     const modeTxt = mode === 'annual' ? 'سنوي (دفعة واحدة — قيود مفتوحة)' : `أقساط (${cfg.installments_count} أقساط)`
-    const price = mode === 'annual' ? `$${p.pricing.annual.final}` : `$${p.pricing.installment.final_per} × ${cfg.installments_count}`
+    const price = mode === 'annual' ? `${cur}${p.pricing.annual.final}` : `${cur}${p.pricing.installment.final_per} × ${cfg.installments_count}`
     const msg = `أرغب في الاشتراك بباقة ${p.name_ar} — ${modeTxt} بسعر ${price}\nالمكتب: ${tenant?.name || ''}`
     window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
   }
@@ -11164,25 +11437,30 @@ function PricingPlans({ tenant }) {
           const st = PLAN_STYLE[p.key] || PLAN_STYLE.silver
           const isCurrent = tenant?.plan_tier === p.key
           const ann = p.pricing.annual, inst = p.pricing.installment
+          const cur = (p.pricing?.currency || 'USD') === 'USD' ? '$' : `${p.pricing?.currency || ''} ` // v4.0 — plan currency
+          const durTxt = p.duration_days && Number(p.duration_days) !== 365 ? `لكل ${p.duration_days} يوماً — دفعة واحدة` : 'سنوياً — دفعة واحدة' // v4.0 — plan duration
           return (
             <Card key={p.key} className={`${st.ring} border-2 relative overflow-hidden`}>
               {p.key === 'gold' && <div className="absolute top-2 left-2"><Badge className="bg-amber-500 text-white text-[10px]">⭐ الأكثر طلباً</Badge></div>}
               {isCurrent && <div className="absolute top-2 right-2"><Badge className="bg-emerald-600 text-white text-[10px]">باقتك الحالية</Badge></div>}
               <CardHeader className={`${st.head} pb-3`}>
                 <CardTitle className="text-center text-lg">{p.icon} {p.name_ar}</CardTitle>
+                {p.description && <div className="text-center text-[10.5px] text-slate-500">{p.description}</div>}
                 <div className="text-center mt-1">
                   {mode === 'annual' ? (
                     <>
-                      {hasDisc && <div className="text-slate-400 line-through text-base font-light">${ann.original}</div>}
-                      <div className="text-3xl font-black text-slate-900">${hasDisc ? ann.final : ann.original}</div>
-                      <div className="text-[11px] text-slate-500">سنوياً — دفعة واحدة</div>
+                      {hasDisc && <div className="text-slate-400 line-through text-base font-light">{cur}{ann.original}</div>}
+                      <div className="text-3xl font-black text-slate-900">{cur}{hasDisc ? ann.final : ann.original}</div>
+                      <div className="text-[11px] text-slate-500">{durTxt}</div>
+                      {hasDisc && ann.discount_value > 0 && <div className="text-[10px] font-bold text-rose-600">وفّرت {cur}{ann.discount_value} (خصم {cfg.discount_percent}%)</div>}
                       <div className="text-[11px] font-bold text-emerald-700 mt-1">♾️ قيود محاسبية مفتوحة فوراً</div>
                     </>
                   ) : (
                     <>
-                      {hasDisc && <div className="text-slate-400 line-through text-base font-light">${inst.original_per}</div>}
-                      <div className="text-3xl font-black text-slate-900">${hasDisc ? inst.final_per : inst.original_per}</div>
-                      <div className="text-[11px] text-slate-500">× {inst.count} أقساط (الإجمالي ${hasDisc ? inst.total_final : ann.original})</div>
+                      {hasDisc && <div className="text-slate-400 line-through text-base font-light">{cur}{inst.original_per}</div>}
+                      <div className="text-3xl font-black text-slate-900">{cur}{hasDisc ? inst.final_per : inst.original_per}</div>
+                      <div className="text-[11px] text-slate-500">× {inst.count} أقساط (الإجمالي {cur}{hasDisc ? inst.total_final : ann.original})</div>
+                      {hasDisc && ann.discount_value > 0 && <div className="text-[10px] font-bold text-rose-600">وفّرت {cur}{ann.discount_value} إجمالاً (خصم {cfg.discount_percent}%)</div>}
                       <div className="text-[11px] font-bold text-blue-700 mt-1">🔒 قيود محدودة حتى سداد آخر قسط</div>
                     </>
                   )}
