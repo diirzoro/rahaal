@@ -21,6 +21,10 @@ import { adminNotifyHandler } from '@/lib/adminNotify' // v3.95 — Batch 3 (In-
 import { adminReportsHandler } from '@/lib/adminReports' // v3.96 — Batch 4 (Reports — READ-ONLY)
 import { adminDisputesHandler } from '@/lib/adminDisputes' // v3.96 — Batch 4 (Disputes)
 import { adminCurrencyHandler } from '@/lib/adminCurrency' // v3.96 — Batch 4 (Currencies & FX)
+import { adminGate, adminCan, adminStaffHandler } from '@/lib/adminStaff' // v3.97 — Batch 5 (Admin realm + staff RBAC)
+import { adminGeoHandler } from '@/lib/adminGeo' // v3.97 — Batch 5 (Geo locations)
+import { adminPayFinHandler } from '@/lib/adminPayFin' // v3.97 — Batch 5 (Payment methods & financial entities)
+import { adminRefDataHandler } from '@/lib/adminRefData' // v3.97 — Batch 5 (Unified reference data)
 
 // v3.47 — Package image optimization settings (applied ONCE at upload; centralized — adjust here)
 const IMG_MAX_DIM = 1200        // longest side in px (aspect ratio preserved, never enlarged)
@@ -478,6 +482,9 @@ async function getPatSession(request, db) {
   }
 }
 function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
+// v3.97 — Batch 5: MAIN super admin realm check (role string is not enough —
+// a tenant user mistakenly holding 'super_admin' must NOT pass admin gates).
+const isMainSA = (u) => !!u && u.role === 'super_admin' && !u.tenant_id
 function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price, billing_mode: t.billing_mode || null, unlimited_journals: !!t.unlimited_journals } : null }
 
 // ============ v3.14 — PRICING & PLANS (Phase 2) ============
@@ -1693,7 +1700,7 @@ async function handleRoute(request, { params }) {
     // ============ v3.45 — RBAC PHASE 1: module-level access enforcement (staff only) ============
     // Server-side guard (not just UI hiding). Owner/super_admin bypass. Shared lookup endpoints
     // (/clients, /suppliers, /boxes, /accounts) stay open as they feed dropdowns across screens.
-    if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') {
+    if (sess.user.role !== 'owner' && !isMainSA(sess.user)) {
       const P = effectivePermissions(sess.user)
       const deny = (label) => bad(`🚫 غير مصرح — ليس لديك صلاحية الوصول إلى قسم ${label}`, 403)
       if (/^\/tickets/.test(route) && !P.mod_tickets) return deny('حجز التذاكر')
@@ -1722,7 +1729,27 @@ async function handleRoute(request, { params }) {
 
     // ============ SUPER ADMIN ============
     if (route.startsWith('/admin/')) {
-      if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      // v3.97 — Batch 5: ADMIN REALM GATE (server-side, not UI hiding).
+      // Replaces the plain role string check: main super_admin must be
+      // tenant-less (a tenant user holding 'super_admin' by mistake is
+      // rejected), and rahaal admin staff pass per-section/per-action RBAC.
+      const gateErr = await adminGate(db, sess, route, method)
+      if (gateErr) return bad(gateErr.error, gateErr.status)
+
+      // v3.97 — Batch 5 delegations: staff RBAC, geo, payments/entities, refdata.
+      if (route.startsWith('/admin/staff/') || route.startsWith('/admin/geo/') || route.startsWith('/admin/payfin/') || route.startsWith('/admin/refdata/')) {
+        let bodyB5 = null
+        if (method !== 'GET') { try { bodyB5 = await request.json() } catch { bodyB5 = {} } }
+        const spB5 = new URL(request.url).searchParams
+        const canB5 = await adminCan(db, sess)
+        const ctxB5 = { currencies: CURRENCIES, baseCurrency: BASE_CURRENCY }
+        let rB5
+        if (route.startsWith('/admin/staff/')) rB5 = await adminStaffHandler(db, route.slice('/admin/staff'.length), method, spB5, bodyB5, sess)
+        else if (route.startsWith('/admin/geo/')) rB5 = await adminGeoHandler(db, route.slice('/admin/geo'.length), method, spB5, bodyB5, sess, canB5)
+        else if (route.startsWith('/admin/payfin/')) rB5 = await adminPayFinHandler(db, route.slice('/admin/payfin'.length), method, spB5, bodyB5, sess, canB5, ctxB5)
+        else rB5 = await adminRefDataHandler(db, route.slice('/admin/refdata'.length), method, spB5, bodyB5, sess, canB5)
+        return rB5?.error ? bad(rB5.error, rB5.status || 400) : ok(rB5)
+      }
 
       // v3.93 — Batch 1 delegations (modular — AUDIT-006). Center = READ-ONLY (GET only).
       if (route.startsWith('/admin/center/') && method === 'GET') {
@@ -2202,7 +2229,7 @@ async function handleRoute(request, { params }) {
       return ok(s ? { ...s, _id: undefined } : {})
     }
     if (route === '/tenant/settings' && method === 'PUT') {
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح', 403)
       const b = await request.json()
       const allowed = ['agency_name', 'logo_base64', 'header', 'footer', 'tax_id', 'commercial_id', 'phone', 'address', 'email', 'primary_color', 'rates', 'pair_usd_sar']
       const upd = { updated_at: new Date() }
@@ -2336,9 +2363,9 @@ async function handleRoute(request, { params }) {
     }
     const officeDocDlMatch = route.match(/^\/office\/verification\/documents\/([^/]+)\/download$/)
     if (officeDocDlMatch && method === 'GET') {
-      const docDL = await db.collection('office_documents').findOne(sess.user.role === 'super_admin' ? { id: officeDocDlMatch[1] } : { id: officeDocDlMatch[1], tenant_id: T })
+      const docDL = await db.collection('office_documents').findOne(isMainSA(sess.user) ? { id: officeDocDlMatch[1] } : { id: officeDocDlMatch[1], tenant_id: T })
       if (!docDL) return bad('المستند غير موجود', 404)
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح', 403)
       const blobDL = await docStorageGet(db, docDL.storage?.object_key)
       if (!blobDL) return bad('ملف المستند غير متاح في التخزين', 404)
       await docAuditLog(db, docDL.tenant_id, 'viewed', docDL.id, sess.user.email, { context: 'office_verification' })
@@ -2358,7 +2385,8 @@ async function handleRoute(request, { params }) {
     }
     // ---- Admin review (super_admin only — API-first: served to the external holding dashboard) ----
     if (route === '/admin/office-verifications' && method === 'GET') {
-      if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      // v3.97 — realm-hardened: main SA or rahaal admin staff (offices perm already gated)
+      if (!isMainSA(sess.user) && sess.user.role !== 'admin_staff') return bad('غير مصرح', 403)
       const url = new URL(request.url)
       const stFilter = url.searchParams.get('status') || null
       const allSettings = await db.collection('tenant_settings').find({ office_verification: { $exists: true } }).toArray()
@@ -2377,7 +2405,8 @@ async function handleRoute(request, { params }) {
     }
     const adminVerDecideMatch = route.match(/^\/admin\/office-verifications\/([^/]+)\/decision$/)
     if (adminVerDecideMatch && method === 'POST') {
-      if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      // v3.97 — realm-hardened: main SA or rahaal admin staff (offices write already gated)
+      if (!isMainSA(sess.user) && sess.user.role !== 'admin_staff') return bad('غير مصرح', 403)
       const bAD = await request.json()
       const decisionAD = String(bAD.decision || '')
       if (!['verified', 'rejected'].includes(decisionAD)) return bad('القرار: verified أو rejected فقط')
@@ -4203,7 +4232,7 @@ async function handleRoute(request, { params }) {
 
     // ============ v3.8 — PATs (Personal Access Tokens for Chrome Extension) ============
     if (route === '/pats' && method === 'GET') {
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const list = await db.collection('pats').find({ tenant_id: T }).sort({ created_at: -1 }).toArray()
       return ok(list.map(p => ({
         id: p.id, name: p.name, prefix: p.prefix,
@@ -4212,7 +4241,7 @@ async function handleRoute(request, { params }) {
       })))
     }
     if (route === '/pats' && method === 'POST') {
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       if (sess.isPat) return bad('لا يمكن إنشاء PAT جديد باستخدام PAT — سجّل دخولاً من الواجهة', 403)
       const b = await request.json().catch(() => ({}))
       const name = String(b.name || '').trim() || 'إضافة المتصفح'
@@ -4234,7 +4263,7 @@ async function handleRoute(request, { params }) {
     }
     const patDelMatch = route.match(/^\/pats\/([^/]+)$/)
     if (patDelMatch && method === 'DELETE') {
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       await db.collection('pats').updateOne(
         { id: patDelMatch[1], tenant_id: T },
         { $set: { revoked_at: new Date() } }
@@ -5156,7 +5185,7 @@ async function handleRoute(request, { params }) {
 
     // v3.9.20 — Data Backup: Export full tenant snapshot as JSON (Owner only)
     if (route === '/backup/export' && method === 'GET') {
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — نسخ احتياطي متاح للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — نسخ احتياطي متاح للمالك فقط', 403)
       const collections = ['tickets', 'visas', 'services', 'clients', 'suppliers', 'boxes', 'journal_entries', 'packages', 'package_bookings', 'currency_exchanges', 'vouchers', 'accounts', 'service_types']
       const backup = { tenant_id: T, tenant_name: sess.tenant?.name, exported_at: new Date().toISOString(), exported_by: sess.user.email, version: '3.9.20', data: {} }
       for (const coll of collections) {
@@ -7247,7 +7276,7 @@ async function handleRoute(request, { params }) {
     }
 
     if (route === '/accounting/close-year' && method === 'POST') {
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — يجب أن تكون مالكاً', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — يجب أن تكون مالكاً', 403)
       const b = await request.json()
       const year = parseInt(b.year)
       if (!year || year < 2000 || year > 2100) return bad('السنة المالية غير صالحة')
@@ -7322,12 +7351,12 @@ async function handleRoute(request, { params }) {
     }
 
     if (route === '/accounting/reopen-year' && method === 'POST') {
-      if (sess.user.role !== 'super_admin' && sess.user.role !== 'owner') return bad('غير مصرح', 403)
+      if (!isMainSA(sess.user) && sess.user.role !== 'owner') return bad('غير مصرح', 403)
       const b = await request.json()
       const year = parseInt(b.year)
       if (!year) return bad('السنة مطلوبة')
       // Only super_admin can reopen; owners can only close (safety)
-      if (sess.user.role !== 'super_admin') return bad('فتح السنة المقفلة يتطلب صلاحية السوبر أدمن', 403)
+      if (!isMainSA(sess.user)) return bad('فتح السنة المقفلة يتطلب صلاحية السوبر أدمن', 403)
       // Delete closing JE
       await db.collection('journal_entries').deleteMany({ tenant_id: T, ref_type: 'year_close', ref_id: `close-${year}` })
       await db.collection('tenants').updateOne({ id: T }, { $pull: { closed_years: year }, $unset: { [`year_closes.${year}`]: '' } })

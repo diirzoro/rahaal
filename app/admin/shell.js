@@ -12,14 +12,14 @@
 // default — every future sensitive action must go through explicit permission
 // + audit logging (wired in later phases).
 // ============================================================================
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
 import {
   LayoutDashboard, Building2, TrendingUp, Receipt, Calculator, ShieldCheck,
   Megaphone, DatabaseBackup, FileSearch, Settings2, Activity, Bell, BarChart3,
-  PanelRight, LogOut, Lock, BadgePercent, Inbox, Scale, Coins,
+  PanelRight, LogOut, Lock, BadgePercent, Inbox, Scale, Coins, MapPin, Wallet, ListChecks, Users,
 } from 'lucide-react'
 import { useAuth } from '../shared'
 import AdminDashboard from './dashboard'
@@ -38,26 +38,35 @@ import AdminNotifyCenter from './notifications' // v3.95 — Batch 3 (In-App Not
 import AdminReportsCenter from './reports' // v3.96 — Batch 4 (Reports Center — READ-ONLY)
 import AdminDisputesCenter from './disputes' // v3.96 — Batch 4 (Disputes Center)
 import AdminCurrencyCenter from './currency' // v3.96 — Batch 4 (Currencies & FX)
+import AdminGeoCenter from './geo' // v3.97 — Batch 5 (Geo Locations)
+import AdminPayFinCenter from './payfin' // v3.97 — Batch 5 (Payments & Financial Entities)
+import AdminRefDataCenter from './refdata' // v3.97 — Batch 5 (Unified Reference Data)
+import AdminStaffCenter from './staff' // v3.97 — Batch 5 (Rahaal Admin Staff RBAC)
+import { api } from '../shared'
 
 const SECTIONS = [
-  { key: 'dashboard', label: 'نظرة عامة', icon: LayoutDashboard, phase: 1, ready: true },
-  { key: 'offices', label: 'المكاتب / Office 360°', icon: Building2, phase: 2, ready: true },
-  { key: 'sales', label: 'المبيعات', icon: TrendingUp, phase: 3, ready: true },
-  { key: 'vouchers', label: 'السندات', icon: Receipt, phase: 3, ready: true },
-  { key: 'accounting', label: 'الحسابات والرقابة المالية', icon: Calculator, phase: 3, ready: true },
-  { key: 'commissions', label: 'مركز العمولات', icon: BadgePercent, phase: 4, ready: true },
-  { key: 'requests', label: 'مركز الطلبات', icon: Inbox, phase: 4, ready: true },
-  { key: 'permissions', label: 'الصلاحيات', icon: ShieldCheck, phase: 3, ready: true },
-  { key: 'ads', label: 'العروض والإعلانات', icon: Megaphone, phase: 6, ready: true },
-  { key: 'backup', label: 'النسخ الاحتياطي والاستعادة', icon: DatabaseBackup, phase: 5, ready: true },
-  { key: 'system', label: 'إدارة النظام', icon: Settings2, phase: 5, ready: true },
-  { key: 'audit', label: 'التدقيق والأمان', icon: FileSearch, phase: 5, ready: true },
-  { key: 'health', label: 'صحة النظام', icon: Activity, phase: 5, ready: true },
-  { key: 'notifications', label: 'التنبيهات', icon: Bell, phase: 5, ready: true },
-  { key: 'reports', label: 'مركز التقارير', icon: BarChart3, phase: 8, ready: true },
-  { key: 'disputes', label: 'مركز النزاعات', icon: Scale, phase: 8, ready: true },
-  { key: 'currency', label: 'العملات وأسعار الصرف', icon: Coins, phase: 8, ready: true },
-  { key: 'legacy', label: 'اللوحة الكلاسيكية', icon: PanelRight, ready: true },
+  { key: 'dashboard', label: 'نظرة عامة', icon: LayoutDashboard, phase: 1, ready: true, perm: 'dashboard' },
+  { key: 'offices', label: 'المكاتب / Office 360°', icon: Building2, phase: 2, ready: true, perm: 'offices' },
+  { key: 'sales', label: 'المبيعات', icon: TrendingUp, phase: 3, ready: true, perm: 'sales' },
+  { key: 'vouchers', label: 'السندات', icon: Receipt, phase: 3, ready: true, perm: 'sales' },
+  { key: 'accounting', label: 'الحسابات والرقابة المالية', icon: Calculator, phase: 3, ready: true, perm: 'accounting' },
+  { key: 'commissions', label: 'مركز العمولات', icon: BadgePercent, phase: 4, ready: true, perm: 'commissions' },
+  { key: 'requests', label: 'مركز الطلبات', icon: Inbox, phase: 4, ready: true, perm: 'requests' },
+  { key: 'permissions', label: 'الصلاحيات', icon: ShieldCheck, phase: 3, ready: true, perm: 'permissions' },
+  { key: 'staff', label: 'مديرو إدارة رحّال', icon: Users, phase: 9, ready: true, perm: 'staff' },
+  { key: 'ads', label: 'العروض والإعلانات', icon: Megaphone, phase: 6, ready: true, perm: 'ads' },
+  { key: 'backup', label: 'النسخ الاحتياطي والاستعادة', icon: DatabaseBackup, phase: 5, ready: true, perm: 'backup' },
+  { key: 'system', label: 'إدارة النظام', icon: Settings2, phase: 5, ready: true, perm: 'system' },
+  { key: 'audit', label: 'التدقيق والأمان', icon: FileSearch, phase: 5, ready: true, perm: 'audit' },
+  { key: 'health', label: 'صحة النظام', icon: Activity, phase: 5, ready: true, perm: 'health' },
+  { key: 'notifications', label: 'التنبيهات', icon: Bell, phase: 5, ready: true, perm: 'notifications' },
+  { key: 'reports', label: 'مركز التقارير', icon: BarChart3, phase: 8, ready: true, perm: 'reports' },
+  { key: 'disputes', label: 'مركز النزاعات', icon: Scale, phase: 8, ready: true, perm: 'disputes' },
+  { key: 'currency', label: 'العملات وأسعار الصرف', icon: Coins, phase: 8, ready: true, perm: 'currency' },
+  { key: 'geo', label: 'المواقع الجغرافية', icon: MapPin, phase: 9, ready: true, perm: 'geo' },
+  { key: 'payments', label: 'طرق الدفع والجهات المالية', icon: Wallet, phase: 9, ready: true, perm: 'payments' },
+  { key: 'refdata', label: 'القوائم المرجعية', icon: ListChecks, phase: 9, ready: true, perm: 'refdata' },
+  { key: 'legacy', label: 'اللوحة الكلاسيكية', icon: PanelRight, ready: true, perm: null }, // main super admin only
 ]
 
 const PlaceholderSection = ({ section }) => (
@@ -76,6 +85,28 @@ const PlaceholderSection = ({ section }) => (
 const AdminApp = ({ legacyPanel = null, announcements = null }) => {
   const { user, logout } = useAuth()
   const [active, setActive] = useState('dashboard')
+  // v3.97 — Batch 5: effective admin permissions (main super admin → all=true;
+  // rahaal admin staff → only granted sections). Server enforces regardless —
+  // this filtering is UX, the API gate is the security boundary.
+  const [eff, setEff] = useState(null)
+  useEffect(() => {
+    api('/admin/staff/me').then(r => {
+      setEff(r)
+      if (!r.all) {
+        const firstVisible = SECTIONS.find(s => s.perm && (r.perms?.[s.perm] || []).includes('view'))
+        if (firstVisible) setActive(a => {
+          const cur = SECTIONS.find(x => x.key === a)
+          return cur?.perm && (r.perms?.[cur.perm] || []).includes('view') ? a : firstVisible.key
+        })
+      }
+    }).catch(() => setEff({ all: true, perms: {} }))
+  }, [])
+  const visibleSections = SECTIONS.filter(s => {
+    if (!eff) return s.key === 'dashboard'
+    if (eff.all) return true
+    if (!s.perm) return false // legacy panel: main super admin only
+    return (eff.perms?.[s.perm] || []).includes('view')
+  })
   const current = SECTIONS.find(s => s.key === active) || SECTIONS[0]
 
   const renderContent = () => {
@@ -95,6 +126,10 @@ const AdminApp = ({ legacyPanel = null, announcements = null }) => {
     if (active === 'reports') return <AdminReportsCenter /> // v3.96 — Batch 4
     if (active === 'disputes') return <AdminDisputesCenter /> // v3.96 — Batch 4
     if (active === 'currency') return <AdminCurrencyCenter /> // v3.96 — Batch 4
+    if (active === 'geo') return <AdminGeoCenter /> // v3.97 — Batch 5
+    if (active === 'payments') return <AdminPayFinCenter /> // v3.97 — Batch 5
+    if (active === 'refdata') return <AdminRefDataCenter onNavigate={setActive} /> // v3.97 — Batch 5
+    if (active === 'staff') return <AdminStaffCenter /> // v3.97 — Batch 5
     if (active === 'legacy') return legacyPanel || <PlaceholderSection section={current} />
     if (active === 'ads') {
       // v3.94 — Batch 2: the extended Ads Center replaces the embedded legacy manager
@@ -134,7 +169,7 @@ const AdminApp = ({ legacyPanel = null, announcements = null }) => {
           </div>
         </div>
         <nav className="flex-1 overflow-y-auto p-3 space-y-1">
-          {SECTIONS.map(s => <NavButton key={s.key} s={s} />)}
+          {visibleSections.map(s => <NavButton key={s.key} s={s} />)}
         </nav>
         <div className="p-3 border-t border-white/10 text-[10px] text-slate-400 flex items-center gap-1.5">
           <Lock className="w-3 h-3" /> وضع القراءة فقط على البيانات المالية (افتراضي)
@@ -164,7 +199,7 @@ const AdminApp = ({ legacyPanel = null, announcements = null }) => {
           </div>
           {/* Mobile nav */}
           <div className="md:hidden mt-3 -mx-1 overflow-x-auto flex gap-1 pb-1">
-            {SECTIONS.map(s => <NavButton key={s.key} s={s} compact />)}
+            {visibleSections.map(s => <NavButton key={s.key} s={s} compact />)}
           </div>
         </header>
         <main className="flex-1 p-4 md:p-6 max-w-7xl w-full mx-auto">

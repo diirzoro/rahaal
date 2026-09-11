@@ -11956,8 +11956,10 @@ function App() {
       <TestEnvBadge />
       <ConfirmHost />
       {/* v3.90 — Phase 1: super_admin → new modular AdminApp shell. The legacy SuperAdminPanel
-          and AnnouncementsManager are passed in and REUSED inside it (zero loss, zero duplication) */}
-      {auth.user.role === 'super_admin' ? <AdminApp legacyPanel={<SuperAdminPanel />} announcements={<AnnouncementsManager />} /> : <TenantApp />}
+          and AnnouncementsManager are passed in and REUSED inside it (zero loss, zero duplication)
+          v3.97 — Batch 5: rahaal admin staff (role=admin_staff) also mount the AdminApp — the
+          shell + server gate show/allow ONLY their granted sections. Tenant users never see it. */}
+      {auth.user.role === 'super_admin' || auth.user.role === 'admin_staff' ? <AdminApp legacyPanel={<SuperAdminPanel />} announcements={<AnnouncementsManager />} /> : <TenantApp />}
     </AuthCtx.Provider>
   )
 }
