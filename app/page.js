@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import * as XLSX from 'xlsx'
 import {
-  Plane, FileBadge2, LayoutDashboard, Users, Building2, ReceiptText, Wallet,
+  Plane, FileBadge2, LayoutDashboard, Users, Building2, ReceiptText, Wallet, Percent,
   ArrowDownLeft, ArrowUpRight, ArrowRight, BookOpenText, BarChart3, PieChart as PieIcon,
   Plus, Search, Calendar, TrendingUp, DollarSign, Sparkles, LogOut,
   Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
@@ -33,6 +33,12 @@ import { Switch } from '@/components/ui/switch'
 // v3.87.5 — shared primitives + heavy screens extracted verbatim (structural move only)
 import { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_MAX_MB, DOC_MAX_FILE_BYTES, DOC_BATCH_MAX_MB, DOC_BATCH_MAX_BYTES, validateDocBatch, todayISO, api, AuthCtx, useAuth, Field, TopBar, ConfirmHost, askConfirm } from './shared'
 import AdminApp from './admin/shell' // v3.90 — Phase 1: modular Super Admin shell (reuses /api/admin/*)
+// v4.1 — MOVED AS-IS from the v3.91–3.97 admin shell into TenantApp «إدارة رحّال»
+// (transfer only — zero new sections, same components, same /api/admin/* endpoints):
+import AdminStaffCenter from './admin/staff' // إدارة المستخدمين (v3.97)
+import AdminPermsCenter from './admin/perms' // الأدوار والصلاحيات (v3.93)
+import AdminSalesCenter from './admin/sales' // مبيعات برنامج رحّال (v3.93)
+import AdminCommissionsCenter from './admin/commissions' // مركز العمولات (v3.94)
 import { MeraajStoreScreen, BulkImportDialog } from './components-heavy'
 
 // ================================================================
@@ -1075,7 +1081,7 @@ function PricingConfigEditor({ asScreen = false, onDone }) {
                 </div>
                 <div className="grid grid-cols-3 gap-2">
                   <Field label="المستخدمون (0=∞)"><Input type="number" min="0" value={p.max_users} onChange={e => setPlan(p.key, { max_users: Number(e.target.value) })} /></Field>
-                  <Field label="الفروع (0=∞)"><Input type="number" min="0" value={p.max_branches} onChange={e => setPlan(p.key, { max_branches: Number(e.target.value) })} /></Field>
+                  <Field label="الفروع (0=∞) ⚠️ غير مفعل تشغيلياً حالياً"><Input type="number" min="0" value={p.max_branches} onChange={e => setPlan(p.key, { max_branches: Number(e.target.value) })} /></Field>
                   <Field label="حصة القيود (0=يدوي)"><Input type="number" min="0" value={p.quota_limit || 0} onChange={e => setPlan(p.key, { quota_limit: Number(e.target.value) })} /></Field>
                 </div>
                 <div className="flex items-center justify-between p-2 rounded border bg-slate-50">
@@ -1236,6 +1242,8 @@ function QuotaIncreaseDialog({ target, onClose, onChanged }) {
   const [amount, setAmount] = useState(500)
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
+  const [opId, setOpId] = useState(null) // v4.0.1 — idempotency key per dialog session
+  useEffect(() => { if (target) setOpId((typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`) }, [target])
   if (!target) return null
   const q = target.journal_quota || { used: 0, limit: 0 }
   const remaining = Math.max(0, (q.limit || 0) - (q.used || 0))
@@ -1245,8 +1253,8 @@ function QuotaIncreaseDialog({ target, onClose, onChanged }) {
     if (!note.trim()) return toast.error('سبب الزيادة مطلوب')
     try {
       setBusy(true)
-      const r = await api(`/admin/tenants/${target.id}/topup`, { method: 'POST', body: { amount: n, note } })
-      toast.success(`✅ زيدت حصة القيود: ${r.quota.prev_limit} ← ${r.quota.new_limit} (المتبقي الآن ${r.quota.remaining})`)
+      const r = await api(`/admin/tenants/${target.id}/topup`, { method: 'POST', body: { amount: n, note, op_id: opId } })
+      toast.success(r.duplicate ? 'ℹ️ هذه العملية نُفذت مسبقاً — لم تُنشأ زيادة ثانية' : `✅ زيدت حصة القيود: ${r.quota.prev_limit} ← ${r.quota.new_limit} (المتبقي الآن ${r.quota.remaining})`)
       onChanged(); onClose()
     } catch (e) { toast.error(e.message) } finally { setBusy(false) }
   }
@@ -1424,7 +1432,7 @@ function NewTenantDialog({ open, onOpenChange, onSaved }) {
           <Field label="بريد المالك" required><Input dir="ltr" type="email" value={f.owner_email} onChange={e => setF({ ...f, owner_email: e.target.value })} placeholder="owner@office.com" /></Field>
           <Field label="كلمة المرور" required><Input dir="ltr" type="text" value={f.owner_password} onChange={e => setF({ ...f, owner_password: e.target.value })} placeholder="اختر كلمة مرور قوية" /></Field>
           <Field label="حد المستخدمين"><Input type="number" min={1} value={f.max_users} onChange={e => setF({ ...f, max_users: e.target.value })} /></Field>
-          <Field label="عدد الفروع"><Input type="number" min={1} value={f.max_branches} onChange={e => setF({ ...f, max_branches: e.target.value })} /></Field>
+          <Field label="عدد الفروع ⚠️ غير مفعل تشغيلياً"><Input type="number" min={1} value={f.max_branches} onChange={e => setF({ ...f, max_branches: e.target.value })} /></Field>
           <Field label="🎁 رمز الإحالة (اختياري)"><Input dir="ltr" value={f.referral_code} onChange={e => setF({ ...f, referral_code: e.target.value.toUpperCase() })} placeholder="مثال: ABCD1234" /></Field>
         </div>
         <DialogFooter>
@@ -1486,7 +1494,7 @@ function EditTenantDialog({ tenant, onOpenChange, onSaved }) {
             </Select>
           </Field>
           <Field label="حد المستخدمين"><Input type="number" min="0" value={f.max_users || 1} onChange={e => setF({ ...f, max_users: Number(e.target.value) })} /></Field>
-          <Field label="عدد الفروع"><Input type="number" min="0" value={f.max_branches || 1} onChange={e => setF({ ...f, max_branches: Number(e.target.value) })} /></Field>
+          <Field label="عدد الفروع ⚠️ غير مفعل تشغيلياً"><Input type="number" min="0" value={f.max_branches || 1} onChange={e => setF({ ...f, max_branches: Number(e.target.value) })} /></Field>
         </div>
         {/* v3.14 — Manual unlimited-journals switch (e.g. after final installment payment) */}
         <div className={`p-3 rounded-lg border flex items-center justify-between ${f.unlimited_journals ? 'bg-emerald-50 border-emerald-300' : 'bg-slate-50 border-slate-200'}`}>
@@ -1879,6 +1887,12 @@ const NAV = [
   // v4.0 — Batch 2: old plans/pricing + subscriptions/installments restored inside TenantApp
   { id: 'platform-plans', label: 'الباقات والتسعير', icon: Wallet, color: 'from-emerald-700 to-teal-500', group: 'إدارة رحّال' },
   { id: 'platform-subs', label: 'الاشتراكات والأقساط', icon: ReceiptText, color: 'from-blue-700 to-indigo-500', group: 'إدارة رحّال' },
+  // v4.1 — Group 1 (moved as-is from the new admin shell): users + roles/permissions
+  { id: 'platform-users', label: 'إدارة المستخدمين', icon: Users, color: 'from-cyan-700 to-sky-500', group: 'إدارة رحّال' },
+  { id: 'platform-roles', label: 'الأدوار والصلاحيات', icon: ShieldCheck, color: 'from-violet-700 to-purple-500', group: 'إدارة رحّال' },
+  // v4.1 — Group 2 (moved as-is): Rahaal software sales + commissions center
+  { id: 'platform-sales', label: 'مبيعات برنامج رحّال', icon: TrendingUp, color: 'from-green-700 to-emerald-500', group: 'إدارة رحّال' },
+  { id: 'platform-commissions', label: 'مركز العمولات', icon: Percent, color: 'from-fuchsia-700 to-pink-500', group: 'إدارة رحّال' },
   { id: 'platform-ads', label: 'الإعلانات والعروض', icon: ImageIcon, color: 'from-orange-600 to-amber-500', group: 'إدارة رحّال' },
   { id: 'help',      label: '📖 دليل الاستخدام', icon: BookOpenText, color: 'from-pink-600 to-rose-500' },
   { id: 'settings',  label: 'إعدادات المكتب', icon: Settings, color: 'from-slate-800 to-slate-600' },
@@ -11355,6 +11369,11 @@ function TenantApp({ onOpenPlatform = null }) {
         {/* v4.0 — Batch 2: the OLD pricing editor (v3.14) + subscriptions/installments (v3.16) reused as screens */}
         {tabAllowed && tab === 'platform-plans' && <ErrorBoundary tabName="الباقات والتسعير"><PricingConfigEditor asScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'platform-subs' && <ErrorBoundary tabName="الاشتراكات والأقساط"><PlatformSubscriptionsScreen /></ErrorBoundary>}
+        {/* v4.1 — moved AS-IS from the v3.91–3.97 admin shell (same components + same /api/admin/* APIs) */}
+        {tabAllowed && tab === 'platform-users' && <ErrorBoundary tabName="إدارة المستخدمين"><AdminStaffCenter /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-roles' && <ErrorBoundary tabName="الأدوار والصلاحيات"><AdminPermsCenter /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-sales' && <ErrorBoundary tabName="مبيعات برنامج رحّال"><AdminSalesCenter key="platform-sales" initialTab="sales" /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-commissions' && <ErrorBoundary tabName="مركز العمولات"><AdminCommissionsCenter /></ErrorBoundary>}
         {tabAllowed && tab === 'platform-ads' && <ErrorBoundary tabName="الإعلانات والعروض"><AnnouncementsManager /></ErrorBoundary>}
         {tabAllowed && tab === 'help' && <ErrorBoundary tabName="دليل الاستخدام"><HelpCenter setTab={setTab} /></ErrorBoundary>}
 

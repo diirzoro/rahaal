@@ -492,10 +492,12 @@ const isMainSA = (u) => !!u && u.role === 'super_admin' && (!u.tenant_id || u.pl
 function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price, billing_mode: t.billing_mode || null, unlimited_journals: !!t.unlimited_journals } : null }
 
 // ============ v3.14 — PRICING & PLANS (Phase 2) ============
-// Annual payment => unlimited journals. Installments => limited journals.
-// Manual super-admin override: tenant.unlimited_journals = true
+// v4.0.1 CLOSURE — OLD condition (v3.14→v4.0): billing_mode === 'annual' opened journals
+// IMMEDIATELY on selection, before any payment. REMOVED: benefits now open ONLY after
+// «تأكيد الدفع» (confirm-payment → subscription='paid' / activation_confirmed) or an
+// explicit manual unlimited_journals override by the Super Admin.
 function isUnlimitedTenant(t) {
-  return !!t && (t.unlimited_journals === true || t.billing_mode === 'annual' || t.subscription === 'paid' || !!t.activation_confirmed)
+  return !!t && (t.unlimited_journals === true || t.subscription === 'paid' || !!t.activation_confirmed)
 }
 
 const DEFAULT_PRICING_CONFIG = {
@@ -2126,8 +2128,16 @@ async function handleRoute(request, { params }) {
         const tid = confirmMatch[1]
         const t = await db.collection('tenants').findOne({ id: tid })
         if (!t) return bad('المكتب غير موجود', 404)
-        if (t.activation_confirmed) return bad('تم تأكيد الدفع لهذا المكتب من قبل')
-        await db.collection('tenants').updateOne({ id: tid }, { $set: { activation_confirmed: true, activation_confirmed_at: new Date(), subscription: 'paid' } })
+        // v4.0.1 — idempotent: confirm-payment can never run twice for the same office/subscription
+        if (t.activation_confirmed) return bad('تم تأكيد الدفع لهذا المكتب من قبل — لا يمكن تنفيذ العملية مرتين', 409)
+        const confirmSet = { activation_confirmed: true, activation_confirmed_at: new Date(), subscription: 'paid' }
+        // v4.0.1 — the plan's unlimited-journals privilege is granted HERE (post-payment), never before
+        try {
+          const cfgCP = await getPricingConfig(db)
+          const planCP = (cfgCP.plans || []).find(x => x.key === t.plan_tier)
+          if (planCP?.unlimited_journals === true) confirmSet.unlimited_journals = true
+        } catch { }
+        await db.collection('tenants').updateOne({ id: tid }, { $set: confirmSet })
         let referrerBonus = null
         if (t.referred_by) {
           // v3.9 — grant referrer +50 quota ONLY when the referred tenant confirms actual payment
@@ -2166,7 +2176,9 @@ async function handleRoute(request, { params }) {
           if (b.max_branches !== undefined) upd.max_branches = b.max_branches === null ? null : Number(b.max_branches)
           if (b.quota_limit !== undefined) upd['journal_quota.limit'] = Number(b.quota_limit)
           if (b.plan_tier !== undefined) upd.plan_tier = b.plan_tier
-          // v3.14 → v4.0 — Assign plan: auto-apply user/branch limits + plan quota + plan unlimited flag
+          // v3.14 → v4.0.1 — Assign plan: auto-apply user/branch limits + plan quota.
+          // Plan assignment NEVER converts to Paid and NEVER opens journals by itself:
+          // the plan's unlimited_journals privilege is granted only at confirm-payment.
           if (b.plan_key !== undefined && ['silver', 'gold', 'enterprise'].includes(b.plan_key)) {
             upd.plan_tier = b.plan_key
             const cfg = await getPricingConfig(db)
@@ -2175,7 +2187,6 @@ async function handleRoute(request, { params }) {
               upd.max_users = Number(p.max_users) === 0 ? 9999 : Number(p.max_users)
               upd.max_branches = Number(p.max_branches) === 0 ? 9999 : Number(p.max_branches)
               if (Number(p.quota_limit) > 0) upd['journal_quota.limit'] = Number(p.quota_limit) // v4.0
-              if (p.unlimited_journals === true) upd.unlimited_journals = true // v4.0
             }
           }
           // v4.0 — LOWERING GUARD (server-enforced): never silently drop below the office's
@@ -2196,11 +2207,11 @@ async function handleRoute(request, { params }) {
           }
           // NOTE: max_branches is stored/applied but has no operational entity to count yet
           // (no branches collection exists) — documented gap, enforcement activates with the entity.
-          // v3.14 — Billing mode: annual => unlimited journals immediately; installments => limited
+          // v4.0.1 CLOSURE — billing_mode is a PAYMENT-METHOD choice ONLY.
+          // OLD (v3.14): choosing 'annual' set unlimited_journals=true immediately (pre-payment!).
+          // NEW: no auto-open — journals open exclusively via confirm-payment or manual toggle.
           if (b.billing_mode !== undefined && ['annual', 'installments', null].includes(b.billing_mode)) {
             upd.billing_mode = b.billing_mode
-            if (b.billing_mode === 'annual') upd.unlimited_journals = true
-            if (b.billing_mode === 'installments' && b.unlimited_journals === undefined && upd.unlimited_journals === undefined) upd.unlimited_journals = false
           }
           // v3.14 — Manual unlimited-journals toggle (e.g. after final installment is paid)
           if (b.unlimited_journals !== undefined) upd.unlimited_journals = !!b.unlimited_journals
@@ -2244,10 +2255,18 @@ async function handleRoute(request, { params }) {
         if (!amount || amount <= 0 || amount > 1000000) return bad('المقدار يجب أن يكون بين 1 و 1,000,000 قيد')
         const note = String(b.note || '').slice(0, 200)
         if (!note.trim()) return bad('سبب الزيادة مطلوب')
+        // v4.0.1 — idempotency: the UI sends a unique op_id per dialog session; resending
+        // the same request never creates a second increase.
+        const opId = String(b.op_id || '').slice(0, 64)
         const q = t.journal_quota || { used: 0, limit: 500, top_ups: [] }
+        if (opId) {
+          const dup = (q.top_ups || []).find(x => x.op_id === opId)
+          if (dup) return ok({ success: true, duplicate: true, tenant_id: tid, added: dup.amount, note: dup.note, by: dup.by, at: dup.date, quota: { prev_limit: dup.prev_limit, new_limit: dup.new_limit, used: Number(q.used) || 0, remaining: Math.max(0, (dup.new_limit || 0) - (Number(q.used) || 0)) } })
+        }
         const prevLimit = Number(q.limit) || 0
         const newLimit = prevLimit + amount
-        const entry = { amount, note, date: new Date(), by: sess.user.email }
+        // v4.0.1 — the ledger entry records: old limit, new limit, amount, actor, reason, date
+        const entry = { op_id: opId || null, amount, note, prev_limit: prevLimit, new_limit: newLimit, date: new Date(), by: sess.user.email }
         await db.collection('tenants').updateOne({ id: tid }, {
           $set: { 'journal_quota.limit': newLimit, 'journal_quota.last_topup_at': entry.date },
           $push: { 'journal_quota.top_ups': entry },
@@ -3953,12 +3972,9 @@ async function handleRoute(request, { params }) {
       if (!b.name || !String(b.name).trim()) return bad('اسم الموظف مطلوب') // v3.88.4 — S-002: field-specific validation
       if (!b.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(b.email).trim())) return bad('البريد الإلكتروني غير صالح — مثال: name@example.com')
       if (!b.password || String(b.password).length < 6) return bad('كلمة المرور يجب ألا تقل عن 6 أحرف')
-      // v2.8 — Plan tier gate: only Gold plan tenants can self-create users
-      const tenantFull = await db.collection('tenants').findOne({ id: T })
-      const tier = tenantFull?.plan_tier || 'standard'
-      if (tier !== 'gold') {
-        return bad('إنشاء المستخدمين الذاتي متاح لباقة Gold فقط. تواصل مع الإدارة العامة لترقية الباقة.', 403)
-      }
+      // v2.8 gold-only gate → v4.0.1 REMOVED: self-creating users is now allowed for ALL
+      // tiers (silver/gold/enterprise/trial). The ONLY server gate is max_users — the value
+      // the Super Admin set (plan default or per-office override). Owner counts within it.
       const count = await db.collection('users').countDocuments(tf)
       const maxUsers = sess.tenant.max_users
       if (maxUsers !== null && maxUsers !== undefined && count >= maxUsers) return bad(`تم الوصول إلى الحد الأقصى للمستخدمين (${maxUsers}). تواصل مع الإدارة لرفع الحد.`)

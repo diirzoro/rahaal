@@ -241,3 +241,14 @@ See /app/memory/test_credentials.md
 - شاشة الاشتراكات والأقساط: Demo→Paid (confirm-payment القديم)، InstallmentsDialog القديم نفسه، فتح/إغلاق القيود، زيادة الحصة، EditTenantDialog (Override لكل مكتب). بطاقات: مكاتب/تجريبي/مدفوع/أقساط متأخرة.
 - التسجيل العام يطبق default_trial_plan_key إن وُجد (وإلا 2/1/30 القديمة). التغييرات غير رجعية على الاشتراكات القائمة.
 - الاستثناءان: DELETE النهائي وImpersonate باقيان مخفيين (أكوادهما لم تُمس). فجوة موثقة: max_branches بلا كيان تشغيلي للفرض (لا collection فروع). الملفات: route.js + page.js فقط. صفر Migration/Backfill.
+
+## v4.0.1 + v4.1 — إقفال مراجعة v4.0 + نقل 4 أقسام من اللوحة الجديدة (NOT TESTED بطلب المستخدم — ترجمة/HTTP 200 فقط)
+### v4.0.1 إقفال:
+- isUnlimitedTenant: أُزيل شرط billing_mode==='annual' القديم (كان يفتح القيود فور الاختيار قبل أي دفع). الفتح الآن حصراً: unlimited_journals يدوي || subscription='paid' || activation_confirmed. PATCH لم يعد يفتح/يغلق القيود تلقائياً مع billing_mode. إسناد الباقة لم يعد يمنح unlimited — امتياز الباقة يُمنح داخل confirm-payment فقط. confirm-payment: 409 عند التكرار (idempotent).
+- POST /tenant/users: أُزيلت بوابة Gold-only (v2.8) — الإنشاء الذاتي لكل الباقات، والحارس الوحيد max_users من الخادم (يشمل المالك في العد، 9999=∞، القيمة من الأدمن).
+- topup: op_id idempotency (إعادة الإرسال ترجع duplicate:true بلا زيادة ثانية) + السجل يدون prev_limit/new_limit/amount/by/note/date. الواجهة ترسل op_id لكل جلسة حوار.
+- وسم «⚠️ غير مفعل تشغيلياً» بجانب حد الفروع في محرر الباقات وحواري إنشاء/تعديل المكتب. لا كيان فروع — فجوة مستقبلية.
+- Snapshot تاريخي للبيع: غير موجود (موثق بصدق) — الحقول الناقصة: اسم الباقة وقت البيع/الأساسي/العملة/نسبة وقيمة الخصم/النهائي/عدد الأقساط/البداية والنهاية/الحدود المطبقة. الحماية الحالية: القيم تُنسخ (لا تُعاد قراءتها من pricing_config) فالتعديل غير رجعي فعلياً، لكن لا توثيق تعاقدي.
+- Super Control بصدق: تعديل الباقات الثلاث الثابتة فقط (silver/gold/enterprise) — لا إضافة باقة جديدة (فلتر PUT يمنع مفاتيح أخرى). لا حذف نهائي للباقة — تعطيل فقط. ليس CRUD كاملاً.
+### v4.1 نقل (Move-only):
+- 4 أقسام نُقلت كما هي من admin shell إلى «إدارة رحّال»: platform-users (AdminStaffCenter v3.97 — مديرو إدارة رحّال)، platform-roles (AdminPermsCenter v3.93)، platform-sales (AdminSalesCenter v3.93 initialTab=sales)، platform-commissions (AdminCommissionsCenter v3.94). استيراد مباشر في page.js + NAV + tab render + أيقونة Percent. صفر مكونات/APIs/Collections جديدة. canModule يقصر platform-* على super_admin، وadminGate يفرض في الخادم. الأقسام تحتفظ بطبيعتها الأصلية (sales/commissions شبه Read-Only حسب حوكمة v3.93/94) — تشغيلها الكامل CRUD دفعة قادمة بموافقة. أمثلة TEST- لم تُنشأ (التعليمة النهائية: نقل فقط). الشل خلف «إدارة المنصة» بقي كما هو.
