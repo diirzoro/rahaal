@@ -1514,7 +1514,9 @@ const MODULE_LABELS = [
 const canModule = (user, tabId) => {
   if (!user) return false
   if (user.role === 'owner') return true
-  if (tabId === 'settings') return false
+  // v3.98 — Phase 1: the platform SA manages his own company office settings
+  // (currencies & rates live here). Staff still never see settings.
+  if (tabId === 'settings') return user.role === 'super_admin'
   return user.permissions?.[`mod_${String(tabId).replace(/-/g, '_')}`] !== false
 }
 
@@ -1548,7 +1550,7 @@ const playMeraajChime = () => {
   } catch { /* autoplay blocked — silent fallback, toast still shows */ }
 }
 
-function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
+function Sidebar({ current, onChange, mobileOpen, onMobileClose, onOpenPlatform = null }) {
   const { tenant, settings, user } = useAuth()
   // v3.86 — swipe-right on the drawer closes it (RTL: drawer lives on the right edge)
   const swipeRef = useRef(null)
@@ -1619,12 +1621,24 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
           )
         })}
       </nav>
+      {/* v3.98 — Phase 1: clear path from the company book to the EXISTING platform
+          admin sections (no new dashboard) — visible only for the platform SA */}
+      {onOpenPlatform && (
+        <div className="p-2 md:p-3 border-t border-slate-800/70">
+          <button
+            onClick={onOpenPlatform}
+            className="w-full flex items-center justify-center gap-2 px-3 py-2.5 min-h-[44px] rounded-lg text-sm font-bold bg-gradient-to-l from-amber-600 to-orange-500 text-white shadow-lg hover:opacity-90 transition"
+          >
+            🛡️ إدارة المنصة
+          </button>
+        </div>
+      )}
       <div className="p-2 md:p-3 border-t border-slate-800/70">
         <div className="flex items-center gap-3 p-2 rounded-lg bg-white/5">
           <div className="w-9 h-9 rounded-full grad-brand flex items-center justify-center shrink-0"><User className="w-4 h-4 text-white" /></div>
           <div className="flex-1 min-w-0">
             <div className="text-xs font-semibold truncate">{user.name}</div>
-            <div className="text-[10px] text-slate-400 truncate">{user.role === 'owner' ? 'مالك المكتب' : 'موظف'}</div>
+            <div className="text-[10px] text-slate-400 truncate">{user.role === 'owner' ? 'مالك المكتب' : user.role === 'super_admin' ? 'المشرف العام' : 'موظف'}</div>
           </div>
         </div>
       </div>
@@ -10523,7 +10537,7 @@ function OfficeSettings() {
 // ================================================================
 // TENANT APP
 // ================================================================
-function TenantApp() {
+function TenantApp({ onOpenPlatform = null }) {
   const [tab, setTab] = useState('dashboard')
   // v3.86 — real mobile drawer state + edge-swipe to open (right edge, RTL)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
@@ -10773,6 +10787,7 @@ function TenantApp() {
         onChange={(id) => { setTab(id); setMobileNavOpen(false) }}
         mobileOpen={mobileNavOpen}
         onMobileClose={() => setMobileNavOpen(false)}
+        onOpenPlatform={onOpenPlatform}
       />
       {/* v3.86 — floating menu button (mobile only, hidden while drawer is open) */}
       {!mobileNavOpen && (
@@ -11918,6 +11933,8 @@ function App() {
   }, [])
 
   useEffect(() => { refreshMe() }, [refreshMe])
+  // v3.98 — Phase 1: platform SA view switcher (company book ⇄ platform admin)
+  const [platformView, setPlatformView] = useState(false)
 
   // v3.46 — After an idle auto-lock, land directly on the LOGIN page (not the public landing)
   // so the user can resume quickly. Key is written only by the idle-lock logout.
@@ -11958,8 +11975,23 @@ function App() {
       {/* v3.90 — Phase 1: super_admin → new modular AdminApp shell. The legacy SuperAdminPanel
           and AnnouncementsManager are passed in and REUSED inside it (zero loss, zero duplication)
           v3.97 — Batch 5: rahaal admin staff (role=admin_staff) also mount the AdminApp — the
-          shell + server gate show/allow ONLY their granted sections. Tenant users never see it. */}
-      {auth.user.role === 'super_admin' || auth.user.role === 'admin_staff' ? <AdminApp legacyPanel={<SuperAdminPanel />} announcements={<AnnouncementsManager />} /> : <TenantApp />}
+          shell + server gate show/allow ONLY their granted sections. Tenant users never see it.
+          v3.98 — Phase 1 (Rahaal company book): the MAIN super_admin bound to the platform-org
+          tenant lands on the SAME shared TenantApp first (the company's own accounting book,
+          same engine, same tenant_id isolation — NOT a copy). «إدارة المنصة» in its sidebar
+          switches to the existing AdminApp; a back button returns to the company book. */}
+      {(() => {
+        const isPlatformSA = auth.user.role === 'super_admin' && !!auth.user.tenant_id
+        if (auth.user.role === 'admin_staff' || (auth.user.role === 'super_admin' && !isPlatformSA)) {
+          return <AdminApp legacyPanel={<SuperAdminPanel />} announcements={<AnnouncementsManager />} />
+        }
+        if (isPlatformSA) {
+          return platformView
+            ? <AdminApp legacyPanel={<SuperAdminPanel />} announcements={<AnnouncementsManager />} onBackToCompany={() => setPlatformView(false)} />
+            : <TenantApp onOpenPlatform={() => setPlatformView(true)} />
+        }
+        return <TenantApp />
+      })()}
     </AuthCtx.Provider>
   )
 }

@@ -82,7 +82,7 @@ const PlaceholderSection = ({ section }) => (
   </Card>
 )
 
-const AdminApp = ({ legacyPanel = null, announcements = null }) => {
+const AdminApp = ({ legacyPanel = null, announcements = null, onBackToCompany = null }) => {
   const { user, logout } = useAuth()
   const [active, setActive] = useState('dashboard')
   // v3.97 — Batch 5: effective admin permissions (main super admin → all=true;
@@ -169,6 +169,15 @@ const AdminApp = ({ legacyPanel = null, announcements = null }) => {
           </div>
         </div>
         <nav className="flex-1 overflow-y-auto p-3 space-y-1">
+          {/* v3.98 — Phase 1: return path to the Rahaal company book (shared TenantApp) */}
+          {onBackToCompany && (
+            <button
+              onClick={onBackToCompany}
+              className="w-full mb-2 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold bg-gradient-to-l from-emerald-600 to-teal-500 text-white shadow hover:opacity-90 transition"
+            >
+              📒 العودة إلى حسابات شركة رحّال
+            </button>
+          )}
           {visibleSections.map(s => <NavButton key={s.key} s={s} />)}
         </nav>
         <div className="p-3 border-t border-white/10 text-[10px] text-slate-400 flex items-center gap-1.5">

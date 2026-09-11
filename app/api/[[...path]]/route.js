@@ -481,10 +481,14 @@ async function getPatSession(request, db) {
     return null
   }
 }
-function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
+function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : u.role === 'super_admin' ? { ...ownerPermissions(), ...(u.permissions || {}) } : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } } // v3.98 — platform SA in the company book = owner-equivalent perms, minus his explicit overrides (travel modules hidden)
 // v3.97 — Batch 5: MAIN super admin realm check (role string is not enough —
 // a tenant user mistakenly holding 'super_admin' must NOT pass admin gates).
-const isMainSA = (u) => !!u && u.role === 'super_admin' && !u.tenant_id
+// v3.98 — Phase 1 (Rahaal company book): the main SA may now be BOUND to the
+// platform-org tenant (شركة رحّال) to use the shared TenantApp for the
+// company's own accounting. He stays main SA only via the platform_org flag —
+// an office user holding 'super_admin' with a normal tenant is still rejected.
+const isMainSA = (u) => !!u && u.role === 'super_admin' && (!u.tenant_id || u.platform_org === true)
 function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price, billing_mode: t.billing_mode || null, unlimited_journals: !!t.unlimited_journals } : null }
 
 // ============ v3.14 — PRICING & PLANS (Phase 2) ============
@@ -1720,7 +1724,7 @@ async function handleRoute(request, { params }) {
     }
     // v3.45 — Role templates catalog for the permissions manager (owner only)
     if (route === '/rbac/templates' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       // v3.93 — merge ACTIVE custom templates created in the Super Admin Permissions Center
       // (single RBAC engine — customs are just extra templates offices can assign)
       const customTpls = await db.collection('admin_role_templates').find({ active: true }, { projection: { _id: 0, key: 1, label: 1, desc: 1, perms: 1 } }).toArray().catch(() => [])
@@ -1982,9 +1986,21 @@ async function handleRoute(request, { params }) {
 
       if (route === '/admin/tenants' && method === 'POST') {
         const b = await request.json()
-        if (!b.name || !b.owner_email || !b.owner_password) return bad('الاسم وبيانات المالك مطلوبة')
+        // v3.98 — Phase 1 (minimal change requested by management): optional LINK
+        // mode — instead of forcing a NEW owner user, an existing MAIN super_admin
+        // account can be bound to the newly created tenant (the Rahaal company
+        // book). No duplicate owner is created; the account keeps role=super_admin.
+        const linkMode = !!b.link_owner_user_id
+        if (!b.name || (!linkMode && (!b.owner_email || !b.owner_password))) return bad('الاسم وبيانات المالك مطلوبة')
+        let linkUser = null
+        if (linkMode) {
+          linkUser = await db.collection('users').findOne({ id: b.link_owner_user_id })
+          if (!linkUser) return bad('المستخدم المطلوب ربطه غير موجود', 404)
+          if (linkUser.role !== 'super_admin') return bad('الربط متاح لحساب المشرف العام الرئيسي فقط')
+          if (linkUser.tenant_id) return bad('حساب المشرف مرتبط بمكتب مسبقاً')
+        }
         const slug = (b.slug || b.name).toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 40) + '-' + uuidv4().slice(0, 4)
-        const existingUser = await db.collection('users').findOne({ email: String(b.owner_email).toLowerCase().trim() })
+        const existingUser = linkMode ? null : await db.collection('users').findOne({ email: String(b.owner_email).toLowerCase().trim() })
         if (existingUser) return bad('البريد الإلكتروني مستخدم بالفعل')
         // Resolve referrer if code provided
         let referredBy = null
@@ -2019,14 +2035,33 @@ async function handleRoute(request, { params }) {
             }
           )
         }
-        await db.collection('users').insertOne({
-          id: uuidv4(), tenant_id: tenant.id, email: String(b.owner_email).toLowerCase().trim(),
-          name: b.owner_name || 'مالك المكتب', role: 'owner', active: true,
-          password_hash: bcrypt.hashSync(b.owner_password, 8),
-          created_at: new Date(),
-        })
+        if (linkMode) {
+          // Bind the existing main SA account to the company book: same account,
+          // same role (super_admin), tenant scope = the platform org. Travel-only
+          // modules are hidden via the EXISTING permission flags machinery
+          // (canModule reads permissions.mod_* !== false). Financial modules stay.
+          await db.collection('tenants').updateOne({ id: tenant.id }, { $set: { is_platform_org: true } })
+          await db.collection('users').updateOne({ id: linkUser.id }, {
+            $set: {
+              tenant_id: tenant.id, platform_org: true,
+              permissions: {
+                ...(linkUser.permissions || {}),
+                mod_tickets: false, mod_visas: false, mod_visa_monitor: false,
+                mod_services: false, mod_packages: false, mod_meraaj: false, mod_query: false,
+              },
+              updated_at: new Date(),
+            },
+          })
+        } else {
+          await db.collection('users').insertOne({
+            id: uuidv4(), tenant_id: tenant.id, email: String(b.owner_email).toLowerCase().trim(),
+            name: b.owner_name || 'مالك المكتب', role: 'owner', active: true,
+            password_hash: bcrypt.hashSync(b.owner_password, 8),
+            created_at: new Date(),
+          })
+        }
         await seedTenantDefaults(db, tenant.id)
-        return ok({ ...tenant, _id: undefined })
+        return ok({ ...tenant, _id: undefined, linked_user: linkMode ? linkUser.email : null })
       }
 
       // Confirm payment activation (grants +50 to referrer)
@@ -2242,7 +2277,7 @@ async function handleRoute(request, { params }) {
     // v3.50 — BATCH RE-SYNC: recompute market pricing fresh from current room_pricing and
     // re-emit package.updated for ALL shared packages (owner only). Fixes stale/zero prices at once.
     if (route === '/meraaj/resync-all' && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const sharedPkgs = await db.collection('packages').find({ tenant_id: T, 'meraaj.shared': true, archived: { $ne: true } }).toArray()
       let synced = 0, failed = 0
       for (const pkg of sharedPkgs) {
@@ -2666,7 +2701,7 @@ async function handleRoute(request, { params }) {
     // v3.61 — also accepts reject_alert_threshold (int 0..1000, 0 = alert disabled)
     // v3.71 — also accepts digest_reminder_time ('HH:MM' 24h format, '' = disabled)
     if (route === '/meraaj/settings' && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const b = await request.json()
       const set = {}
       if ('auto_approve' in b) set.meraaj_auto_approve = !!b.auto_approve
@@ -2708,7 +2743,7 @@ async function handleRoute(request, { params }) {
     // + rejected-webhooks alert (UTC day boundaries, consistent with the health trend chart).
     // Rejected/cancelled bookings are excluded from seats/revenue/net sums (counted in bookings).
     if (route === '/meraaj/daily-digest' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const startToday = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z')
       const startYesterday = new Date(startToday.getTime() - 24 * 3600 * 1000)
       const endToday = new Date(startToday.getTime() + 24 * 3600 * 1000)
@@ -2770,7 +2805,7 @@ async function handleRoute(request, { params }) {
     // v3.62 — MONTHLY MERAAJ REPORT (owner-only): per-package + per-buyer-office activity for a month.
     // Same exclusion semantics as digest: rejected/cancelled counted in bookings, excluded from sums.
     if (route === '/meraaj/monthly-report' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const month = url.searchParams.get('month') || new Date().toISOString().slice(0, 7)
       if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return bad('صيغة الشهر غير صحيحة — استخدم YYYY-MM')
       const start = new Date(month + '-01T00:00:00.000Z')
@@ -2811,7 +2846,7 @@ async function handleRoute(request, { params }) {
     // missing passports (approved bookings) and today's rejected webhooks vs threshold.
     // READ-ONLY: never modifies any document.
     if (route === '/meraaj/alerts-center' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       // 1) failed outbound events (total + latest 5)
       const failedTotal = await db.collection('meraaj_events').countDocuments({ ...tf, status: 'failed' })
       const failedLatest = await db.collection('meraaj_events').find({ ...tf, status: 'failed' }).sort({ created_at: -1 }).limit(5).project({ _id: 0, id: 1, type: 1, attempts: 1, last_error: 1, created_at: 1 }).toArray()
@@ -2896,7 +2931,7 @@ async function handleRoute(request, { params }) {
     // (written opportunistically by GET /meraaj/alerts-center). ?days=N (default 14, clamp 7..60).
     // Returns rows oldest→newest, one per day that has a snapshot.
     if (route === '/meraaj/alerts-history' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const days71 = Math.max(7, Math.min(60, parseInt(url.searchParams.get('days'), 10) || 14))
       const fromKey71 = new Date(Date.now() - (days71 - 1) * 24 * 3600 * 1000).toISOString().slice(0, 10)
       const rows71 = await db.collection('meraaj_alerts_history').find({ tenant_id: T, date: { $gte: fromKey71 } }).sort({ date: 1 }).project({ _id: 0, date: 1, counts: 1, updated_at: 1 }).toArray()
@@ -2907,7 +2942,7 @@ async function handleRoute(request, { params }) {
     // returned for the OVERALL total plus the top 6 offices and top 6 packages by window net.
     // SAME sum semantics: rejected/cancelled excluded from net, counted in bookings.
     if (route === '/meraaj/comparison-trend' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const endMonth71 = url.searchParams.get('month') || new Date().toISOString().slice(0, 7)
       if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(endMonth71)) return bad('صيغة الشهر غير صحيحة — استخدم YYYY-MM')
       const nMonths71 = Math.max(3, Math.min(12, parseInt(url.searchParams.get('months'), 10) || 6))
@@ -2956,7 +2991,7 @@ async function handleRoute(request, { params }) {
     // bookings + rejected but EXCLUDED from seats/revenue/net sums). UTC month boundaries.
     // growth_pct is computed on net_to_seller: prev>0 → pct; prev=0 & cur>0 → null (new); else 0.
     if (route === '/meraaj/office-comparison' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const monthC = url.searchParams.get('month') || new Date().toISOString().slice(0, 7)
       if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthC)) return bad('صيغة الشهر غير صحيحة — استخدم YYYY-MM')
       const curStart = new Date(monthC + '-01T00:00:00.000Z')
@@ -3132,7 +3167,7 @@ async function handleRoute(request, { params }) {
     // still missing a passport, from the AUTHORITATIVE linked package_bookings registrants
     // (falls back to the inbound copy only if the link is missing). Filters: package_id, office.
     if (route === '/meraaj/passport-report' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const fPkg = url.searchParams.get('package_id') || ''
       const fOffice = url.searchParams.get('office') || ''
       const q = { ...tf, status: 'approved' }
@@ -3212,7 +3247,7 @@ async function handleRoute(request, { params }) {
     // (untouched meraajContractPayload) so the marketplace availability updates immediately.
     const seatRefillMatch = route.match(/^\/meraaj\/packages\/([^/]+)\/add-seats$/)
     if (seatRefillMatch && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const pkg = await db.collection('packages').findOne({ id: seatRefillMatch[1], tenant_id: T })
       if (!pkg) return bad('الباكج غير موجود', 404)
       if (!pkg.meraaj?.shared) return bad('الباكج غير مشارك في سوق معراج')
@@ -3237,7 +3272,7 @@ async function handleRoute(request, { params }) {
     // dispatched=false → relists automatically IF open + not archived + seats available.
     const dispatchMatch = route.match(/^\/meraaj\/packages\/([^/]+)\/dispatch$/)
     if (dispatchMatch && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const pkgD = await db.collection('packages').findOne({ id: dispatchMatch[1], tenant_id: T })
       if (!pkgD) return bad('الباكج غير موجود', 404)
       if (!pkgD.meraaj?.shared) return bad('الباكج غير مُشارَك في سوق معراج')
@@ -3262,7 +3297,7 @@ async function handleRoute(request, { params }) {
     }
     // v3.63 — BUYER OFFICE RATING TAGS (owner): excellent | good | late_payment | '' (remove)
     if (route === '/meraaj/office-tag' && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const b = await request.json().catch(() => ({}))
       const office = String(b.office || '').trim().slice(0, 120)
       if (!office) return bad('اسم المكتب مطلوب')
@@ -3661,7 +3696,7 @@ async function handleRoute(request, { params }) {
     // Same idempotency as single retry: SAME event id re-sent, SAME doc updated, no new docs.
     // A failure in one event never stops the rest (per-event try/catch).
     if (route === '/meraaj/events/retry-all-failed' && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const retryUrl = process.env.MERAAJ_WEBHOOK_URL || (meraajApiBase() ? `${meraajApiBase()}/api/integrations/rahal/webhooks` : '')
       if (!retryUrl || !meraajSecret()) return bad('رابط معراج غير مُهيأ — أضف MERAAJ_API_BASE_URL ثم أعد المحاولة')
       const b = await request.json().catch(() => ({}))
@@ -3711,7 +3746,7 @@ async function handleRoute(request, { params }) {
     // emitMeraajEvent and webhook processing logic are untouched.
     const evtRetryMatch = route.match(/^\/meraaj\/events\/([^/]+)\/retry$/)
     if (evtRetryMatch && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const ev = await db.collection('meraaj_events').findOne({ id: evtRetryMatch[1], tenant_id: T })
       if (!ev) return bad('الحدث غير موجود', 404)
       if (ev.status === 'sent') return bad('الحدث مُرسل مسبقاً — لا حاجة لإعادة المحاولة')
@@ -6146,7 +6181,7 @@ async function handleRoute(request, { params }) {
     // record for each orphan (identity = account_code — no renumbering, no duplicates).
     // Uncertain cases (name conflicts) are SKIPPED and reported — never auto-linked.
     if (route === '/accounts/link-repair' && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const groups = [COA.CASHBOXES, COA.BANKS, COA.CLIENTS, COA.SUPPLIERS]
       const accs = await db.collection('accounts').find({ tenant_id: T, parent: { $in: groups }, $or: [{ is_group: { $exists: false } }, { is_group: false }] }).sort({ code: 1 }).toArray()
       const repaired = [], skippedConflicts = [], alreadyLinked = []
