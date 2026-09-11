@@ -12,6 +12,9 @@ import { getOffice360 } from '@/lib/admin360'
 // v3.93 — Batch 1: Sales & Vouchers + Accounting oversight (read-only) + Permissions Center
 import { adminCenterHandler } from '@/lib/adminCenter'
 import { adminPermsHandler } from '@/lib/adminPerms'
+import { adminCommissionsHandler } from '@/lib/adminCommissions' // v3.94 — Batch 2 (READ-ONLY)
+import { adminRequestsHandler } from '@/lib/adminRequests' // v3.94 — Batch 2 (READ-ONLY)
+import { adminAdsHandler, activeAnnouncementsFor } from '@/lib/adminAds' // v3.94 — Batch 2 (extends announcements)
 
 // v3.47 — Package image optimization settings (applied ONCE at upload; centralized — adjust here)
 const IMG_MAX_DIM = 1200        // longest side in px (aspect ratio preserved, never enlarged)
@@ -1728,6 +1731,17 @@ async function handleRoute(request, { params }) {
         return rP?.error ? bad(rP.error, rP.status || 400) : ok(rP)
       }
 
+      // v3.94 — Batch 2 delegations (modular). Commissions & Requests = READ-ONLY (GET only).
+      if (route.startsWith('/admin/commissions/') && method === 'GET') {
+        const rCm = await adminCommissionsHandler(db, route.slice('/admin/commissions'.length), new URL(request.url).searchParams,
+          { affiliateRate: AFFILIATE_COMMISSION_RATE, minCashoutIndividual: AFFILIATE_MIN_CASHOUT_INDIVIDUAL, minCashoutOffice: AFFILIATE_MIN_CASHOUT_OFFICE })
+        return rCm?.error ? bad(rCm.error, rCm.status || 400) : ok(rCm)
+      }
+      if (route.startsWith('/admin/requests/') && method === 'GET') {
+        const rRq = await adminRequestsHandler(db, route.slice('/admin/requests'.length), new URL(request.url).searchParams)
+        return rRq?.error ? bad(rRq.error, rRq.status || 400) : ok(rRq)
+      }
+
       // v3.91 — Phase 2: Office 360° (READ-ONLY — no writes, no balance recomputation).
       // Logic lives in lib/admin360.js; this is a single delegation line (AUDIT-006).
       const office360Match = route.match(/^\/admin\/tenants\/([^/]+)\/office360$/)
@@ -2101,44 +2115,15 @@ async function handleRoute(request, { params }) {
         return ok({ success: true })
       }
 
-      // v2.8 — Announcements CRUD (popup + banner)
-      if (route === '/admin/announcements' && method === 'GET') {
-        const list = await db.collection('announcements').find({}).sort({ created_at: -1 }).toArray()
-        return ok(list.map(a => ({ ...a, _id: undefined })))
-      }
-      if (route === '/admin/announcements' && method === 'POST') {
-        const b = await request.json()
-        const doc = {
-          id: uuidv4(),
-          type: b.type || 'popup', // 'popup' | 'banner'
-          title: b.title || '',
-          body: b.body || '',
-          image_url: b.image_url || '',
-          link_url: b.link_url || '',
-          active: b.active !== false,
-          starts_at: b.starts_at ? new Date(b.starts_at) : null,
-          ends_at: b.ends_at ? new Date(b.ends_at) : null,
-          created_by: sess.user.email,
-          created_at: new Date(),
-        }
-        await db.collection('announcements').insertOne(doc)
-        return ok({ ...doc, _id: undefined })
-      }
-      const annMatch = route.match(/^\/admin\/announcements\/([^/]+)$/)
-      if (annMatch && method === 'PUT') {
-        const id = annMatch[1]
-        const b = await request.json()
-        const upd = {}
-        for (const k of ['type', 'title', 'body', 'image_url', 'link_url', 'active']) if (b[k] !== undefined) upd[k] = b[k]
-        if (b.starts_at !== undefined) upd.starts_at = b.starts_at ? new Date(b.starts_at) : null
-        if (b.ends_at !== undefined) upd.ends_at = b.ends_at ? new Date(b.ends_at) : null
-        upd.updated_at = new Date()
-        await db.collection('announcements').updateOne({ id }, { $set: upd })
-        return ok({ success: true })
-      }
-      if (annMatch && method === 'DELETE') {
-        await db.collection('announcements').deleteOne({ id: annMatch[1] })
-        return ok({ success: true })
+      // v2.8 → v3.94 — Announcements: extended (types/targeting/schedule/status/audit)
+      // in lib/adminAds.js — SAME collection & API paths, backward compatible with the
+      // legacy AnnouncementsManager (its {active} toggles map to active/paused).
+      if (route === '/admin/announcements' || route.startsWith('/admin/announcements/')) {
+        let bodyA = null
+        if (method !== 'GET') { try { bodyA = await request.json() } catch { bodyA = {} } }
+        const rA = await adminAdsHandler(db, route.slice('/admin/announcements'.length), method, new URL(request.url).searchParams, bodyA, sess)
+        if (rA?.error) return bad(rA.error, rA.status || 400)
+        return ok(Array.isArray(rA?.rows) && method === 'GET' && route === '/admin/announcements' && !new URL(request.url).searchParams.get('extended') ? rA.rows : rA) // legacy manager expects a plain array
       }
 
       return bad(`Admin route ${route} not found`, 404)
@@ -3851,17 +3836,11 @@ async function handleRoute(request, { params }) {
       return ok({ discount_enabled: cfg.discount_enabled, discount_percent: disc, installments_count: n, plans, current: { plan_tier: sess.tenant?.plan_tier || null, billing_mode: sess.tenant?.billing_mode || null, unlimited: isUnlimitedTenant(sess.tenant) } })
     }
 
-    // v2.8 — Active announcements for tenant popup + banner
+    // v2.8 → v3.94 — Active announcements for tenant popup + banner
+    // Targeting is now enforced in the BACKEND (audience: all/tenants/plan/sub_status)
+    // via lib/adminAds.js — legacy docs without audience keep showing to everyone.
     if (route === '/announcements/active' && method === 'GET') {
-      const now = new Date()
-      const list = await db.collection('announcements').find({
-        active: true,
-        $and: [
-          { $or: [{ starts_at: null }, { starts_at: { $lte: now } }, { starts_at: { $exists: false } }] },
-          { $or: [{ ends_at: null }, { ends_at: { $gte: now } }, { ends_at: { $exists: false } }] },
-        ],
-      }).sort({ created_at: -1 }).toArray()
-      return ok(list.map(a => ({ id: a.id, type: a.type, title: a.title, body: a.body, image_url: a.image_url, link_url: a.link_url })))
+      return ok(await activeAnnouncementsFor(db, sess.tenant))
     }
 
     // Rates (per-tenant)

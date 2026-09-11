@@ -19,7 +19,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import {
   LayoutDashboard, Building2, TrendingUp, Receipt, Calculator, ShieldCheck,
   Megaphone, DatabaseBackup, FileSearch, Settings2, Activity, Bell, BarChart3,
-  PanelRight, LogOut, Lock,
+  PanelRight, LogOut, Lock, BadgePercent, Inbox,
 } from 'lucide-react'
 import { useAuth } from '../shared'
 import AdminDashboard from './dashboard'
@@ -27,6 +27,9 @@ import OfficesSection from './offices' // v3.91 — Phase 2
 import AdminSalesCenter from './sales' // v3.93 — Phase 3 (Sales & Vouchers — READ-ONLY)
 import AdminAccounting from './accounting' // v3.93 — Phase 3 (Accounting Control — READ-ONLY)
 import AdminPermsCenter from './perms' // v3.93 — Phase 3 (Permissions Center — RBAC)
+import AdminCommissionsCenter from './commissions' // v3.94 — Batch 2 (Commissions — READ-ONLY)
+import AdminRequestsCenter from './requests' // v3.94 — Batch 2 (Requests — READ-ONLY)
+import AdminAdsCenter from './ads' // v3.94 — Batch 2 (extends AnnouncementsManager over the same API)
 
 const SECTIONS = [
   { key: 'dashboard', label: 'نظرة عامة', icon: LayoutDashboard, phase: 1, ready: true },
@@ -34,6 +37,8 @@ const SECTIONS = [
   { key: 'sales', label: 'المبيعات', icon: TrendingUp, phase: 3, ready: true },
   { key: 'vouchers', label: 'السندات', icon: Receipt, phase: 3, ready: true },
   { key: 'accounting', label: 'الحسابات والرقابة المالية', icon: Calculator, phase: 3, ready: true },
+  { key: 'commissions', label: 'مركز العمولات', icon: BadgePercent, phase: 4, ready: true },
+  { key: 'requests', label: 'مركز الطلبات', icon: Inbox, phase: 4, ready: true },
   { key: 'permissions', label: 'الصلاحيات', icon: ShieldCheck, phase: 3, ready: true },
   { key: 'ads', label: 'العروض والإعلانات', icon: Megaphone, phase: 6, ready: true },
   { key: 'backup', label: 'النسخ الاحتياطي والاستعادة', icon: DatabaseBackup, phase: 7 },
@@ -69,19 +74,15 @@ const AdminApp = ({ legacyPanel = null, announcements = null }) => {
     if (active === 'sales') return <AdminSalesCenter key="sales" initialTab="sales" /> // v3.93 — Phase 3
     if (active === 'vouchers') return <AdminSalesCenter key="vouchers" initialTab="vouchers" /> // v3.93 — Phase 3
     if (active === 'accounting') return <AdminAccounting /> // v3.93 — Phase 3
+    if (active === 'commissions') return <AdminCommissionsCenter /> // v3.94 — Batch 2
+    if (active === 'requests') return <AdminRequestsCenter /> // v3.94 — Batch 2
     if (active === 'permissions') return <AdminPermsCenter /> // v3.93 — Phase 3
     if (active === 'legacy') return legacyPanel || <PlaceholderSection section={current} />
     if (active === 'ads') {
-      return (
-        <div className="space-y-4">
-          <Card className="bg-blue-50/60 border-blue-200">
-            <CardContent className="py-3 text-xs text-blue-900">
-              ♻️ هذا القسم يعيد استخدام <b>AnnouncementsManager</b> الحالي وواجهة <b>/api/admin/announcements</b> كما هي — التوسعة (الاستهداف، التواريخ، الأولوية، السجل) مجدولة في المرحلة 6.
-            </CardContent>
-          </Card>
-          {announcements || <PlaceholderSection section={current} />}
-        </div>
-      )
+      // v3.94 — Batch 2: the extended Ads Center replaces the embedded legacy manager
+      // (same API /admin/announcements — the legacy AnnouncementsManager still works
+      // unchanged inside the classic panel).
+      return <AdminAdsCenter />
     }
     return <PlaceholderSection section={current} />
   }
