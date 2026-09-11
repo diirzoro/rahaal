@@ -162,3 +162,13 @@ See /app/memory/test_credentials.md
 - AUDIT-001 (فحص ثابت، بلا إصلاح): الخادم يرحل الإقفال إلى 3102 (RETAINED_EARNINGS ثابت في route.js:67 وlib/coa.js:28؛ تعليق 6939 يؤكد أن 3900 القديم لا وجود له بالشجرة وأُصلح). التضارب نص UI فقط: page.js:5902 و5921 يذكران "3900 الأرباح المدورة" بينما 5979 صحيح (3102). التوصية: توحيد النصين إلى 3102 لاحقاً بموافقة.
 - Data Gaps: لا last_login (النشاط مشتق من created_at)؛ الأرباح null (لا endpoint إداري موثوق)؛ القائمة لا تعرض عدد العمليات/COA/معراج (متاحة داخل 360)؛ الفروع = الحد max_branches لا العدد الفعلي؛ backup/export يعتمد جلسة مكتب.
 - عمليات تحتاج Audit لاحقاً: tenants POST/PATCH/toggle-status/topup/reset-password/impersonate/confirm-payment، pricing-config PUT، plans PUT، password-reset PATCH، office-verifications PATCH، announcements POST/PUT/DELETE، backup/export، (اختيارياً: قراءات office360).
+
+## v3.92 — ربط حسابات الدليل بالسجلات التشغيلية — NOT TESTED بطلب المستخدم
+- الهوية = account_code حصراً (لا الاسم). helper: opLinkMapFor + ensureOperationalLink في route.js.
+- POST /accounts تحت 1101/1102/1103/2101 (غير مجموعة): فحص مسبق لتكرار الاسم → إنشاء الحساب → إنشاء السجل التشغيلي (صندوق cash/bank، عميل، مورد) — وعند التعارض تراجع نظيف (حذف الحساب) بلا يتيم.
+- PUT /accounts/:id: إعادة التسمية تحافظ على الهوية — مزامنة اسم السجل بالكود + رفض الاسم المكرر. مزامنة عكسية من PUT clients/suppliers إلى accounts.name_ar بالكود.
+- DELETE /accounts/:id: حظر حذف حساب مرتبط بسجل تشغيلي.
+- /accounts/tree: منع ازدواج العقدة — السجل الذي كوده موجود كمستند accounts يُدمج كـlinked_entity على العقدة (شارة 🔗 بالواجهة).
+- الاستيراد (تذاكر+تأشيرات، معاينة+تنفيذ): رفض صريح للأسماء المكررة (عميل/مورد/صندوق) — findStrict limit(2)، لا إنشاء تلقائي لأي طرف.
+- اليتامى: GET /accounts/link-audit (قراءة) + POST /accounts/link-repair (مالك فقط، Idempotent، تعارضات الأسماء تُتخطى وتُعرض) + زر "🔗 فحص الربط التشغيلي" وحوار في صفحة الدليل.
+- السندات لم تُمس: كانت أصلاً ترحل على الحساب النهائي (partyLeafCode + boxLeafV F-007) — المشكلة كانت غياب السجل التشغيلي فقط.

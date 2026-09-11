@@ -4573,8 +4573,24 @@ function ChartScreen() {
       if (editing) await api(`/accounts/${editing.id}`, { method: 'PUT', body: { name_ar: form.name_ar, type: form.type, parent: form.parent || null, is_group: form.is_group, notes: form.notes } })
       // v3.89 — when the code matches the auto-preview, send it EMPTY so the backend
       // generates it atomically (collision-free even under concurrent creation)
-      else await api('/accounts', { method: 'POST', body: (form.parent && (!form.code || form.code === autoCode)) ? { ...form, code: '' } : form })
+      else {
+        const created = await api('/accounts', { method: 'POST', body: (form.parent && (!form.code || form.code === autoCode)) ? { ...form, code: '' } : form })
+        // v3.92 — COA→operational auto-link feedback
+        if (created?.operational_link?.created) toast.success(`🔗 أُنشئ ${created.operational_link.kind} تشغيلي مرتبط تلقائياً (${created.code}) — سيظهر في الشاشة التشغيلية والسندات`)
+      }
       setOpen(false); setEditing(null); load(); loadTree(); toast.success(editing ? 'تم التعديل' : 'تمت الإضافة') // v3.88.4 — U-008: refresh the TREE view too
+    } catch (e) { toast.error(e.message) }
+  }
+  // v3.92 — orphan-link audit & safe repair (owner-triggered, idempotent)
+  const [linkAudit, setLinkAudit] = useState(null)
+  const [linkOpen, setLinkOpen] = useState(false)
+  const runLinkAudit = async () => { try { setLinkAudit(await api('/accounts/link-audit')); setLinkOpen(true) } catch (e) { toast.error(e.message) } }
+  const runLinkRepair = async () => {
+    if (!(await askConfirm({ title: 'ربط الحسابات اليتيمة بالسجلات التشغيلية', desc: 'سيُنشأ سجل تشغيلي (صندوق/عميل/مورد) لكل حساب غير مرتبط — عملية آمنة وIdempotent بدون إعادة ترقيم. حالات تعارض الأسماء تُتخطى وتُعرض.', icon: '🔗', confirmLabel: 'تنفيذ الربط الآمن' }))) return
+    try {
+      const r = await api('/accounts/link-repair', { method: 'POST' })
+      toast.success(`🔗 تم ربط ${r.repaired_count} حساباً${r.skipped_conflicts?.length ? ` — تُخطي ${r.skipped_conflicts.length} (تعارض أسماء)` : ''}`)
+      setLinkAudit(await api('/accounts/link-audit')); load(); loadTree()
     } catch (e) { toast.error(e.message) }
   }
   const del = async (a) => {
@@ -4656,6 +4672,7 @@ function ChartScreen() {
             ) : <span className="w-5 h-5 inline-block" />}
             <span className="font-mono text-[11px] font-bold px-1.5 py-0.5 rounded bg-white/70 border">{node.code}</span>
             <span className="text-sm font-semibold truncate">{node.name}</span>
+            {node.linked_entity && <span title={`مرتبط بسجل تشغيلي (${node.linked_entity.type === 'box' ? 'صندوق/بنك' : node.linked_entity.type === 'client' ? 'عميل' : 'مورد'})`} className="text-emerald-600 text-xs">🔗</span>}
             {node.is_group && <Badge variant="outline" className="text-[10px] shrink-0">📁 مجموعة</Badge>}
             {node.is_parent && <Badge variant="outline" className="text-[10px] shrink-0 bg-white">🌳 شجري · {node.next_child_seq} فرع</Badge>}
           </div>
@@ -4694,7 +4711,41 @@ function ChartScreen() {
   return (
     <div className="space-y-6">
       <TopBar title="الدليل المحاسبي" subtitle="شجرة الحسابات الرئيسية والفرعية — يدعم الحسابات المجمعة (parent/child)"
-        right={<Button onClick={() => { setEditing(null); setOpen(true) }} className="gap-2 grad-brand text-white"><Plus className="w-4 h-4" /> حساب جديد</Button>} />
+        right={<div className="flex items-center gap-2">
+          <Button variant="outline" onClick={runLinkAudit} className="gap-2">🔗 فحص الربط التشغيلي</Button>
+          <Button onClick={() => { setEditing(null); setOpen(true) }} className="gap-2 grad-brand text-white"><Plus className="w-4 h-4" /> حساب جديد</Button>
+        </div>} />
+      {/* v3.92 — orphan-link audit dialog */}
+      <Dialog open={linkOpen} onOpenChange={setLinkOpen}>
+        <DialogContent dir="rtl" className="max-w-2xl">
+          <DialogHeader><DialogTitle>🔗 ربط حسابات الدليل بالسجلات التشغيلية (1101 / 1102 / 1103 / 2101)</DialogTitle></DialogHeader>
+          {!linkAudit ? <div className="text-slate-400 text-center py-6">جارِ الفحص…</div> : (
+            <div className="space-y-3 text-sm">
+              <div className="flex flex-wrap gap-2">
+                <Badge className="bg-emerald-100 text-emerald-700">مرتبط: {linkAudit.linked}</Badge>
+                <Badge className={linkAudit.orphans?.length ? 'bg-rose-100 text-rose-700' : 'bg-slate-100 text-slate-500'}>يتيم (بلا سجل تشغيلي): {linkAudit.orphans?.length || 0}</Badge>
+                <Badge className={linkAudit.conflicts?.length ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-500'}>تعارض اسم: {linkAudit.conflicts?.length || 0}</Badge>
+              </div>
+              {(linkAudit.orphans?.length > 0) && (
+                <div className="border rounded-lg p-3 bg-rose-50/50 max-h-48 overflow-y-auto space-y-1">
+                  {linkAudit.orphans.map(o => <div key={o.code} className="text-xs flex gap-2"><span className="font-mono text-slate-500" dir="ltr">{o.code}</span><b>{o.name}</b><Badge variant="outline" className="text-[9px]">{o.kind}</Badge></div>)}
+                </div>
+              )}
+              {(linkAudit.conflicts?.length > 0) && (
+                <div className="border rounded-lg p-3 bg-orange-50/60 max-h-40 overflow-y-auto space-y-1">
+                  <div className="text-[11px] font-bold text-orange-800">تعارضات أسماء — لن تُربط تلقائياً (قرار يدوي): غيّر اسم الحساب أو السجل ثم أعد الفحص</div>
+                  {linkAudit.conflicts.map(o => <div key={o.code} className="text-xs flex gap-2"><span className="font-mono text-slate-500" dir="ltr">{o.code}</span><b>{o.name}</b><span className="text-orange-700">يتعارض مع حساب {o.conflict_with || '—'}</span></div>)}
+                </div>
+              )}
+              {(linkAudit.orphans?.length === 0 && linkAudit.conflicts?.length === 0) && <div className="text-emerald-700 font-semibold">✅ كل الحسابات مرتبطة بسجلاتها التشغيلية</div>}
+              <div className="flex justify-between items-center pt-2">
+                <div className="text-[10px] text-slate-400">الربط بالهوية (account_code) وليس بالاسم · Idempotent · بدون إعادة ترقيم</div>
+                {linkAudit.orphans?.length > 0 && <Button onClick={runLinkRepair} className="bg-emerald-600 hover:bg-emerald-700 text-white gap-1">🔗 ربط آمن ({linkAudit.orphans.length})</Button>}
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* v3.10.0 — View mode toggle bar */}
       <Card>

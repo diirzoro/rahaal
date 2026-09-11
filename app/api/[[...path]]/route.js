@@ -598,6 +598,50 @@ async function generateSubAccountCode(db, tenantId, parentCode) {
   }
 }
 
+// ============================================================================
+// v3.92 — COA ↔ OPERATIONAL LINKAGE (boxes / clients / suppliers)
+// Identity = account_code (stable, unique per tenant) — NEVER the name.
+// A leaf account created from the COA under one of these groups gets a real
+// operational record so it appears in the operational screens and vouchers.
+// Idempotent: an existing record with the same account_code is reused as-is.
+// Name duplicates are REJECTED (no auto-link on ambiguity — stop & report).
+// ============================================================================
+function opLinkMapFor(parentCode) {
+  const p = String(parentCode || '')
+  if (p === COA.CASHBOXES) return { coll: 'boxes', kind: 'صندوق', nameField: 'name_ar', screen: 'شاشة الصناديق', boxType: 'cash' }
+  if (p === COA.BANKS) return { coll: 'boxes', kind: 'حساب بنكي', nameField: 'name_ar', screen: 'شاشة الصناديق', boxType: 'bank' }
+  if (p === COA.CLIENTS) return { coll: 'clients', kind: 'عميل', nameField: 'name', screen: 'شاشة العملاء' }
+  if (p === COA.SUPPLIERS) return { coll: 'suppliers', kind: 'مورد', nameField: 'name', screen: 'شاشة الموردين' }
+  return null
+}
+async function ensureOperationalLink(db, T, account) {
+  if (account.is_group) return { skipped: 'group' }
+  const m = opLinkMapFor(account.parent)
+  if (!m) return { skipped: 'not_operational_group' }
+  // idempotent by account_code — the stable identity
+  const existing = await db.collection(m.coll).findOne({ tenant_id: T, account_code: account.code })
+  if (existing) return { linked: true, created: false, coll: m.coll, id: existing.id }
+  const name = account.name_ar
+  // never create a duplicate operational record for a reused name
+  const dupName = await db.collection(m.coll).findOne(
+    m.coll === 'boxes'
+      ? { tenant_id: T, $or: [{ name_ar: name }, { name: name }] }
+      : { tenant_id: T, name }
+  )
+  if (dupName) return { conflict: `يوجد ${m.kind} آخر بنفس الاسم "${name}" (حساب ${dupName.account_code || '—'}) — عدّل الاسم أو استخدم ${m.screen}` }
+  const base = {
+    id: uuidv4(), tenant_id: T, parent_code: String(account.parent),
+    account_code: account.code, account_parent_code: String(account.parent),
+    balances: emptyBalances(), created_at: new Date(), created_from: 'coa',
+  }
+  let doc
+  if (m.coll === 'boxes') doc = { ...base, name_ar: name, type: m.boxType }
+  else if (m.coll === 'clients') doc = { ...base, name, phone: '', whatsapp: '', address: '', email: '', notes: 'أُنشئ من الدليل المحاسبي', credit_limit: 0, credit_currency: 'USD', is_frozen: false }
+  else doc = { ...base, name, phone: '', whatsapp: '', address: '', email: '', notes: 'أُنشئ من الدليل المحاسبي' }
+  await db.collection(m.coll).insertOne(doc)
+  return { linked: true, created: true, coll: m.coll, id: doc.id, kind: m.kind }
+}
+
 // v3.10.0 — Validate JE lines: no negatives + account exists
 async function validateJournalLines(db, tenantId, lines) {
   if (!Array.isArray(lines) || lines.length === 0) return { ok: true }
@@ -5411,6 +5455,11 @@ async function handleRoute(request, { params }) {
       const upd = {}
       for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes', 'parent_code', 'credit_limit', 'credit_currency', 'is_frozen']) if (b[k] !== undefined) upd[k] = k === 'credit_limit' ? (Number(b[k]) || 0) : k === 'is_frozen' ? !!b[k] : b[k]
       await db.collection('clients').updateOne({ id: clientIdMatch[1], tenant_id: T }, { $set: upd })
+      // v3.92 — keep the linked COA account (if one exists for this code) in sync by IDENTITY
+      if (upd.name !== undefined) {
+        const c0 = await db.collection('clients').findOne({ id: clientIdMatch[1], tenant_id: T }, { projection: { account_code: 1 } })
+        if (c0?.account_code) await db.collection('accounts').updateOne({ tenant_id: T, code: c0.account_code }, { $set: { name_ar: upd.name } })
+      }
       return ok({ success: true })
     }
     if (clientIdMatch && method === 'DELETE') {
@@ -5443,6 +5492,11 @@ async function handleRoute(request, { params }) {
       const upd = {}
       for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes', 'parent_code']) if (b[k] !== undefined) upd[k] = b[k]
       await db.collection('suppliers').updateOne({ id: supIdMatch[1], tenant_id: T }, { $set: upd })
+      // v3.92 — keep the linked COA account (if one exists for this code) in sync by IDENTITY
+      if (upd.name !== undefined) {
+        const s0 = await db.collection('suppliers').findOne({ id: supIdMatch[1], tenant_id: T }, { projection: { account_code: 1 } })
+        if (s0?.account_code) await db.collection('accounts').updateOne({ tenant_id: T, code: s0.account_code }, { $set: { name_ar: upd.name } })
+      }
       return ok({ success: true })
     }
     if (supIdMatch && method === 'DELETE') {
@@ -5879,6 +5933,14 @@ async function handleRoute(request, { params }) {
       })
       // Attach sub-entities under their parent codes
       const attach = (entity, type) => {
+        const ecode = entity.account_code
+        // v3.92 — a COA-linked entity whose code exists as an accounts doc must not render
+        // twice: decorate the existing tree node with the operational identity instead
+        if (ecode && byCode.has(ecode)) {
+          const n = byCode.get(ecode)
+          n.linked_entity = { type, id: entity.id, balances: entity.balances || {}, box_type: entity.type || null }
+          return
+        }
         const pcode = entity.account_parent_code || entity.parent_code
         if (pcode && byCode.has(pcode)) {
           byCode.get(pcode).sub_entities.push({
@@ -5926,6 +5988,46 @@ async function handleRoute(request, { params }) {
       if (seqNC > seqCapNC) return bad(`امتلأ تسلسل الفرع ${parentNC} (الحد ${seqCapNC} حساباً) — أنشئ مجموعة جديدة`)
       return ok({ next_code: codeNC, parent: parentNC, preview: true })
     }
+    // v3.92 — LINK AUDIT (read-only): leaf accounts under 1101/1102/1103/2101 and their
+    // operational linkage status. Nothing is modified here.
+    if (route === '/accounts/link-audit' && method === 'GET') {
+      const groups = [COA.CASHBOXES, COA.BANKS, COA.CLIENTS, COA.SUPPLIERS]
+      const accs = await db.collection('accounts').find({ tenant_id: T, parent: { $in: groups }, $or: [{ is_group: { $exists: false } }, { is_group: false }] }).sort({ code: 1 }).toArray()
+      const items = []
+      for (const a of accs) {
+        const m = opLinkMapFor(a.parent)
+        const linkedRec = await db.collection(m.coll).findOne({ tenant_id: T, account_code: a.code })
+        if (linkedRec) { items.push({ code: a.code, name: a.name_ar, kind: m.kind, status: 'linked' }); continue }
+        const dupName = await db.collection(m.coll).findOne(
+          m.coll === 'boxes' ? { tenant_id: T, $or: [{ name_ar: a.name_ar }, { name: a.name_ar }] } : { tenant_id: T, name: a.name_ar }
+        )
+        items.push(dupName
+          ? { code: a.code, name: a.name_ar, kind: m.kind, status: 'name_conflict', conflict_with: dupName.account_code || null }
+          : { code: a.code, name: a.name_ar, kind: m.kind, status: 'orphan' })
+      }
+      return ok({
+        total: items.length,
+        linked: items.filter(i => i.status === 'linked').length,
+        orphans: items.filter(i => i.status === 'orphan'),
+        conflicts: items.filter(i => i.status === 'name_conflict'),
+      })
+    }
+    // v3.92 — LINK REPAIR (owner-triggered, IDEMPOTENT): creates the missing operational
+    // record for each orphan (identity = account_code — no renumbering, no duplicates).
+    // Uncertain cases (name conflicts) are SKIPPED and reported — never auto-linked.
+    if (route === '/accounts/link-repair' && method === 'POST') {
+      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      const groups = [COA.CASHBOXES, COA.BANKS, COA.CLIENTS, COA.SUPPLIERS]
+      const accs = await db.collection('accounts').find({ tenant_id: T, parent: { $in: groups }, $or: [{ is_group: { $exists: false } }, { is_group: false }] }).sort({ code: 1 }).toArray()
+      const repaired = [], skippedConflicts = [], alreadyLinked = []
+      for (const a of accs) {
+        const r = await ensureOperationalLink(db, T, a)
+        if (r?.conflict) skippedConflicts.push({ code: a.code, name: a.name_ar, reason: r.conflict })
+        else if (r?.created) repaired.push({ code: a.code, name: a.name_ar, kind: r.kind })
+        else if (r?.linked) alreadyLinked.push(a.code)
+      }
+      return ok({ repaired, repaired_count: repaired.length, already_linked: alreadyLinked.length, skipped_conflicts: skippedConflicts })
+    }
     if (route === '/accounts' && method === 'POST') {
       const b = await request.json()
       if (!b.name_ar || !b.type) return bad('الاسم والنوع مطلوبان')
@@ -5969,8 +6071,30 @@ async function handleRoute(request, { params }) {
         is_group: !!b.is_group, notes: b.notes || '',
         created_at: new Date(),
       }
+      // v3.92 — COA→operational pre-check: never create an account that would collide with an
+      // existing box/client/supplier NAME (prevents duplicate operational records up-front)
+      const opMapC = !doc.is_group ? opLinkMapFor(parentStr) : null
+      if (opMapC) {
+        const dupOp = await db.collection(opMapC.coll).findOne(
+          opMapC.coll === 'boxes'
+            ? { tenant_id: T, $or: [{ name_ar: doc.name_ar }, { name: doc.name_ar }] }
+            : { tenant_id: T, name: doc.name_ar }
+        )
+        if (dupOp) return bad(`يوجد ${opMapC.kind} بنفس الاسم "${doc.name_ar}" (حساب ${dupOp.account_code || '—'}) — لمنع التكرار عدّل الاسم أو استخدم ${opMapC.screen}`)
+      }
       await db.collection('accounts').insertOne(doc)
-      const { _id, ...rest } = doc; return ok(rest)
+      // v3.92 — auto-link: an account under 1101/1102/1103/2101 gets its operational record
+      // (identity = account_code) so it appears in the operational screens and vouchers.
+      let opLink = null
+      if (opMapC) {
+        opLink = await ensureOperationalLink(db, T, doc)
+        if (opLink?.conflict) {
+          // clean abort — never leave an orphan account behind
+          await db.collection('accounts').deleteOne({ id: doc.id, tenant_id: T })
+          return bad(opLink.conflict)
+        }
+      }
+      const { _id, ...rest } = doc; return ok({ ...rest, operational_link: opLink })
     }
     const acctIdMatch = route.match(/^\/accounts\/([^/]+)$/)
     if (acctIdMatch && method === 'PUT') {
@@ -5987,7 +6111,22 @@ async function handleRoute(request, { params }) {
       if (b.code !== undefined && String(b.code) !== acc.code) {
         return bad(acc.is_system ? `الحساب ${acc.code} حساب نظامي — لا يمكن تغيير رقمه` : 'تغيير رمز الحساب غير مدعوم — احذف الحساب وأنشئه من جديد بالرمز الصحيح')
       }
+      // v3.92 — rename keeps the SAME identity (account + operational record). The linked
+      // record is found by account_code (never by name) and gets the new name — no new
+      // account, no new record. Duplicate names are rejected before touching anything.
+      const opMapU = opLinkMapFor(acc.parent)
+      if (opMapU && upd.name_ar !== undefined && String(upd.name_ar) !== acc.name_ar) {
+        const dupOpU = await db.collection(opMapU.coll).findOne(
+          opMapU.coll === 'boxes'
+            ? { tenant_id: T, account_code: { $ne: acc.code }, $or: [{ name_ar: upd.name_ar }, { name: upd.name_ar }] }
+            : { tenant_id: T, account_code: { $ne: acc.code }, name: upd.name_ar }
+        )
+        if (dupOpU) return bad(`يوجد ${opMapU.kind} آخر بنفس الاسم "${upd.name_ar}" — اختر اسماً مختلفاً لمنع التكرار`)
+      }
       await db.collection('accounts').updateOne({ id: acctIdMatch[1], tenant_id: T }, { $set: upd })
+      if (opMapU && upd.name_ar !== undefined) {
+        await db.collection(opMapU.coll).updateOne({ tenant_id: T, account_code: acc.code }, { $set: { [opMapU.nameField]: upd.name_ar } })
+      }
       return ok({ success: true })
     }
     if (acctIdMatch && method === 'DELETE') {
@@ -6000,6 +6139,12 @@ async function handleRoute(request, { params }) {
       // Check for journal entries
       const jeCount = await db.collection('journal_entries').countDocuments({ tenant_id: T, 'lines.account_code': acc.code })
       if (jeCount > 0) return bad(`لا يمكن حذف الحساب — مستخدم في ${jeCount} قيد يومية`)
+      // v3.92 — linked operational record guard: never orphan a box/client/supplier
+      const opMapD = opLinkMapFor(acc.parent)
+      if (opMapD) {
+        const opRec = await db.collection(opMapD.coll).findOne({ tenant_id: T, account_code: acc.code })
+        if (opRec) return bad(`الحساب مرتبط بـ${opMapD.kind} "${opRec[opMapD.nameField] || opRec.name || ''}" — احذفه من ${opMapD.screen} أولاً (الهوية موحدة)`)
+      }
       await db.collection('accounts').deleteOne({ id: acctIdMatch[1], tenant_id: T })
       return ok({ success: true })
     }
@@ -6203,6 +6348,11 @@ async function handleRoute(request, { params }) {
       const clientSet = new Set(allClients.map(x => String(x.name).trim().toLowerCase()))
       const supplierSet = new Set(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
       const boxSet = new Set(allBoxes.flatMap(x => [String(x.name_ar || '').trim().toLowerCase(), String(x.name || '').trim().toLowerCase()].filter(Boolean)))
+      // v3.92 — duplicate operational names make name-matching AMBIGUOUS → hard, clear error
+      const dupOf = (names) => { const cnt = {}; for (const k of names) if (k) cnt[k] = (cnt[k] || 0) + 1; return new Set(Object.keys(cnt).filter(k => cnt[k] > 1)) }
+      const clientDups = dupOf(allClients.map(x => String(x.name).trim().toLowerCase()))
+      const supplierDups = dupOf(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
+      const boxDups = dupOf(allBoxes.flatMap(x => [String(x.name_ar || '').trim().toLowerCase(), String(x.name || '').trim().toLowerCase()].filter(Boolean)))
       const seenInBatch = new Set()
       const seenNameDateInBatch = new Set()
       const validated = rows.map((r, i) => {
@@ -6214,12 +6364,21 @@ async function handleRoute(request, { params }) {
         if (!r.client_name) errors.push('حساب القبض مطلوب (عميل أو صندوق/بنك)')
         else {
           const key = String(r.client_name).trim().toLowerCase()
-          if (clientSet.has(key)) receiptKind = 'client'
-          else if (boxSet.has(key)) receiptKind = 'box'
+          if (clientSet.has(key)) {
+            if (clientDups.has(key)) errors.push(`خطأ استيراد: اسم حساب القبض "${r.client_name}" مكرر بين أكثر من عميل — وحّد الأسماء أو صحّح السجلات أولاً`)
+            receiptKind = 'client'
+          } else if (boxSet.has(key)) {
+            if (boxDups.has(key)) errors.push(`خطأ استيراد: اسم الصندوق/البنك "${r.client_name}" مكرر بين أكثر من صندوق — وحّد الأسماء أولاً`)
+            receiptKind = 'box'
+          }
           else errors.push(`خطأ استيراد: حساب القبض "${r.client_name}" غير موجود (لا عميل ولا صندوق/بنك) — أضِفه يدوياً أولاً`)
         }
         if (!r.supplier_name) errors.push('اسم المورد مطلوب')
-        else if (!supplierSet.has(String(r.supplier_name).trim().toLowerCase())) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
+        else {
+          const supKey = String(r.supplier_name).trim().toLowerCase()
+          if (!supplierSet.has(supKey)) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
+          else if (supplierDups.has(supKey)) errors.push(`خطأ استيراد: اسم المورد "${r.supplier_name}" مكرر بين أكثر من مورد — وحّد الأسماء أولاً`)
+        }
         let dup = false
         // v3.18 — Duplicate rule uses TRAVEL DATE ONLY (never the transaction date fallback).
         // No travel date => no name/PNR dedup (accept the row). Different travel date => accepted.
@@ -6254,11 +6413,22 @@ async function handleRoute(request, { params }) {
         if (skip && r.__dup) { skipped++; continue }
         if (r.__errors && r.__errors.length) { failed++; errors.push({ row: r.__row, errors: r.__errors }); continue }
         // v3.9.8 — Receipt account may be a client (credit) OR a box/bank (cash)
+        // v3.92 — STRICT resolution: the row must resolve to EXACTLY ONE linked record.
+        // Ambiguity (duplicate names) fails with a clear message — nothing is auto-created.
+        const findStrict = async (coll, filter) => { const l = await db.collection(coll).find(filter).limit(2).toArray(); return { doc: l[0] || null, dup: l.length > 1 } }
         const nameTrim = r.client_name ? String(r.client_name).trim() : ''
-        const cli = nameTrim ? await db.collection('clients').findOne({ tenant_id: T, name: nameTrim }) : null
+        const cliR = nameTrim ? await findStrict('clients', { tenant_id: T, name: nameTrim }) : { doc: null, dup: false }
+        if (cliR.dup) { failed++; errors.push({ row: r.__row, errors: [`اسم حساب القبض "${nameTrim}" مكرر بين أكثر من عميل — وحّد الأسماء أولاً`] }); continue }
+        const cli = cliR.doc
         let box = null
-        if (!cli && nameTrim) box = await db.collection('boxes').findOne({ tenant_id: T, $or: [{ name_ar: nameTrim }, { name: nameTrim }] })
-        const sup = r.supplier_name ? await db.collection('suppliers').findOne({ tenant_id: T, name: String(r.supplier_name).trim() }) : null
+        if (!cli && nameTrim) {
+          const boxR = await findStrict('boxes', { tenant_id: T, $or: [{ name_ar: nameTrim }, { name: nameTrim }] })
+          if (boxR.dup) { failed++; errors.push({ row: r.__row, errors: [`اسم الصندوق/البنك "${nameTrim}" مكرر بين أكثر من صندوق — وحّد الأسماء أولاً`] }); continue }
+          box = boxR.doc
+        }
+        const supR = r.supplier_name ? await findStrict('suppliers', { tenant_id: T, name: String(r.supplier_name).trim() }) : { doc: null, dup: false }
+        if (supR.dup) { failed++; errors.push({ row: r.__row, errors: [`اسم المورد "${r.supplier_name}" مكرر بين أكثر من مورد — وحّد الأسماء أولاً`] }); continue }
+        const sup = supR.doc
         if (!cli && !box) { failed++; errors.push({ row: r.__row, errors: [`حساب القبض "${r.client_name}" غير موجود (لا عميل ولا صندوق/بنك)`] }); continue }
         if (!sup) { failed++; errors.push({ row: r.__row, errors: [`المورد "${r.supplier_name}" غير موجود في دليل الحسابات`] }); continue }
         const payload = box
@@ -6299,6 +6469,11 @@ async function handleRoute(request, { params }) {
       const clientSet = new Set(allClients.map(x => String(x.name).trim().toLowerCase()))
       const supplierSet = new Set(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
       const boxSet = new Set(allBoxes.flatMap(x => [String(x.name_ar || '').trim().toLowerCase(), String(x.name || '').trim().toLowerCase()].filter(Boolean)))
+      // v3.92 — duplicate operational names make name-matching AMBIGUOUS → hard, clear error
+      const dupOf = (names) => { const cnt = {}; for (const k of names) if (k) cnt[k] = (cnt[k] || 0) + 1; return new Set(Object.keys(cnt).filter(k => cnt[k] > 1)) }
+      const clientDups = dupOf(allClients.map(x => String(x.name).trim().toLowerCase()))
+      const supplierDups = dupOf(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
+      const boxDups = dupOf(allBoxes.flatMap(x => [String(x.name_ar || '').trim().toLowerCase(), String(x.name || '').trim().toLowerCase()].filter(Boolean)))
       const seenInBatch = new Set()
       const seenNameDateInBatch = new Set()
       const validated = rows.map((r, i) => {
@@ -6310,12 +6485,21 @@ async function handleRoute(request, { params }) {
         if (!r.client_name) errors.push('حساب القبض مطلوب (عميل أو صندوق/بنك)')
         else {
           const key = String(r.client_name).trim().toLowerCase()
-          if (clientSet.has(key)) receiptKind = 'client'
-          else if (boxSet.has(key)) receiptKind = 'box'
+          if (clientSet.has(key)) {
+            if (clientDups.has(key)) errors.push(`خطأ استيراد: اسم حساب القبض "${r.client_name}" مكرر بين أكثر من عميل — وحّد الأسماء أو صحّح السجلات أولاً`)
+            receiptKind = 'client'
+          } else if (boxSet.has(key)) {
+            if (boxDups.has(key)) errors.push(`خطأ استيراد: اسم الصندوق/البنك "${r.client_name}" مكرر بين أكثر من صندوق — وحّد الأسماء أولاً`)
+            receiptKind = 'box'
+          }
           else errors.push(`خطأ استيراد: حساب القبض "${r.client_name}" غير موجود (لا عميل ولا صندوق/بنك) — أضِفه يدوياً أولاً`)
         }
         if (!r.supplier_name) errors.push('اسم المورد مطلوب')
-        else if (!supplierSet.has(String(r.supplier_name).trim().toLowerCase())) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
+        else {
+          const supKey = String(r.supplier_name).trim().toLowerCase()
+          if (!supplierSet.has(supKey)) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
+          else if (supplierDups.has(supKey)) errors.push(`خطأ استيراد: اسم المورد "${r.supplier_name}" مكرر بين أكثر من مورد — وحّد الأسماء أولاً`)
+        }
         let dup = false
         // v3.18 — Duplicate rule uses ENTRY DATE only (never the transaction date fallback).
         // No entry date => no dedup (accept). Different entry date => accepted as a new operation.
@@ -6350,11 +6534,22 @@ async function handleRoute(request, { params }) {
         if (skip && r.__dup) { skipped++; continue }
         if (r.__errors && r.__errors.length) { failed++; errors.push({ row: r.__row, errors: r.__errors }); continue }
         // v3.9.8 — Receipt account may be a client (credit) OR a box/bank (cash)
+        // v3.92 — STRICT resolution: the row must resolve to EXACTLY ONE linked record.
+        // Ambiguity (duplicate names) fails with a clear message — nothing is auto-created.
+        const findStrict = async (coll, filter) => { const l = await db.collection(coll).find(filter).limit(2).toArray(); return { doc: l[0] || null, dup: l.length > 1 } }
         const nameTrim = r.client_name ? String(r.client_name).trim() : ''
-        const cli = nameTrim ? await db.collection('clients').findOne({ tenant_id: T, name: nameTrim }) : null
+        const cliR = nameTrim ? await findStrict('clients', { tenant_id: T, name: nameTrim }) : { doc: null, dup: false }
+        if (cliR.dup) { failed++; errors.push({ row: r.__row, errors: [`اسم حساب القبض "${nameTrim}" مكرر بين أكثر من عميل — وحّد الأسماء أولاً`] }); continue }
+        const cli = cliR.doc
         let box = null
-        if (!cli && nameTrim) box = await db.collection('boxes').findOne({ tenant_id: T, $or: [{ name_ar: nameTrim }, { name: nameTrim }] })
-        const sup = r.supplier_name ? await db.collection('suppliers').findOne({ tenant_id: T, name: String(r.supplier_name).trim() }) : null
+        if (!cli && nameTrim) {
+          const boxR = await findStrict('boxes', { tenant_id: T, $or: [{ name_ar: nameTrim }, { name: nameTrim }] })
+          if (boxR.dup) { failed++; errors.push({ row: r.__row, errors: [`اسم الصندوق/البنك "${nameTrim}" مكرر بين أكثر من صندوق — وحّد الأسماء أولاً`] }); continue }
+          box = boxR.doc
+        }
+        const supR = r.supplier_name ? await findStrict('suppliers', { tenant_id: T, name: String(r.supplier_name).trim() }) : { doc: null, dup: false }
+        if (supR.dup) { failed++; errors.push({ row: r.__row, errors: [`اسم المورد "${r.supplier_name}" مكرر بين أكثر من مورد — وحّد الأسماء أولاً`] }); continue }
+        const sup = supR.doc
         if (!cli && !box) { failed++; errors.push({ row: r.__row, errors: [`حساب القبض "${r.client_name}" غير موجود (لا عميل ولا صندوق/بنك)`] }); continue }
         if (!sup) { failed++; errors.push({ row: r.__row, errors: [`المورد "${r.supplier_name}" غير موجود في دليل الحسابات`] }); continue }
         const payload = box
