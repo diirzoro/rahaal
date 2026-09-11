@@ -439,7 +439,114 @@ function OfficeVerificationCard() {
   )
 }
 
-function SuperAdminPanel() {
+// v3.99 — Batch 1: Rahaal company home — dashboard tab content for the PLATFORM
+// SUPER ADMIN only (other offices keep the original travel Dashboard untouched).
+// Every number comes from the OLD live admin APIs (/admin/tenants,
+// /admin/password-reset-requests, /admin/installments-overview) — zero new
+// endpoints, zero new collections, and NO tickets/visas KPIs by design.
+function RahaalAdminHome({ setTab }) {
+  const [data, setData] = useState(null)
+  const [resets, setResets] = useState([])
+  const [inst, setInst] = useState([])
+  const [loading, setLoading] = useState(true)
+  const load = useCallback(async () => {
+    try {
+      setLoading(true)
+      const [d, rr, ins] = await Promise.all([
+        api('/admin/tenants'),
+        api('/admin/password-reset-requests').catch(() => []),
+        api('/admin/installments-overview').catch(() => []),
+      ])
+      setData(d); setResets(rr || []); setInst(ins || [])
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }, [])
+  useEffect(() => { load() }, [load])
+  const offices = (data?.tenants || []).filter(t => !t.is_platform_org) // exclude Rahaal's own org
+  const active = offices.filter(t => t.status !== 'suspended').length
+  const suspended = offices.filter(t => t.status === 'suspended').length
+  const trial = offices.filter(t => (t.subscription || 'trial') === 'trial').length
+  const paid = offices.filter(t => t.subscription === 'paid').length
+  const now = Date.now()
+  const expired = offices.filter(t => t.subscription_expires_at && new Date(t.subscription_expires_at).getTime() < now).length
+  const expiring = offices.filter(t => { if (!t.subscription_expires_at) return false; const d = new Date(t.subscription_expires_at).getTime() - now; return d >= 0 && d <= 30 * 86400000 }).length
+  const totalUsers = offices.reduce((s, t) => s + (t.users_count || 0), 0)
+  const pendingResets = resets.filter(r => r.status === 'pending').length
+  const overdueInst = inst.filter(r => r.overdue).length
+  const recent = [...offices].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)).slice(0, 5)
+  const alerts = [
+    pendingResets > 0 && { icon: '🔑', txt: `${pendingResets} طلب استعادة كلمة مرور معلق` },
+    overdueInst > 0 && { icon: '⚠️', txt: `${overdueInst} مكتب لديه قسط متأخر` },
+    suspended > 0 && { icon: '⏸️', txt: `${suspended} مكتب موقوف` },
+    expiring > 0 && { icon: '⏳', txt: `${expiring} اشتراك ينتهي خلال 30 يوماً` },
+    expired > 0 && { icon: '🔴', txt: `${expired} اشتراك منتهٍ` },
+  ].filter(Boolean)
+  if (loading && !data) return <div className="p-10 text-center text-slate-400">جارِ التحميل...</div>
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h2 className="text-xl font-black text-slate-800">🏢 لوحة تحكم شركة رحّال</h2>
+          <div className="text-xs text-slate-500">مؤشرات إدارة المنصة — من واجهات الإدارة القديمة الحية</div>
+        </div>
+        <Button variant="outline" size="sm" onClick={load}>🔄 تحديث</Button>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard icon={Building2} label="إجمالي المكاتب" value={offices.length} grad="grad-brand" />
+        <StatCard icon={Power} label="المكاتب النشطة" value={active} grad="grad-green" />
+        <StatCard icon={AlertTriangle} label="المكاتب الموقوفة" value={suspended} grad="grad-gold" />
+        <StatCard icon={Users} label="مستخدمو المنصة" value={totalUsers} grad="grad-teal" />
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard icon={Key} label="اشتراكات تجريبية" value={trial} grad="grad-slate" />
+        <StatCard icon={Wallet} label="اشتراكات مدفوعة" value={paid} grad="grad-green" />
+        <StatCard icon={ReceiptText} label="تنتهي خلال 30 يوماً" value={expiring} grad="grad-gold" />
+        <StatCard icon={AlertTriangle} label="اشتراكات منتهية" value={expired} grad="grad-brand" />
+      </div>
+      {alerts.length > 0 && (
+        <Card className="border-amber-300 bg-amber-50/60">
+          <CardContent className="p-4 space-y-2">
+            <div className="font-black text-amber-900 text-sm">🔔 تنبيهات إدارية تحتاج إجراء</div>
+            {alerts.map((a, i) => (
+              <button key={i} onClick={() => setTab('platform-offices')} className="w-full text-right flex items-center gap-2 text-sm text-amber-800 hover:underline">
+                <span>{a.icon}</span><span>{a.txt}</span><span className="text-[10px] text-amber-600 mr-auto">فتح إدارة المكاتب ←</span>
+              </button>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+      <Card>
+        <CardHeader className="pb-2"><CardTitle className="text-sm flex items-center gap-2"><Building2 className="w-4 h-4 text-blue-600" /> آخر المكاتب المسجلة</CardTitle></CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead>المكتب</TableHead><TableHead>الاشتراك</TableHead><TableHead>الحالة</TableHead><TableHead className="text-center">المستخدمون</TableHead><TableHead>تاريخ التسجيل</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>
+              {recent.map(t => (
+                <TableRow key={t.id}>
+                  <TableCell className="font-semibold text-sm">{t.name}<div className="text-[10px] text-slate-400 font-mono">{t.slug}</div></TableCell>
+                  <TableCell><Badge variant="outline">{t.subscription || 'trial'} • {t.plan_tier || 'standard'}</Badge></TableCell>
+                  <TableCell>{t.status === 'suspended' ? <Badge className="bg-rose-100 text-rose-700">⏸️ موقوف</Badge> : <Badge className="bg-emerald-100 text-emerald-700">✅ نشط</Badge>}</TableCell>
+                  <TableCell className="text-center text-sm">{t.users_count}/{t.max_users}</TableCell>
+                  <TableCell className="text-xs">{fmtDate(t.created_at)}</TableCell>
+                </TableRow>
+              ))}
+              {recent.length === 0 && <TableRow><TableCell colSpan={5} className="text-center py-6 text-slate-400">لا مكاتب مسجلة بعد</TableCell></TableRow>}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <QuickAction icon={Building2} label="إدارة المكاتب" grad="grad-brand" onClick={() => setTab('platform-offices')} />
+        <QuickAction icon={ImageIcon} label="الإعلانات والعروض" grad="grad-gold" onClick={() => setTab('platform-ads')} />
+        <QuickAction icon={Wallet} label="سند قبض" grad="grad-green" onClick={() => setTab('receipt')} />
+        <QuickAction icon={BarChart3} label="التقارير المالية" grad="grad-teal" onClick={() => setTab('reports')} />
+      </div>
+    </div>
+  )
+}
+
+function SuperAdminPanel({ embedded = false }) {
   const { user, logout } = useAuth()
   const [data, setData] = useState(null)
   const [openNew, setOpenNew] = useState(false)
@@ -449,6 +556,7 @@ function SuperAdminPanel() {
   const [pricingOpen, setPricingOpen] = useState(false)
   const [instRows, setInstRows] = useState([])
   const [instTarget, setInstTarget] = useState(null)
+  const [tq, setTq] = useState('') // v3.99 — Batch 1: search/filter (embedded mode)
   const load = async () => {
     try {
       const [d, rr, ins] = await Promise.all([
@@ -467,7 +575,8 @@ function SuperAdminPanel() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className={embedded ? '' : 'min-h-screen bg-slate-50'}>
+      {!embedded && (
       <header className="grad-slate text-white p-6 shadow-lg">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-4">
@@ -488,16 +597,17 @@ function SuperAdminPanel() {
           </div>
         </div>
       </header>
+      )}
 
-      <div className="max-w-7xl mx-auto p-6 space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className={embedded ? 'space-y-6' : 'max-w-7xl mx-auto p-6 space-y-6'}>
+        {!embedded && <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <StatCard icon={Building2} label="المكاتب" value={data?.global_stats?.tenants ?? '—'} grad="grad-brand" />
           <StatCard icon={Plane} label="إجمالي التذاكر" value={data?.global_stats?.tickets ?? '—'} grad="grad-green" />
           <StatCard icon={FileBadge2} label="إجمالي التأشيرات" value={data?.global_stats?.visas ?? '—'} grad="grad-gold" />
-        </div>
+        </div>}
 
-        {/* v3.12 — Password reset requests inbox */}
-        {pendingResets.length > 0 && (
+        {/* v3.12 — Password reset requests inbox (Batch 2 — hidden in embedded mode) */}
+        {!embedded && pendingResets.length > 0 && (
           <Card className="border-orange-300 bg-orange-50/50">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-orange-900">
@@ -537,8 +647,8 @@ function SuperAdminPanel() {
           </Card>
         )}
 
-        {/* v3.16 — Installments tracker */}
-        {instRows.length > 0 && (
+        {/* v3.16 — Installments tracker (Batch 4 — hidden in embedded mode) */}
+        {!embedded && instRows.length > 0 && (
           <Card className="border-blue-300 bg-blue-50/40">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-blue-900">
@@ -585,8 +695,9 @@ function SuperAdminPanel() {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="flex items-center gap-2"><Building2 className="w-5 h-5 text-blue-600" /> إدارة المكاتب (Tenants)</CardTitle>
-            <div className="flex gap-2">
-              <Button onClick={() => setPricingOpen(true)} variant="outline" className="gap-2">💲 التسعير والخصومات</Button>
+            <div className="flex gap-2 items-center flex-wrap">
+              {embedded && <Input value={tq} onChange={e => setTq(e.target.value)} placeholder="🔍 بحث بالاسم أو المعرف..." className="h-9 w-52" />}
+              {!embedded && <Button onClick={() => setPricingOpen(true)} variant="outline" className="gap-2">💲 التسعير والخصومات</Button>}
               <Button onClick={() => setOpenNew(true)} className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> إنشاء مكتب جديد</Button>
             </div>
           </CardHeader>
@@ -605,7 +716,7 @@ function SuperAdminPanel() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(data?.tenants || []).map(t => {
+                {(data?.tenants || []).filter(t => !embedded || (!t.is_platform_org && (!tq.trim() || `${t.name} ${t.slug || ''}`.includes(tq.trim())))).map(t => {
                   const q = t.journal_quota || { used: 0, limit: 500 }
                   const pct = q.limit ? (q.used / q.limit) * 100 : 0
                   return (
@@ -638,7 +749,7 @@ function SuperAdminPanel() {
                             try { const r = await api(`/admin/tenants/${t.id}/toggle-status`, { method: 'POST' }); toast.success(`تم — الحالة الآن: ${r.status === 'active' ? 'نشط' : 'معلّق'}`); load() }
                             catch (e) { toast.error(e.message) }
                           }}>{t.status === 'suspended' ? '▶️ تفعيل' : '⏸️ تعليق'}</Button>
-                          <Button size="sm" variant="outline" className="text-purple-600 border-purple-300" onClick={async () => {
+                          {!embedded && <Button size="sm" variant="outline" className="text-purple-600 border-purple-300" onClick={async () => {
                             if (!(await askConfirm({ title: `الدخول كمالك المكتب "${t.name}"`, desc: `ستُفتح جلسة مؤقتة (30 دقيقة) في تاب جديد. سيظهر شريط أحمر أعلى الشاشة يذكّرك بحالة الجلسة.`, icon: '👤', confirmLabel: 'فتح الجلسة' }))) return
                             try {
                               const r = await api(`/admin/tenants/${t.id}/impersonate`, { method: 'POST' })
@@ -647,8 +758,8 @@ function SuperAdminPanel() {
                               window.open('/', '_blank')
                               toast.success(`🎭 جلسة "دخول كـ ${r.tenant.name}" فُتحت في تاب جديد`)
                             } catch (e) { toast.error(e.message) }
-                          }}>🎭 دخول كـ</Button>
-                          {!t.activation_confirmed && (
+                          }}>🎭 دخول كـ</Button>}
+                          {!embedded && !t.activation_confirmed && (
                             <Button size="sm" variant="outline" className="text-blue-600 border-blue-300" onClick={async () => {
                               if (!(await askConfirm({ title: 'تأكيد دفع القسط الأول', desc: `تأكيد أن المكتب "${t.name}" قد دفع القسط الأول؟`, icon: '💳', confirmLabel: 'تأكيد الدفع' }))) return
                               try {
@@ -658,26 +769,26 @@ function SuperAdminPanel() {
                               } catch (e) { toast.error(e.message) }
                             }}>💳 تأكيد دفع</Button>
                           )}
-                          <Button size="sm" variant="outline" className="text-emerald-600" onClick={async () => {
+                          {!embedded && <Button size="sm" variant="outline" className="text-emerald-600" onClick={async () => {
                             const amt = await askConfirm({ title: 'إضافة رصيد قيود', desc: `إضافة رصيد قيود للمكتب "${t.name}"`, icon: '➕', confirmLabel: 'إضافة الرصيد', input: { label: 'عدد القيود', placeholder: '500', required: true }, inputDefault: '500' })
                             if (!amt) return
                             const n = Number(amt); if (!n || n < 1) return
                             await api(`/admin/tenants/${t.id}`, { method: 'PATCH', body: { top_up_amount: n } })
                             toast.success(`تم إضافة ${n} قيد`); load()
-                          }}><Plus className="w-3 h-3" /> رصيد</Button>
+                          }}><Plus className="w-3 h-3" /> رصيد</Button>}
                           <Button size="sm" variant="outline" onClick={() => setEditing(t)}><Settings className="w-3 h-3" /></Button>
-                          <Button size="sm" variant="outline" className={t.status === 'active' ? 'text-amber-600' : 'text-emerald-600'}
+                          {!embedded && <Button size="sm" variant="outline" className={t.status === 'active' ? 'text-amber-600' : 'text-emerald-600'}
                             onClick={async () => {
                               const newStatus = t.status === 'active' ? 'suspended' : 'active'
                               await api(`/admin/tenants/${t.id}`, { method: 'PATCH', body: { status: newStatus } })
                               toast.success(newStatus === 'active' ? 'تم التفعيل' : 'تم الإيقاف'); load()
-                            }}><Power className="w-3 h-3" /></Button>
-                          <Button size="sm" variant="outline" className="text-rose-600"
+                            }}><Power className="w-3 h-3" /></Button>}
+                          {!embedded && <Button size="sm" variant="outline" className="text-rose-600"
                             onClick={async () => {
                               if (!(await askConfirm({ title: 'حذف المكتب نهائياً', desc: `حذف المكتب "${t.name}" وجميع بياناته نهائياً؟`, icon: '🗑️', variant: 'danger', irreversible: true, confirmLabel: 'تأكيد الحذف' }))) return
                               await api(`/admin/tenants/${t.id}`, { method: 'DELETE' })
                               toast.success('تم الحذف'); load()
-                            }}><Trash2 className="w-3 h-3" /></Button>
+                            }}><Trash2 className="w-3 h-3" /></Button>}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -691,8 +802,8 @@ function SuperAdminPanel() {
           </CardContent>
         </Card>
 
-        {/* v2.8 — Announcements Management */}
-        <AnnouncementsManager />
+        {/* v2.8 — Announcements Management (own tab in embedded mode) */}
+        {!embedded && <AnnouncementsManager />}
       </div>
 
       <NewTenantDialog open={openNew} onOpenChange={setOpenNew} onSaved={() => { load(); setOpenNew(false) }} />
@@ -1497,6 +1608,9 @@ const NAV = [
   { id: 'journal',   label: 'قيود اليومية', icon: ReceiptText, color: 'from-slate-700 to-slate-500' },
   { id: 'reports',   label: 'التقارير المالية', icon: BarChart3, color: 'from-cyan-600 to-blue-500' },
   { id: 'affiliate', label: 'التسويق بالعمولة', icon: User, color: 'from-emerald-600 to-teal-500' },
+  // v3.99 — Batch 1: old Super Admin sections merged into the shared sidebar (platform SA only — see canModule)
+  { id: 'platform-offices', label: 'إدارة المكاتب', icon: Building2, color: 'from-slate-700 to-blue-600', group: 'إدارة رحّال' },
+  { id: 'platform-ads', label: 'الإعلانات والعروض', icon: ImageIcon, color: 'from-orange-600 to-amber-500', group: 'إدارة رحّال' },
   { id: 'help',      label: '📖 دليل الاستخدام', icon: BookOpenText, color: 'from-pink-600 to-rose-500' },
   { id: 'settings',  label: 'إعدادات المكتب', icon: Settings, color: 'from-slate-800 to-slate-600' },
 ]
@@ -1513,6 +1627,9 @@ const MODULE_LABELS = [
 ]
 const canModule = (user, tabId) => {
   if (!user) return false
+  // v3.99 — Batch 1: «إدارة رحّال» group is for the PLATFORM SUPER ADMIN only
+  // (checked BEFORE the owner shortcut so office owners never see it)
+  if (String(tabId).startsWith('platform-')) return user.role === 'super_admin'
   if (user.role === 'owner') return true
   // v3.98 — Phase 1: the platform SA manages his own company office settings
   // (currencies & rates live here). Staff still never see settings.
@@ -1600,10 +1717,14 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose, onOpenPlatform 
         </div>
       </div>
       <nav className="flex-1 overflow-y-auto overscroll-contain p-2 md:p-3 space-y-1" style={{ touchAction: 'pan-y' }}>
-        {NAV.filter(n => canModule(user, n.id)).map(item => {
+        {NAV.filter(n => canModule(user, n.id)).map((item, idx, arr) => {
           const Icon = item.icon
           const active = current === item.id
-          return (
+          // v3.99 — Batch 1: group header (e.g. «إدارة رحّال») rendered once before its first item
+          const groupHeader = item.group && arr[idx - 1]?.group !== item.group
+            ? <div key={`${item.id}-group`} className="pt-3 pb-1 px-3 text-[10px] font-black text-amber-400/90 tracking-widest">🏢 {item.group}</div>
+            : null
+          return [groupHeader,
             <button
               key={item.id}
               onClick={() => onChange(item.id)}
@@ -1617,8 +1738,8 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose, onOpenPlatform 
               </span>
               <span className="flex-1 text-right">{item.label}</span>
               {active && <ChevronLeft className="w-4 h-4 text-slate-400" />}
-            </button>
-          )
+            </button>,
+          ]
         })}
       </nav>
       {/* v3.98 — Phase 1: clear path from the company book to the EXISTING platform
@@ -10939,7 +11060,9 @@ function TenantApp({ onOpenPlatform = null }) {
             <div className="text-sm text-slate-500 mt-2">ليس لديك صلاحية لعرض هذا القسم — تواصل مع مالك المكتب لمنحك الصلاحية.</div>
           </CardContent></Card>
         )}
-        {tabAllowed && tab === 'dashboard' && <ErrorBoundary tabName="لوحة التحكم"><Dashboard setTab={setTab} /></ErrorBoundary>}
+        {/* v3.99 — Batch 1: platform SA gets the admin home (old admin KPIs, no travel widgets);
+            every other office keeps the original travel Dashboard untouched */}
+        {tabAllowed && tab === 'dashboard' && <ErrorBoundary tabName="لوحة التحكم">{user?.role === 'super_admin' ? <RahaalAdminHome setTab={setTab} /> : <Dashboard setTab={setTab} />}</ErrorBoundary>}
         {tabAllowed && tab === 'tickets' && <ErrorBoundary tabName="حجز التذاكر"><TicketsScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'visas' && <ErrorBoundary tabName="التأشيرات والخدمات"><VisasScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'services' && <ErrorBoundary tabName="الخدمات"><ServicesScreen /></ErrorBoundary>}
@@ -10958,6 +11081,9 @@ function TenantApp({ onOpenPlatform = null }) {
         {tabAllowed && tab === 'visa-monitor' && <ErrorBoundary tabName="مراقبة التأشيرات"><VisaMonitorScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'settings' && user.role === 'owner' && <ErrorBoundary tabName="إعدادات المكتب"><OfficeSettings /></ErrorBoundary>}
         {tabAllowed && tab === 'affiliate' && <ErrorBoundary tabName="التسويق بالعمولة"><AffiliateScreen /></ErrorBoundary>}
+        {/* v3.99 — Batch 1: «إدارة رحّال» — the OLD live admin components reused as-is (embedded) */}
+        {tabAllowed && tab === 'platform-offices' && <ErrorBoundary tabName="إدارة المكاتب"><SuperAdminPanel embedded /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-ads' && <ErrorBoundary tabName="الإعلانات والعروض"><AnnouncementsManager /></ErrorBoundary>}
         {tabAllowed && tab === 'help' && <ErrorBoundary tabName="دليل الاستخدام"><HelpCenter setTab={setTab} /></ErrorBoundary>}
 
         {/* v2.8.1 — Global footer with contact + Target Media badge */}
