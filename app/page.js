@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import * as XLSX from 'xlsx'
 import {
-  Plane, FileBadge2, LayoutDashboard, Users, Building2, ReceiptText, Wallet, Percent, Inbox, Bell,
+  Plane, FileBadge2, LayoutDashboard, Users, Building2, ReceiptText, Wallet, Percent, Inbox, Bell, MapPin,
   ArrowDownLeft, ArrowUpRight, ArrowRight, BookOpenText, BarChart3, PieChart as PieIcon,
   Plus, Search, Calendar, TrendingUp, DollarSign, Sparkles, LogOut,
   Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
@@ -41,6 +41,15 @@ import AdminSalesCenter from './admin/sales' // مبيعات برنامج رحّ
 import AdminCommissionsCenter from './admin/commissions' // مركز العمولات (v3.94)
 import AdminNotifyCenter from './admin/notifications' // v4.3 — مركز التنبيهات (moved as-is)
 import AdminRequestsCenter from './admin/requests' // v4.3 — الطلبات المتخصصة القائمة (moved as-is)
+// v4.4 — scope-correction consolidation: existing components reused as TABS (no copies, no new engines)
+import OfficesSection from './admin/offices' // Office 360° viewer
+import AdminSystemCenter from './admin/system'
+import AdminAuditCenter from './admin/audit'
+import AdminBackupCenter from './admin/backup'
+import AdminHealthCenter from './admin/health'
+import AdminCurrencyCenter from './admin/currency'
+import AdminGeoCenter from './admin/geo'
+import AdminPayFinCenter from './admin/payfin'
 import { MeraajStoreScreen, BulkImportDialog } from './components-heavy'
 
 // ================================================================
@@ -1806,6 +1815,151 @@ function CommissionsLedger() {
   )
 }
 
+// ============ v4.4 — CONSOLIDATION HUBS (reuse-only: existing components as tabs) ============
+function HubTabs({ tabs, initial }) {
+  const [t, setT] = useState(initial || tabs[0].key)
+  const cur = tabs.find(x => x.key === t) || tabs[0]
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-1 flex-wrap">
+        {tabs.map(x => (
+          <button key={x.key} onClick={() => setT(x.key)}
+            className={`px-4 py-1.5 rounded-lg text-sm font-bold border ${t === x.key ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+            {x.label}
+          </button>
+        ))}
+      </div>
+      <div key={cur.key}>{cur.render()}</div>
+    </div>
+  )
+}
+
+// «إدارة المكاتب» — one section: offices list (old panel) + verifications tab + Office 360°
+function PlatformOfficesHub() {
+  return <HubTabs tabs={[
+    { key: 'list', label: '🏢 المكاتب', render: () => <SuperAdminPanel embedded /> },
+    { key: 'verify', label: '✅ توثيق المكاتب', render: () => <OfficeVerificationsPanel /> },
+    { key: 'office360', label: '🔍 Office 360°', render: () => <OfficesSection /> },
+  ]} />
+}
+
+// «المستخدمون والصلاحيات» — one section: rahaal managers + roles/permissions + password reset requests
+function PlatformPeopleHub() {
+  return <HubTabs tabs={[
+    { key: 'staff', label: '👑 مديرو رحّال', render: () => <AdminStaffCenter /> },
+    { key: 'perms', label: '🛡️ الأدوار والصلاحيات (مستخدمو المنصة)', render: () => <AdminPermsCenter /> },
+    { key: 'resets', label: '🔑 طلبات استعادة كلمة المرور', render: () => <ResetRequestsPanel /> },
+  ]} />
+}
+
+// «إعدادات النظام» — one entry: general/maintenance, backup, audit&security, health, platform currencies
+function PlatformSystemHub() {
+  return <HubTabs tabs={[
+    { key: 'system', label: '⚙️ عام وصيانة وبيئة', render: () => <AdminSystemCenter /> },
+    { key: 'backup', label: '💾 النسخ الاحتياطي والاستعادة', render: () => <AdminBackupCenter /> },
+    { key: 'audit', label: '🕵️ Audit & Security', render: () => <AdminAuditCenter /> },
+    { key: 'health', label: '❤️ System Health', render: () => <AdminHealthCenter /> },
+    { key: 'currency', label: '💱 العملات وأسعار الصرف', render: () => <AdminCurrencyCenter /> },
+  ]} />
+}
+
+// «الصناديق والبنوك» (super admin only wrapper): tab 1 = the ORIGINAL financial screen
+// untouched; extra tabs = platform payment methods & financial entities (adminPayFin).
+// Receipt/payment vouchers, sales, subscriptions, commissions and refunds all read
+// payment methods/entities from this single source (payment_methods/financial_entities).
+function BoxesBanksHub() {
+  return <HubTabs tabs={[
+    { key: 'boxes', label: '🏦 الصناديق والحسابات (المحتوى الأصلي)', render: () => <BoxesScreen /> },
+    { key: 'payfin', label: '💳 طرق الدفع والجهات المالية وحسابات الاستلام', render: () => <AdminPayFinCenter /> },
+  ]} />
+}
+
+// v4.4 — «توثيق المكاتب» tab (reuses the existing verification APIs — no new workflow)
+function OfficeVerificationsPanel() {
+  const [rows, setRows] = useState(null)
+  const load = () => api('/admin/office-verifications').then(r => setRows(r.verifications || r.rows || r.requests || (Array.isArray(r) ? r : []))).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [])
+  const decide = async (r, decision) => {
+    const reason = prompt(decision === 'verified' ? 'ملاحظة الاعتماد (اختياري):' : 'سبب الرفض (إلزامي):')
+    if (decision === 'rejected' && !reason) return
+    if (reason === null) return
+    try { await api(`/admin/office-verifications/${r.tenant_id}/decision`, { method: 'POST', body: { decision, reason: reason || '' } }); toast.success('✅ تم'); load() } catch (e) { toast.error(e.message) }
+  }
+  const stV = { pending: 'bg-amber-100 text-amber-700', verified: 'bg-emerald-100 text-emerald-700', rejected: 'bg-rose-100 text-rose-700', unverified: 'bg-slate-100 text-slate-500' }
+  const stL = { pending: 'معلق للمراجعة', verified: 'موثق', rejected: 'مرفوض', unverified: 'لم يقدم طلباً' }
+  return (
+    <Card>
+      <CardHeader className="pb-2"><CardTitle className="text-sm">✅ طلبات توثيق المكاتب</CardTitle></CardHeader>
+      <CardContent>
+        {rows === null ? <div className="text-center text-slate-400 text-sm py-4">جاري التحميل...</div>
+          : rows.length === 0 ? <div className="text-center text-slate-400 text-sm py-4">لا طلبات توثيق</div>
+            : <Table>
+              <TableHeader><TableRow><TableHead>المكتب</TableHead><TableHead>المستندات</TableHead><TableHead>تاريخ التقديم</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">القرار</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {rows.map(r => (
+                  <TableRow key={r.tenant_id}>
+                    <TableCell className="text-sm font-semibold">{r.office_name || r.tenant_id}</TableCell>
+                    <TableCell className="text-xs">{(r.documents || []).length} مستند{r.reject_reason && <div className="text-[9px] text-rose-500">آخر رفض: {r.reject_reason}</div>}</TableCell>
+                    <TableCell className="text-[10px]">{r.submitted_at ? String(r.submitted_at).slice(0, 10) : '—'}</TableCell>
+                    <TableCell><Badge className={stV[r.status] || 'bg-slate-100 text-slate-600'}>{stL[r.status] || r.status}</Badge></TableCell>
+                    <TableCell className="text-left">{['pending', 'rejected'].includes(r.status) && <div className="flex gap-1 justify-end">
+                      <Button size="sm" variant="outline" className="h-7 text-[10px] text-emerald-700" onClick={() => decide(r, 'verified')}>✅ اعتماد</Button>
+                      {r.status === 'pending' && <Button size="sm" variant="outline" className="h-7 text-[10px] text-rose-600" onClick={() => decide(r, 'rejected')}>⛔ رفض</Button>}
+                    </div>}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>}
+      </CardContent>
+    </Card>
+  )
+}
+
+// v4.4 — password reset requests moved to its proper tab (reuses the same APIs and the
+// existing AdminResetPasswordDialog — the legacy inline card was hidden in embedded mode)
+function ResetRequestsPanel() {
+  const [rows, setRows] = useState(null)
+  const [target, setTarget] = useState(null)
+  const load = () => api('/admin/password-reset-requests').then(r => setRows(Array.isArray(r) ? r : (r.rows || []))).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [])
+  const reject = async (r) => {
+    if (!(await askConfirm({ title: 'رفض الطلب', desc: `رفض طلب استعادة كلمة المرور لـ ${r.email}؟`, icon: '⛔', confirmLabel: 'رفض' }))) return
+    try { await api(`/admin/password-reset-requests/${r.id}`, { method: 'PATCH', body: { action: 'reject' } }); toast.success('تم الرفض'); load() } catch (e) { toast.error(e.message) }
+  }
+  const pending = (rows || []).filter(r => r.status === 'pending')
+  const done = (rows || []).filter(r => r.status !== 'pending')
+  return (
+    <div className="space-y-4">
+      <Card className={pending.length ? 'border-orange-300' : ''}>
+        <CardHeader className="pb-2"><CardTitle className="text-sm">🔑 طلبات استعادة كلمة المرور {pending.length > 0 && <Badge className="bg-orange-500 text-white mr-2">{pending.length} معلق</Badge>}</CardTitle></CardHeader>
+        <CardContent>
+          {rows === null ? <div className="text-center text-slate-400 text-sm py-4">جاري التحميل...</div>
+            : rows.length === 0 ? <div className="text-center text-slate-400 text-sm py-4">لا طلبات</div>
+              : <Table>
+                <TableHeader><TableRow><TableHead>البريد</TableHead><TableHead>الاسم/المكتب</TableHead><TableHead>الهاتف</TableHead><TableHead>التاريخ</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">إجراءات</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {[...pending, ...done].map(r => (
+                    <TableRow key={r.id} className={r.status === 'pending' ? 'bg-orange-50/50' : ''}>
+                      <TableCell className="font-mono text-xs" dir="ltr">{r.email}</TableCell>
+                      <TableCell className="text-xs">{r.user_name || '—'}<div className="text-[9px] text-slate-400">{r.tenant_name || ''}</div></TableCell>
+                      <TableCell className="text-xs" dir="ltr">{r.phone || '—'}</TableCell>
+                      <TableCell className="text-[10px]">{r.created_at ? new Date(r.created_at).toLocaleString('ar-EG') : '—'}</TableCell>
+                      <TableCell><Badge className={r.status === 'pending' ? 'bg-orange-100 text-orange-700' : r.status === 'reset' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}>{r.status === 'pending' ? 'معلق' : r.status === 'reset' ? 'تم التعيين' : 'مرفوض'}</Badge></TableCell>
+                      <TableCell className="text-left">{r.status === 'pending' && <div className="flex gap-1 justify-end">
+                        <Button size="sm" variant="outline" className="h-7 text-[10px] text-emerald-700" onClick={() => setTarget(r)}>🔐 تعيين كلمة مرور</Button>
+                        <Button size="sm" variant="outline" className="h-7 text-[10px] text-rose-600" onClick={() => reject(r)}>⛔ رفض</Button>
+                      </div>}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>}
+        </CardContent>
+      </Card>
+      <AdminResetPasswordDialog req={target} onClose={() => setTarget(null)} onDone={load} />
+    </div>
+  )
+}
+
 function NewTenantDialog({ open, onOpenChange, onSaved }) {
   const [f, setF] = useState({ name: '', owner_name: '', owner_email: '', owner_password: '', max_users: 2, max_branches: 1, subscription: 'trial', referral_code: '' })
   const [saving, setSaving] = useState(false)
@@ -2285,15 +2439,17 @@ const NAV = [
   // v4.0 — Batch 2: old plans/pricing + subscriptions/installments restored inside TenantApp
   { id: 'platform-plans', label: 'الباقات والتسعير', icon: Wallet, color: 'from-emerald-700 to-teal-500', group: 'إدارة رحّال' },
   { id: 'platform-subs', label: 'الاشتراكات والأقساط', icon: ReceiptText, color: 'from-blue-700 to-indigo-500', group: 'إدارة رحّال' },
-  // v4.1 → v4.3: AdminStaffCenter IS the Rahaal managers section (admin realm only) — renamed per Group-3 directive; no separate managers system
-  { id: 'platform-users', label: 'مديرو رحّال', icon: Users, color: 'from-cyan-700 to-sky-500', group: 'إدارة رحّال' },
-  { id: 'platform-roles', label: 'الأدوار والصلاحيات', icon: ShieldCheck, color: 'from-violet-700 to-purple-500', group: 'إدارة رحّال' },
+  // v4.4 — ONE consolidated entry «المستخدمون والصلاحيات» (tabs: مديرو رحّال / الأدوار / طلبات استعادة كلمة المرور) — replaces the two separate entries
+  { id: 'platform-people', label: 'المستخدمون والصلاحيات', icon: Users, color: 'from-cyan-700 to-sky-500', group: 'إدارة رحّال' },
   // v4.1 — Group 2 (moved as-is): Rahaal software sales + commissions center
   { id: 'platform-sales', label: 'مبيعات برنامج رحّال', icon: TrendingUp, color: 'from-green-700 to-emerald-500', group: 'إدارة رحّال' },
   { id: 'platform-commissions', label: 'مركز العمولات', icon: Percent, color: 'from-fuchsia-700 to-pink-500', group: 'إدارة رحّال' },
   // v4.3 — Group 3: unified orders registry + notifications center
   { id: 'platform-orders', label: 'مركز الطلبات', icon: Inbox, color: 'from-amber-700 to-orange-500', group: 'إدارة رحّال' },
   { id: 'platform-notify', label: 'مركز التنبيهات', icon: Bell, color: 'from-rose-700 to-red-500', group: 'إدارة رحّال' },
+  // v4.4 — consolidated admin entries: system settings hub + standalone geo section
+  { id: 'platform-system', label: 'إعدادات النظام', icon: Settings, color: 'from-slate-700 to-gray-500', group: 'إدارة رحّال' },
+  { id: 'platform-geo', label: 'المواقع الجغرافية', icon: MapPin, color: 'from-lime-700 to-green-500', group: 'إدارة رحّال' },
   { id: 'platform-ads', label: 'الإعلانات والعروض', icon: ImageIcon, color: 'from-orange-600 to-amber-500', group: 'إدارة رحّال' },
   { id: 'help',      label: '📖 دليل الاستخدام', icon: BookOpenText, color: 'from-pink-600 to-rose-500' },
   { id: 'settings',  label: 'إعدادات المكتب', icon: Settings, color: 'from-slate-800 to-slate-600' },
@@ -11757,7 +11913,9 @@ function TenantApp({ onOpenPlatform = null }) {
         {tabAllowed && tab === 'payment' && <ErrorBoundary tabName="سند الصرف"><VoucherScreen mode="payment" /></ErrorBoundary>}
         {tabAllowed && tab === 'clients' && <ErrorBoundary tabName="العملاء"><PartiesScreen kind="clients" /></ErrorBoundary>}
         {tabAllowed && tab === 'suppliers' && <ErrorBoundary tabName="الموردون"><PartiesScreen kind="suppliers" /></ErrorBoundary>}
-        {tabAllowed && tab === 'boxes' && <ErrorBoundary tabName="الصناديق والبنوك"><BoxesScreen /></ErrorBoundary>}
+        {/* v4.4 — «الصناديق والبنوك»: original financial content UNTOUCHED (first tab, same component);
+            the super admin additionally sees the platform payment-methods/financial-entities tabs */}
+        {tabAllowed && tab === 'boxes' && <ErrorBoundary tabName="الصناديق والبنوك">{user?.role === 'super_admin' ? <BoxesBanksHub /> : <BoxesScreen />}</ErrorBoundary>}
         {tabAllowed && tab === 'chart' && <ErrorBoundary tabName="الدليل المحاسبي"><ChartScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'journal' && <ErrorBoundary tabName="قيود اليومية"><JournalScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'reports' && <ErrorBoundary tabName="التقارير المالية"><ReportsScreen /></ErrorBoundary>}
@@ -11766,13 +11924,14 @@ function TenantApp({ onOpenPlatform = null }) {
         {tabAllowed && tab === 'settings' && user.role === 'owner' && <ErrorBoundary tabName="إعدادات المكتب"><OfficeSettings /></ErrorBoundary>}
         {tabAllowed && tab === 'affiliate' && <ErrorBoundary tabName="التسويق بالعمولة"><AffiliateScreen /></ErrorBoundary>}
         {/* v3.99 — Batch 1: «إدارة رحّال» — the OLD live admin components reused as-is (embedded) */}
-        {tabAllowed && tab === 'platform-offices' && <ErrorBoundary tabName="إدارة المكاتب"><SuperAdminPanel embedded /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-offices' && <ErrorBoundary tabName="إدارة المكاتب"><PlatformOfficesHub /></ErrorBoundary>}
         {/* v4.0 — Batch 2: the OLD pricing editor (v3.14) + subscriptions/installments (v3.16) reused as screens */}
         {tabAllowed && tab === 'platform-plans' && <ErrorBoundary tabName="الباقات والتسعير"><PricingConfigEditor asScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'platform-subs' && <ErrorBoundary tabName="الاشتراكات والأقساط"><PlatformSubscriptionsScreen /></ErrorBoundary>}
-        {/* v4.1 — moved AS-IS from the v3.91–3.97 admin shell (same components + same /api/admin/* APIs) */}
-        {tabAllowed && tab === 'platform-users' && <ErrorBoundary tabName="إدارة المستخدمين"><AdminStaffCenter /></ErrorBoundary>}
-        {tabAllowed && tab === 'platform-roles' && <ErrorBoundary tabName="الأدوار والصلاحيات"><AdminPermsCenter /></ErrorBoundary>}
+        {/* v4.4 — consolidated hubs: users&perms / system settings / geo (components reused as tabs — zero copies) */}
+        {tabAllowed && tab === 'platform-people' && <ErrorBoundary tabName="المستخدمون والصلاحيات"><PlatformPeopleHub /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-system' && <ErrorBoundary tabName="إعدادات النظام"><PlatformSystemHub /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-geo' && <ErrorBoundary tabName="المواقع الجغرافية"><AdminGeoCenter /></ErrorBoundary>}
         {/* v4.2 — program sales replaces the travel-sales aggregation (unsuitable per user directive); commissions gains an operational rules manager */}
         {tabAllowed && tab === 'platform-sales' && <ErrorBoundary tabName="مبيعات برنامج رحّال"><div className="space-y-6"><OrdersScreen salesOnly /><ProgramSalesScreen /></div></ErrorBoundary>}
         {tabAllowed && tab === 'platform-commissions' && <ErrorBoundary tabName="مركز العمولات"><div className="space-y-4"><CommissionRulesManager /><CommissionsLedger /><AdminCommissionsCenter /></div></ErrorBoundary>}

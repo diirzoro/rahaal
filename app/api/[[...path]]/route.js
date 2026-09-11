@@ -2420,7 +2420,9 @@ async function handleRoute(request, { params }) {
         return ok(Array.isArray(rA?.rows) && method === 'GET' && route === '/admin/announcements' && !new URL(request.url).searchParams.get('extended') ? rA.rows : rA) // legacy manager expects a plain array
       }
 
-      return bad(`Admin route ${route} not found`, 404)
+      // v4.4 — office-verifications review handlers live later in the file (legacy
+      // placement, dead since the v3.97 realm block 404'd first). Let them fall through.
+      if (!route.startsWith('/admin/office-verifications')) return bad(`Admin route ${route} not found`, 404)
     }
 
     // ============ TENANT-SCOPED ============
