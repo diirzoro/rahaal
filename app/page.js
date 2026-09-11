@@ -4594,8 +4594,13 @@ function ChartScreen() {
     } catch (e) { toast.error(e.message) }
   }
   const del = async (a) => {
-    if (!(await askConfirm({ title: 'حذف الحساب المحاسبي', desc: `حذف الحساب ${a.code} — ${a.name_ar}؟`, variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
-    try { await api(`/accounts/${a.id}`, { method: 'DELETE' }); load(); loadTree(); toast.success('تم الحذف') } // v3.88.4 — U-008
+    // v3.92.1 — required copy: unused accounts get the standard irreversible-delete confirm;
+    // used accounts are blocked by the backend with the "linked to operations" message.
+    if (!(await askConfirm({ title: 'حذف الحساب المحاسبي', desc: `هل أنت متأكد من حذف الحساب ${a.code} — ${a.name_ar}؟ لا يمكن التراجع بعد الحذف.`, variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
+    try {
+      const r = await api(`/accounts/${a.id}`, { method: 'DELETE' }); load(); loadTree()
+      toast.success(r?.cascade_deleted ? `تم حذف الحساب و${r.cascade_deleted} المرتبط به (غير مستخدم)` : 'تم الحذف')
+    } // v3.88.4 — U-008
     catch (e) { toast.error(e.message) }
   }
   // v3.88.3 — Equity added as a first-class account type (COA v2 already contains the

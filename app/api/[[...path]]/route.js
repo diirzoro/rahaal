@@ -641,6 +641,47 @@ async function ensureOperationalLink(db, T, account) {
   await db.collection(m.coll).insertOne(doc)
   return { linked: true, created: true, coll: m.coll, id: doc.id, kind: m.kind }
 }
+// v3.92.1 — SAFE DELETE usage check: an account is deletable ONLY when it has ZERO history.
+// "Balance = 0" is NEVER used as permission — an account may have in/out movements netting
+// to zero; deleting it would damage the accounting record. Identity = account_code / record
+// id (never the name). READ-ONLY checks — no journal/voucher/transaction is ever touched.
+async function accountUsageCheck(db, T, acc) {
+  const code = acc.code
+  // 1) journal history by the account's own code
+  if (await db.collection('journal_entries').findOne({ tenant_id: T, 'lines.account_code': code })) {
+    return { used: true, reason: 'قيود يومية' }
+  }
+  // 2) vouchers posted directly to a COA account (expense/revenue selector)
+  if (await db.collection('vouchers').findOne({ tenant_id: T, coa_account_code: code })) {
+    return { used: true, reason: 'سندات مرتبطة بالحساب' }
+  }
+  // 3) linked operational record → deep usage by the RECORD identity (id), not the name
+  const m = opLinkMapFor(acc.parent)
+  const rec = m ? await db.collection(m.coll).findOne({ tenant_id: T, account_code: code }) : null
+  if (rec) {
+    const rid = rec.id
+    const refChecks = [
+      ['journal_entries', { tenant_id: T, 'lines.party_id': rid }, 'قيود يومية'],
+      ['vouchers', { tenant_id: T, $or: [{ party_id: rid }, { box_id: rid }] }, 'سندات'],
+      ['tickets', { tenant_id: T, $or: [{ client_id: rid }, { supplier_id: rid }, { box_id: rid }] }, 'تذاكر'],
+      ['visas', { tenant_id: T, $or: [{ client_id: rid }, { supplier_id: rid }, { box_id: rid }] }, 'تأشيرات'],
+      ['services', { tenant_id: T, $or: [{ client_id: rid }, { supplier_id: rid }, { box_id: rid }] }, 'خدمات'],
+      ['package_bookings', { tenant_id: T, $or: [{ client_id: rid }, { box_id: rid }] }, 'حجوزات باكجات'],
+      ['package_components', { tenant_id: T, supplier_id: rid }, 'مكونات باكجات/برامج'],
+      ['currency_exchanges', { tenant_id: T, $or: [{ box_currency_id: rid }, { box_counter_id: rid }] }, 'عمليات مصارفة'],
+    ]
+    for (const [coll, q, label] of refChecks) {
+      const hit = await db.collection(coll).findOne(q).catch(() => null)
+      if (hit) return { used: true, reason: `${m.kind} المرتبط مستخدم في ${label}`, rec, m }
+    }
+    // belt: a non-zero STORED balance blocks deletion even if no history doc was found
+    // (the inverse is never assumed: zero balance alone NEVER permits deletion)
+    const nonZero = Object.values(rec.balances || {}).some(v => typeof v === 'number' && Math.abs(v) > 0.0001)
+    if (nonZero) return { used: true, reason: `${m.kind} المرتبط عليه رصيد قائم`, rec, m }
+    return { used: false, rec, m }
+  }
+  return { used: false, rec: null, m }
+}
 
 // v3.10.0 — Validate JE lines: no negatives + account exists
 async function validateJournalLines(db, tenantId, lines) {
@@ -6133,20 +6174,27 @@ async function handleRoute(request, { params }) {
       const acc = await db.collection('accounts').findOne({ id: acctIdMatch[1], tenant_id: T })
       if (!acc) return bad('الحساب غير موجود', 404)
       if (acc.is_system) return bad(`الحساب ${acc.code} — ${acc.name_ar} حساب نظامي ولا يمكن حذفه`)
-      // Check for children
+      // v3.92.1 — group protection: children accounts OR attached operational records block deletion
       const childCount = await db.collection('accounts').countDocuments({ tenant_id: T, parent: acc.code })
-      if (childCount > 0) return bad(`لا يمكن حذف الحساب — يحتوي على ${childCount} حساب فرعي`)
-      // Check for journal entries
-      const jeCount = await db.collection('journal_entries').countDocuments({ tenant_id: T, 'lines.account_code': acc.code })
-      if (jeCount > 0) return bad(`لا يمكن حذف الحساب — مستخدم في ${jeCount} قيد يومية`)
-      // v3.92 — linked operational record guard: never orphan a box/client/supplier
-      const opMapD = opLinkMapFor(acc.parent)
-      if (opMapD) {
-        const opRec = await db.collection(opMapD.coll).findOne({ tenant_id: T, account_code: acc.code })
-        if (opRec) return bad(`الحساب مرتبط بـ${opMapD.kind} "${opRec[opMapD.nameField] || opRec.name || ''}" — احذفه من ${opMapD.screen} أولاً (الهوية موحدة)`)
+      if (childCount > 0) return bad(`لا يمكن حذف الحساب — مجموعة تحتوي على ${childCount} حساب فرعي. عالج الحسابات التابعة أولاً`)
+      const [childCli, childSup, childBox] = await Promise.all([
+        db.collection('clients').countDocuments({ tenant_id: T, $or: [{ account_parent_code: acc.code }, { parent_code: acc.code }] }),
+        db.collection('suppliers').countDocuments({ tenant_id: T, $or: [{ account_parent_code: acc.code }, { parent_code: acc.code }] }),
+        db.collection('boxes').countDocuments({ tenant_id: T, $or: [{ account_parent_code: acc.code }, { parent_code: acc.code }] }),
+      ])
+      if (childCli + childSup + childBox > 0) return bad(`لا يمكن حذف الحساب — تتبعه سجلات تشغيلية (${childCli} عميل، ${childSup} مورد، ${childBox} صندوق/بنك). عالجها أولاً`)
+      // v3.92.1 — SAFE DELETE: deletable ONLY with ZERO history (never "balance = 0").
+      // Checks journals by account_code, vouchers by coa_account_code, and — for linked
+      // box/client/supplier — every operational reference by the record id.
+      const usage = await accountUsageCheck(db, T, acc)
+      if (usage.used) {
+        return bad(`لا يمكن حذف الحساب لأنه مرتبط بعمليات أو قيود مالية (${usage.reason}). يمكنك إيقاف استخدامه أو تغيير اسمه بدلاً من حذفه.`)
       }
+      // truly unused: cascade-delete the linked operational record + the account in ONE operation.
+      // No renumbering: next_child_seq is untouched — other account codes are unaffected.
+      if (usage.rec) await db.collection(usage.m.coll).deleteOne({ id: usage.rec.id, tenant_id: T })
       await db.collection('accounts').deleteOne({ id: acctIdMatch[1], tenant_id: T })
-      return ok({ success: true })
+      return ok({ success: true, cascade_deleted: usage.rec ? `${usage.m.kind} "${usage.rec[usage.m.nameField] || usage.rec.name || ''}"` : null })
     }
 
     // Tickets
