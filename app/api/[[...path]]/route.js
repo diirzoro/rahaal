@@ -7,6 +7,25 @@ import sharp from 'sharp'
 // v3.88 — COA Migration Framework: single source of truth for the COA template,
 // per-tenant versioning, audit/classification and controlled reset/preserve migrations.
 import { seedCoaTemplate, applyResetMigration, upsertTenantSettingsDefaults, ensureTenantSettingsUniqueIndex } from '@/lib/coa'
+// v3.91 — Phase 2: Office 360° READ-ONLY aggregations (modular — AUDIT-006)
+import { getOffice360 } from '@/lib/admin360'
+// v3.93 — Batch 1: Sales & Vouchers + Accounting oversight (read-only) + Permissions Center
+import { adminCenterHandler } from '@/lib/adminCenter'
+import { adminPermsHandler } from '@/lib/adminPerms'
+import { adminCommissionsHandler } from '@/lib/adminCommissions' // v3.94 — Batch 2 (READ-ONLY)
+import { adminRequestsHandler } from '@/lib/adminRequests' // v3.94 — Batch 2 (READ-ONLY)
+import { adminAdsHandler, activeAnnouncementsFor } from '@/lib/adminAds' // v3.94 — Batch 2 (extends announcements)
+import { adminSystemHandler } from '@/lib/adminSystem' // v3.95 — Batch 3 (Backup/Restore path/System)
+import { adminAuditHandler } from '@/lib/adminAudit' // v3.95 — Batch 3 (Central Audit + Health — READ-ONLY)
+import { adminNotifyHandler } from '@/lib/adminNotify' // v3.95 — Batch 3 (In-App Notifications)
+import { adminReportsHandler } from '@/lib/adminReports' // v3.96 — Batch 4 (Reports — READ-ONLY)
+import { adminDisputesHandler } from '@/lib/adminDisputes' // v3.96 — Batch 4 (Disputes)
+import { adminCurrencyHandler } from '@/lib/adminCurrency' // v3.96 — Batch 4 (Currencies & FX)
+import { adminGate, adminCan, adminStaffHandler } from '@/lib/adminStaff' // v3.97 — Batch 5 (Admin realm + staff RBAC)
+import { adminOrdersHandler, adminCommissionsLedgerHandler } from '@/lib/adminOrders' // v4.3 — unified orders + commissions ledger
+import { adminGeoHandler } from '@/lib/adminGeo' // v3.97 — Batch 5 (Geo locations)
+import { adminPayFinHandler } from '@/lib/adminPayFin' // v3.97 — Batch 5 (Payment methods & financial entities)
+import { adminRefDataHandler } from '@/lib/adminRefData' // v3.97 — Batch 5 (Unified reference data)
 
 // v3.47 — Package image optimization settings (applied ONCE at upload; centralized — adjust here)
 const IMG_MAX_DIM = 1200        // longest side in px (aspect ratio preserved, never enlarged)
@@ -463,14 +482,23 @@ async function getPatSession(request, db) {
     return null
   }
 }
-function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } }
+function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : u.role === 'super_admin' ? { ...ownerPermissions(), ...(u.permissions || {}) } : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } } // v3.98 — platform SA in the company book = owner-equivalent perms, minus his explicit overrides (travel modules hidden)
+// v3.97 — Batch 5: MAIN super admin realm check (role string is not enough —
+// a tenant user mistakenly holding 'super_admin' must NOT pass admin gates).
+// v3.98 — Phase 1 (Rahaal company book): the main SA may now be BOUND to the
+// platform-org tenant (شركة رحّال) to use the shared TenantApp for the
+// company's own accounting. He stays main SA only via the platform_org flag —
+// an office user holding 'super_admin' with a normal tenant is still rejected.
+const isMainSA = (u) => !!u && u.role === 'super_admin' && (!u.tenant_id || u.platform_org === true)
 function sanitizeTenant(t) { return t ? { id: t.id, name: t.name, slug: t.slug, status: t.status, max_users: t.max_users, max_branches: t.max_branches, referral_code: t.referral_code, referred_by: t.referred_by, plan_tier: t.plan_tier || 'standard', subscription: t.subscription, subscription_expires_at: t.subscription_expires_at, subscription_price: t.subscription_price, billing_mode: t.billing_mode || null, unlimited_journals: !!t.unlimited_journals } : null }
 
 // ============ v3.14 — PRICING & PLANS (Phase 2) ============
-// Annual payment => unlimited journals. Installments => limited journals.
-// Manual super-admin override: tenant.unlimited_journals = true
+// v4.0.1 CLOSURE — OLD condition (v3.14→v4.0): billing_mode === 'annual' opened journals
+// IMMEDIATELY on selection, before any payment. REMOVED: benefits now open ONLY after
+// «تأكيد الدفع» (confirm-payment → subscription='paid' / activation_confirmed) or an
+// explicit manual unlimited_journals override by the Super Admin.
 function isUnlimitedTenant(t) {
-  return !!t && (t.unlimited_journals === true || t.billing_mode === 'annual' || t.subscription === 'paid' || !!t.activation_confirmed)
+  return !!t && (t.unlimited_journals === true || t.subscription === 'paid' || !!t.activation_confirmed)
 }
 
 const DEFAULT_PRICING_CONFIG = {
@@ -536,7 +564,15 @@ function isFutureDocDate(dateVal) {
 }
 
 async function updateBalance(db, col, filter, currency, delta) {
-  await db.collection(col).updateOne(filter, { $inc: { [`balances.${currency}`]: delta } })
+  // v4.6 — RAH-ACC anti-corruption guard: a NaN/Infinity delta or a missing currency key
+  // would permanently corrupt the cached balance bucket ($inc NaN → the whole balance
+  // becomes NaN forever / a "balances.undefined" bucket appears). Fail LOUDLY instead —
+  // callers' restore paths (F-020) handle the abort; silent corruption never does.
+  const d = Number(delta)
+  if (!Number.isFinite(d)) throw new Error(`قيمة غير صالحة لتحديث الرصيد (${delta}) — أُوقفت العملية لحماية الأرصدة المخزنة`)
+  if (!currency || typeof currency !== 'string') throw new Error('عملة غير محددة لتحديث الرصيد — أُوقفت العملية لحماية الأرصدة المخزنة')
+  if (d === 0) return
+  await db.collection(col).updateOne(filter, { $inc: { [`balances.${currency}`]: d } })
 }
 
 // v3.10.7 — Chart of Accounts tree: atomic sequential code generator
@@ -596,6 +632,91 @@ async function generateSubAccountCode(db, tenantId, parentCode) {
   }
 }
 
+// ============================================================================
+// v3.92 — COA ↔ OPERATIONAL LINKAGE (boxes / clients / suppliers)
+// Identity = account_code (stable, unique per tenant) — NEVER the name.
+// A leaf account created from the COA under one of these groups gets a real
+// operational record so it appears in the operational screens and vouchers.
+// Idempotent: an existing record with the same account_code is reused as-is.
+// Name duplicates are REJECTED (no auto-link on ambiguity — stop & report).
+// ============================================================================
+function opLinkMapFor(parentCode) {
+  const p = String(parentCode || '')
+  if (p === COA.CASHBOXES) return { coll: 'boxes', kind: 'صندوق', nameField: 'name_ar', screen: 'شاشة الصناديق', boxType: 'cash' }
+  if (p === COA.BANKS) return { coll: 'boxes', kind: 'حساب بنكي', nameField: 'name_ar', screen: 'شاشة الصناديق', boxType: 'bank' }
+  if (p === COA.CLIENTS) return { coll: 'clients', kind: 'عميل', nameField: 'name', screen: 'شاشة العملاء' }
+  if (p === COA.SUPPLIERS) return { coll: 'suppliers', kind: 'مورد', nameField: 'name', screen: 'شاشة الموردين' }
+  return null
+}
+async function ensureOperationalLink(db, T, account) {
+  if (account.is_group) return { skipped: 'group' }
+  const m = opLinkMapFor(account.parent)
+  if (!m) return { skipped: 'not_operational_group' }
+  // idempotent by account_code — the stable identity
+  const existing = await db.collection(m.coll).findOne({ tenant_id: T, account_code: account.code })
+  if (existing) return { linked: true, created: false, coll: m.coll, id: existing.id }
+  const name = account.name_ar
+  // never create a duplicate operational record for a reused name
+  const dupName = await db.collection(m.coll).findOne(
+    m.coll === 'boxes'
+      ? { tenant_id: T, $or: [{ name_ar: name }, { name: name }] }
+      : { tenant_id: T, name }
+  )
+  if (dupName) return { conflict: `يوجد ${m.kind} آخر بنفس الاسم "${name}" (حساب ${dupName.account_code || '—'}) — عدّل الاسم أو استخدم ${m.screen}` }
+  const base = {
+    id: uuidv4(), tenant_id: T, parent_code: String(account.parent),
+    account_code: account.code, account_parent_code: String(account.parent),
+    balances: emptyBalances(), created_at: new Date(), created_from: 'coa',
+  }
+  let doc
+  if (m.coll === 'boxes') doc = { ...base, name_ar: name, type: m.boxType }
+  else if (m.coll === 'clients') doc = { ...base, name, phone: '', whatsapp: '', address: '', email: '', notes: 'أُنشئ من الدليل المحاسبي', credit_limit: 0, credit_currency: 'USD', is_frozen: false }
+  else doc = { ...base, name, phone: '', whatsapp: '', address: '', email: '', notes: 'أُنشئ من الدليل المحاسبي' }
+  await db.collection(m.coll).insertOne(doc)
+  return { linked: true, created: true, coll: m.coll, id: doc.id, kind: m.kind }
+}
+// v3.92.1 — SAFE DELETE usage check: an account is deletable ONLY when it has ZERO history.
+// "Balance = 0" is NEVER used as permission — an account may have in/out movements netting
+// to zero; deleting it would damage the accounting record. Identity = account_code / record
+// id (never the name). READ-ONLY checks — no journal/voucher/transaction is ever touched.
+async function accountUsageCheck(db, T, acc) {
+  const code = acc.code
+  // 1) journal history by the account's own code
+  if (await db.collection('journal_entries').findOne({ tenant_id: T, 'lines.account_code': code })) {
+    return { used: true, reason: 'قيود يومية' }
+  }
+  // 2) vouchers posted directly to a COA account (expense/revenue selector)
+  if (await db.collection('vouchers').findOne({ tenant_id: T, coa_account_code: code })) {
+    return { used: true, reason: 'سندات مرتبطة بالحساب' }
+  }
+  // 3) linked operational record → deep usage by the RECORD identity (id), not the name
+  const m = opLinkMapFor(acc.parent)
+  const rec = m ? await db.collection(m.coll).findOne({ tenant_id: T, account_code: code }) : null
+  if (rec) {
+    const rid = rec.id
+    const refChecks = [
+      ['journal_entries', { tenant_id: T, 'lines.party_id': rid }, 'قيود يومية'],
+      ['vouchers', { tenant_id: T, $or: [{ party_id: rid }, { box_id: rid }] }, 'سندات'],
+      ['tickets', { tenant_id: T, $or: [{ client_id: rid }, { supplier_id: rid }, { box_id: rid }] }, 'تذاكر'],
+      ['visas', { tenant_id: T, $or: [{ client_id: rid }, { supplier_id: rid }, { box_id: rid }] }, 'تأشيرات'],
+      ['services', { tenant_id: T, $or: [{ client_id: rid }, { supplier_id: rid }, { box_id: rid }] }, 'خدمات'],
+      ['package_bookings', { tenant_id: T, $or: [{ client_id: rid }, { box_id: rid }] }, 'حجوزات باكجات'],
+      ['package_components', { tenant_id: T, supplier_id: rid }, 'مكونات باكجات/برامج'],
+      ['currency_exchanges', { tenant_id: T, $or: [{ box_currency_id: rid }, { box_counter_id: rid }] }, 'عمليات مصارفة'],
+    ]
+    for (const [coll, q, label] of refChecks) {
+      const hit = await db.collection(coll).findOne(q).catch(() => null)
+      if (hit) return { used: true, reason: `${m.kind} المرتبط مستخدم في ${label}`, rec, m }
+    }
+    // belt: a non-zero STORED balance blocks deletion even if no history doc was found
+    // (the inverse is never assumed: zero balance alone NEVER permits deletion)
+    const nonZero = Object.values(rec.balances || {}).some(v => typeof v === 'number' && Math.abs(v) > 0.0001)
+    if (nonZero) return { used: true, reason: `${m.kind} المرتبط عليه رصيد قائم`, rec, m }
+    return { used: false, rec, m }
+  }
+  return { used: false, rec: null, m }
+}
+
 // v3.10.0 — Validate JE lines: no negatives + account exists
 async function validateJournalLines(db, tenantId, lines) {
   if (!Array.isArray(lines) || lines.length === 0) return { ok: true }
@@ -625,6 +746,123 @@ async function validateJournalLines(db, tenantId, lines) {
     }
   }
   return { ok: true }
+}
+
+// ============ v4.5 — ACCOUNTING CORE HARDENING (central invariants) ============
+// Engine/structural accounts the Accounting Engine depends on (Opening, Year Close,
+// Retained Earnings, FX, fixed postings). Protected in code regardless of is_system
+// flag or journal history — a core account matters even before its first posting.
+const ENGINE_ACCOUNT_CODES = new Set(Object.values(COA))
+
+// v4.5 — compatibility view of "inactive" (data uses mixed flags; storage unification
+// would need a Data Migration — handled in CODE only, migration logged as future need)
+const isInactiveAccount = (a) => !!a && (a.inactive === true || a.is_active === false || a.active === false || a.archived === true)
+
+// v4.5 — CENTRAL closed-period / closed-year guard. Every journal write (manual,
+// automatic, opening, transaction-generated) passes through this via the central
+// gate — no side path can forget it. Returns an error string or null.
+async function assertOpenPeriod(db, T, dateLike) {
+  const d = dateLike instanceof Date ? dateLike : new Date(dateLike || Date.now())
+  if (isNaN(d.getTime())) return 'تاريخ القيد غير صالح'
+  const yr = d.getFullYear()
+  const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
+  if (tenant?.closed_years?.includes(yr)) return `السنة المالية ${yr} مقفلة — لا يمكن إنشاء أو تعديل قيود بتاريخها`
+  const settings = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { period_lock: 1 } })
+  const closedUntil = settings?.period_lock?.closed_until || null
+  if (closedUntil && d.toISOString().slice(0, 10) <= String(closedUntil).slice(0, 10)) {
+    return `🔒 الفترة حتى ${closedUntil} مقفلة — استخدم قيد تسوية عكسي بالتاريخ الحالي بدلاً من التعديل الرجعي`
+  }
+  return null
+}
+
+// v4.5 — journal quota preflight (same rule as the central gate) so callers can
+// verify BEFORE applying cached-balance side effects (fail-fast, no partial state)
+async function assertJournalQuota(db, T) {
+  const t = await db.collection('tenants').findOne({ id: T })
+  if (!isUnlimitedTenant(t)) {
+    const q = t?.journal_quota || { used: 0, limit: 500 }
+    if (q.used >= q.limit) {
+      const err = new Error(`انتهت حصة قيود اليومية (${q.used}/${q.limit}). يرجى تجديد الاشتراك مع الإدارة العامة.`)
+      err.code = 'QUOTA_EXCEEDED'
+      throw err
+    }
+  }
+}
+
+// v4.5 — CENTRAL JOURNAL INVARIANTS: journal validity is an invariant of the gate,
+// not a courtesy of each business route. Covers: valid lines, non-negative amounts,
+// accounts exist + tenant-scoped, no Group posting, no posting to inactive accounts,
+// closed period/year guard, and multi-currency-aware balance (BASE-currency check —
+// per-currency comparison would falsely reject correct FX / manual_dual entries).
+async function enforceJournalInvariants(db, T, je, opts = {}) {
+  const lines = je.lines
+  if (!Array.isArray(lines) || lines.length === 0) throw new Error('القيد بلا أسطر — مرفوض')
+  // 1) line validity + accounts exist (tenant-scoped) + group-account guard + negatives
+  const v = await validateJournalLines(db, T, lines)
+  if (!v.ok) throw new Error(v.error)
+  // 2) inactive accounts never accept NEW postings (history/reports untouched)
+  const codes = [...new Set(lines.map(l => l.account_code).filter(c => c && c !== 'MANUAL'))]
+  if (codes.length) {
+    const inactive = await db.collection('accounts')
+      .find({ tenant_id: T, code: { $in: codes } }, { projection: { code: 1, name_ar: 1, inactive: 1, is_active: 1, active: 1, archived: 1 } })
+      .toArray()
+    const bad0 = inactive.find(isInactiveAccount)
+    if (bad0) throw new Error(`الحساب "${bad0.code} — ${bad0.name_ar || ''}" غير نشط — لا يقبل ترحيلاً جديداً (التاريخ محفوظ كما هو)`)
+  }
+  // 3) closed period / closed year — central, side-path-proof
+  if (!opts.bypassPeriodGuard) {
+    const perr = await assertOpenPeriod(db, T, je.date)
+    if (perr) { const e = new Error(perr); e.code = 'PERIOD_CLOSED'; throw e }
+  }
+  // 4) currency sanity
+  if (!je.currency || typeof je.currency !== 'string') throw new Error('عملة القيد مطلوبة')
+  // 5) balance invariant — multi-currency aware: totals are compared in the BASE
+  //    currency using tenant rates (FX and manual_dual are balanced in base by
+  //    construction; forcing per-currency equality would wrongly reject them).
+  //    Tolerance scales with line count to absorb legitimate 2dp per-line rounding.
+  const rates = (await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { rates: 1 } }))?.rates || DEFAULT_RATES
+  let totD = 0, totC = 0
+  for (const l of lines) {
+    const cur = l.currency || je.currency
+    const c2 = (cur && cur !== 'MULTI') ? cur : BASE_CURRENCY
+    totD += toBase(Number(l.debit) || 0, c2, rates)
+    totC += toBase(Number(l.credit) || 0, c2, rates)
+  }
+  const tolerance = Math.max(0.05, lines.length * 0.01)
+  if (Math.abs(totD - totC) > tolerance) {
+    const e = new Error(`القيد غير متوازن (بالعملة الأساس): مدين ${totD.toFixed(2)} ≠ دائن ${totC.toFixed(2)} — الفرق ${(totD - totC).toFixed(2)}`)
+    e.code = 'UNBALANCED_JOURNAL'
+    throw e
+  }
+}
+
+// v4.5 — inverse of reverseManualJournalEffects: RE-APPLIES the original cached-balance
+// effects of a manual/manual_dual JE. Used to RESTORE state when a posted-journal edit
+// fails midway (no partial state, no silent history loss).
+async function applyManualJournalEffects(db, T, je) {
+  const isMulti = je.currency === 'MULTI' || je.ref_type === 'manual_dual'
+  if (isMulti) {
+    for (const l of (je.lines || []).slice(0, 2)) {
+      const cur = l.currency
+      const debit = Number(l.debit) || 0, credit = Number(l.credit) || 0
+      const amt = debit > 0 ? debit : credit
+      const side = debit > 0 ? 'debit' : 'credit'
+      if (!cur || !l.party_id) continue
+      if (l.party_type === 'client') await updateBalance(db, 'clients', { id: l.party_id, tenant_id: T }, cur, side === 'debit' ? +amt : -amt)
+      if (l.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: l.party_id, tenant_id: T }, cur, side === 'debit' ? -amt : +amt)
+      if (l.party_type === 'box') await updateBalance(db, 'boxes', { id: l.party_id, tenant_id: T }, cur, side === 'debit' ? +amt : -amt)
+    }
+  } else {
+    for (const l of je.lines || []) {
+      const debit = Number(l.debit) || 0, credit = Number(l.credit) || 0
+      const delta = debit - credit
+      const cur = l.currency || je.currency
+      if (!l.party_id) continue
+      if (l.party_type === 'client') await updateBalance(db, 'clients', { id: l.party_id, tenant_id: T }, cur, +delta)
+      if (l.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: l.party_id, tenant_id: T }, cur, -delta)
+      if (l.party_type === 'box') await updateBalance(db, 'boxes', { id: l.party_id, tenant_id: T }, cur, +delta)
+    }
+  }
 }
 
 // v3.10.6 — Credit Limit + Freeze enforcement for credit sales
@@ -661,23 +899,59 @@ async function checkClientCredit(db, tenantId, clientId, saleAmount, currency, s
 }
 
 async function createJournalEntry(db, tenantId, { date, description, ref_type, ref_id, currency, lines }, opts = {}) {
-  // Enforce quota (skipped in edit mode, and bypassed entirely for unlimited tenants)
-  if (!opts.skipQuota) {
-    const t = await db.collection('tenants').findOne({ id: tenantId })
-    if (!isUnlimitedTenant(t)) {
-      const q = t?.journal_quota || { used: 0, limit: 500 }
-      if (q.used >= q.limit) {
-        const err = new Error(`انتهت حصة قيود اليومية (${q.used}/${q.limit}). يرجى تجديد الاشتراك مع الإدارة العامة.`)
-        err.code = 'QUOTA_EXCEEDED'
-        throw err
-      }
-    }
+  // v4.5 — generic idempotency (code-level): a caller may pass opts.idempotencyKey;
+  // the same financial operation never produces two journals on retry/concurrent calls.
+  // (DB-level unique index is intentionally NOT created now — would require checking
+  // existing production data first. Logged as deferred DB hardening.)
+  if (opts.idempotencyKey) {
+    const existing = await db.collection('journal_entries').findOne({ tenant_id: tenantId, idempotency_key: opts.idempotencyKey })
+    if (existing) return existing
   }
+  // Enforce quota (skipped in edit mode, and bypassed entirely for unlimited tenants)
+  if (!opts.skipQuota) await assertJournalQuota(db, tenantId)
   // v3.89 — opts.extra: optional passthrough marker fields (e.g. meraaj_booking_ref for
   // idempotent Meraaj postings). Spread FIRST so extras can NEVER override core JE fields.
   const je = { ...(opts.extra || {}), id: opts.existingJeId || uuidv4(), tenant_id: tenantId, date: new Date(date || Date.now()), description, ref_type, ref_id, currency, lines, created_at: opts.createdAt || new Date() }
-  await db.collection('journal_entries').insertOne(je)
-  if (!opts.skipQuota) await db.collection('tenants').updateOne({ id: tenantId }, { $inc: { 'journal_quota.used': 1 } })
+  // v4.5 — actor/source traceability for NEW journals (historical journals untouched):
+  // created_by falls back to any value already provided via opts.extra.
+  if (opts.actor && !je.created_by) je.created_by = opts.actor
+  if (opts.source && !je.source) je.source = opts.source
+  if (opts.idempotencyKey) je.idempotency_key = opts.idempotencyKey
+  // v4.5 — CENTRAL INVARIANTS (Priority 1+2+5): no automatic or manual journal can
+  // skip validation — lines/accounts/tenant/group/inactive/period/base-balance.
+  await enforceJournalInvariants(db, tenantId, je, opts)
+  // v4.8.1 — PR#18-1: EXPLICIT WRITE PHASES.
+  // Phase A — journal COMMIT. An insert error is verified against the collection:
+  //   provably NOT saved  → e.jePhase='pre_commit'      (caller may compensate safely)
+  //   verification failed → e.jePhase='commit_uncertain' (caller must NOT compensate —
+  //   reversing balances for a journal that may be saved corrupts the books)
+  //   saved despite the driver error → treated as committed (fall through to Phase B).
+  try {
+    await db.collection('journal_entries').insertOne(je)
+  } catch (insErr) {
+    let committed = false, verified = false
+    try {
+      committed = !!(await db.collection('journal_entries').findOne({ id: je.id, tenant_id: tenantId }, { projection: { id: 1 } }))
+      verified = true
+    } catch { /* verification unavailable → state unknown */ }
+    if (!verified) { insErr.jePhase = 'commit_uncertain'; throw insErr }
+    if (!committed) { insErr.jePhase = 'pre_commit'; throw insErr }
+    // committed=true: the journal IS saved — do not re-throw an "insert failure"
+  }
+  // Phase B — quota COUNTER. The journal is committed: a counter failure is NEVER
+  // treated as an insert failure (no caller may reverse balances for a saved journal)
+  // and is NEVER hidden — loud log + persisted audit record + flag on the returned doc.
+  if (!opts.skipQuota) {
+    try {
+      await db.collection('tenants').updateOne({ id: tenantId }, { $inc: { 'journal_quota.used': 1 } })
+    } catch (qErr) {
+      console.error('[JE] CRITICAL: quota counter update FAILED after journal commit', je.id, qErr)
+      try {
+        await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: tenantId, action: 'quota_increment_failed', je_id: je.id, ref_type: je.ref_type, error: String(qErr?.message || qErr).slice(0, 300), at: new Date() })
+      } catch { }
+      je.quota_counter_failed = true // surfaced, not hidden — journal itself is committed
+    }
+  }
   return je
 }
 
@@ -1463,11 +1737,24 @@ async function handleRoute(request, { params }) {
         if (ref) referredBy = ref.id
       }
       const myCode = genReferralCode()
+      // v4.0 — default trial plan: if the Super Admin picked one in pricing settings,
+      // its limits drive NEW signups; otherwise the legacy defaults (2 users / 1 branch / 30 entries).
+      let trialLimits = { max_users: 2, max_branches: 1, quota: 30, plan_tier: 'standard' }
+      try {
+        const cfgT = await getPricingConfig(db)
+        const dp = cfgT.default_trial_plan_key ? (cfgT.plans || []).find(p => p.key === cfgT.default_trial_plan_key && p.active !== false) : null
+        if (dp) trialLimits = {
+          max_users: Number(dp.max_users) === 0 ? 9999 : (Number(dp.max_users) || 2),
+          max_branches: Number(dp.max_branches) === 0 ? 9999 : (Number(dp.max_branches) || 1),
+          quota: Number(dp.quota_limit) > 0 ? Number(dp.quota_limit) : 30,
+          plan_tier: dp.key,
+        }
+      } catch { }
       const tenant = {
         id: uuidv4(), slug, name: b.name, status: 'active',
-        max_users: 2, max_branches: 1, subscription: 'trial',
-        plan_tier: 'standard', // v2.8 default tier (standard | silver | bronze | gold)
-        journal_quota: { used: 0, limit: 30, top_ups: [] }, // v2.8 — 30 free entries on signup (was 500)
+        max_users: trialLimits.max_users, max_branches: trialLimits.max_branches, subscription: 'trial',
+        plan_tier: trialLimits.plan_tier, // v2.8 default tier | v4.0 default trial plan key when configured
+        journal_quota: { used: 0, limit: trialLimits.quota, top_ups: [] }, // v2.8 — 30 free entries on signup (was 500)
         referral_code: myCode, referred_by: referredBy,
         referral_stats: { signups: 0, activations: 0, bonus_earned: 0 },
         activation_confirmed: false,
@@ -1594,7 +1881,7 @@ async function handleRoute(request, { params }) {
     // ============ v3.45 — RBAC PHASE 1: module-level access enforcement (staff only) ============
     // Server-side guard (not just UI hiding). Owner/super_admin bypass. Shared lookup endpoints
     // (/clients, /suppliers, /boxes, /accounts) stay open as they feed dropdowns across screens.
-    if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') {
+    if (sess.user.role !== 'owner' && !isMainSA(sess.user)) {
       const P = effectivePermissions(sess.user)
       const deny = (label) => bad(`🚫 غير مصرح — ليس لديك صلاحية الوصول إلى قسم ${label}`, 403)
       if (/^\/tickets/.test(route) && !P.mod_tickets) return deny('حجز التذاكر')
@@ -1614,13 +1901,141 @@ async function handleRoute(request, { params }) {
     }
     // v3.45 — Role templates catalog for the permissions manager (owner only)
     if (route === '/rbac/templates' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
-      return ok({ templates: RBAC_ROLE_TEMPLATES(), defaults: DEFAULT_STAFF_PERMISSIONS })
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
+      // v3.93 — merge ACTIVE custom templates created in the Super Admin Permissions Center
+      // (single RBAC engine — customs are just extra templates offices can assign)
+      const customTpls = await db.collection('admin_role_templates').find({ active: true }, { projection: { _id: 0, key: 1, label: 1, desc: 1, perms: 1 } }).toArray().catch(() => [])
+      return ok({ templates: [...RBAC_ROLE_TEMPLATES(), ...customTpls], defaults: DEFAULT_STAFF_PERMISSIONS })
     }
 
     // ============ SUPER ADMIN ============
     if (route.startsWith('/admin/')) {
-      if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      // v3.97 — Batch 5: ADMIN REALM GATE (server-side, not UI hiding).
+      // Replaces the plain role string check: main super_admin must be
+      // tenant-less (a tenant user holding 'super_admin' by mistake is
+      // rejected), and rahaal admin staff pass per-section/per-action RBAC.
+      const gateErr = await adminGate(db, sess, route, method)
+      if (gateErr) return bad(gateErr.error, gateErr.status)
+
+      // v3.97 — Batch 5 delegations: staff RBAC, geo, payments/entities, refdata.
+      if (route.startsWith('/admin/staff/') || route.startsWith('/admin/geo/') || route.startsWith('/admin/payfin/') || route.startsWith('/admin/refdata/')) {
+        let bodyB5 = null
+        if (method !== 'GET') { try { bodyB5 = await request.json() } catch { bodyB5 = {} } }
+        const spB5 = new URL(request.url).searchParams
+        const canB5 = await adminCan(db, sess)
+        const ctxB5 = { currencies: CURRENCIES, baseCurrency: BASE_CURRENCY }
+        let rB5
+        if (route.startsWith('/admin/staff/')) rB5 = await adminStaffHandler(db, route.slice('/admin/staff'.length), method, spB5, bodyB5, sess)
+        else if (route.startsWith('/admin/geo/')) rB5 = await adminGeoHandler(db, route.slice('/admin/geo'.length), method, spB5, bodyB5, sess, canB5)
+        else if (route.startsWith('/admin/payfin/')) rB5 = await adminPayFinHandler(db, route.slice('/admin/payfin'.length), method, spB5, bodyB5, sess, canB5, ctxB5)
+        else rB5 = await adminRefDataHandler(db, route.slice('/admin/refdata'.length), method, spB5, bodyB5, sess, canB5)
+        return rB5?.error ? bad(rB5.error, rB5.status || 400) : ok(rB5)
+      }
+
+      // v3.93 — Batch 1 delegations (modular — AUDIT-006). Center = READ-ONLY (GET only).
+      if (route.startsWith('/admin/center/') && method === 'GET') {
+        const rC = await adminCenterHandler(db, route.slice('/admin/center'.length), new URL(request.url).searchParams)
+        return rC?.error ? bad(rC.error, rC.status || 400) : ok(rC)
+      }
+      if (route.startsWith('/admin/perms/')) {
+        let bodyP = null
+        if (method !== 'GET') { try { bodyP = await request.json() } catch { bodyP = {} } }
+        const rbac = { defaults: DEFAULT_STAFF_PERMISSIONS, templates: RBAC_ROLE_TEMPLATES, ownerAll: () => rbacAllPerms(true) }
+        const rP = await adminPermsHandler(db, route.slice('/admin/perms'.length), method, new URL(request.url).searchParams, bodyP, sess, rbac)
+        return rP?.error ? bad(rP.error, rP.status || 400) : ok(rP)
+      }
+
+      // v4.3 — UNIFIED ORDERS + PROGRAM COMMISSIONS LEDGER (platform_orders /
+      // platform_commissions). Sales are order TYPES here — no platform_sales.
+      if (route === '/admin/orders' || route.startsWith('/admin/orders/')) {
+        let bodyO = null
+        if (method !== 'GET') { try { bodyO = await request.json() } catch { bodyO = {} } }
+        const rO = await adminOrdersHandler(db, route.slice('/admin/orders'.length), method, new URL(request.url).searchParams, bodyO, sess)
+        return rO?.error ? bad(rO.error, rO.status || 400) : ok(rO)
+      }
+      if (route === '/admin/commissions-ledger' || route.startsWith('/admin/commissions-ledger/')) {
+        let bodyL = null
+        if (method !== 'GET') { try { bodyL = await request.json() } catch { bodyL = {} } }
+        const rL = await adminCommissionsLedgerHandler(db, route.slice('/admin/commissions-ledger'.length), method, new URL(request.url).searchParams, bodyL, sess)
+        return rL?.error ? bad(rL.error, rL.status || 400) : ok(rL)
+      }
+
+      // v3.94 — Batch 2 delegations (modular). Commissions & Requests = READ-ONLY (GET only).
+      if (route.startsWith('/admin/commissions/') && method === 'GET') {
+        const rCm = await adminCommissionsHandler(db, route.slice('/admin/commissions'.length), new URL(request.url).searchParams,
+          { affiliateRate: AFFILIATE_COMMISSION_RATE, minCashoutIndividual: AFFILIATE_MIN_CASHOUT_INDIVIDUAL, minCashoutOffice: AFFILIATE_MIN_CASHOUT_OFFICE })
+        return rCm?.error ? bad(rCm.error, rCm.status || 400) : ok(rCm)
+      }
+      if (route.startsWith('/admin/requests/') && method === 'GET') {
+        const rRq = await adminRequestsHandler(db, route.slice('/admin/requests'.length), new URL(request.url).searchParams)
+        return rRq?.error ? bad(rRq.error, rRq.status || 400) : ok(rRq)
+      }
+
+      // v3.95 — Batch 3 delegations (modular): System (backup/restore path/status/
+      // env/integrations/maintenance config), Central Audit (READ-ONLY, GET only),
+      // In-App Notifications. Environment/versions ctx built from REAL constants.
+      if (route.startsWith('/admin/system/') || route.startsWith('/admin/audit/') || route.startsWith('/admin/notify/')) {
+        let bodyS = null
+        if (method !== 'GET') { try { bodyS = await request.json() } catch { bodyS = {} } }
+        const baseS = process.env.NEXT_PUBLIC_BASE_URL || ''
+        const ctxS = {
+          envName: baseS.includes('rahaal-test') ? 'Test' : /emergent|preview/i.test(baseS) ? 'Preview' : 'Live',
+          baseHost: baseS.replace(/^https?:\/\//, '').split('/')[0] || null,
+          versions: { root: '3.88.4', health: '3.9.28', backup_export: '3.9.20' }, // as hardcoded in this file — shown as-is
+          dbNameSafe: process.env.DB_NAME || '(الافتراضي من الاتصال)',
+          keys: {
+            MERAAJ_SHARED_SECRET: !!process.env.MERAAJ_SHARED_SECRET,
+            MERAAJ_API_BASE_URL: !!process.env.MERAAJ_API_BASE_URL,
+            MERAAJ_WEBHOOK_URL: !!process.env.MERAAJ_WEBHOOK_URL,
+            MERAAJ_STORE_URL: !!process.env.MERAAJ_STORE_URL,
+          },
+          meraajHostSafe: (() => { try { return new URL(process.env.MERAAJ_API_BASE_URL || '').host || null } catch { return null } })(),
+        }
+        const spS = new URL(request.url).searchParams
+        let rS
+        if (route.startsWith('/admin/system/')) rS = await adminSystemHandler(db, route.slice('/admin/system'.length), method, spS, bodyS, sess, ctxS)
+        else if (route.startsWith('/admin/audit/')) {
+          if (method !== 'GET') return bad('سجل التدقيق قراءة فقط — لا تعديل ولا حذف', 405)
+          rS = await adminAuditHandler(db, route.slice('/admin/audit'.length), spS, ctxS)
+        } else rS = await adminNotifyHandler(db, route.slice('/admin/notify'.length), method, spS, bodyS, sess)
+        return rS?.error ? bad(rS.error, rS.status || 400) : ok(rS)
+      }
+
+      // v3.96 — Batch 4 delegations (modular): Reports (READ-ONLY, GET only),
+      // Disputes, Currencies & FX. ctx built from the REAL code constants.
+      if (route.startsWith('/admin/reports/') || route.startsWith('/admin/disputes') || route.startsWith('/admin/currency/')) {
+        let bodyB4 = null
+        if (method !== 'GET') { try { bodyB4 = await request.json() } catch { bodyB4 = {} } }
+        const baseB4 = process.env.NEXT_PUBLIC_BASE_URL || ''
+        const ctxB4 = {
+          currencies: CURRENCIES, baseCurrency: BASE_CURRENCY, defaultRates: DEFAULT_RATES,
+          envName: baseB4.includes('rahaal-test') ? 'Test' : /emergent|preview/i.test(baseB4) ? 'Preview' : 'Live',
+          versions: { root: '3.88.4', health: '3.9.28', backup_export: '3.9.20' },
+          keys: { MERAAJ_SHARED_SECRET: !!process.env.MERAAJ_SHARED_SECRET, MERAAJ_API_BASE_URL: !!process.env.MERAAJ_API_BASE_URL, MERAAJ_WEBHOOK_URL: !!process.env.MERAAJ_WEBHOOK_URL, MERAAJ_STORE_URL: !!process.env.MERAAJ_STORE_URL },
+          commConsts: { affiliateRate: AFFILIATE_COMMISSION_RATE, minCashoutIndividual: AFFILIATE_MIN_CASHOUT_INDIVIDUAL, minCashoutOffice: AFFILIATE_MIN_CASHOUT_OFFICE },
+        }
+        const spB4 = new URL(request.url).searchParams
+        let rB4
+        if (route.startsWith('/admin/reports/')) {
+          if (method !== 'GET') return bad('التقارير قراءة فقط', 405)
+          rB4 = await adminReportsHandler(db, route.slice('/admin/reports'.length), spB4, ctxB4)
+        } else if (route.startsWith('/admin/disputes')) {
+          rB4 = await adminDisputesHandler(db, route.slice('/admin/disputes'.length), method, spB4, bodyB4, sess)
+        } else {
+          rB4 = await adminCurrencyHandler(db, route.slice('/admin/currency'.length), method, spB4, bodyB4, sess, ctxB4)
+        }
+        return rB4?.error ? bad(rB4.error, rB4.status || 400) : ok(rB4)
+      }
+
+      // v3.91 — Phase 2: Office 360° (READ-ONLY — no writes, no balance recomputation).
+      // Logic lives in lib/admin360.js; this is a single delegation line (AUDIT-006).
+      const office360Match = route.match(/^\/admin\/tenants\/([^/]+)\/office360$/)
+      if (office360Match && method === 'GET') {
+        const url360 = new URL(request.url)
+        const r360 = await getOffice360(db, office360Match[1], url360.searchParams.get('tab') || 'overview')
+        if (r360?.error) return bad(r360.error, 404)
+        return ok(r360)
+      }
 
       // v3.16 — Installments tracker (SaaS billing follow-up)
       if (route === '/admin/installments-overview' && method === 'GET') {
@@ -1674,10 +2089,17 @@ async function handleRoute(request, { params }) {
         }
       }
 
-      // v3.14 — Pricing config management (flexible discount + dynamic features)
+      // v3.14 → v4.0 — Pricing config management (flexible discount + dynamic features
+      // + per-plan description/currency/duration/quota/active/order + offer window +
+      // default trial plan). Every save is audited into the 'pricing_config_history'
+      // doc INSIDE the same platform_settings collection — no new collections.
       if (route === '/admin/pricing-config' && method === 'GET') {
         const cfg = await getPricingConfig(db)
         return ok({ ...cfg, _id: undefined })
+      }
+      if (route === '/admin/pricing-config/history' && method === 'GET') {
+        const h = await db.collection('platform_settings').findOne({ id: 'pricing_config_history' })
+        return ok({ entries: (h?.entries || []).slice().reverse() })
       }
       if (route === '/admin/pricing-config' && method === 'PUT') {
         const b = await request.json()
@@ -1685,24 +2107,117 @@ async function handleRoute(request, { params }) {
         if (b.discount_enabled !== undefined) upd.discount_enabled = !!b.discount_enabled
         if (b.discount_percent !== undefined) upd.discount_percent = Math.min(95, Math.max(0, Number(b.discount_percent) || 0))
         if (b.installments_count !== undefined) upd.installments_count = Math.max(1, Number(b.installments_count) || 5)
+        // v4.0 — offer window: when set, the discount applies ONLY inside the window
+        if (b.offer_start_at !== undefined) upd.offer_start_at = b.offer_start_at ? new Date(b.offer_start_at) : null
+        if (b.offer_end_at !== undefined) upd.offer_end_at = b.offer_end_at ? new Date(b.offer_end_at) : null
+        // v4.0 — default trial plan: drives limits for NEW public signups (never retroactive)
+        if (b.default_trial_plan_key !== undefined) upd.default_trial_plan_key = ['silver', 'gold', 'enterprise'].includes(b.default_trial_plan_key) ? b.default_trial_plan_key : null
         if (Array.isArray(b.plans)) {
           upd.plans = b.plans
             .filter(p => p && ['silver', 'gold', 'enterprise'].includes(p.key))
-            .map(p => ({
+            .map((p, i) => ({
               key: p.key,
               name_ar: String(p.name_ar || '').slice(0, 60),
               icon: String(p.icon || '').slice(0, 8),
+              description: String(p.description || '').slice(0, 300), // v4.0
+              currency: String(p.currency || 'USD').toUpperCase().slice(0, 8), // v4.0
+              duration_days: Math.max(1, Number(p.duration_days) || 365), // v4.0
               annual_price: Math.max(0, Number(p.annual_price) || 0),
               max_users: Math.max(0, Number(p.max_users) || 0),
               max_branches: Math.max(0, Number(p.max_branches) || 0),
+              quota_limit: Math.max(0, Number(p.quota_limit) || 0), // v4.0 — 0 = لا تُطبَّق حصة من الباقة
+              unlimited_journals: !!p.unlimited_journals, // v4.0 — الباقة تمنح قيوداً مفتوحة عند الإسناد
+              active: p.active !== false, // v4.0 — تفعيل/تعطيل ظهور الباقة للمشتركين
+              sort_order: Number.isFinite(Number(p.sort_order)) ? Number(p.sort_order) : i, // v4.0 — ترتيب الظهور
               features: (Array.isArray(p.features) ? p.features : []).map(f => String(f).slice(0, 120)).filter(Boolean).slice(0, 25),
             }))
         }
         const existing = await db.collection('platform_settings').findOne({ id: 'pricing_config' })
-        const merged = { ...(existing ? { ...DEFAULT_PRICING_CONFIG, ...existing } : DEFAULT_PRICING_CONFIG), ...upd }
+        const prevCfg = existing ? { ...DEFAULT_PRICING_CONFIG, ...existing } : DEFAULT_PRICING_CONFIG
+        const merged = { ...prevCfg, ...upd }
         delete merged._id // MongoDB immutable field must never be in $set
         await db.collection('platform_settings').updateOne({ id: 'pricing_config' }, { $set: merged }, { upsert: true })
-        return ok({ success: true, config: merged })
+        // v4.0 — audit trail (المنفذ، التاريخ، القيمة السابقة → الجديدة) field-by-field.
+        // NOTE: price/discount changes are NEVER retroactive — existing tenants keep
+        // their stored limits/prices until the admin explicitly re-assigns a plan.
+        const changes = []
+        for (const k of ['discount_enabled', 'discount_percent', 'installments_count', 'default_trial_plan_key', 'offer_start_at', 'offer_end_at']) {
+          if (upd[k] !== undefined && JSON.stringify(prevCfg[k] ?? null) !== JSON.stringify(merged[k] ?? null)) changes.push({ field: k, from: prevCfg[k] ?? null, to: merged[k] ?? null })
+        }
+        if (upd.plans) {
+          for (const np of upd.plans) {
+            const op = (prevCfg.plans || []).find(x => x.key === np.key) || {}
+            for (const f of ['name_ar', 'description', 'currency', 'duration_days', 'annual_price', 'max_users', 'max_branches', 'quota_limit', 'unlimited_journals', 'active', 'sort_order']) {
+              if (JSON.stringify(op[f] ?? null) !== JSON.stringify(np[f] ?? null)) changes.push({ field: `${np.key}.${f}`, from: op[f] ?? null, to: np[f] ?? null })
+            }
+            if (JSON.stringify(op.features || []) !== JSON.stringify(np.features || [])) changes.push({ field: `${np.key}.features`, from: `${(op.features || []).length} ميزة`, to: `${(np.features || []).length} ميزة` })
+          }
+        }
+        if (changes.length) {
+          await db.collection('platform_settings').updateOne(
+            { id: 'pricing_config_history' },
+            { $push: { entries: { $each: [{ at: new Date(), by: sess.user.email, changes }], $slice: -100 } } },
+            { upsert: true }
+          )
+        }
+        return ok({ success: true, config: merged, changes_logged: changes.length })
+      }
+
+      // v4.2 — COMMISSION RULES became OPERATIONAL: stored in the EXISTING
+      // platform_settings collection (doc id 'commission_rules') — configuration,
+      // NOT financial records. The financial commissions LEDGER (accruals/payments)
+      // requires a NEW collection → pending explicit user approval (documented).
+      if (route === '/admin/commission-rules' && method === 'GET') {
+        const doc = await db.collection('platform_settings').findOne({ id: 'commission_rules' })
+        return ok({ rules: doc?.rules || [], updated_at: doc?.updated_at || null, updated_by: doc?.updated_by || null })
+      }
+      if (route === '/admin/commission-rules' && method === 'PUT') {
+        const b = await request.json()
+        if (!b.reason || !String(b.reason).trim()) return bad('السبب إلزامي لأي تغيير في قواعد العمولات')
+        const prevDoc = await db.collection('platform_settings').findOne({ id: 'commission_rules' })
+        const prevRules = prevDoc?.rules || []
+        const rules = (Array.isArray(b.rules) ? b.rules : []).slice(0, 50).map(r => ({
+          id: r.id || uuidv4(),
+          name: String(r.name || '').slice(0, 120),
+          type: r.type === 'fixed' ? 'fixed' : 'percent',
+          value: Math.max(0, Number(r.value) || 0),
+          applies_to: ['silver', 'gold', 'enterprise', 'all'].includes(r.applies_to) ? r.applies_to : 'all',
+          beneficiary_type: ['marketer', 'referrer_office', 'employee'].includes(r.beneficiary_type) ? r.beneficiary_type : 'marketer',
+          beneficiary_name: String(r.beneficiary_name || '').slice(0, 120),
+          start_at: r.start_at ? new Date(r.start_at) : null,
+          end_at: r.end_at ? new Date(r.end_at) : null,
+          priority: Number.isFinite(Number(r.priority)) ? Number(r.priority) : 0,
+          active: r.active !== false,
+          created_at: r.created_at ? new Date(r.created_at) : new Date(),
+        }))
+        for (const r of rules) {
+          if (!r.name.trim()) return bad('اسم القاعدة إلزامي')
+          if (r.type === 'percent' && r.value > 100) return bad(`نسبة العمولة في «${r.name}» لا تتجاوز 100%`)
+        }
+        // منع تداخل قاعدتين نشطتين على الباقة/المستفيد نفسه ضمن نافذة زمنية متقاطعة
+        const overlaps = (a, c) => {
+          const aS = a.start_at ? a.start_at.getTime() : -Infinity, aE = a.end_at ? a.end_at.getTime() : Infinity
+          const cS = c.start_at ? c.start_at.getTime() : -Infinity, cE = c.end_at ? c.end_at.getTime() : Infinity
+          return aS <= cE && cS <= aE
+        }
+        const act = rules.filter(r => r.active)
+        for (let i = 0; i < act.length; i++) for (let j = i + 1; j < act.length; j++) {
+          const a = act[i], c = act[j]
+          const samePlan = a.applies_to === c.applies_to || a.applies_to === 'all' || c.applies_to === 'all'
+          const sameBenef = a.beneficiary_type === c.beneficiary_type && (a.beneficiary_name || '') === (c.beneficiary_name || '')
+          if (samePlan && sameBenef && overlaps(a, c)) return bad(`⚠️ تعارض قواعد: «${a.name}» و«${c.name}» نشطتان على النطاق نفسه والمستفيد نفسه في فترة متقاطعة — عطّل إحداهما أو عدّل التواريخ`, 409)
+        }
+        await db.collection('platform_settings').updateOne({ id: 'commission_rules' }, { $set: { id: 'commission_rules', rules, updated_at: new Date(), updated_by: sess.user.email } }, { upsert: true })
+        try {
+          await db.collection('audit_logs').insertOne({
+            id: uuidv4(), category: 'commissions', at: new Date(), actor_id: sess.user.id, actor_email: sess.user.email,
+            action: 'commission_rules_update', target: { doc: 'commission_rules' },
+            before: { count: prevRules.length, rules: prevRules.map(r => ({ id: r.id, name: r.name, type: r.type, value: r.value, active: r.active })) },
+            after: { count: rules.length, rules: rules.map(r => ({ id: r.id, name: r.name, type: r.type, value: r.value, active: r.active })) },
+            reason: String(b.reason).slice(0, 300),
+          })
+        } catch { }
+        return ok({ success: true, rules })
       }
 
       // v3.12 — Password reset requests inbox (admin-mediated forgot password)
@@ -1748,21 +2263,36 @@ async function handleRoute(request, { params }) {
         const users = await db.collection('users').find({ role: { $ne: 'super_admin' } }).toArray()
         const usersByTenant = {}
         for (const u of users) usersByTenant[u.tenant_id] = (usersByTenant[u.tenant_id] || 0) + 1
+        // v3.91 — Phase 2: attach owner info from the SAME users query (zero extra queries)
+        const ownersByTenant = {}
+        for (const u of users) if (u.role === 'owner' && u.tenant_id && !ownersByTenant[u.tenant_id]) ownersByTenant[u.tenant_id] = { name: u.name || null, email: u.email || null, phone: u.phone || u.whatsapp || null }
         const [tCount, vCount] = await Promise.all([
           db.collection('tickets').countDocuments(),
           db.collection('visas').countDocuments(),
         ])
         return ok({
-          tenants: tenants.map(t => ({ ...t, _id: undefined, users_count: usersByTenant[t.id] || 0 })),
+          tenants: tenants.map(t => ({ ...t, _id: undefined, users_count: usersByTenant[t.id] || 0, owner: ownersByTenant[t.id] || null })),
           global_stats: { tenants: tenants.length, tickets: tCount, visas: vCount },
         })
       }
 
       if (route === '/admin/tenants' && method === 'POST') {
         const b = await request.json()
-        if (!b.name || !b.owner_email || !b.owner_password) return bad('الاسم وبيانات المالك مطلوبة')
+        // v3.98 — Phase 1 (minimal change requested by management): optional LINK
+        // mode — instead of forcing a NEW owner user, an existing MAIN super_admin
+        // account can be bound to the newly created tenant (the Rahaal company
+        // book). No duplicate owner is created; the account keeps role=super_admin.
+        const linkMode = !!b.link_owner_user_id
+        if (!b.name || (!linkMode && (!b.owner_email || !b.owner_password))) return bad('الاسم وبيانات المالك مطلوبة')
+        let linkUser = null
+        if (linkMode) {
+          linkUser = await db.collection('users').findOne({ id: b.link_owner_user_id })
+          if (!linkUser) return bad('المستخدم المطلوب ربطه غير موجود', 404)
+          if (linkUser.role !== 'super_admin') return bad('الربط متاح لحساب المشرف العام الرئيسي فقط')
+          if (linkUser.tenant_id) return bad('حساب المشرف مرتبط بمكتب مسبقاً')
+        }
         const slug = (b.slug || b.name).toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 40) + '-' + uuidv4().slice(0, 4)
-        const existingUser = await db.collection('users').findOne({ email: String(b.owner_email).toLowerCase().trim() })
+        const existingUser = linkMode ? null : await db.collection('users').findOne({ email: String(b.owner_email).toLowerCase().trim() })
         if (existingUser) return bad('البريد الإلكتروني مستخدم بالفعل')
         // Resolve referrer if code provided
         let referredBy = null
@@ -1797,14 +2327,33 @@ async function handleRoute(request, { params }) {
             }
           )
         }
-        await db.collection('users').insertOne({
-          id: uuidv4(), tenant_id: tenant.id, email: String(b.owner_email).toLowerCase().trim(),
-          name: b.owner_name || 'مالك المكتب', role: 'owner', active: true,
-          password_hash: bcrypt.hashSync(b.owner_password, 8),
-          created_at: new Date(),
-        })
+        if (linkMode) {
+          // Bind the existing main SA account to the company book: same account,
+          // same role (super_admin), tenant scope = the platform org. Travel-only
+          // modules are hidden via the EXISTING permission flags machinery
+          // (canModule reads permissions.mod_* !== false). Financial modules stay.
+          await db.collection('tenants').updateOne({ id: tenant.id }, { $set: { is_platform_org: true } })
+          await db.collection('users').updateOne({ id: linkUser.id }, {
+            $set: {
+              tenant_id: tenant.id, platform_org: true,
+              permissions: {
+                ...(linkUser.permissions || {}),
+                mod_tickets: false, mod_visas: false, mod_visa_monitor: false,
+                mod_services: false, mod_packages: false, mod_meraaj: false, mod_query: false,
+              },
+              updated_at: new Date(),
+            },
+          })
+        } else {
+          await db.collection('users').insertOne({
+            id: uuidv4(), tenant_id: tenant.id, email: String(b.owner_email).toLowerCase().trim(),
+            name: b.owner_name || 'مالك المكتب', role: 'owner', active: true,
+            password_hash: bcrypt.hashSync(b.owner_password, 8),
+            created_at: new Date(),
+          })
+        }
         await seedTenantDefaults(db, tenant.id)
-        return ok({ ...tenant, _id: undefined })
+        return ok({ ...tenant, _id: undefined, linked_user: linkMode ? linkUser.email : null })
       }
 
       // Confirm payment activation (grants +50 to referrer)
@@ -1813,8 +2362,16 @@ async function handleRoute(request, { params }) {
         const tid = confirmMatch[1]
         const t = await db.collection('tenants').findOne({ id: tid })
         if (!t) return bad('المكتب غير موجود', 404)
-        if (t.activation_confirmed) return bad('تم تأكيد الدفع لهذا المكتب من قبل')
-        await db.collection('tenants').updateOne({ id: tid }, { $set: { activation_confirmed: true, activation_confirmed_at: new Date(), subscription: 'paid' } })
+        // v4.0.1 — idempotent: confirm-payment can never run twice for the same office/subscription
+        if (t.activation_confirmed) return bad('تم تأكيد الدفع لهذا المكتب من قبل — لا يمكن تنفيذ العملية مرتين', 409)
+        const confirmSet = { activation_confirmed: true, activation_confirmed_at: new Date(), subscription: 'paid' }
+        // v4.0.1 — the plan's unlimited-journals privilege is granted HERE (post-payment), never before
+        try {
+          const cfgCP = await getPricingConfig(db)
+          const planCP = (cfgCP.plans || []).find(x => x.key === t.plan_tier)
+          if (planCP?.unlimited_journals === true) confirmSet.unlimited_journals = true
+        } catch { }
+        await db.collection('tenants').updateOne({ id: tid }, { $set: confirmSet })
         let referrerBonus = null
         if (t.referred_by) {
           // v3.9 — grant referrer +50 quota ONLY when the referred tenant confirms actual payment
@@ -1841,6 +2398,11 @@ async function handleRoute(request, { params }) {
         const tid = tenantIdMatch[1]
         if (method === 'PATCH') {
           const b = await request.json()
+          // v4.0 — «زيادة حصة القيود» has exactly ONE path: POST /admin/tenants/:id/topup.
+          // The old dual PATCH top_up_amount path is retired to prevent double-logging.
+          if (b.top_up_amount !== undefined) return bad('زيادة حصة القيود لها مسار مخصص واحد — استخدم زر «زيادة حصة القيود»')
+          const tCur = await db.collection('tenants').findOne({ id: tid })
+          if (!tCur) return bad('المكتب غير موجود', 404)
           const upd = {}
           if (b.status) upd.status = b.status
           if (b.name) upd.name = b.name
@@ -1848,7 +2410,9 @@ async function handleRoute(request, { params }) {
           if (b.max_branches !== undefined) upd.max_branches = b.max_branches === null ? null : Number(b.max_branches)
           if (b.quota_limit !== undefined) upd['journal_quota.limit'] = Number(b.quota_limit)
           if (b.plan_tier !== undefined) upd.plan_tier = b.plan_tier
-          // v3.14 — Assign 6-tier plan: auto-apply user/branch limits from pricing config
+          // v3.14 → v4.0.1 — Assign plan: auto-apply user/branch limits + plan quota.
+          // Plan assignment NEVER converts to Paid and NEVER opens journals by itself:
+          // the plan's unlimited_journals privilege is granted only at confirm-payment.
           if (b.plan_key !== undefined && ['silver', 'gold', 'enterprise'].includes(b.plan_key)) {
             upd.plan_tier = b.plan_key
             const cfg = await getPricingConfig(db)
@@ -1856,13 +2420,32 @@ async function handleRoute(request, { params }) {
             if (p) {
               upd.max_users = Number(p.max_users) === 0 ? 9999 : Number(p.max_users)
               upd.max_branches = Number(p.max_branches) === 0 ? 9999 : Number(p.max_branches)
+              if (Number(p.quota_limit) > 0) upd['journal_quota.limit'] = Number(p.quota_limit) // v4.0
             }
           }
-          // v3.14 — Billing mode: annual => unlimited journals immediately; installments => limited
+          // v4.0 — LOWERING GUARD (server-enforced): never silently drop below the office's
+          // CURRENT user count. Nothing is auto-deleted — the admin must resolve the excess
+          // first (deactivate/delete users) and then retry the reduction.
+          if (upd.max_users !== undefined && upd.max_users !== null && Number(upd.max_users) > 0) {
+            const usersCount = await db.collection('users').countDocuments({ tenant_id: tid })
+            if (Number(upd.max_users) < usersCount) {
+              return bad(`⚠️ لا يمكن خفض حد المستخدمين إلى ${upd.max_users} — المكتب لديه ${usersCount} مستخدماً حالياً. عالج التجاوز أولاً (عطّل أو احذف مستخدمين) ثم أعد المحاولة`, 409)
+            }
+          }
+          // v4.0 — quota lowering guard: block reducing the journal quota below what is already used
+          if (upd['journal_quota.limit'] !== undefined) {
+            const usedNowQ = tCur.journal_quota?.used || 0
+            if (Number(upd['journal_quota.limit']) < usedNowQ) {
+              return bad(`⚠️ لا يمكن خفض حصة القيود إلى ${upd['journal_quota.limit']} — المكتب استخدم ${usedNowQ} قيداً بالفعل`, 409)
+            }
+          }
+          // NOTE: max_branches is stored/applied but has no operational entity to count yet
+          // (no branches collection exists) — documented gap, enforcement activates with the entity.
+          // v4.0.1 CLOSURE — billing_mode is a PAYMENT-METHOD choice ONLY.
+          // OLD (v3.14): choosing 'annual' set unlimited_journals=true immediately (pre-payment!).
+          // NEW: no auto-open — journals open exclusively via confirm-payment or manual toggle.
           if (b.billing_mode !== undefined && ['annual', 'installments', null].includes(b.billing_mode)) {
             upd.billing_mode = b.billing_mode
-            if (b.billing_mode === 'annual') upd.unlimited_journals = true
-            if (b.billing_mode === 'installments' && b.unlimited_journals === undefined) upd.unlimited_journals = false
           }
           // v3.14 — Manual unlimited-journals toggle (e.g. after final installment is paid)
           if (b.unlimited_journals !== undefined) upd.unlimited_journals = !!b.unlimited_journals
@@ -1870,19 +2453,6 @@ async function handleRoute(request, { params }) {
           if (b.subscription_price !== undefined) upd.subscription_price = Number(b.subscription_price) || 0
           if (b.subscription_expires_at !== undefined) upd.subscription_expires_at = b.subscription_expires_at ? new Date(b.subscription_expires_at) : null
           await db.collection('tenants').updateOne({ id: tid }, { $set: upd })
-          // Top-up quota
-          if (b.top_up_amount) {
-            const amt = Number(b.top_up_amount) || 0
-            if (amt > 0) {
-              await db.collection('tenants').updateOne(
-                { id: tid },
-                {
-                  $inc: { 'journal_quota.limit': amt },
-                  $push: { 'journal_quota.top_ups': { amount: amt, date: new Date(), by: sess.user.email, note: b.top_up_note || 'manual top-up' } }
-                }
-              )
-            }
-          }
           return ok({ success: true })
         }
         if (method === 'DELETE') {
@@ -1905,7 +2475,10 @@ async function handleRoute(request, { params }) {
         return ok({ success: true, status: newStatus })
       }
 
-      // v3.9.17 — Top-up: add journal-entries credits to tenant quota (Admin/Super Admin only)
+      // v3.9.17 → v4.0 — «زيادة حصة القيود» (THE single approved path — the old
+      // PATCH top_up_amount dual path is retired). Unified logging into
+      // journal_quota.top_ups (the original ledger): amount + reason + actor + date.
+      // wallet.topups dual-write removed. It adds JOURNAL QUOTA — not money.
       const topupMatch = route.match(/^\/admin\/tenants\/([^/]+)\/topup$/)
       if (topupMatch && method === 'POST') {
         const tid = topupMatch[1]
@@ -1913,15 +2486,30 @@ async function handleRoute(request, { params }) {
         if (!t) return bad('المكتب غير موجود', 404)
         const b = await request.json()
         const amount = parseInt(b.amount)
-        if (!amount || amount <= 0 || amount > 1000000) return bad('المبلغ يجب أن يكون بين 1 و 1,000,000 قيد')
+        if (!amount || amount <= 0 || amount > 1000000) return bad('المقدار يجب أن يكون بين 1 و 1,000,000 قيد')
         const note = String(b.note || '').slice(0, 200)
-        const currentLimit = t.journal_quota?.limit || 500
-        const newLimit = currentLimit + amount
+        if (!note.trim()) return bad('سبب الزيادة مطلوب')
+        // v4.0.1 — idempotency: the UI sends a unique op_id per dialog session; resending
+        // the same request never creates a second increase.
+        const opId = String(b.op_id || '').slice(0, 64)
+        const q = t.journal_quota || { used: 0, limit: 500, top_ups: [] }
+        if (opId) {
+          const dup = (q.top_ups || []).find(x => x.op_id === opId)
+          if (dup) return ok({ success: true, duplicate: true, tenant_id: tid, added: dup.amount, note: dup.note, by: dup.by, at: dup.date, quota: { prev_limit: dup.prev_limit, new_limit: dup.new_limit, used: Number(q.used) || 0, remaining: Math.max(0, (dup.new_limit || 0) - (Number(q.used) || 0)) } })
+        }
+        const prevLimit = Number(q.limit) || 0
+        const newLimit = prevLimit + amount
+        // v4.0.1 — the ledger entry records: old limit, new limit, amount, actor, reason, date
+        const entry = { op_id: opId || null, amount, note, prev_limit: prevLimit, new_limit: newLimit, date: new Date(), by: sess.user.email }
         await db.collection('tenants').updateOne({ id: tid }, {
-          $set: { 'journal_quota.limit': newLimit, 'journal_quota.last_topup_at': new Date() },
-          $push: { 'wallet.topups': { amount, note, at: new Date(), by: sess.user.email } },
+          $set: { 'journal_quota.limit': newLimit, 'journal_quota.last_topup_at': entry.date },
+          $push: { 'journal_quota.top_ups': entry },
         })
-        return ok({ success: true, tenant_id: tid, added: amount, new_limit: newLimit, prev_limit: currentLimit, note })
+        return ok({
+          success: true, tenant_id: tid,
+          added: amount, note, by: sess.user.email, at: entry.date,
+          quota: { prev_limit: prevLimit, new_limit: newLimit, used: Number(q.used) || 0, remaining: Math.max(0, newLimit - (Number(q.used) || 0)) },
+        })
       }
 
       // v3.9.17 — Reset password for the tenant's owner (Admin/Super Admin only)
@@ -1982,47 +2570,20 @@ async function handleRoute(request, { params }) {
         return ok({ success: true })
       }
 
-      // v2.8 — Announcements CRUD (popup + banner)
-      if (route === '/admin/announcements' && method === 'GET') {
-        const list = await db.collection('announcements').find({}).sort({ created_at: -1 }).toArray()
-        return ok(list.map(a => ({ ...a, _id: undefined })))
-      }
-      if (route === '/admin/announcements' && method === 'POST') {
-        const b = await request.json()
-        const doc = {
-          id: uuidv4(),
-          type: b.type || 'popup', // 'popup' | 'banner'
-          title: b.title || '',
-          body: b.body || '',
-          image_url: b.image_url || '',
-          link_url: b.link_url || '',
-          active: b.active !== false,
-          starts_at: b.starts_at ? new Date(b.starts_at) : null,
-          ends_at: b.ends_at ? new Date(b.ends_at) : null,
-          created_by: sess.user.email,
-          created_at: new Date(),
-        }
-        await db.collection('announcements').insertOne(doc)
-        return ok({ ...doc, _id: undefined })
-      }
-      const annMatch = route.match(/^\/admin\/announcements\/([^/]+)$/)
-      if (annMatch && method === 'PUT') {
-        const id = annMatch[1]
-        const b = await request.json()
-        const upd = {}
-        for (const k of ['type', 'title', 'body', 'image_url', 'link_url', 'active']) if (b[k] !== undefined) upd[k] = b[k]
-        if (b.starts_at !== undefined) upd.starts_at = b.starts_at ? new Date(b.starts_at) : null
-        if (b.ends_at !== undefined) upd.ends_at = b.ends_at ? new Date(b.ends_at) : null
-        upd.updated_at = new Date()
-        await db.collection('announcements').updateOne({ id }, { $set: upd })
-        return ok({ success: true })
-      }
-      if (annMatch && method === 'DELETE') {
-        await db.collection('announcements').deleteOne({ id: annMatch[1] })
-        return ok({ success: true })
+      // v2.8 → v3.94 — Announcements: extended (types/targeting/schedule/status/audit)
+      // in lib/adminAds.js — SAME collection & API paths, backward compatible with the
+      // legacy AnnouncementsManager (its {active} toggles map to active/paused).
+      if (route === '/admin/announcements' || route.startsWith('/admin/announcements/')) {
+        let bodyA = null
+        if (method !== 'GET') { try { bodyA = await request.json() } catch { bodyA = {} } }
+        const rA = await adminAdsHandler(db, route.slice('/admin/announcements'.length), method, new URL(request.url).searchParams, bodyA, sess)
+        if (rA?.error) return bad(rA.error, rA.status || 400)
+        return ok(Array.isArray(rA?.rows) && method === 'GET' && route === '/admin/announcements' && !new URL(request.url).searchParams.get('extended') ? rA.rows : rA) // legacy manager expects a plain array
       }
 
-      return bad(`Admin route ${route} not found`, 404)
+      // v4.4 — office-verifications review handlers live later in the file (legacy
+      // placement, dead since the v3.97 realm block 404'd first). Let them fall through.
+      if (!route.startsWith('/admin/office-verifications')) return bad(`Admin route ${route} not found`, 404)
     }
 
     // ============ TENANT-SCOPED ============
@@ -2036,7 +2597,7 @@ async function handleRoute(request, { params }) {
       return ok(s ? { ...s, _id: undefined } : {})
     }
     if (route === '/tenant/settings' && method === 'PUT') {
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح', 403)
       const b = await request.json()
       const allowed = ['agency_name', 'logo_base64', 'header', 'footer', 'tax_id', 'commercial_id', 'phone', 'address', 'email', 'primary_color', 'rates', 'pair_usd_sar']
       const upd = { updated_at: new Date() }
@@ -2049,7 +2610,7 @@ async function handleRoute(request, { params }) {
     // v3.50 — BATCH RE-SYNC: recompute market pricing fresh from current room_pricing and
     // re-emit package.updated for ALL shared packages (owner only). Fixes stale/zero prices at once.
     if (route === '/meraaj/resync-all' && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const sharedPkgs = await db.collection('packages').find({ tenant_id: T, 'meraaj.shared': true, archived: { $ne: true } }).toArray()
       let synced = 0, failed = 0
       for (const pkg of sharedPkgs) {
@@ -2170,9 +2731,9 @@ async function handleRoute(request, { params }) {
     }
     const officeDocDlMatch = route.match(/^\/office\/verification\/documents\/([^/]+)\/download$/)
     if (officeDocDlMatch && method === 'GET') {
-      const docDL = await db.collection('office_documents').findOne(sess.user.role === 'super_admin' ? { id: officeDocDlMatch[1] } : { id: officeDocDlMatch[1], tenant_id: T })
+      const docDL = await db.collection('office_documents').findOne(isMainSA(sess.user) ? { id: officeDocDlMatch[1] } : { id: officeDocDlMatch[1], tenant_id: T })
       if (!docDL) return bad('المستند غير موجود', 404)
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح', 403)
       const blobDL = await docStorageGet(db, docDL.storage?.object_key)
       if (!blobDL) return bad('ملف المستند غير متاح في التخزين', 404)
       await docAuditLog(db, docDL.tenant_id, 'viewed', docDL.id, sess.user.email, { context: 'office_verification' })
@@ -2192,7 +2753,8 @@ async function handleRoute(request, { params }) {
     }
     // ---- Admin review (super_admin only — API-first: served to the external holding dashboard) ----
     if (route === '/admin/office-verifications' && method === 'GET') {
-      if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      // v3.97 — realm-hardened: main SA or rahaal admin staff (offices perm already gated)
+      if (!isMainSA(sess.user) && sess.user.role !== 'admin_staff') return bad('غير مصرح', 403)
       const url = new URL(request.url)
       const stFilter = url.searchParams.get('status') || null
       const allSettings = await db.collection('tenant_settings').find({ office_verification: { $exists: true } }).toArray()
@@ -2211,7 +2773,8 @@ async function handleRoute(request, { params }) {
     }
     const adminVerDecideMatch = route.match(/^\/admin\/office-verifications\/([^/]+)\/decision$/)
     if (adminVerDecideMatch && method === 'POST') {
-      if (sess.user.role !== 'super_admin') return bad('غير مصرح', 403)
+      // v3.97 — realm-hardened: main SA or rahaal admin staff (offices write already gated)
+      if (!isMainSA(sess.user) && sess.user.role !== 'admin_staff') return bad('غير مصرح', 403)
       const bAD = await request.json()
       const decisionAD = String(bAD.decision || '')
       if (!['verified', 'rejected'].includes(decisionAD)) return bad('القرار: verified أو rejected فقط')
@@ -2471,7 +3034,7 @@ async function handleRoute(request, { params }) {
     // v3.61 — also accepts reject_alert_threshold (int 0..1000, 0 = alert disabled)
     // v3.71 — also accepts digest_reminder_time ('HH:MM' 24h format, '' = disabled)
     if (route === '/meraaj/settings' && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const b = await request.json()
       const set = {}
       if ('auto_approve' in b) set.meraaj_auto_approve = !!b.auto_approve
@@ -2513,7 +3076,7 @@ async function handleRoute(request, { params }) {
     // + rejected-webhooks alert (UTC day boundaries, consistent with the health trend chart).
     // Rejected/cancelled bookings are excluded from seats/revenue/net sums (counted in bookings).
     if (route === '/meraaj/daily-digest' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const startToday = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z')
       const startYesterday = new Date(startToday.getTime() - 24 * 3600 * 1000)
       const endToday = new Date(startToday.getTime() + 24 * 3600 * 1000)
@@ -2575,7 +3138,7 @@ async function handleRoute(request, { params }) {
     // v3.62 — MONTHLY MERAAJ REPORT (owner-only): per-package + per-buyer-office activity for a month.
     // Same exclusion semantics as digest: rejected/cancelled counted in bookings, excluded from sums.
     if (route === '/meraaj/monthly-report' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const month = url.searchParams.get('month') || new Date().toISOString().slice(0, 7)
       if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return bad('صيغة الشهر غير صحيحة — استخدم YYYY-MM')
       const start = new Date(month + '-01T00:00:00.000Z')
@@ -2616,7 +3179,7 @@ async function handleRoute(request, { params }) {
     // missing passports (approved bookings) and today's rejected webhooks vs threshold.
     // READ-ONLY: never modifies any document.
     if (route === '/meraaj/alerts-center' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       // 1) failed outbound events (total + latest 5)
       const failedTotal = await db.collection('meraaj_events').countDocuments({ ...tf, status: 'failed' })
       const failedLatest = await db.collection('meraaj_events').find({ ...tf, status: 'failed' }).sort({ created_at: -1 }).limit(5).project({ _id: 0, id: 1, type: 1, attempts: 1, last_error: 1, created_at: 1 }).toArray()
@@ -2701,7 +3264,7 @@ async function handleRoute(request, { params }) {
     // (written opportunistically by GET /meraaj/alerts-center). ?days=N (default 14, clamp 7..60).
     // Returns rows oldest→newest, one per day that has a snapshot.
     if (route === '/meraaj/alerts-history' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const days71 = Math.max(7, Math.min(60, parseInt(url.searchParams.get('days'), 10) || 14))
       const fromKey71 = new Date(Date.now() - (days71 - 1) * 24 * 3600 * 1000).toISOString().slice(0, 10)
       const rows71 = await db.collection('meraaj_alerts_history').find({ tenant_id: T, date: { $gte: fromKey71 } }).sort({ date: 1 }).project({ _id: 0, date: 1, counts: 1, updated_at: 1 }).toArray()
@@ -2712,7 +3275,7 @@ async function handleRoute(request, { params }) {
     // returned for the OVERALL total plus the top 6 offices and top 6 packages by window net.
     // SAME sum semantics: rejected/cancelled excluded from net, counted in bookings.
     if (route === '/meraaj/comparison-trend' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const endMonth71 = url.searchParams.get('month') || new Date().toISOString().slice(0, 7)
       if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(endMonth71)) return bad('صيغة الشهر غير صحيحة — استخدم YYYY-MM')
       const nMonths71 = Math.max(3, Math.min(12, parseInt(url.searchParams.get('months'), 10) || 6))
@@ -2761,7 +3324,7 @@ async function handleRoute(request, { params }) {
     // bookings + rejected but EXCLUDED from seats/revenue/net sums). UTC month boundaries.
     // growth_pct is computed on net_to_seller: prev>0 → pct; prev=0 & cur>0 → null (new); else 0.
     if (route === '/meraaj/office-comparison' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const monthC = url.searchParams.get('month') || new Date().toISOString().slice(0, 7)
       if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthC)) return bad('صيغة الشهر غير صحيحة — استخدم YYYY-MM')
       const curStart = new Date(monthC + '-01T00:00:00.000Z')
@@ -2937,7 +3500,7 @@ async function handleRoute(request, { params }) {
     // still missing a passport, from the AUTHORITATIVE linked package_bookings registrants
     // (falls back to the inbound copy only if the link is missing). Filters: package_id, office.
     if (route === '/meraaj/passport-report' && method === 'GET') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const fPkg = url.searchParams.get('package_id') || ''
       const fOffice = url.searchParams.get('office') || ''
       const q = { ...tf, status: 'approved' }
@@ -3017,7 +3580,7 @@ async function handleRoute(request, { params }) {
     // (untouched meraajContractPayload) so the marketplace availability updates immediately.
     const seatRefillMatch = route.match(/^\/meraaj\/packages\/([^/]+)\/add-seats$/)
     if (seatRefillMatch && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const pkg = await db.collection('packages').findOne({ id: seatRefillMatch[1], tenant_id: T })
       if (!pkg) return bad('الباكج غير موجود', 404)
       if (!pkg.meraaj?.shared) return bad('الباكج غير مشارك في سوق معراج')
@@ -3042,7 +3605,7 @@ async function handleRoute(request, { params }) {
     // dispatched=false → relists automatically IF open + not archived + seats available.
     const dispatchMatch = route.match(/^\/meraaj\/packages\/([^/]+)\/dispatch$/)
     if (dispatchMatch && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const pkgD = await db.collection('packages').findOne({ id: dispatchMatch[1], tenant_id: T })
       if (!pkgD) return bad('الباكج غير موجود', 404)
       if (!pkgD.meraaj?.shared) return bad('الباكج غير مُشارَك في سوق معراج')
@@ -3067,7 +3630,7 @@ async function handleRoute(request, { params }) {
     }
     // v3.63 — BUYER OFFICE RATING TAGS (owner): excellent | good | late_payment | '' (remove)
     if (route === '/meraaj/office-tag' && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const b = await request.json().catch(() => ({}))
       const office = String(b.office || '').trim().slice(0, 120)
       if (!office) return bad('اسم المكتب مطلوب')
@@ -3466,7 +4029,7 @@ async function handleRoute(request, { params }) {
     // Same idempotency as single retry: SAME event id re-sent, SAME doc updated, no new docs.
     // A failure in one event never stops the rest (per-event try/catch).
     if (route === '/meraaj/events/retry-all-failed' && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const retryUrl = process.env.MERAAJ_WEBHOOK_URL || (meraajApiBase() ? `${meraajApiBase()}/api/integrations/rahal/webhooks` : '')
       if (!retryUrl || !meraajSecret()) return bad('رابط معراج غير مُهيأ — أضف MERAAJ_API_BASE_URL ثم أعد المحاولة')
       const b = await request.json().catch(() => ({}))
@@ -3516,7 +4079,7 @@ async function handleRoute(request, { params }) {
     // emitMeraajEvent and webhook processing logic are untouched.
     const evtRetryMatch = route.match(/^\/meraaj\/events\/([^/]+)\/retry$/)
     if (evtRetryMatch && method === 'POST') {
-      if (sess.user.role !== 'owner') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const ev = await db.collection('meraaj_events').findOne({ id: evtRetryMatch[1], tenant_id: T })
       if (!ev) return bad('الحدث غير موجود', 404)
       if (ev.status === 'sent') return bad('الحدث مُرسل مسبقاً — لا حاجة لإعادة المحاولة')
@@ -3645,12 +4208,9 @@ async function handleRoute(request, { params }) {
       if (!b.name || !String(b.name).trim()) return bad('اسم الموظف مطلوب') // v3.88.4 — S-002: field-specific validation
       if (!b.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(b.email).trim())) return bad('البريد الإلكتروني غير صالح — مثال: name@example.com')
       if (!b.password || String(b.password).length < 6) return bad('كلمة المرور يجب ألا تقل عن 6 أحرف')
-      // v2.8 — Plan tier gate: only Gold plan tenants can self-create users
-      const tenantFull = await db.collection('tenants').findOne({ id: T })
-      const tier = tenantFull?.plan_tier || 'standard'
-      if (tier !== 'gold') {
-        return bad('إنشاء المستخدمين الذاتي متاح لباقة Gold فقط. تواصل مع الإدارة العامة لترقية الباقة.', 403)
-      }
+      // v2.8 gold-only gate → v4.0.1 REMOVED: self-creating users is now allowed for ALL
+      // tiers (silver/gold/enterprise/trial). The ONLY server gate is max_users — the value
+      // the Super Admin set (plan default or per-office override). Owner counts within it.
       const count = await db.collection('users').countDocuments(tf)
       const maxUsers = sess.tenant.max_users
       if (maxUsers !== null && maxUsers !== undefined && count >= maxUsers) return bad(`تم الوصول إلى الحد الأقصى للمستخدمين (${maxUsers}). تواصل مع الإدارة لرفع الحد.`)
@@ -3714,35 +4274,36 @@ async function handleRoute(request, { params }) {
     // Returns config with server-computed final prices based on the flexible discount.
     if (route === '/pricing' && method === 'GET') {
       const cfg = await getPricingConfig(db)
-      const disc = cfg.discount_enabled ? Math.min(95, Math.max(0, Number(cfg.discount_percent) || 0)) : 0
+      // v4.0 — offer window: when start/end dates are set, the discount only applies inside them
+      const nowP = new Date()
+      const inWindow = (!cfg.offer_start_at || new Date(cfg.offer_start_at) <= nowP) && (!cfg.offer_end_at || nowP <= new Date(cfg.offer_end_at))
+      const disc = (cfg.discount_enabled && inWindow) ? Math.min(95, Math.max(0, Number(cfg.discount_percent) || 0)) : 0
       const n = Number(cfg.installments_count) || 5
-      const plans = (cfg.plans || []).map(p => {
-        const annualOriginal = Number(p.annual_price) || 0
-        const annualFinal = Math.round(annualOriginal * (100 - disc)) / 100
-        const instOriginal = Math.round((annualOriginal / n) * 100) / 100
-        const instFinal = Math.round((annualFinal / n) * 100) / 100
-        return {
-          ...p,
-          pricing: {
-            annual: { original: annualOriginal, final: annualFinal },
-            installment: { count: n, original_per: instOriginal, final_per: instFinal, total_final: annualFinal },
-          },
-        }
-      })
-      return ok({ discount_enabled: cfg.discount_enabled, discount_percent: disc, installments_count: n, plans, current: { plan_tier: sess.tenant?.plan_tier || null, billing_mode: sess.tenant?.billing_mode || null, unlimited: isUnlimitedTenant(sess.tenant) } })
+      const plans = (cfg.plans || [])
+        .filter(p => p.active !== false) // v4.0 — الباقات المعطلة لا تظهر للمشتركين
+        .slice().sort((a, b2) => (Number(a.sort_order) || 0) - (Number(b2.sort_order) || 0)) // v4.0 — ترتيب الظهور
+        .map(p => {
+          const annualOriginal = Number(p.annual_price) || 0
+          const annualFinal = Math.round(annualOriginal * (100 - disc)) / 100
+          const instOriginal = Math.round((annualOriginal / n) * 100) / 100
+          const instFinal = Math.round((annualFinal / n) * 100) / 100
+          return {
+            ...p,
+            pricing: {
+              currency: p.currency || 'USD', // v4.0
+              annual: { original: annualOriginal, final: annualFinal, discount_value: Math.round((annualOriginal - annualFinal) * 100) / 100 }, // v4.0 — قيمة الخصم
+              installment: { count: n, original_per: instOriginal, final_per: instFinal, total_final: annualFinal },
+            },
+          }
+        })
+      return ok({ discount_enabled: !!(cfg.discount_enabled && inWindow), discount_percent: disc, installments_count: n, offer_start_at: cfg.offer_start_at || null, offer_end_at: cfg.offer_end_at || null, plans, current: { plan_tier: sess.tenant?.plan_tier || null, billing_mode: sess.tenant?.billing_mode || null, unlimited: isUnlimitedTenant(sess.tenant) } })
     }
 
-    // v2.8 — Active announcements for tenant popup + banner
+    // v2.8 → v3.94 — Active announcements for tenant popup + banner
+    // Targeting is now enforced in the BACKEND (audience: all/tenants/plan/sub_status)
+    // via lib/adminAds.js — legacy docs without audience keep showing to everyone.
     if (route === '/announcements/active' && method === 'GET') {
-      const now = new Date()
-      const list = await db.collection('announcements').find({
-        active: true,
-        $and: [
-          { $or: [{ starts_at: null }, { starts_at: { $lte: now } }, { starts_at: { $exists: false } }] },
-          { $or: [{ ends_at: null }, { ends_at: { $gte: now } }, { ends_at: { $exists: false } }] },
-        ],
-      }).sort({ created_at: -1 }).toArray()
-      return ok(list.map(a => ({ id: a.id, type: a.type, title: a.title, body: a.body, image_url: a.image_url, link_url: a.link_url })))
+      return ok(await activeAnnouncementsFor(db, sess.tenant))
     }
 
     // Rates (per-tenant)
@@ -4043,7 +4604,7 @@ async function handleRoute(request, { params }) {
 
     // ============ v3.8 — PATs (Personal Access Tokens for Chrome Extension) ============
     if (route === '/pats' && method === 'GET') {
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       const list = await db.collection('pats').find({ tenant_id: T }).sort({ created_at: -1 }).toArray()
       return ok(list.map(p => ({
         id: p.id, name: p.name, prefix: p.prefix,
@@ -4052,7 +4613,7 @@ async function handleRoute(request, { params }) {
       })))
     }
     if (route === '/pats' && method === 'POST') {
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       if (sess.isPat) return bad('لا يمكن إنشاء PAT جديد باستخدام PAT — سجّل دخولاً من الواجهة', 403)
       const b = await request.json().catch(() => ({}))
       const name = String(b.name || '').trim() || 'إضافة المتصفح'
@@ -4074,7 +4635,7 @@ async function handleRoute(request, { params }) {
     }
     const patDelMatch = route.match(/^\/pats\/([^/]+)$/)
     if (patDelMatch && method === 'DELETE') {
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
       await db.collection('pats').updateOne(
         { id: patDelMatch[1], tenant_id: T },
         { $set: { revoked_at: new Date() } }
@@ -4695,6 +5256,12 @@ async function handleRoute(request, { params }) {
       const [_, pkgId, bookingId] = pkgBookDelMatch
       const booking = await db.collection('package_bookings').findOne({ id: bookingId, tenant_id: T, package_id: pkgId })
       if (!booking) return bad('التسجيل غير موجود', 404)
+      // v4.6 — RAH-ACC: deleting a booking whose journal lives inside a closed year/period
+      // silently rewrites closed books — centrally blocked BEFORE any reversal (same rule
+      // as manual journal deletion).
+      const jeGuardPB = await db.collection('journal_entries').findOne({ ref_type: 'package_booking', ref_id: bookingId, tenant_id: T })
+      const perrPBD = await assertOpenPeriod(db, T, jeGuardPB?.date || booking.date || booking.created_at)
+      if (perrPBD) return bad(`الحجز داخل فترة/سنة مقفلة ولا يُحذف — ${perrPBD}`)
       // Reverse balances
       const cur = booking.currency || 'USD'
       const payMethod = booking.payment_method || 'credit'
@@ -4714,8 +5281,8 @@ async function handleRoute(request, { params }) {
       // Delete associated JE
       const je = await db.collection('journal_entries').findOne({ ref_type: 'package_booking', ref_id: bookingId, tenant_id: T })
       if (je) {
-        await db.collection('journal_entries').deleteOne({ id: je.id })
-        await db.collection('tenants').updateOne({ id: T }, { $inc: { 'journal_quota.used': -1 } })
+        await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T }) // v4.6 — tenant-scoped
+        await db.collection('tenants').updateOne({ id: T, 'journal_quota.used': { $gt: 0 } }, { $inc: { 'journal_quota.used': -1 } }) // v4.6 — never below 0
       }
       // Decrement package bookings count
       await db.collection('packages').updateOne({ id: pkgId, tenant_id: T }, { $inc: { bookings_count: -1 } })
@@ -4776,28 +5343,16 @@ async function handleRoute(request, { params }) {
         const { _id: _idL, ...restL } = updatedLight
         return ok({ ...restL, _light_update: true })
       }
-      // FULL RECALC — reverse old, then re-apply new
-      const oldPay = oldBooking.payment_method || 'credit'
-      if (oldPay === 'cash' && oldBooking.box_id) {
-        await updateBalance(db, 'boxes', { id: oldBooking.box_id, tenant_id: T }, cur, -(oldBooking.total_sale || 0))
-      } else if (oldBooking.client_id) {
-        await updateBalance(db, 'clients', { id: oldBooking.client_id, tenant_id: T }, cur, -(oldBooking.total_sale || 0))
-      }
-      if (Array.isArray(oldBooking.component_snapshots)) {
-        for (const comp of oldBooking.component_snapshots) {
-          if (comp.supplier_id && comp.cost_total) {
-            await updateBalance(db, 'suppliers', { id: comp.supplier_id, tenant_id: T }, cur, -(comp.cost_total || 0))
-          }
-        }
-      }
-      // v3.19 — Reverse old partner-commission share balance (it was applied as a negative on create)
-      if ((Number(oldBooking.commission_share_amount) || 0) > 0 && oldBooking.commission_partner_id) {
-        const oldPcCol = oldBooking.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
-        await updateBalance(db, oldPcCol, { id: oldBooking.commission_partner_id, tenant_id: T }, cur, +(Number(oldBooking.commission_share_amount) || 0))
-      }
+      // FULL RECALC — v4.6 RAH-ACC FIX: previously the old balances were reversed and the
+      // old JE deleted BEFORE the validations below (transport/client/box/leaf-accounts) —
+      // any early return or thrown error left a PERMANENT partial state (balances reversed,
+      // journal gone, booking unchanged). Now ALL validations + a JE dry-run happen FIRST;
+      // destructive steps are grouped at the end.
       const oldJe = await db.collection('journal_entries').findOne({ ref_type: 'package_booking', ref_id: bookingId2, tenant_id: T })
       const existingJeId = oldJe?.id || undefined
-      if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id })
+      // v4.6 — closed year/period guard on the ORIGINAL journal date BEFORE any destructive step
+      const perrPBE = await assertOpenPeriod(db, T, oldJe?.date || oldBooking.date || oldBooking.created_at)
+      if (perrPBE) return bad(`الحجز الأصلي داخل فترة/سنة مقفلة — لا يمكن تعديله: ${perrPBE}`)
       const newPax = Math.max(1, Number(body.pax_count ?? oldBooking.pax_count) || 1)
       const newPay = body.payment_method === 'cash' ? 'cash' : (body.payment_method === 'credit' ? 'credit' : (oldBooking.payment_method || 'credit'))
       // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id
@@ -4908,6 +5463,51 @@ async function handleRoute(request, { params }) {
       for (const sid of supIdsA) partyLeafCode(supDocsJE[sid])
       const pcDocA = (newPartnerShare > 0 && pcId) ? await db.collection(pcType === 'supplier' ? 'suppliers' : 'clients').findOne({ id: pcId, tenant_id: T }) : null
       const pcLeafA = pcDocA ? partyLeafCode(pcDocA) : null
+      // v4.6 — RAH-ACC: build + DRY-RUN validate the NEW journal BEFORE any destructive step
+      // (accounts exist / no group / no inactive / balanced in base / open period —
+      // a rejection here has ZERO side effects, nothing was reversed or deleted yet)
+      const jeDatePB = oldJe?.date || oldBooking.created_at || new Date()
+      const lines = []
+      if (newPay === 'cash') lines.push({ account_code: payLeafA, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
+      else lines.push({ account_code: payLeafA, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
+      const supGrouped = {}
+      for (const c of newSnapshots) {
+        if (!c.supplier_id || !c.cost_total) continue
+        supGrouped[c.supplier_id] = supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }
+        supGrouped[c.supplier_id].amount += c.cost_total
+      }
+      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: partyLeafCode(supDocsJE[sid]), account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
+      // v3.19 — Balanced JE: revenue = sale - Σ(supplier credits) - partnerShare (mirrors POST logic)
+      const supSumJE = +Object.values(supGrouped).reduce((s, x) => s + +x.amount.toFixed(2), 0).toFixed(2)
+      const commissionJE = +(total_sale - supSumJE).toFixed(2)
+      const revenueNet = +(commissionJE - newPartnerShare).toFixed(2)
+      if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkgDoc.name}`, debit: 0, credit: revenueNet })
+      if (newPartnerShare > 0) lines.push({ account_code: pcLeafA, account_name: pcType === 'supplier' ? 'الموردون' : 'العملاء', party_type: pcType, party_id: pcId, party_name: pcName || 'شريك عمولة', debit: 0, credit: newPartnerShare }) // v3.88.5 — pre-resolved leaf
+      try {
+        await enforceJournalInvariants(db, T, { date: jeDatePB, currency: cur, lines })
+      } catch (invErr) {
+        return bad(`تعذر التعديل — القيد الجديد مرفوض قبل تنفيذ أي أثر مالي: ${invErr.message}`)
+      }
+      // ===== v4.6 — destructive steps start ONLY here (every validation above passed) =====
+      const oldPay = oldBooking.payment_method || 'credit'
+      if (oldPay === 'cash' && oldBooking.box_id) {
+        await updateBalance(db, 'boxes', { id: oldBooking.box_id, tenant_id: T }, cur, -(oldBooking.total_sale || 0))
+      } else if (oldBooking.client_id) {
+        await updateBalance(db, 'clients', { id: oldBooking.client_id, tenant_id: T }, cur, -(oldBooking.total_sale || 0))
+      }
+      if (Array.isArray(oldBooking.component_snapshots)) {
+        for (const comp of oldBooking.component_snapshots) {
+          if (comp.supplier_id && comp.cost_total) {
+            await updateBalance(db, 'suppliers', { id: comp.supplier_id, tenant_id: T }, cur, -(comp.cost_total || 0))
+          }
+        }
+      }
+      // v3.19 — Reverse old partner-commission share balance (it was applied as a negative on create)
+      if ((Number(oldBooking.commission_share_amount) || 0) > 0 && oldBooking.commission_partner_id) {
+        const oldPcCol = oldBooking.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
+        await updateBalance(db, oldPcCol, { id: oldBooking.commission_partner_id, tenant_id: T }, cur, +(Number(oldBooking.commission_share_amount) || 0))
+      }
+      if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id, tenant_id: T }) // v4.6 — tenant-scoped
       if (newPay === 'cash') {
         await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
       } else {
@@ -4968,24 +5568,8 @@ async function handleRoute(request, { params }) {
         const newStatus = newBooked >= target.capacity ? 'full' : (target.status === 'full' && newBooked < target.capacity ? 'open' : target.status)
         await db.collection('package_transports').updateOne({ id: newTransport.id, tenant_id: T }, { $set: { seats_booked: newBooked, status: newStatus } })
       }
-      const lines = []
-      if (newPay === 'cash') lines.push({ account_code: payLeafA, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
-      else lines.push({ account_code: payLeafA, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
-      const supGrouped = {}
-      for (const c of newSnapshots) {
-        if (!c.supplier_id || !c.cost_total) continue
-        supGrouped[c.supplier_id] = supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }
-        supGrouped[c.supplier_id].amount += c.cost_total
-      }
-      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: partyLeafCode(supDocsJE[sid]), account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
-      // v3.19 — Balanced JE: revenue = sale - Σ(supplier credits) - partnerShare (mirrors POST logic)
-      const supSumJE = +Object.values(supGrouped).reduce((s, x) => s + +x.amount.toFixed(2), 0).toFixed(2)
-      const commissionJE = +(total_sale - supSumJE).toFixed(2)
-      const revenueNet = +(commissionJE - newPartnerShare).toFixed(2)
-      if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkgDoc.name}`, debit: 0, credit: revenueNet })
-      if (newPartnerShare > 0) lines.push({ account_code: pcLeafA, account_name: pcType === 'supplier' ? 'الموردون' : 'العملاء', party_type: pcType, party_id: pcId, party_name: pcName || 'شريك عمولة', debit: 0, credit: newPartnerShare }) // v3.88.5 — pre-resolved leaf
       await createJournalEntry(db, T, {
-        date: oldJe?.date || updatedBooking.created_at || new Date(),
+        date: jeDatePB,
         description: `تسجيل ${updatedBooking.pilgrim_name} في ${pkgDoc.name} — ${newPax} فرد (تعديل)${newPartnerShare > 0 ? ` — عمولة مشتركة ${newPartnerShare} مع ${pcName || 'شريك'}` : ''}`,
         ref_type: 'package_booking', ref_id: bookingId2, currency: cur, lines,
       }, { skipQuota: true, existingJeId, createdAt: oldJe?.created_at || new Date() })
@@ -4996,7 +5580,7 @@ async function handleRoute(request, { params }) {
 
     // v3.9.20 — Data Backup: Export full tenant snapshot as JSON (Owner only)
     if (route === '/backup/export' && method === 'GET') {
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — نسخ احتياطي متاح للمالك فقط', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — نسخ احتياطي متاح للمالك فقط', 403)
       const collections = ['tickets', 'visas', 'services', 'clients', 'suppliers', 'boxes', 'journal_entries', 'packages', 'package_bookings', 'currency_exchanges', 'vouchers', 'accounts', 'service_types']
       const backup = { tenant_id: T, tenant_name: sess.tenant?.name, exported_at: new Date().toISOString(), exported_by: sess.user.email, version: '3.9.20', data: {} }
       for (const coll of collections) {
@@ -5396,6 +5980,11 @@ async function handleRoute(request, { params }) {
       const upd = {}
       for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes', 'parent_code', 'credit_limit', 'credit_currency', 'is_frozen']) if (b[k] !== undefined) upd[k] = k === 'credit_limit' ? (Number(b[k]) || 0) : k === 'is_frozen' ? !!b[k] : b[k]
       await db.collection('clients').updateOne({ id: clientIdMatch[1], tenant_id: T }, { $set: upd })
+      // v3.92 — keep the linked COA account (if one exists for this code) in sync by IDENTITY
+      if (upd.name !== undefined) {
+        const c0 = await db.collection('clients').findOne({ id: clientIdMatch[1], tenant_id: T }, { projection: { account_code: 1 } })
+        if (c0?.account_code) await db.collection('accounts').updateOne({ tenant_id: T, code: c0.account_code }, { $set: { name_ar: upd.name } })
+      }
       return ok({ success: true })
     }
     if (clientIdMatch && method === 'DELETE') {
@@ -5428,6 +6017,11 @@ async function handleRoute(request, { params }) {
       const upd = {}
       for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes', 'parent_code']) if (b[k] !== undefined) upd[k] = b[k]
       await db.collection('suppliers').updateOne({ id: supIdMatch[1], tenant_id: T }, { $set: upd })
+      // v3.92 — keep the linked COA account (if one exists for this code) in sync by IDENTITY
+      if (upd.name !== undefined) {
+        const s0 = await db.collection('suppliers').findOne({ id: supIdMatch[1], tenant_id: T }, { projection: { account_code: 1 } })
+        if (s0?.account_code) await db.collection('accounts').updateOne({ tenant_id: T, code: s0.account_code }, { $set: { name_ar: upd.name } })
+      }
       return ok({ success: true })
     }
     if (supIdMatch && method === 'DELETE') {
@@ -5864,6 +6458,14 @@ async function handleRoute(request, { params }) {
       })
       // Attach sub-entities under their parent codes
       const attach = (entity, type) => {
+        const ecode = entity.account_code
+        // v3.92 — a COA-linked entity whose code exists as an accounts doc must not render
+        // twice: decorate the existing tree node with the operational identity instead
+        if (ecode && byCode.has(ecode)) {
+          const n = byCode.get(ecode)
+          n.linked_entity = { type, id: entity.id, balances: entity.balances || {}, box_type: entity.type || null }
+          return
+        }
         const pcode = entity.account_parent_code || entity.parent_code
         if (pcode && byCode.has(pcode)) {
           byCode.get(pcode).sub_entities.push({
@@ -5911,6 +6513,46 @@ async function handleRoute(request, { params }) {
       if (seqNC > seqCapNC) return bad(`امتلأ تسلسل الفرع ${parentNC} (الحد ${seqCapNC} حساباً) — أنشئ مجموعة جديدة`)
       return ok({ next_code: codeNC, parent: parentNC, preview: true })
     }
+    // v3.92 — LINK AUDIT (read-only): leaf accounts under 1101/1102/1103/2101 and their
+    // operational linkage status. Nothing is modified here.
+    if (route === '/accounts/link-audit' && method === 'GET') {
+      const groups = [COA.CASHBOXES, COA.BANKS, COA.CLIENTS, COA.SUPPLIERS]
+      const accs = await db.collection('accounts').find({ tenant_id: T, parent: { $in: groups }, $or: [{ is_group: { $exists: false } }, { is_group: false }] }).sort({ code: 1 }).toArray()
+      const items = []
+      for (const a of accs) {
+        const m = opLinkMapFor(a.parent)
+        const linkedRec = await db.collection(m.coll).findOne({ tenant_id: T, account_code: a.code })
+        if (linkedRec) { items.push({ code: a.code, name: a.name_ar, kind: m.kind, status: 'linked' }); continue }
+        const dupName = await db.collection(m.coll).findOne(
+          m.coll === 'boxes' ? { tenant_id: T, $or: [{ name_ar: a.name_ar }, { name: a.name_ar }] } : { tenant_id: T, name: a.name_ar }
+        )
+        items.push(dupName
+          ? { code: a.code, name: a.name_ar, kind: m.kind, status: 'name_conflict', conflict_with: dupName.account_code || null }
+          : { code: a.code, name: a.name_ar, kind: m.kind, status: 'orphan' })
+      }
+      return ok({
+        total: items.length,
+        linked: items.filter(i => i.status === 'linked').length,
+        orphans: items.filter(i => i.status === 'orphan'),
+        conflicts: items.filter(i => i.status === 'name_conflict'),
+      })
+    }
+    // v3.92 — LINK REPAIR (owner-triggered, IDEMPOTENT): creates the missing operational
+    // record for each orphan (identity = account_code — no renumbering, no duplicates).
+    // Uncertain cases (name conflicts) are SKIPPED and reported — never auto-linked.
+    if (route === '/accounts/link-repair' && method === 'POST') {
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — للمالك فقط', 403)
+      const groups = [COA.CASHBOXES, COA.BANKS, COA.CLIENTS, COA.SUPPLIERS]
+      const accs = await db.collection('accounts').find({ tenant_id: T, parent: { $in: groups }, $or: [{ is_group: { $exists: false } }, { is_group: false }] }).sort({ code: 1 }).toArray()
+      const repaired = [], skippedConflicts = [], alreadyLinked = []
+      for (const a of accs) {
+        const r = await ensureOperationalLink(db, T, a)
+        if (r?.conflict) skippedConflicts.push({ code: a.code, name: a.name_ar, reason: r.conflict })
+        else if (r?.created) repaired.push({ code: a.code, name: a.name_ar, kind: r.kind })
+        else if (r?.linked) alreadyLinked.push(a.code)
+      }
+      return ok({ repaired, repaired_count: repaired.length, already_linked: alreadyLinked.length, skipped_conflicts: skippedConflicts })
+    }
     if (route === '/accounts' && method === 'POST') {
       const b = await request.json()
       if (!b.name_ar || !b.type) return bad('الاسم والنوع مطلوبان')
@@ -5954,8 +6596,30 @@ async function handleRoute(request, { params }) {
         is_group: !!b.is_group, notes: b.notes || '',
         created_at: new Date(),
       }
+      // v3.92 — COA→operational pre-check: never create an account that would collide with an
+      // existing box/client/supplier NAME (prevents duplicate operational records up-front)
+      const opMapC = !doc.is_group ? opLinkMapFor(parentStr) : null
+      if (opMapC) {
+        const dupOp = await db.collection(opMapC.coll).findOne(
+          opMapC.coll === 'boxes'
+            ? { tenant_id: T, $or: [{ name_ar: doc.name_ar }, { name: doc.name_ar }] }
+            : { tenant_id: T, name: doc.name_ar }
+        )
+        if (dupOp) return bad(`يوجد ${opMapC.kind} بنفس الاسم "${doc.name_ar}" (حساب ${dupOp.account_code || '—'}) — لمنع التكرار عدّل الاسم أو استخدم ${opMapC.screen}`)
+      }
       await db.collection('accounts').insertOne(doc)
-      const { _id, ...rest } = doc; return ok(rest)
+      // v3.92 — auto-link: an account under 1101/1102/1103/2101 gets its operational record
+      // (identity = account_code) so it appears in the operational screens and vouchers.
+      let opLink = null
+      if (opMapC) {
+        opLink = await ensureOperationalLink(db, T, doc)
+        if (opLink?.conflict) {
+          // clean abort — never leave an orphan account behind
+          await db.collection('accounts').deleteOne({ id: doc.id, tenant_id: T })
+          return bad(opLink.conflict)
+        }
+      }
+      const { _id, ...rest } = doc; return ok({ ...rest, operational_link: opLink })
     }
     const acctIdMatch = route.match(/^\/accounts\/([^/]+)$/)
     if (acctIdMatch && method === 'PUT') {
@@ -5966,27 +6630,89 @@ async function handleRoute(request, { params }) {
       for (const k of ['name_ar', 'type', 'parent', 'is_group', 'notes']) if (b[k] !== undefined) upd[k] = b[k]
       // v3.87 — SYSTEM ACCOUNTS (e.g. 3103) are structurally immutable: code is never
       // editable via PUT, and type/parent/is_group are locked for system accounts.
-      if (acc.is_system && (upd.type !== undefined || upd.parent !== undefined || upd.is_group !== undefined)) {
-        return bad(`الحساب ${acc.code} حساب نظامي — لا يمكن تغيير نوعه أو موقعه في الشجرة`)
+      // v4.5 — the protection also covers ENGINE accounts (COA template codes that the
+      // accounting engine posts to: Opening / Year Closing / Retained Earnings / FX /
+      // fixed postings) even when is_system flag is absent and even BEFORE first use.
+      const structuralChange = upd.type !== undefined && upd.type !== acc.type
+        || upd.parent !== undefined && upd.parent !== acc.parent
+        || upd.is_group !== undefined && !!upd.is_group !== !!acc.is_group
+      if ((acc.is_system || ENGINE_ACCOUNT_CODES.has(acc.code)) && structuralChange) {
+        return bad(`الحساب ${acc.code} حساب نظامي/محركي — لا يمكن تغيير نوعه أو موقعه في الشجرة`)
       }
       if (b.code !== undefined && String(b.code) !== acc.code) {
-        return bad(acc.is_system ? `الحساب ${acc.code} حساب نظامي — لا يمكن تغيير رقمه` : 'تغيير رمز الحساب غير مدعوم — احذف الحساب وأنشئه من جديد بالرمز الصحيح')
+        return bad((acc.is_system || ENGINE_ACCOUNT_CODES.has(acc.code)) ? `الحساب ${acc.code} حساب نظامي — لا يمكن تغيير رقمه` : 'تغيير رمز الحساب غير مدعوم — احذف الحساب وأنشئه من جديد بالرمز الصحيح')
+      }
+      // v4.5 — HISTORY PROTECTION (Priority 3): an account already used in journal_entries
+      // must not be structurally reinterpreted (type/parent/group↔leaf). Safe descriptive
+      // edits (name/notes) remain allowed.
+      if (structuralChange) {
+        const usedCount = await db.collection('journal_entries').countDocuments({ tenant_id: T, 'lines.account_code': acc.code })
+        if (usedCount > 0) {
+          return bad(`الحساب ${acc.code} مستخدم في ${usedCount} قيداً — تغيير النوع/الأب/التجميع يعيد تفسير التاريخ المحاسبي وهو ممنوع. عدّل الاسم أو الملاحظات فقط، أو أنشئ حساباً جديداً`)
+        }
+        // group→leaf never allowed while children exist; leaf→group blocked above when used
+        if (upd.is_group !== undefined && !upd.is_group && acc.is_group) {
+          const kidsU = await db.collection('accounts').countDocuments({ tenant_id: T, parent: acc.code })
+          if (kidsU > 0) return bad(`لا يمكن تحويل المجموعة ${acc.code} إلى حساب تفصيلي — لديها ${kidsU} حساباً فرعياً`)
+        }
+        // v4.5 — parent must exist, be a GROUP, in the same tenant, and not the account itself
+        if (upd.parent !== undefined && upd.parent !== null && upd.parent !== '') {
+          if (String(upd.parent) === acc.code) return bad('لا يمكن جعل الحساب أباً لنفسه')
+          const newParent = await db.collection('accounts').findOne({ tenant_id: T, code: String(upd.parent) })
+          if (!newParent) return bad(`الحساب الأب "${upd.parent}" غير موجود في دليل هذا المكتب`)
+          if (!newParent.is_group) return bad(`الحساب الأب "${upd.parent}" ليس حساب مجموعة`)
+        }
+        // v4.5 — type must be a valid accounting type
+        if (upd.type !== undefined && !['asset', 'liability', 'equity', 'revenue', 'expense'].includes(upd.type)) {
+          return bad('نوع الحساب غير صالح (asset / liability / equity / revenue / expense)')
+        }
+      }
+      // v3.92 — rename keeps the SAME identity (account + operational record). The linked
+      // record is found by account_code (never by name) and gets the new name — no new
+      // account, no new record. Duplicate names are rejected before touching anything.
+      const opMapU = opLinkMapFor(acc.parent)
+      if (opMapU && upd.name_ar !== undefined && String(upd.name_ar) !== acc.name_ar) {
+        const dupOpU = await db.collection(opMapU.coll).findOne(
+          opMapU.coll === 'boxes'
+            ? { tenant_id: T, account_code: { $ne: acc.code }, $or: [{ name_ar: upd.name_ar }, { name: upd.name_ar }] }
+            : { tenant_id: T, account_code: { $ne: acc.code }, name: upd.name_ar }
+        )
+        if (dupOpU) return bad(`يوجد ${opMapU.kind} آخر بنفس الاسم "${upd.name_ar}" — اختر اسماً مختلفاً لمنع التكرار`)
       }
       await db.collection('accounts').updateOne({ id: acctIdMatch[1], tenant_id: T }, { $set: upd })
+      if (opMapU && upd.name_ar !== undefined) {
+        await db.collection(opMapU.coll).updateOne({ tenant_id: T, account_code: acc.code }, { $set: { [opMapU.nameField]: upd.name_ar } })
+      }
       return ok({ success: true })
     }
     if (acctIdMatch && method === 'DELETE') {
       const acc = await db.collection('accounts').findOne({ id: acctIdMatch[1], tenant_id: T })
       if (!acc) return bad('الحساب غير موجود', 404)
       if (acc.is_system) return bad(`الحساب ${acc.code} — ${acc.name_ar} حساب نظامي ولا يمكن حذفه`)
-      // Check for children
+      // v4.5 — ENGINE accounts (COA template codes the engine posts to) are protected
+      // even without is_system flag and even before their first posting.
+      if (ENGINE_ACCOUNT_CODES.has(acc.code)) return bad(`الحساب ${acc.code} — ${acc.name_ar} حساب محركي أساسي (افتتاح/إقفال/أرباح مبقاة/فروقات صرف) ولا يمكن حذفه — يمكن تعطيله فقط`)
+      // v3.92.1 — group protection: children accounts OR attached operational records block deletion
       const childCount = await db.collection('accounts').countDocuments({ tenant_id: T, parent: acc.code })
-      if (childCount > 0) return bad(`لا يمكن حذف الحساب — يحتوي على ${childCount} حساب فرعي`)
-      // Check for journal entries
-      const jeCount = await db.collection('journal_entries').countDocuments({ tenant_id: T, 'lines.account_code': acc.code })
-      if (jeCount > 0) return bad(`لا يمكن حذف الحساب — مستخدم في ${jeCount} قيد يومية`)
+      if (childCount > 0) return bad(`لا يمكن حذف الحساب — مجموعة تحتوي على ${childCount} حساب فرعي. عالج الحسابات التابعة أولاً`)
+      const [childCli, childSup, childBox] = await Promise.all([
+        db.collection('clients').countDocuments({ tenant_id: T, $or: [{ account_parent_code: acc.code }, { parent_code: acc.code }] }),
+        db.collection('suppliers').countDocuments({ tenant_id: T, $or: [{ account_parent_code: acc.code }, { parent_code: acc.code }] }),
+        db.collection('boxes').countDocuments({ tenant_id: T, $or: [{ account_parent_code: acc.code }, { parent_code: acc.code }] }),
+      ])
+      if (childCli + childSup + childBox > 0) return bad(`لا يمكن حذف الحساب — تتبعه سجلات تشغيلية (${childCli} عميل، ${childSup} مورد، ${childBox} صندوق/بنك). عالجها أولاً`)
+      // v3.92.1 — SAFE DELETE: deletable ONLY with ZERO history (never "balance = 0").
+      // Checks journals by account_code, vouchers by coa_account_code, and — for linked
+      // box/client/supplier — every operational reference by the record id.
+      const usage = await accountUsageCheck(db, T, acc)
+      if (usage.used) {
+        return bad(`لا يمكن حذف الحساب لأنه مرتبط بعمليات أو قيود مالية (${usage.reason}). يمكنك إيقاف استخدامه أو تغيير اسمه بدلاً من حذفه.`)
+      }
+      // truly unused: cascade-delete the linked operational record + the account in ONE operation.
+      // No renumbering: next_child_seq is untouched — other account codes are unaffected.
+      if (usage.rec) await db.collection(usage.m.coll).deleteOne({ id: usage.rec.id, tenant_id: T })
       await db.collection('accounts').deleteOne({ id: acctIdMatch[1], tenant_id: T })
-      return ok({ success: true })
+      return ok({ success: true, cascade_deleted: usage.rec ? `${usage.m.kind} "${usage.rec[usage.m.nameField] || usage.rec.name || ''}"` : null })
     }
 
     // Tickets
@@ -6188,6 +6914,11 @@ async function handleRoute(request, { params }) {
       const clientSet = new Set(allClients.map(x => String(x.name).trim().toLowerCase()))
       const supplierSet = new Set(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
       const boxSet = new Set(allBoxes.flatMap(x => [String(x.name_ar || '').trim().toLowerCase(), String(x.name || '').trim().toLowerCase()].filter(Boolean)))
+      // v3.92 — duplicate operational names make name-matching AMBIGUOUS → hard, clear error
+      const dupOf = (names) => { const cnt = {}; for (const k of names) if (k) cnt[k] = (cnt[k] || 0) + 1; return new Set(Object.keys(cnt).filter(k => cnt[k] > 1)) }
+      const clientDups = dupOf(allClients.map(x => String(x.name).trim().toLowerCase()))
+      const supplierDups = dupOf(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
+      const boxDups = dupOf(allBoxes.flatMap(x => [String(x.name_ar || '').trim().toLowerCase(), String(x.name || '').trim().toLowerCase()].filter(Boolean)))
       const seenInBatch = new Set()
       const seenNameDateInBatch = new Set()
       const validated = rows.map((r, i) => {
@@ -6199,12 +6930,21 @@ async function handleRoute(request, { params }) {
         if (!r.client_name) errors.push('حساب القبض مطلوب (عميل أو صندوق/بنك)')
         else {
           const key = String(r.client_name).trim().toLowerCase()
-          if (clientSet.has(key)) receiptKind = 'client'
-          else if (boxSet.has(key)) receiptKind = 'box'
+          if (clientSet.has(key)) {
+            if (clientDups.has(key)) errors.push(`خطأ استيراد: اسم حساب القبض "${r.client_name}" مكرر بين أكثر من عميل — وحّد الأسماء أو صحّح السجلات أولاً`)
+            receiptKind = 'client'
+          } else if (boxSet.has(key)) {
+            if (boxDups.has(key)) errors.push(`خطأ استيراد: اسم الصندوق/البنك "${r.client_name}" مكرر بين أكثر من صندوق — وحّد الأسماء أولاً`)
+            receiptKind = 'box'
+          }
           else errors.push(`خطأ استيراد: حساب القبض "${r.client_name}" غير موجود (لا عميل ولا صندوق/بنك) — أضِفه يدوياً أولاً`)
         }
         if (!r.supplier_name) errors.push('اسم المورد مطلوب')
-        else if (!supplierSet.has(String(r.supplier_name).trim().toLowerCase())) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
+        else {
+          const supKey = String(r.supplier_name).trim().toLowerCase()
+          if (!supplierSet.has(supKey)) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
+          else if (supplierDups.has(supKey)) errors.push(`خطأ استيراد: اسم المورد "${r.supplier_name}" مكرر بين أكثر من مورد — وحّد الأسماء أولاً`)
+        }
         let dup = false
         // v3.18 — Duplicate rule uses TRAVEL DATE ONLY (never the transaction date fallback).
         // No travel date => no name/PNR dedup (accept the row). Different travel date => accepted.
@@ -6239,11 +6979,22 @@ async function handleRoute(request, { params }) {
         if (skip && r.__dup) { skipped++; continue }
         if (r.__errors && r.__errors.length) { failed++; errors.push({ row: r.__row, errors: r.__errors }); continue }
         // v3.9.8 — Receipt account may be a client (credit) OR a box/bank (cash)
+        // v3.92 — STRICT resolution: the row must resolve to EXACTLY ONE linked record.
+        // Ambiguity (duplicate names) fails with a clear message — nothing is auto-created.
+        const findStrict = async (coll, filter) => { const l = await db.collection(coll).find(filter).limit(2).toArray(); return { doc: l[0] || null, dup: l.length > 1 } }
         const nameTrim = r.client_name ? String(r.client_name).trim() : ''
-        const cli = nameTrim ? await db.collection('clients').findOne({ tenant_id: T, name: nameTrim }) : null
+        const cliR = nameTrim ? await findStrict('clients', { tenant_id: T, name: nameTrim }) : { doc: null, dup: false }
+        if (cliR.dup) { failed++; errors.push({ row: r.__row, errors: [`اسم حساب القبض "${nameTrim}" مكرر بين أكثر من عميل — وحّد الأسماء أولاً`] }); continue }
+        const cli = cliR.doc
         let box = null
-        if (!cli && nameTrim) box = await db.collection('boxes').findOne({ tenant_id: T, $or: [{ name_ar: nameTrim }, { name: nameTrim }] })
-        const sup = r.supplier_name ? await db.collection('suppliers').findOne({ tenant_id: T, name: String(r.supplier_name).trim() }) : null
+        if (!cli && nameTrim) {
+          const boxR = await findStrict('boxes', { tenant_id: T, $or: [{ name_ar: nameTrim }, { name: nameTrim }] })
+          if (boxR.dup) { failed++; errors.push({ row: r.__row, errors: [`اسم الصندوق/البنك "${nameTrim}" مكرر بين أكثر من صندوق — وحّد الأسماء أولاً`] }); continue }
+          box = boxR.doc
+        }
+        const supR = r.supplier_name ? await findStrict('suppliers', { tenant_id: T, name: String(r.supplier_name).trim() }) : { doc: null, dup: false }
+        if (supR.dup) { failed++; errors.push({ row: r.__row, errors: [`اسم المورد "${r.supplier_name}" مكرر بين أكثر من مورد — وحّد الأسماء أولاً`] }); continue }
+        const sup = supR.doc
         if (!cli && !box) { failed++; errors.push({ row: r.__row, errors: [`حساب القبض "${r.client_name}" غير موجود (لا عميل ولا صندوق/بنك)`] }); continue }
         if (!sup) { failed++; errors.push({ row: r.__row, errors: [`المورد "${r.supplier_name}" غير موجود في دليل الحسابات`] }); continue }
         const payload = box
@@ -6284,6 +7035,11 @@ async function handleRoute(request, { params }) {
       const clientSet = new Set(allClients.map(x => String(x.name).trim().toLowerCase()))
       const supplierSet = new Set(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
       const boxSet = new Set(allBoxes.flatMap(x => [String(x.name_ar || '').trim().toLowerCase(), String(x.name || '').trim().toLowerCase()].filter(Boolean)))
+      // v3.92 — duplicate operational names make name-matching AMBIGUOUS → hard, clear error
+      const dupOf = (names) => { const cnt = {}; for (const k of names) if (k) cnt[k] = (cnt[k] || 0) + 1; return new Set(Object.keys(cnt).filter(k => cnt[k] > 1)) }
+      const clientDups = dupOf(allClients.map(x => String(x.name).trim().toLowerCase()))
+      const supplierDups = dupOf(allSuppliers.map(x => String(x.name).trim().toLowerCase()))
+      const boxDups = dupOf(allBoxes.flatMap(x => [String(x.name_ar || '').trim().toLowerCase(), String(x.name || '').trim().toLowerCase()].filter(Boolean)))
       const seenInBatch = new Set()
       const seenNameDateInBatch = new Set()
       const validated = rows.map((r, i) => {
@@ -6295,12 +7051,21 @@ async function handleRoute(request, { params }) {
         if (!r.client_name) errors.push('حساب القبض مطلوب (عميل أو صندوق/بنك)')
         else {
           const key = String(r.client_name).trim().toLowerCase()
-          if (clientSet.has(key)) receiptKind = 'client'
-          else if (boxSet.has(key)) receiptKind = 'box'
+          if (clientSet.has(key)) {
+            if (clientDups.has(key)) errors.push(`خطأ استيراد: اسم حساب القبض "${r.client_name}" مكرر بين أكثر من عميل — وحّد الأسماء أو صحّح السجلات أولاً`)
+            receiptKind = 'client'
+          } else if (boxSet.has(key)) {
+            if (boxDups.has(key)) errors.push(`خطأ استيراد: اسم الصندوق/البنك "${r.client_name}" مكرر بين أكثر من صندوق — وحّد الأسماء أولاً`)
+            receiptKind = 'box'
+          }
           else errors.push(`خطأ استيراد: حساب القبض "${r.client_name}" غير موجود (لا عميل ولا صندوق/بنك) — أضِفه يدوياً أولاً`)
         }
         if (!r.supplier_name) errors.push('اسم المورد مطلوب')
-        else if (!supplierSet.has(String(r.supplier_name).trim().toLowerCase())) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
+        else {
+          const supKey = String(r.supplier_name).trim().toLowerCase()
+          if (!supplierSet.has(supKey)) errors.push(`خطأ استيراد: المورد "${r.supplier_name}" غير موجود في دليل الحسابات — أضِفه يدوياً أولاً`)
+          else if (supplierDups.has(supKey)) errors.push(`خطأ استيراد: اسم المورد "${r.supplier_name}" مكرر بين أكثر من مورد — وحّد الأسماء أولاً`)
+        }
         let dup = false
         // v3.18 — Duplicate rule uses ENTRY DATE only (never the transaction date fallback).
         // No entry date => no dedup (accept). Different entry date => accepted as a new operation.
@@ -6335,11 +7100,22 @@ async function handleRoute(request, { params }) {
         if (skip && r.__dup) { skipped++; continue }
         if (r.__errors && r.__errors.length) { failed++; errors.push({ row: r.__row, errors: r.__errors }); continue }
         // v3.9.8 — Receipt account may be a client (credit) OR a box/bank (cash)
+        // v3.92 — STRICT resolution: the row must resolve to EXACTLY ONE linked record.
+        // Ambiguity (duplicate names) fails with a clear message — nothing is auto-created.
+        const findStrict = async (coll, filter) => { const l = await db.collection(coll).find(filter).limit(2).toArray(); return { doc: l[0] || null, dup: l.length > 1 } }
         const nameTrim = r.client_name ? String(r.client_name).trim() : ''
-        const cli = nameTrim ? await db.collection('clients').findOne({ tenant_id: T, name: nameTrim }) : null
+        const cliR = nameTrim ? await findStrict('clients', { tenant_id: T, name: nameTrim }) : { doc: null, dup: false }
+        if (cliR.dup) { failed++; errors.push({ row: r.__row, errors: [`اسم حساب القبض "${nameTrim}" مكرر بين أكثر من عميل — وحّد الأسماء أولاً`] }); continue }
+        const cli = cliR.doc
         let box = null
-        if (!cli && nameTrim) box = await db.collection('boxes').findOne({ tenant_id: T, $or: [{ name_ar: nameTrim }, { name: nameTrim }] })
-        const sup = r.supplier_name ? await db.collection('suppliers').findOne({ tenant_id: T, name: String(r.supplier_name).trim() }) : null
+        if (!cli && nameTrim) {
+          const boxR = await findStrict('boxes', { tenant_id: T, $or: [{ name_ar: nameTrim }, { name: nameTrim }] })
+          if (boxR.dup) { failed++; errors.push({ row: r.__row, errors: [`اسم الصندوق/البنك "${nameTrim}" مكرر بين أكثر من صندوق — وحّد الأسماء أولاً`] }); continue }
+          box = boxR.doc
+        }
+        const supR = r.supplier_name ? await findStrict('suppliers', { tenant_id: T, name: String(r.supplier_name).trim() }) : { doc: null, dup: false }
+        if (supR.dup) { failed++; errors.push({ row: r.__row, errors: [`اسم المورد "${r.supplier_name}" مكرر بين أكثر من مورد — وحّد الأسماء أولاً`] }); continue }
+        const sup = supR.doc
         if (!cli && !box) { failed++; errors.push({ row: r.__row, errors: [`حساب القبض "${r.client_name}" غير موجود (لا عميل ولا صندوق/بنك)`] }); continue }
         if (!sup) { failed++; errors.push({ row: r.__row, errors: [`المورد "${r.supplier_name}" غير موجود في دليل الحسابات`] }); continue }
         const payload = box
@@ -6436,6 +7212,9 @@ async function handleRoute(request, { params }) {
           const doc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
           if (!doc) { failed++; errors.push({ id: docId, error: 'غير موجود' }); continue }
           const je = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
+          // v4.6 — RAH-ACC: per-row closed year/period guard (bulk delete must not rewrite closed books)
+          const perrBD = await assertOpenPeriod(db, T, je?.date || doc.date)
+          if (perrBD) { failed++; errors.push({ id: docId, error: `داخل فترة/سنة مقفلة — ${perrBD}` }); continue }
           if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
             if (doc.payment_method === 'cash' && doc.box_id) {
               await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
@@ -6463,8 +7242,8 @@ async function handleRoute(request, { params }) {
             }
           }
           if (je) {
-            await db.collection('journal_entries').deleteOne({ id: je.id })
-            await db.collection('tenants').updateOne({ id: T }, { $inc: { 'journal_quota.used': -1 } })
+            await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T }) // v4.6 — tenant-scoped
+            await db.collection('tenants').updateOne({ id: T, 'journal_quota.used': { $gt: 0 } }, { $inc: { 'journal_quota.used': -1 } }) // v4.6 — never below 0
           }
           await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
           deleted++
@@ -6498,6 +7277,10 @@ async function handleRoute(request, { params }) {
           const oldDoc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
           if (!oldDoc) { failed++; errors.push({ id: docId, error: 'غير موجود' }); continue }
           const oldJe = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
+          // v4.6 — RAH-ACC: per-row closed year/period guard on the ORIGINAL side (bulk edit
+          // reverses + deletes + recreates — closed books must never be rewritten)
+          const perrBE = await assertOpenPeriod(db, T, oldJe?.date || oldDoc.date)
+          if (perrBE) { failed++; errors.push({ id: docId, error: `داخل فترة/سنة مقفلة — ${perrBE}` }); continue }
           // Build new body from oldDoc + partial changes
           const newBody = {
             date: oldDoc.date, currency: oldDoc.currency, exchange_rate: oldDoc.exchange_rate,
@@ -6522,7 +7305,7 @@ async function handleRoute(request, { params }) {
           if (newBody.payment_method === 'credit') newBody.box_id = null
           // Reverse old effects
           await reverseTransactionEffects(db, T, kind, oldDoc)
-          if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id })
+          if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id, tenant_id: T }) // v4.6 — tenant-scoped
           await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
           const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at }
           let result
@@ -6560,6 +7343,10 @@ async function handleRoute(request, { params }) {
       if (!doc) return bad('العنصر غير موجود', 404)
       // Reverse balance updates & delete linked journal entry
       const je = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
+      // v4.6 — RAH-ACC: a document whose journal lives inside a closed year/period must not
+      // be deleted — that silently rewrites closed books (same central rule as manual JEs).
+      const perrUD = await assertOpenPeriod(db, T, je?.date || doc.date)
+      if (perrUD) return bad(`السجل داخل فترة/سنة مقفلة ولا يُحذف — ${perrUD}`)
       if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
         if (doc.payment_method === 'cash' && doc.box_id) {
           await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
@@ -6587,8 +7374,8 @@ async function handleRoute(request, { params }) {
         }
       }
       if (je) {
-        await db.collection('journal_entries').deleteOne({ id: je.id })
-        await db.collection('tenants').updateOne({ id: T }, { $inc: { 'journal_quota.used': -1 } })
+        await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T }) // v4.6 — tenant-scoped
+        await db.collection('tenants').updateOne({ id: T, 'journal_quota.used': { $gt: 0 } }, { $inc: { 'journal_quota.used': -1 } }) // v4.6 — never below 0
       }
       await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
       return ok({ success: true, deleted: kind, id: docId })
@@ -6603,10 +7390,15 @@ async function handleRoute(request, { params }) {
       const oldDoc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
       if (!oldDoc) return bad('السجل غير موجود', 404)
       const oldJe = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
+      // v4.6 — RAH-ACC: closed year/period guard on the ORIGINAL side BEFORE any destructive
+      // step (same "both sides" rule as manual-journal edits in v4.5) — editing a document
+      // whose journal is inside a closed period silently rewrites closed books.
+      const perrUP = await assertOpenPeriod(db, T, oldJe?.date || oldDoc.date)
+      if (perrUP) return bad(`السجل الأصلي داخل فترة/سنة مقفلة — لا يمكن تعديله: ${perrUP}`)
       // Step 1: Reverse balance effects of the old record
       await reverseTransactionEffects(db, T, kind, oldDoc)
       // Step 2: Delete old JE (without decrementing quota, since we'll re-post)
-      if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id })
+      if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id, tenant_id: T }) // v4.6 — tenant-scoped
       // Step 3: Delete the old record so we can re-insert with same id
       await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
       // Step 4: Re-create with same id + skip quota (edit doesn't count against limit)
@@ -6644,7 +7436,24 @@ async function handleRoute(request, { params }) {
     if (route === '/journal-entries' && method === 'POST') {
       const b = await request.json()
       const result = await createManualJournal(db, T, b)
-      if (result.error) return bad(result.error)
+      if (result.error) {
+        // v4.8.2 — PR#18 (final point): the explicit unsafe state from createManualJournal
+        // is no longer dropped by bad() — HTTP 500 + unsafe_state + no_retry in the JSON
+        // body + je_audit (tenant/actor/state/error). Normal pre-write rejections
+        // (validation / dry-run / period / quota) keep their current bad(400) logic.
+        if (result.unsafe_state) {
+          console.error('[JE-CREATE] CRITICAL unsafe state', result.unsafe_state, result.error)
+          try {
+            await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'create_failed_unsafe_state', ref_type: b?.dual ? 'manual_dual' : 'manual', unsafe_state: result.unsafe_state, balances_need_manual_review: true, error: String(result.error).slice(0, 300), by: sess.user.email, at: new Date() })
+          } catch { }
+          return cors(NextResponse.json({
+            error: `⛔ ${result.error} — لا تُعد المحاولة؛ يلزم فحص يدوي فوري للقيد والأرصدة`,
+            unsafe_state: result.unsafe_state,
+            no_retry: true,
+          }, { status: 500 }))
+        }
+        return bad(result.error)
+      }
       return ok(result.doc)
     }
 
@@ -6659,12 +7468,69 @@ async function handleRoute(request, { params }) {
       // v3.80 — reject future doc date EARLY (this handler deletes the old JE before re-creating,
       // with no restore-on-error mechanism — validating here prevents data loss)
       if (isFutureDocDate(b.date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ القيد)`)
+      // v4.5 — closed period/year guard on BOTH sides BEFORE any destructive step:
+      // the ORIGINAL date (a journal inside a closed period must not be silently rewritten)
+      // and the NEW date (validated again centrally, but checked here pre-destruction).
+      const perrOld = await assertOpenPeriod(db, T, oldJe.date)
+      if (perrOld) return bad(`القيد الأصلي داخل فترة/سنة مقفلة — ${perrOld}`)
+      const perrNew = await assertOpenPeriod(db, T, b.date)
+      if (perrNew) return bad(perrNew)
       // Reverse old effects
       await reverseManualJournalEffects(db, T, oldJe)
-      await db.collection('journal_entries').deleteOne({ id: jeId })
+      await db.collection('journal_entries').deleteOne({ id: jeId, tenant_id: T }) // v4.5 — tenant-scoped delete
       // Re-create with same id + skip quota
-      const result = await createManualJournal(db, T, b, { existingId: jeId, skipQuota: true, createdAt: oldJe.created_at })
-      if (result.error) return bad(result.error)
+      let result
+      try {
+        result = await createManualJournal(db, T, b, { existingId: jeId, skipQuota: true, createdAt: oldJe.created_at, actor: sess.user.email })
+      } catch (e) {
+        result = { error: e?.message || 'فشل غير متوقع أثناء إعادة إنشاء القيد' }
+      }
+      if (result.error) {
+        // v4.8.1 — PR#18-2: UNSAFE STATES are handled explicitly and are NEVER recorded
+        // as a full restore (edit_failed_restored) nor announced as a successful recovery.
+        if (result.unsafe_state) {
+          console.error('[JE-EDIT] CRITICAL unsafe state for', jeId, result.unsafe_state, result.error)
+          let oldDocRestored = false
+          if (result.unsafe_state === 'partial') {
+            // journal NOT saved (id is free) → re-insert the ORIGINAL document only, to
+            // preserve ledger history. Balance re-apply is deliberately SKIPPED: residual
+            // partial effects of the new attempt are unknown — re-applying old effects
+            // on top could double-count. Balances require manual reconciliation.
+            try {
+              const { _id: _omitU, ...restoreDocU } = oldJe
+              await db.collection('journal_entries').insertOne({ ...restoreDocU })
+              oldDocRestored = true
+            } catch (rdErr) { console.error('[JE-EDIT] old-doc reinsert failed for', jeId, rdErr) }
+          } // 'uncertain': the NEW journal may already exist with the SAME id — reinserting would duplicate it
+          try {
+            await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'edit_failed_unsafe_state', je_id: jeId, ref_type: oldJe.ref_type, unsafe_state: result.unsafe_state, old_doc_restored: oldDocRestored, balances_need_manual_review: true, error: String(result.error).slice(0, 300), by: sess.user.email, at: new Date() })
+          } catch { }
+          return bad(`⛔ فشل التعديل بحالة غير آمنة (${result.unsafe_state === 'uncertain' ? 'حفظ القيد الجديد غير مؤكد' : 'أثر جزئي متبقٍ من المحاولة الجديدة'}) — لا تُعد المحاولة إطلاقاً؛ يلزم فحص يدوي فوري للقيد ${jeId} وأرصدة أطرافه قبل أي إجراء${oldDocRestored ? ' (أُعيد مستند القيد الأصلي للسجل دون إعادة تطبيق أرصدته)' : ''}. التفاصيل: ${result.error}`, 500)
+        }
+        // v4.5/v4.8 — NO PARTIAL STATE, NO SILENT HISTORY LOSS: createManualJournal now
+        // guarantees ZERO residual new-attempt effects (dry-run + tracked compensation),
+        // so restoring the ORIGINAL journal + its effects fully returns the books to the
+        // pre-edit state. A restore failure is NEVER reported as a successful restore.
+        try {
+          const { _id: _omit, ...restoreDoc } = oldJe
+          await db.collection('journal_entries').insertOne({ ...restoreDoc })
+          await applyManualJournalEffects(db, T, oldJe)
+        } catch (restoreErr) {
+          console.error('[JE-EDIT] CRITICAL: restore failed for', jeId, restoreErr)
+          try {
+            await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'edit_failed_restore_failed', je_id: jeId, ref_type: oldJe.ref_type, error: `${String(result.error).slice(0, 200)} || restore: ${String(restoreErr?.message || restoreErr).slice(0, 200)}`, by: sess.user.email, at: new Date() })
+          } catch { }
+          return bad(`فشل التعديل (${result.error}) ثم فشلت الاستعادة التلقائية (${restoreErr?.message || restoreErr}) — لا تُعد المحاولة؛ يلزم فحص يدوي فوري للقيد ${jeId} وأرصدته`, 500)
+        }
+        try {
+          await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'edit_failed_restored', je_id: jeId, ref_type: oldJe.ref_type, error: String(result.error).slice(0, 300), by: sess.user.email, at: new Date() })
+        } catch { }
+        return bad(`فشل التعديل — استُرجع القيد الأصلي وأرصدته كما كانت. السبب: ${result.error}`)
+      }
+      // v4.5 — audit the successful modification of a POSTED journal (before-image kept)
+      try {
+        await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'edit', je_id: jeId, ref_type: oldJe.ref_type, before: { date: oldJe.date, description: oldJe.description, currency: oldJe.currency, lines: oldJe.lines }, by: sess.user.email, at: new Date() })
+      } catch { }
       return ok(result.doc)
     }
 
@@ -6692,9 +7558,10 @@ async function handleRoute(request, { params }) {
       if (!currency) return bad('العملة مطلوبة (SAR / USD / YER)')
       if (!date) return bad('تاريخ الافتتاح مطلوب')
       if (isFutureDocDate(date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ القيد الافتتاحي)`)
-      const olSettings = await db.collection('tenant_settings').findOne({ tenant_id: T })
-      const lockedUntil = olSettings?.period_lock?.closed_until || null
-      if (lockedUntil && date <= lockedUntil) return bad(`الفترة مقفلة حتى ${lockedUntil} — لا يمكن الإدخال بهذا التاريخ`)
+      // v4.5 — CENTRAL guard (closed YEAR + period lock together): this route writes the
+      // journal directly (bypassing the central gate) and previously missed closed_years.
+      const perrOp = await assertOpenPeriod(db, T, date)
+      if (perrOp) return bad(perrOp)
       // Resolve the target: party (box/client/supplier) or a direct COA leaf account
       let accountCode = null, accountName = null, partyType = null, partyId = null
       const kind = String(b.party_type || 'account')
@@ -6710,6 +7577,9 @@ async function handleRoute(request, { params }) {
         const acct = await db.collection('accounts').findOne({ tenant_id: T, code: String(b.account_code || '') })
         if (!acct) return bad('الحساب غير موجود في الدليل')
         if (acct.is_group) return bad('اختر حساباً تفصيلياً (وليس مجموعة)')
+        // v4.6 — RAH-ACC: an inactive account must not receive a NEW opening balance
+        // (same central rule the journal gate applies — history untouched)
+        if (isInactiveAccount(acct)) return bad(`الحساب "${acct.code} — ${acct.name_ar || ''}" غير نشط — لا يقبل رصيداً افتتاحياً جديداً`)
         if (!['asset', 'liability', 'equity'].includes(acct.type)) {
           return bad('الأرصدة الافتتاحية للأصول والخصوم وحقوق الملكية فقط — نتيجة الإيرادات والمصروفات للسنة السابقة تُقفل ضمن الأرباح المبقاة (3102)')
         }
@@ -6750,6 +7620,9 @@ async function handleRoute(request, { params }) {
       const date = String(b.date || '').slice(0, 10)
       if (!date) return bad('تاريخ الإقفال مطلوب')
       if (isFutureDocDate(date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ الإقفال)`)
+      // v4.5 — central closed year/period guard (this route writes journals directly)
+      const perrOc = await assertOpenPeriod(db, T, date)
+      if (perrOc) return bad(perrOc)
       // v3.87 — optional per-currency close: pass currency: 'SAR' to close ONLY that
       // currency independently; omit (or 'ALL') to close every non-zero currency.
       const onlyCcy = ['SAR', 'USD', 'YER'].includes(b.currency) ? b.currency : null
@@ -6788,12 +7661,20 @@ async function handleRoute(request, { params }) {
       if (!['manual', 'manual_dual', 'opening', 'opening_close'].includes(je.ref_type)) {
         return bad('لا يمكن حذف قيود المعاملات مباشرةً — احذف السجل المرتبط (تذكرة/سند/مصارفة)', 400)
       }
+      // v4.5 — deleting a journal dated inside a closed year/period silently rewrites
+      // closed books — centrally blocked (same rule as creation/edit).
+      const perrDel = await assertOpenPeriod(db, T, je.date)
+      if (perrDel) return bad(`القيد داخل فترة/سنة مقفلة ولا يُحذف — ${perrDel}`)
       for (const ln of je.lines || []) {
         if (!ln.party_type || !ln.party_id) continue
         const delta = round2n((ln.debit || 0) - (ln.credit || 0))
-        if (ln.party_type === 'box') await updateBalance(db, 'boxes', { id: ln.party_id, tenant_id: T }, je.currency, -delta)
-        if (ln.party_type === 'client') await updateBalance(db, 'clients', { id: ln.party_id, tenant_id: T }, je.currency, -delta)
-        if (ln.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: ln.party_id, tenant_id: T }, je.currency, delta)
+        // v4.5 — FIX: reversal must hit the LINE currency. For manual_dual the JE
+        // currency is 'MULTI' — using it here corrupted balances into a 'MULTI' bucket
+        // while the original effect lived under the real per-line currency.
+        const lnCur = ln.currency || je.currency
+        if (ln.party_type === 'box') await updateBalance(db, 'boxes', { id: ln.party_id, tenant_id: T }, lnCur, -delta)
+        if (ln.party_type === 'client') await updateBalance(db, 'clients', { id: ln.party_id, tenant_id: T }, lnCur, -delta)
+        if (ln.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: ln.party_id, tenant_id: T }, lnCur, delta)
       }
       await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T })
       await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'delete', je_id: je.id, ref_type: je.ref_type, description: je.description, currency: je.currency, lines: je.lines, by: sess.user.email, at: new Date() })
@@ -6929,7 +7810,7 @@ async function handleRoute(request, { params }) {
     }
 
     if (route === '/accounting/close-year' && method === 'POST') {
-      if (sess.user.role !== 'owner' && sess.user.role !== 'super_admin') return bad('غير مصرح — يجب أن تكون مالكاً', 403)
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — يجب أن تكون مالكاً', 403)
       const b = await request.json()
       const year = parseInt(b.year)
       if (!year || year < 2000 || year > 2100) return bad('السنة المالية غير صالحة')
@@ -6946,7 +7827,7 @@ async function handleRoute(request, { params }) {
       if (!reAcct) return bad(`Preflight: حساب الأرباح المبقاة (${COA.RETAINED_EARNINGS}) غير موجود في شجرة الحسابات — رحّل الدليل إلى COA v2 أولاً (لن يُنشأ الحساب تلقائياً)`)
       if (reAcct.is_group) return bad(`Preflight: حساب الأرباح المبقاة (${COA.RETAINED_EARNINGS}) حساب مجموعة — يجب أن يكون حساباً تفصيلياً قابلاً للقيد`)
       if (reAcct.type !== 'equity') return bad(`Preflight: الحساب (${COA.RETAINED_EARNINGS}) ليس ضمن حقوق الملكية`)
-      if (reAcct.is_active === false) return bad(`Preflight: حساب الأرباح المبقاة (${COA.RETAINED_EARNINGS}) غير نشط`)
+      if (isInactiveAccount(reAcct)) return bad(`Preflight: حساب الأرباح المبقاة (${COA.RETAINED_EARNINGS}) غير نشط`) // v4.6 — unified inactive view
       // v3.88.4 — aggregate revenues/expenses PER CURRENCY (the old code mixed all
       // currencies into one USD-labelled JE) — string/Date-safe business-TZ filter.
       const yStart = bizDayStart(`${year}-01-01`), yEnd = bizDayEnd(`${year}-12-31`)
@@ -6990,7 +7871,10 @@ async function handleRoute(request, { params }) {
           description: `🔒 قيد إقفال السنة المالية ${year} (${ccy}) — تصفير الإيرادات والمصروفات وترحيل الصافي إلى الأرباح المبقاة (${COA.RETAINED_EARNINGS})`,
           ref_type: 'year_close', ref_id: `close-${year}`, currency: ccy,
           lines: closingLines.map(l => ({ ...l, currency: ccy, party_type: null, party_id: null, party_name: l.account_name })),
-        }, { skipQuota: true })
+          // v4.6 — RAH-ACC: idempotency per year+currency — a partial multi-currency failure
+          // followed by a retry can no longer DUPLICATE closing journals (double transfer to
+          // retained earnings). Reopen-year deletes these JEs, so a re-close starts fresh.
+        }, { skipQuota: true, idempotencyKey: `year_close:${year}:${ccy}` })
         results.push({ currency: ccy, net_profit: net, closing_je_id: closingJe.id, lines_count: closingLines.length })
       }
       if (results.length === 0) return bad(`لا توجد قيود إيرادات أو مصروفات في السنة ${year}`)
@@ -7004,12 +7888,12 @@ async function handleRoute(request, { params }) {
     }
 
     if (route === '/accounting/reopen-year' && method === 'POST') {
-      if (sess.user.role !== 'super_admin' && sess.user.role !== 'owner') return bad('غير مصرح', 403)
+      if (!isMainSA(sess.user) && sess.user.role !== 'owner') return bad('غير مصرح', 403)
       const b = await request.json()
       const year = parseInt(b.year)
       if (!year) return bad('السنة مطلوبة')
       // Only super_admin can reopen; owners can only close (safety)
-      if (sess.user.role !== 'super_admin') return bad('فتح السنة المقفلة يتطلب صلاحية السوبر أدمن', 403)
+      if (!isMainSA(sess.user)) return bad('فتح السنة المقفلة يتطلب صلاحية السوبر أدمن', 403)
       // Delete closing JE
       await db.collection('journal_entries').deleteMany({ tenant_id: T, ref_type: 'year_close', ref_id: `close-${year}` })
       await db.collection('tenants').updateOne({ id: T }, { $pull: { closed_years: year }, $unset: { [`year_closes.${year}`]: '' } })
@@ -7974,17 +8858,12 @@ async function createTicket(db, T, b, opts = {}) {
   // v3.10.2 — Reject negative amounts across all numeric fields
   const numFields = ['cost', 'sale_price', 'discount', 'commission', 'partner_commission_share', 'partner_commission', 'commission_office_share']
   for (const f of numFields) if (b[f] !== undefined && Number(b[f]) < 0) return { error: `القيمة السالبة غير مسموحة في الحقل: ${f}` }
-  // v3.9.14 — Period lock: prevent creating records in a closed year
-  if (b.date) {
-    const yr = new Date(b.date).getFullYear()
-    const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
-    if (tenant?.closed_years?.includes(yr)) return { error: `السنة المالية ${yr} مقفلة — لا يمكن إضافة أو تعديل قيود بتاريخها` }
-    // v3.10.6 — Date-level period lock check
-    const settings = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { period_lock: 1 } })
-    if (settings?.period_lock?.closed_until && b.date <= settings.period_lock.closed_until) {
-      return { error: `🔒 الفترة حتى ${settings.period_lock.closed_until} مقفلة — استخدم قيد تسوية عكسي بالتاريخ الحالي بدلاً من التعديل الرجعي` }
-    }
-  }
+  // v4.6 — RAH-ACC: CENTRAL closed year/period fail-fast (the old local string compare
+  // missed a date-with-time on the boundary day → the central gate then threw AFTER the
+  // doc/balances were written). Journal quota is also preflighted — no partial state on 402.
+  const perrTk = await assertOpenPeriod(db, T, b.date)
+  if (perrTk) return { error: perrTk }
+  if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
   const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
   if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
   const cost = Number(b.cost) || 0, sale = Number(b.sale_price) || 0
@@ -8116,17 +8995,11 @@ async function createVisa(db, T, b, opts = {}) {
   // v3.10.2 — Reject negative amounts
   const numFields = ['cost', 'sale_price', 'discount', 'commission']
   for (const f of numFields) if (b[f] !== undefined && Number(b[f]) < 0) return { error: `القيمة السالبة غير مسموحة في الحقل: ${f}` }
-  // v3.9.14 — Period lock
-  if (b.date) {
-    const yr = new Date(b.date).getFullYear()
-    const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
-    if (tenant?.closed_years?.includes(yr)) return { error: `السنة المالية ${yr} مقفلة — لا يمكن إضافة أو تعديل قيود بتاريخها` }
-    // v3.10.6 — Date-level period lock check
-    const settings = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { period_lock: 1 } })
-    if (settings?.period_lock?.closed_until && b.date <= settings.period_lock.closed_until) {
-      return { error: `🔒 الفترة حتى ${settings.period_lock.closed_until} مقفلة — استخدم قيد تسوية عكسي بالتاريخ الحالي` }
-    }
-  }
+  // v4.6 — RAH-ACC: CENTRAL closed year/period fail-fast (boundary-day string-compare gap
+  // fixed) + journal quota preflight — no doc/balance write can precede a failing gate.
+  const perrVs = await assertOpenPeriod(db, T, b.date)
+  if (perrVs) return { error: perrVs }
+  if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
   const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
   if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
   const cost = Number(b.cost) || 0, sale = Number(b.sale_price) || 0
@@ -8196,6 +9069,10 @@ async function createVisa(db, T, b, opts = {}) {
   const boxLeaf = paymentMethod === 'cash' ? partyLeafCode(box) : null
   const cliLeaf = paymentMethod === 'cash' ? null : partyLeafCode(cli)
   const supLeaf = partyLeafCode(sup)
+  // v4.6 — RAH-ACC CRITICAL FIX: partnerLeaf was NEVER defined in createVisa (it exists in
+  // createTicket/createService) → any visa carrying a partner commission share crashed with
+  // a ReferenceError AFTER the doc + balances were written (partial state, no journal).
+  const partnerLeaf = partnerDoc ? partyLeafCode(partnerDoc) : null
   await db.collection('visas').insertOne(doc)
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
   if (partnerShare > 0 && doc.commission_partner_id) {
@@ -8267,17 +9144,11 @@ async function createService(db, T, b, opts = {}) {
   // services were the only path missing it). Values are rejected, NEVER abs()-coerced.
   const numFieldsSvc = ['cost', 'sale_price', 'discount', 'commission', 'commission_share_value']
   for (const f of numFieldsSvc) if (b[f] !== undefined && Number(b[f]) < 0) return { error: `القيمة السالبة غير مسموحة في الحقل: ${f}` }
-  // v3.9.14 — Period lock: prevent creating records in a closed year
-  if (b.date) {
-    const yr = new Date(b.date).getFullYear()
-    const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
-    if (tenant?.closed_years?.includes(yr)) return { error: `السنة المالية ${yr} مقفلة — لا يمكن إضافة أو تعديل قيود بتاريخها` }
-    // v3.10.6 — Date-level period lock check
-    const settings = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { period_lock: 1 } })
-    if (settings?.period_lock?.closed_until && b.date <= settings.period_lock.closed_until) {
-      return { error: `🔒 الفترة حتى ${settings.period_lock.closed_until} مقفلة — استخدم قيد تسوية عكسي بالتاريخ الحالي بدلاً من التعديل الرجعي` }
-    }
-  }
+  // v4.6 — RAH-ACC: CENTRAL closed year/period fail-fast (boundary-day string-compare gap
+  // fixed) + journal quota preflight — no doc/balance write can precede a failing gate.
+  const perrSv = await assertOpenPeriod(db, T, b.date)
+  if (perrSv) return { error: perrSv }
+  if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
   const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
   // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id only
   if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
@@ -8383,6 +9254,12 @@ async function createVoucher(db, T, b, opts = {}) {
   const amount = Number(b.amount) || 0
   if (Number(b.amount) < 0) return { error: 'لا يُسمح بمبلغ سالب في السند' }
   if (amount <= 0) return { error: 'المبلغ يجب أن يكون أكبر من صفر' }
+  // v4.6 — RAH-ACC: vouchers had NO closed year/period check at all before their writes —
+  // the central gate then threw AFTER the voucher + balances were written (partial state).
+  // Fail-fast here + journal quota preflight (no partial state on 402 either).
+  const perrVc = await assertOpenPeriod(db, T, b.date)
+  if (perrVc) return { error: perrVc }
+  if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
   let partyName = ''
   let partyDoc = null // v3.88.4 — F-007: keep the party doc to post to its LEAF account
   let coaAccount = null // v3.79 — real COA account for expense/revenue vouchers
@@ -8492,6 +9369,10 @@ async function resolveAccountRef(db, T, ref) {
 
 async function createFx(db, T, b, opts = {}) {
   if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ عملية الصرافة)` } // v3.80
+  // v4.5 — FAIL-FAST before box/party balance side effects (Priority 13)
+  const perrFx = await assertOpenPeriod(db, T, b.date)
+  if (perrFx) return { error: perrFx }
+  if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
   if (!['buy', 'sell'].includes(b.type)) return { error: 'نوع العملية غير صالح' }
   if (!CURRENCIES.includes(b.currency) || !CURRENCIES.includes(b.counter_currency)) return { error: 'العملات غير صالحة' }
   if (b.currency === b.counter_currency) return { error: 'يجب اختيار عملتين مختلفتين' }
@@ -8607,6 +9488,26 @@ async function createFx(db, T, b, opts = {}) {
 
 async function createManualJournal(db, T, b, opts = {}) {
   if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ القيد)` } // v3.80
+  // v4.5 — FAIL-FAST before ANY cached-balance side effect (Priority 13): period/year
+  // guard + journal quota are verified here so "balance updated but journal failed"
+  // can no longer happen through this path.
+  const perr0 = await assertOpenPeriod(db, T, b.date)
+  if (perr0) return { error: perr0 }
+  if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
+  // v4.8 — PR#18-1: (a) the FINAL journal lines are dry-run through the central gate
+  // (enforceJournalInvariants — accounts/tenant/group/inactive/currency/base-balance/period)
+  // BEFORE any cached-balance effect; (b) every balance effect of THIS attempt is tracked,
+  // so a residual gate failure (true race only) compensates exactly what was applied —
+  // once, in reverse order, never a double reversal — and NEVER claims success if the
+  // compensation itself did not complete. Multi-currency/FX engine logic untouched.
+  const appliedFx = []
+  const applyTracked = async (col, pid, cur, delta) => {
+    await updateBalance(db, col, { id: pid, tenant_id: T }, cur, delta)
+    appliedFx.push({ col, pid, cur, delta })
+  }
+  const rollbackApplied = async () => {
+    for (const a of [...appliedFx].reverse()) await updateBalance(db, a.col, { id: a.pid, tenant_id: T }, a.cur, -a.delta)
+  }
   // Modes:
   //  A) single: { date, currency, description, lines: [...] }
   //  B) dual:   { date, description, dual: true, debit_*, credit_* }
@@ -8637,18 +9538,36 @@ async function createManualJournal(db, T, b, opts = {}) {
       if (fxDiff > 0) lines.push({ account_code: COA.FX_PNL, account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: BASE_CURRENCY, debit: 0, credit: +fxDiff.toFixed(2) })
       else lines.push({ account_code: COA.FX_PNL, account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: BASE_CURRENCY, debit: +Math.abs(fxDiff).toFixed(2), credit: 0 })
     }
-    for (const side of ['debit', 'credit']) {
-      const pt = b[`${side}_party_type`], pid = b[`${side}_party_id`], cur = b[`${side}_currency`]
-      const amt = side === 'debit' ? da : ca
-      if (pt === 'client' && pid) await updateBalance(db, 'clients', { id: pid, tenant_id: T }, cur, side === 'debit' ? amt : -amt)
-      if (pt === 'supplier' && pid) await updateBalance(db, 'suppliers', { id: pid, tenant_id: T }, cur, side === 'debit' ? -amt : amt)
-      if (pt === 'box' && pid) await updateBalance(db, 'boxes', { id: pid, tenant_id: T }, cur, side === 'debit' ? amt : -amt)
+    // v4.8 — PR#18-1: full central-gate DRY-RUN on the FINAL lines BEFORE any balance effect
+    // (rejecting e.g. an inactive account can no longer leave a changed balance without a journal)
+    try {
+      await enforceJournalInvariants(db, T, { date: b.date, currency: 'MULTI', lines })
+    } catch (e) { return { error: e.message } }
+    try {
+      for (const side of ['debit', 'credit']) {
+        const pt = b[`${side}_party_type`], pid = b[`${side}_party_id`], cur = b[`${side}_currency`]
+        const amt = side === 'debit' ? da : ca
+        if (pt === 'client' && pid) await applyTracked('clients', pid, cur, side === 'debit' ? amt : -amt)
+        if (pt === 'supplier' && pid) await applyTracked('suppliers', pid, cur, side === 'debit' ? -amt : amt)
+        if (pt === 'box' && pid) await applyTracked('boxes', pid, cur, side === 'debit' ? amt : -amt)
+      }
+      const je = await createJournalEntry(db, T, {
+        date: b.date, description: (opts.existingId ? 'تعديل — ' : '') + (b.description || 'سند قيد ثنائي (مصارفة/تسوية)'),
+        ref_type: 'manual_dual', ref_id: opts.existingId || uuidv4(), currency: 'MULTI', lines,
+      }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal' })
+      return { doc: { ...je, _id: undefined, fx_diff_usd: fxDiff } }
+    } catch (e) {
+      // v4.8.1 — PR#18-2: EXPLICIT machine-readable state for callers (PUT edit path).
+      // commit_uncertain → the journal MAY be saved (same id in edit mode): NO automatic
+      // compensation — reversing balances for a possibly-saved journal corrupts the books.
+      if (e?.jePhase === 'commit_uncertain') {
+        return { error: `⛔ حالة حفظ القيد غير مؤكدة (${e?.message}) — لم يُنفذ أي تعويض تلقائي حتى لا تُعكس أرصدة قيد ربما حُفظ؛ لا تُعد المحاولة — يلزم فحص يدوي فوري`, unsafe_state: 'uncertain', no_retry: true }
+      }
+      try { await rollbackApplied() } catch (rbErr) {
+        return { error: `⛔ فشل القيد (${e?.message}) وتعذر اكتمال التراجع الآلي عن آثار المحاولة (${rbErr?.message}) — يلزم فحص يدوي فوري للأرصدة`, unsafe_state: 'partial', no_retry: true }
+      }
+      return { error: e?.message || 'فشل غير متوقع أثناء إنشاء القيد' }
     }
-    const je = await createJournalEntry(db, T, {
-      date: b.date, description: (opts.existingId ? 'تعديل — ' : '') + (b.description || 'سند قيد ثنائي (مصارفة/تسوية)'),
-      ref_type: 'manual_dual', ref_id: opts.existingId || uuidv4(), currency: 'MULTI', lines,
-    }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt })
-    return { doc: { ...je, _id: undefined, fx_diff_usd: fxDiff } }
   }
   // Single-currency manual JE
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
@@ -8660,24 +9579,41 @@ async function createManualJournal(db, T, b, opts = {}) {
   const totalD = lines.reduce((s, l) => s + (Number(l.debit) || 0), 0)
   const totalC = lines.reduce((s, l) => s + (Number(l.credit) || 0), 0)
   if (Math.abs(totalD - totalC) > 0.01) return { error: `القيد غير متوازن: مدين ${totalD.toFixed(2)} ≠ دائن ${totalC.toFixed(2)}` }
-  for (const l of lines) {
-    const debit = Number(l.debit) || 0, credit = Number(l.credit) || 0
-    const delta = debit - credit
-    if (l.party_type === 'client' && l.party_id) await updateBalance(db, 'clients', { id: l.party_id, tenant_id: T }, b.currency, delta)
-    if (l.party_type === 'supplier' && l.party_id) await updateBalance(db, 'suppliers', { id: l.party_id, tenant_id: T }, b.currency, -delta)
-    if (l.party_type === 'box' && l.party_id) await updateBalance(db, 'boxes', { id: l.party_id, tenant_id: T }, b.currency, delta)
+  // v4.8 — PR#18-1: build the EXACT final lines first, dry-run them through the central
+  // gate, and only then touch balances (tracked) — identical parity with createJournalEntry.
+  const mappedLines = lines.map(l => ({
+    account_code: l.account_code || 'MANUAL', account_name: l.account_name || '—',
+    party_type: l.party_type || 'manual', party_id: l.party_id || null, party_name: l.party_name || l.account_name || '—',
+    currency: b.currency,
+    debit: Number(l.debit) || 0, credit: Number(l.credit) || 0,
+  }))
+  try {
+    await enforceJournalInvariants(db, T, { date: b.date, currency: b.currency, lines: mappedLines })
+  } catch (e) { return { error: e.message } }
+  try {
+    for (const l of lines) {
+      const debit = Number(l.debit) || 0, credit = Number(l.credit) || 0
+      const delta = debit - credit
+      if (l.party_type === 'client' && l.party_id) await applyTracked('clients', l.party_id, b.currency, delta)
+      if (l.party_type === 'supplier' && l.party_id) await applyTracked('suppliers', l.party_id, b.currency, -delta)
+      if (l.party_type === 'box' && l.party_id) await applyTracked('boxes', l.party_id, b.currency, delta)
+    }
+    const je = await createJournalEntry(db, T, {
+      date: b.date, description: (opts.existingId ? 'تعديل — ' : '') + (b.description || 'قيد يومية يدوي'),
+      ref_type: 'manual', ref_id: opts.existingId || uuidv4(), currency: b.currency,
+      lines: mappedLines,
+    }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal' })
+    return { doc: { ...je, _id: undefined } }
+  } catch (e) {
+    // v4.8.1 — PR#18-2: EXPLICIT machine-readable state for callers (PUT edit path).
+    if (e?.jePhase === 'commit_uncertain') {
+      return { error: `⛔ حالة حفظ القيد غير مؤكدة (${e?.message}) — لم يُنفذ أي تعويض تلقائي حتى لا تُعكس أرصدة قيد ربما حُفظ؛ لا تُعد المحاولة — يلزم فحص يدوي فوري`, unsafe_state: 'uncertain', no_retry: true }
+    }
+    try { await rollbackApplied() } catch (rbErr) {
+      return { error: `⛔ فشل القيد (${e?.message}) وتعذر اكتمال التراجع الآلي عن آثار المحاولة (${rbErr?.message}) — يلزم فحص يدوي فوري للأرصدة`, unsafe_state: 'partial', no_retry: true }
+    }
+    return { error: e?.message || 'فشل غير متوقع أثناء إنشاء القيد' }
   }
-  const je = await createJournalEntry(db, T, {
-    date: b.date, description: (opts.existingId ? 'تعديل — ' : '') + (b.description || 'قيد يومية يدوي'),
-    ref_type: 'manual', ref_id: opts.existingId || uuidv4(), currency: b.currency,
-    lines: lines.map(l => ({
-      account_code: l.account_code || 'MANUAL', account_name: l.account_name || '—',
-      party_type: l.party_type || 'manual', party_id: l.party_id || null, party_name: l.party_name || l.account_name || '—',
-      currency: b.currency,
-      debit: Number(l.debit) || 0, credit: Number(l.credit) || 0,
-    })),
-  }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt })
-  return { doc: { ...je, _id: undefined } }
 }
 
 async function computeDashboard(db, T) {

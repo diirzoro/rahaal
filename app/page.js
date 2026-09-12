@@ -5,10 +5,10 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
 import * as XLSX from 'xlsx'
 import {
-  Plane, FileBadge2, LayoutDashboard, Users, Building2, ReceiptText, Wallet,
+  Plane, FileBadge2, LayoutDashboard, Users, Building2, ReceiptText, Wallet, Percent, Inbox, Bell, MapPin,
   ArrowDownLeft, ArrowUpRight, ArrowRight, BookOpenText, BarChart3, PieChart as PieIcon,
   Plus, Search, Calendar, TrendingUp, DollarSign, Sparkles, LogOut,
-  Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
+  Filter, ChevronLeft, ChevronDown, Activity, Banknote, Loader2, Landmark, ShieldCheck,
   Building, Settings, Upload, Download, FileSpreadsheet, CheckCircle2, XCircle,
   AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key, Pencil,
   ArrowLeftRight, Briefcase, CalendarClock, LogIn, Package, Copy, RefreshCw,
@@ -32,6 +32,24 @@ import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 // v3.87.5 — shared primitives + heavy screens extracted verbatim (structural move only)
 import { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_MAX_MB, DOC_MAX_FILE_BYTES, DOC_BATCH_MAX_MB, DOC_BATCH_MAX_BYTES, validateDocBatch, todayISO, api, AuthCtx, useAuth, Field, TopBar, ConfirmHost, askConfirm } from './shared'
+import AdminApp from './admin/shell' // v3.90 — Phase 1: modular Super Admin shell (reuses /api/admin/*)
+// v4.1 — MOVED AS-IS from the v3.91–3.97 admin shell into TenantApp «إدارة رحّال»
+// (transfer only — zero new sections, same components, same /api/admin/* endpoints):
+import AdminStaffCenter from './admin/staff' // إدارة المستخدمين (v3.97)
+import AdminPermsCenter from './admin/perms' // الأدوار والصلاحيات (v3.93)
+import AdminSalesCenter from './admin/sales' // مبيعات برنامج رحّال (v3.93)
+import AdminCommissionsCenter from './admin/commissions' // مركز العمولات (v3.94)
+import AdminNotifyCenter from './admin/notifications' // v4.3 — مركز التنبيهات (moved as-is)
+import AdminRequestsCenter from './admin/requests' // v4.3 — الطلبات المتخصصة القائمة (moved as-is)
+// v4.4 — scope-correction consolidation: existing components reused as TABS (no copies, no new engines)
+import OfficesSection from './admin/offices' // Office 360° viewer
+import AdminSystemCenter from './admin/system'
+import AdminAuditCenter from './admin/audit'
+import AdminBackupCenter from './admin/backup'
+import AdminHealthCenter from './admin/health'
+import AdminCurrencyCenter from './admin/currency'
+import AdminGeoCenter from './admin/geo'
+import AdminPayFinCenter from './admin/payfin'
 import { MeraajStoreScreen, BulkImportDialog } from './components-heavy'
 
 // ================================================================
@@ -438,7 +456,114 @@ function OfficeVerificationCard() {
   )
 }
 
-function SuperAdminPanel() {
+// v3.99 — Batch 1: Rahaal company home — dashboard tab content for the PLATFORM
+// SUPER ADMIN only (other offices keep the original travel Dashboard untouched).
+// Every number comes from the OLD live admin APIs (/admin/tenants,
+// /admin/password-reset-requests, /admin/installments-overview) — zero new
+// endpoints, zero new collections, and NO tickets/visas KPIs by design.
+function RahaalAdminHome({ setTab }) {
+  const [data, setData] = useState(null)
+  const [resets, setResets] = useState([])
+  const [inst, setInst] = useState([])
+  const [loading, setLoading] = useState(true)
+  const load = useCallback(async () => {
+    try {
+      setLoading(true)
+      const [d, rr, ins] = await Promise.all([
+        api('/admin/tenants'),
+        api('/admin/password-reset-requests').catch(() => []),
+        api('/admin/installments-overview').catch(() => []),
+      ])
+      setData(d); setResets(rr || []); setInst(ins || [])
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }, [])
+  useEffect(() => { load() }, [load])
+  const offices = (data?.tenants || []).filter(t => !t.is_platform_org) // exclude Rahaal's own org
+  const active = offices.filter(t => t.status !== 'suspended').length
+  const suspended = offices.filter(t => t.status === 'suspended').length
+  const trial = offices.filter(t => (t.subscription || 'trial') === 'trial').length
+  const paid = offices.filter(t => t.subscription === 'paid').length
+  const now = Date.now()
+  const expired = offices.filter(t => t.subscription_expires_at && new Date(t.subscription_expires_at).getTime() < now).length
+  const expiring = offices.filter(t => { if (!t.subscription_expires_at) return false; const d = new Date(t.subscription_expires_at).getTime() - now; return d >= 0 && d <= 30 * 86400000 }).length
+  const totalUsers = offices.reduce((s, t) => s + (t.users_count || 0), 0)
+  const pendingResets = resets.filter(r => r.status === 'pending').length
+  const overdueInst = inst.filter(r => r.overdue).length
+  const recent = [...offices].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)).slice(0, 5)
+  const alerts = [
+    pendingResets > 0 && { icon: '🔑', txt: `${pendingResets} طلب استعادة كلمة مرور معلق` },
+    overdueInst > 0 && { icon: '⚠️', txt: `${overdueInst} مكتب لديه قسط متأخر` },
+    suspended > 0 && { icon: '⏸️', txt: `${suspended} مكتب موقوف` },
+    expiring > 0 && { icon: '⏳', txt: `${expiring} اشتراك ينتهي خلال 30 يوماً` },
+    expired > 0 && { icon: '🔴', txt: `${expired} اشتراك منتهٍ` },
+  ].filter(Boolean)
+  if (loading && !data) return <div className="p-10 text-center text-slate-400">جارِ التحميل...</div>
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h2 className="text-xl font-black text-slate-800">🏢 لوحة تحكم شركة رحّال</h2>
+          <div className="text-xs text-slate-500">مؤشرات إدارة المنصة — من واجهات الإدارة القديمة الحية</div>
+        </div>
+        <Button variant="outline" size="sm" onClick={load}>🔄 تحديث</Button>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard icon={Building2} label="إجمالي المكاتب" value={offices.length} grad="grad-brand" />
+        <StatCard icon={Power} label="المكاتب النشطة" value={active} grad="grad-green" />
+        <StatCard icon={AlertTriangle} label="المكاتب الموقوفة" value={suspended} grad="grad-gold" />
+        <StatCard icon={Users} label="مستخدمو المنصة" value={totalUsers} grad="grad-teal" />
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard icon={Key} label="اشتراكات تجريبية" value={trial} grad="grad-slate" />
+        <StatCard icon={Wallet} label="اشتراكات مدفوعة" value={paid} grad="grad-green" />
+        <StatCard icon={ReceiptText} label="تنتهي خلال 30 يوماً" value={expiring} grad="grad-gold" />
+        <StatCard icon={AlertTriangle} label="اشتراكات منتهية" value={expired} grad="grad-brand" />
+      </div>
+      {alerts.length > 0 && (
+        <Card className="border-amber-300 bg-amber-50/60">
+          <CardContent className="p-4 space-y-2">
+            <div className="font-black text-amber-900 text-sm">🔔 تنبيهات إدارية تحتاج إجراء</div>
+            {alerts.map((a, i) => (
+              <button key={i} onClick={() => setTab('platform-offices')} className="w-full text-right flex items-center gap-2 text-sm text-amber-800 hover:underline">
+                <span>{a.icon}</span><span>{a.txt}</span><span className="text-[10px] text-amber-600 mr-auto">فتح إدارة المكاتب ←</span>
+              </button>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+      <Card>
+        <CardHeader className="pb-2"><CardTitle className="text-sm flex items-center gap-2"><Building2 className="w-4 h-4 text-blue-600" /> آخر المكاتب المسجلة</CardTitle></CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead>المكتب</TableHead><TableHead>الاشتراك</TableHead><TableHead>الحالة</TableHead><TableHead className="text-center">المستخدمون</TableHead><TableHead>تاريخ التسجيل</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>
+              {recent.map(t => (
+                <TableRow key={t.id}>
+                  <TableCell className="font-semibold text-sm">{t.name}<div className="text-[10px] text-slate-400 font-mono">{t.slug}</div></TableCell>
+                  <TableCell><Badge variant="outline">{t.subscription || 'trial'} • {t.plan_tier || 'standard'}</Badge></TableCell>
+                  <TableCell>{t.status === 'suspended' ? <Badge className="bg-rose-100 text-rose-700">⏸️ موقوف</Badge> : <Badge className="bg-emerald-100 text-emerald-700">✅ نشط</Badge>}</TableCell>
+                  <TableCell className="text-center text-sm">{t.users_count}/{t.max_users}</TableCell>
+                  <TableCell className="text-xs">{fmtDate(t.created_at)}</TableCell>
+                </TableRow>
+              ))}
+              {recent.length === 0 && <TableRow><TableCell colSpan={5} className="text-center py-6 text-slate-400">لا مكاتب مسجلة بعد</TableCell></TableRow>}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <QuickAction icon={Building2} label="إدارة المكاتب" grad="grad-brand" onClick={() => setTab('platform-offices')} />
+        <QuickAction icon={ImageIcon} label="الإعلانات والعروض" grad="grad-gold" onClick={() => setTab('platform-ads')} />
+        <QuickAction icon={Wallet} label="سند قبض" grad="grad-green" onClick={() => setTab('receipt')} />
+        <QuickAction icon={BarChart3} label="التقارير المالية" grad="grad-teal" onClick={() => setTab('reports')} />
+      </div>
+    </div>
+  )
+}
+
+function SuperAdminPanel({ embedded = false }) {
   const { user, logout } = useAuth()
   const [data, setData] = useState(null)
   const [openNew, setOpenNew] = useState(false)
@@ -448,6 +573,8 @@ function SuperAdminPanel() {
   const [pricingOpen, setPricingOpen] = useState(false)
   const [instRows, setInstRows] = useState([])
   const [instTarget, setInstTarget] = useState(null)
+  const [quotaTarget, setQuotaTarget] = useState(null) // v4.0 — unified «زيادة حصة القيود» dialog
+  const [tq, setTq] = useState('') // v3.99 — Batch 1: search/filter (embedded mode)
   const load = async () => {
     try {
       const [d, rr, ins] = await Promise.all([
@@ -466,7 +593,8 @@ function SuperAdminPanel() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className={embedded ? '' : 'min-h-screen bg-slate-50'}>
+      {!embedded && (
       <header className="grad-slate text-white p-6 shadow-lg">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-4">
@@ -487,16 +615,17 @@ function SuperAdminPanel() {
           </div>
         </div>
       </header>
+      )}
 
-      <div className="max-w-7xl mx-auto p-6 space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className={embedded ? 'space-y-6' : 'max-w-7xl mx-auto p-6 space-y-6'}>
+        {!embedded && <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <StatCard icon={Building2} label="المكاتب" value={data?.global_stats?.tenants ?? '—'} grad="grad-brand" />
           <StatCard icon={Plane} label="إجمالي التذاكر" value={data?.global_stats?.tickets ?? '—'} grad="grad-green" />
           <StatCard icon={FileBadge2} label="إجمالي التأشيرات" value={data?.global_stats?.visas ?? '—'} grad="grad-gold" />
-        </div>
+        </div>}
 
-        {/* v3.12 — Password reset requests inbox */}
-        {pendingResets.length > 0 && (
+        {/* v3.12 — Password reset requests inbox (Batch 2 — hidden in embedded mode) */}
+        {!embedded && pendingResets.length > 0 && (
           <Card className="border-orange-300 bg-orange-50/50">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-orange-900">
@@ -536,8 +665,8 @@ function SuperAdminPanel() {
           </Card>
         )}
 
-        {/* v3.16 — Installments tracker */}
-        {instRows.length > 0 && (
+        {/* v3.16 — Installments tracker (Batch 4 — hidden in embedded mode) */}
+        {!embedded && instRows.length > 0 && (
           <Card className="border-blue-300 bg-blue-50/40">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-blue-900">
@@ -584,8 +713,9 @@ function SuperAdminPanel() {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="flex items-center gap-2"><Building2 className="w-5 h-5 text-blue-600" /> إدارة المكاتب (Tenants)</CardTitle>
-            <div className="flex gap-2">
-              <Button onClick={() => setPricingOpen(true)} variant="outline" className="gap-2">💲 التسعير والخصومات</Button>
+            <div className="flex gap-2 items-center flex-wrap">
+              {embedded && <Input value={tq} onChange={e => setTq(e.target.value)} placeholder="🔍 بحث بالاسم أو المعرف..." className="h-9 w-52" />}
+              {!embedded && <Button onClick={() => setPricingOpen(true)} variant="outline" className="gap-2">💲 التسعير والخصومات</Button>}
               <Button onClick={() => setOpenNew(true)} className="grad-brand text-white gap-2"><Plus className="w-4 h-4" /> إنشاء مكتب جديد</Button>
             </div>
           </CardHeader>
@@ -604,7 +734,7 @@ function SuperAdminPanel() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(data?.tenants || []).map(t => {
+                {(data?.tenants || []).filter(t => !embedded || (!t.is_platform_org && (!tq.trim() || `${t.name} ${t.slug || ''}`.includes(tq.trim())))).map(t => {
                   const q = t.journal_quota || { used: 0, limit: 500 }
                   const pct = q.limit ? (q.used / q.limit) * 100 : 0
                   return (
@@ -637,7 +767,7 @@ function SuperAdminPanel() {
                             try { const r = await api(`/admin/tenants/${t.id}/toggle-status`, { method: 'POST' }); toast.success(`تم — الحالة الآن: ${r.status === 'active' ? 'نشط' : 'معلّق'}`); load() }
                             catch (e) { toast.error(e.message) }
                           }}>{t.status === 'suspended' ? '▶️ تفعيل' : '⏸️ تعليق'}</Button>
-                          <Button size="sm" variant="outline" className="text-purple-600 border-purple-300" onClick={async () => {
+                          {!embedded && <Button size="sm" variant="outline" className="text-purple-600 border-purple-300" onClick={async () => {
                             if (!(await askConfirm({ title: `الدخول كمالك المكتب "${t.name}"`, desc: `ستُفتح جلسة مؤقتة (30 دقيقة) في تاب جديد. سيظهر شريط أحمر أعلى الشاشة يذكّرك بحالة الجلسة.`, icon: '👤', confirmLabel: 'فتح الجلسة' }))) return
                             try {
                               const r = await api(`/admin/tenants/${t.id}/impersonate`, { method: 'POST' })
@@ -646,8 +776,8 @@ function SuperAdminPanel() {
                               window.open('/', '_blank')
                               toast.success(`🎭 جلسة "دخول كـ ${r.tenant.name}" فُتحت في تاب جديد`)
                             } catch (e) { toast.error(e.message) }
-                          }}>🎭 دخول كـ</Button>
-                          {!t.activation_confirmed && (
+                          }}>🎭 دخول كـ</Button>}
+                          {!embedded && !t.activation_confirmed && (
                             <Button size="sm" variant="outline" className="text-blue-600 border-blue-300" onClick={async () => {
                               if (!(await askConfirm({ title: 'تأكيد دفع القسط الأول', desc: `تأكيد أن المكتب "${t.name}" قد دفع القسط الأول؟`, icon: '💳', confirmLabel: 'تأكيد الدفع' }))) return
                               try {
@@ -657,26 +787,21 @@ function SuperAdminPanel() {
                               } catch (e) { toast.error(e.message) }
                             }}>💳 تأكيد دفع</Button>
                           )}
-                          <Button size="sm" variant="outline" className="text-emerald-600" onClick={async () => {
-                            const amt = await askConfirm({ title: 'إضافة رصيد قيود', desc: `إضافة رصيد قيود للمكتب "${t.name}"`, icon: '➕', confirmLabel: 'إضافة الرصيد', input: { label: 'عدد القيود', placeholder: '500', required: true }, inputDefault: '500' })
-                            if (!amt) return
-                            const n = Number(amt); if (!n || n < 1) return
-                            await api(`/admin/tenants/${t.id}`, { method: 'PATCH', body: { top_up_amount: n } })
-                            toast.success(`تم إضافة ${n} قيد`); load()
-                          }}><Plus className="w-3 h-3" /> رصيد</Button>
+                          {/* v4.0 — renamed «رصيد» → «زيادة حصة القيود» + single unified POST /topup path */}
+                          {!embedded && <Button size="sm" variant="outline" className="text-emerald-600" onClick={() => setQuotaTarget(t)}><Plus className="w-3 h-3" /> زيادة حصة القيود</Button>}
                           <Button size="sm" variant="outline" onClick={() => setEditing(t)}><Settings className="w-3 h-3" /></Button>
-                          <Button size="sm" variant="outline" className={t.status === 'active' ? 'text-amber-600' : 'text-emerald-600'}
+                          {!embedded && <Button size="sm" variant="outline" className={t.status === 'active' ? 'text-amber-600' : 'text-emerald-600'}
                             onClick={async () => {
                               const newStatus = t.status === 'active' ? 'suspended' : 'active'
                               await api(`/admin/tenants/${t.id}`, { method: 'PATCH', body: { status: newStatus } })
                               toast.success(newStatus === 'active' ? 'تم التفعيل' : 'تم الإيقاف'); load()
-                            }}><Power className="w-3 h-3" /></Button>
-                          <Button size="sm" variant="outline" className="text-rose-600"
+                            }}><Power className="w-3 h-3" /></Button>}
+                          {!embedded && <Button size="sm" variant="outline" className="text-rose-600"
                             onClick={async () => {
                               if (!(await askConfirm({ title: 'حذف المكتب نهائياً', desc: `حذف المكتب "${t.name}" وجميع بياناته نهائياً؟`, icon: '🗑️', variant: 'danger', irreversible: true, confirmLabel: 'تأكيد الحذف' }))) return
                               await api(`/admin/tenants/${t.id}`, { method: 'DELETE' })
                               toast.success('تم الحذف'); load()
-                            }}><Trash2 className="w-3 h-3" /></Button>
+                            }}><Trash2 className="w-3 h-3" /></Button>}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -690,8 +815,8 @@ function SuperAdminPanel() {
           </CardContent>
         </Card>
 
-        {/* v2.8 — Announcements Management */}
-        <AnnouncementsManager />
+        {/* v2.8 — Announcements Management (own tab in embedded mode) */}
+        {!embedded && <AnnouncementsManager />}
       </div>
 
       <NewTenantDialog open={openNew} onOpenChange={setOpenNew} onSaved={() => { load(); setOpenNew(false) }} />
@@ -699,6 +824,7 @@ function SuperAdminPanel() {
       <AdminResetPasswordDialog req={resetTarget} onClose={() => setResetTarget(null)} onDone={load} />
       <PricingConfigDialog open={pricingOpen} onOpenChange={setPricingOpen} />
       <InstallmentsDialog row={instTarget} onClose={() => setInstTarget(null)} onChanged={load} />
+      <QuotaIncreaseDialog target={quotaTarget} onClose={() => setQuotaTarget(null)} onChanged={load} />
     </div>
   )
 }
@@ -864,80 +990,179 @@ function AdminResetPasswordDialog({ req, onClose, onDone }) {
   )
 }
 
-// v3.14 — Super Admin: pricing config (flexible discount toggle + dynamic features matrix)
-function PricingConfigDialog({ open, onOpenChange }) {
+// v3.14 → v4.0 — Super Admin: pricing config editor (the SAME old editor, extracted so it
+// can render as a full screen inside TenantApp «إدارة رحّال» AND as the legacy dialog).
+// v4.0 adds: description/currency/duration/quota/unlimited/active/sort per plan,
+// offer window, default trial plan, full price breakdown and the change-history log.
+function PricingConfigEditor({ asScreen = false, onDone }) {
   const [cfg, setCfg] = useState(null)
+  const [hist, setHist] = useState([])
   const [saving, setSaving] = useState(false)
-  useEffect(() => { if (open) api('/admin/pricing-config').then(setCfg).catch(e => toast.error(e.message)) }, [open])
+  const loadAll = () => {
+    api('/admin/pricing-config').then(setCfg).catch(e => toast.error(e.message))
+    api('/admin/pricing-config/history').then(h => setHist(h.entries || [])).catch(() => {})
+  }
+  useEffect(() => { loadAll() }, [])
   const setPlan = (key, patch) => setCfg(c => ({ ...c, plans: c.plans.map(p => p.key === key ? { ...p, ...patch } : p) }))
   const save = async () => {
     try {
       setSaving(true)
-      await api('/admin/pricing-config', { method: 'PUT', body: cfg })
-      toast.success('✅ تم حفظ إعدادات التسعير — تنعكس فوراً على واجهة المشتركين')
-      onOpenChange(false)
+      const r = await api('/admin/pricing-config', { method: 'PUT', body: cfg })
+      toast.success(`✅ تم حفظ إعدادات التسعير — سُجّل ${r.changes_logged || 0} تغييراً في السجل`)
+      loadAll()
+      onDone?.()
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
-  if (!cfg) return null
+  if (!cfg) return <div className="text-center py-8 text-slate-400"><Loader2 className="w-5 h-5 animate-spin inline" /> جاري التحميل...</div>
   const disc = cfg.discount_enabled ? (Number(cfg.discount_percent) || 0) : 0
   const n = Number(cfg.installments_count) || 5
+  const dateVal = (v) => v ? String(new Date(v).toISOString()).slice(0, 10) : ''
+  const FIELD_LABELS = { discount_enabled: 'تفعيل الخصم', discount_percent: 'نسبة الخصم %', installments_count: 'عدد الأقساط', default_trial_plan_key: 'الباقة الافتراضية للتجربة', offer_start_at: 'بداية العرض', offer_end_at: 'نهاية العرض', name_ar: 'الاسم', description: 'الوصف', currency: 'العملة', duration_days: 'مدة الاشتراك (يوم)', annual_price: 'السعر الأساسي', max_users: 'حد المستخدمين', max_branches: 'حد الفروع', quota_limit: 'حصة القيود', unlimited_journals: 'قيود مفتوحة', active: 'مفعّلة', sort_order: 'الترتيب', features: 'المزايا' }
+  const fieldLabel = (f) => { const [pk, fk] = String(f).includes('.') ? String(f).split('.') : [null, f]; const pl = pk ? (cfg.plans.find(p => p.key === pk)?.name_ar || pk) + ' — ' : ''; return pl + (FIELD_LABELS[fk] || fk) }
+  const fmtVal = (v) => v === true ? 'نعم' : v === false ? 'لا' : (v === null || v === undefined || v === '') ? '—' : String(v).length > 24 ? String(v).slice(0, 24) + '…' : String(v)
+  return (
+    <div className="space-y-4">
+      {asScreen && (
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h2 className="text-xl font-extrabold flex items-center gap-2">💲 الباقات والتسعير والخصومات</h2>
+            <div className="text-xs text-slate-500">أي تغيير ينعكس آلياً على شاشة الباقات لدى المشتركين — ولا يمس اشتراكات أو أقساطاً سابقة بأثر رجعي</div>
+          </div>
+          <Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? 'جارٍ الحفظ...' : '💾 حفظ ونشر التسعير'}</Button>
+        </div>
+      )}
+      {/* التسعير والخصومات — flexible discount + offer window + installments count */}
+      <div className={`p-3 rounded-lg border-2 ${cfg.discount_enabled ? 'bg-rose-50 border-rose-300' : 'bg-slate-50 border-slate-200'}`}>
+        <div className="text-xs font-black text-slate-700 mb-2">🔥 التسعير والخصومات</div>
+        <div className="flex items-center gap-4 flex-wrap">
+          <Button type="button" size="sm" onClick={() => setCfg({ ...cfg, discount_enabled: !cfg.discount_enabled })}
+            className={cfg.discount_enabled ? 'bg-rose-600 hover:bg-rose-700 text-white' : 'bg-slate-300 hover:bg-slate-400 text-slate-700'}>
+            {cfg.discount_enabled ? '🔥 الخصم مفعّل' : '⭕ الخصم متوقف'}
+          </Button>
+          <div className="flex items-center gap-2">
+            <Label className="text-xs">نسبة الخصم %</Label>
+            <Input type="number" min="0" max="95" value={cfg.discount_percent} onChange={e => setCfg({ ...cfg, discount_percent: Number(e.target.value) })} className="w-24 font-black text-center" disabled={!cfg.discount_enabled} />
+          </div>
+          <div className="flex items-center gap-2">
+            <Label className="text-xs">عدد الأقساط</Label>
+            <Input type="number" min="1" max="24" value={cfg.installments_count} onChange={e => setCfg({ ...cfg, installments_count: Number(e.target.value) })} className="w-20 font-black text-center" />
+          </div>
+          {/* v4.0 — offer window (فارغ = الخصم دائم ما دام مفعلاً) */}
+          <div className="flex items-center gap-2">
+            <Label className="text-xs">بداية العرض</Label>
+            <Input type="date" value={dateVal(cfg.offer_start_at)} onChange={e => setCfg({ ...cfg, offer_start_at: e.target.value || null })} className="w-36 text-xs" disabled={!cfg.discount_enabled} />
+          </div>
+          <div className="flex items-center gap-2">
+            <Label className="text-xs">نهاية العرض</Label>
+            <Input type="date" value={dateVal(cfg.offer_end_at)} onChange={e => setCfg({ ...cfg, offer_end_at: e.target.value || null })} className="w-36 text-xs" disabled={!cfg.discount_enabled} />
+          </div>
+        </div>
+        <div className="text-[10px] text-slate-500 mt-2">معنى الخصم: {disc}% خصم = المشترك يدفع {100 - disc}% من السعر الأساسي. إلغاء الخصم = 0%. ترك تاريخي العرض فارغين = خصم دائم ما دام مفعلاً.</div>
+      </div>
+      {/* إدارة الباقات — plans editor with live breakdown */}
+      <div className="text-xs font-black text-slate-700">📦 إدارة الباقات <span className="font-normal text-slate-400">(القيم الحالية افتراضية وقابلة للتعديل بالكامل)</span></div>
+      <div className="grid md:grid-cols-3 gap-3">
+        {cfg.plans.slice().sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)).map(p => {
+          const base = Number(p.annual_price) || 0
+          const final = Math.round(base * (100 - disc)) / 100
+          const discountValue = Math.round((base - final) * 100) / 100
+          const cur = (p.currency || 'USD') === 'USD' ? '$' : `${p.currency} `
+          return (
+            <Card key={p.key} className={`border-2 ${p.active === false ? 'opacity-60 border-dashed' : ''}`}>
+              <CardHeader className="pb-2 bg-slate-50">
+                <CardTitle className="text-sm flex items-center justify-between">
+                  <span>{p.icon} {p.name_ar} <span className="text-[10px] text-slate-400 font-mono">({p.key})</span></span>
+                  <Button type="button" size="sm" variant={p.active === false ? 'outline' : 'default'}
+                    className={p.active === false ? 'h-6 text-[10px] text-rose-600' : 'h-6 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white'}
+                    onClick={() => setPlan(p.key, { active: p.active === false })}>
+                    {p.active === false ? '⛔ معطّلة' : '✅ مفعّلة'}
+                  </Button>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="pt-3 space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <Field label="اسم الباقة"><Input value={p.name_ar} onChange={e => setPlan(p.key, { name_ar: e.target.value })} /></Field>
+                  <Field label="ترتيب الظهور"><Input type="number" min="0" value={p.sort_order ?? 0} onChange={e => setPlan(p.key, { sort_order: Number(e.target.value) })} /></Field>
+                </div>
+                <Field label="وصف الباقة"><Textarea rows={2} value={p.description || ''} onChange={e => setPlan(p.key, { description: e.target.value })} className="text-xs" placeholder="وصف يظهر للمشتركين..." /></Field>
+                <div className="grid grid-cols-3 gap-2">
+                  <Field label="السعر الأساسي"><Input type="number" min="0" value={p.annual_price} onChange={e => setPlan(p.key, { annual_price: Number(e.target.value) })} className="font-black" /></Field>
+                  <Field label="العملة"><Input value={p.currency || 'USD'} onChange={e => setPlan(p.key, { currency: e.target.value.toUpperCase() })} dir="ltr" className="text-center" /></Field>
+                  <Field label="المدة (يوم)"><Input type="number" min="1" value={p.duration_days || 365} onChange={e => setPlan(p.key, { duration_days: Number(e.target.value) })} /></Field>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <Field label="المستخدمون (0=∞)"><Input type="number" min="0" value={p.max_users} onChange={e => setPlan(p.key, { max_users: Number(e.target.value) })} /></Field>
+                  <Field label="الفروع (0=∞) ⚠️ غير مفعل تشغيلياً حالياً"><Input type="number" min="0" value={p.max_branches} onChange={e => setPlan(p.key, { max_branches: Number(e.target.value) })} /></Field>
+                  <Field label="حصة القيود (0=يدوي)"><Input type="number" min="0" value={p.quota_limit || 0} onChange={e => setPlan(p.key, { quota_limit: Number(e.target.value) })} /></Field>
+                </div>
+                <div className="flex items-center justify-between p-2 rounded border bg-slate-50">
+                  <span className="text-[11px] font-bold">{p.unlimited_journals ? '♾️ الباقة تمنح قيوداً مفتوحة' : '🔒 قيود محدودة بالحصة'}</span>
+                  <Button type="button" size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => setPlan(p.key, { unlimited_journals: !p.unlimited_journals })}>{p.unlimited_journals ? 'إلغاء' : 'منح ∞'}</Button>
+                </div>
+                <label className="flex items-center gap-2 p-2 rounded border cursor-pointer bg-blue-50/50 text-[11px]">
+                  <input type="radio" name="default_trial_plan" checked={cfg.default_trial_plan_key === p.key} onChange={() => setCfg({ ...cfg, default_trial_plan_key: p.key })} />
+                  <span className="font-bold">الباقة الافتراضية للتجربة</span> <span className="text-slate-400">(حدودها تُطبق على التسجيلات الجديدة)</span>
+                </label>
+                <Field label={`المزايا (سطر لكل ميزة — ${(p.features || []).length})`}>
+                  <Textarea rows={5} value={(p.features || []).join('\n')} onChange={e => setPlan(p.key, { features: e.target.value.split('\n') })} className="text-xs" />
+                </Field>
+                {/* v4.0 — full breakdown: أساسي / نسبة / قيمة الخصم / نهائي */}
+                <div className="p-2 rounded bg-blue-50 border border-blue-200 text-[11px] space-y-0.5">
+                  <div className="font-bold text-blue-800">معاينة حية:</div>
+                  <div>السعر الأساسي: <b>{cur}{base}</b> · نسبة الخصم: <b>{disc}%</b> · قيمة الخصم: <b className="text-rose-600">-{cur}{discountValue}</b></div>
+                  <div>السعر النهائي سنوياً: {disc > 0 && <span className="line-through text-slate-400">{cur}{base}</span>} <b className="text-slate-900">{cur}{disc > 0 ? final : base}</b> <span className="text-slate-400">(يدفع {100 - disc}%)</span></div>
+                  <div>القسط: {disc > 0 && <span className="line-through text-slate-400">{cur}{Math.round((base / n) * 100) / 100}</span>} <b className="text-slate-900">{cur}{Math.round(((disc > 0 ? final : base) / n) * 100) / 100}</b> × {n}</div>
+                </div>
+              </CardContent>
+            </Card>
+          )
+        })}
+      </div>
+      <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ تذكير: مراقبة التأشيرات وإدارة البكجات متاحة في جميع الباقات بلا استثناء — أبقِها ضمن المزايا الثلاث. تغيير الأسعار/الخصم لا يمس اشتراكات أو أقساطاً قائمة — يسري على الجديد فقط، إلا بتدخل يدوي صريح على مكتب محدد.</div>
+      {!asScreen && (
+        <DialogFooter>
+          <Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? 'جارٍ الحفظ...' : '💾 حفظ ونشر التسعير'}</Button>
+        </DialogFooter>
+      )}
+      {/* v4.0 — change history: who / when / old → new */}
+      {asScreen && (
+        <Card>
+          <CardHeader className="pb-2"><CardTitle className="text-sm">🕘 سجل تغييرات الباقات والخصومات ({hist.length})</CardTitle></CardHeader>
+          <CardContent>
+            {hist.length === 0 ? <div className="text-center text-slate-400 text-sm py-3">لا توجد تغييرات مسجلة بعد — أول حفظ سيبدأ السجل</div> : (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {hist.map((h, i) => (
+                  <div key={i} className="p-2 rounded border bg-slate-50 text-[11px]">
+                    <div className="flex items-center justify-between font-bold text-slate-700">
+                      <span>👤 {h.by}</span>
+                      <span className="font-mono text-slate-500">{h.at ? new Date(h.at).toLocaleString('ar-EG') : '—'}</span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {(h.changes || []).map((c, j) => (
+                        <span key={j} className="px-1.5 py-0.5 rounded bg-white border text-slate-600">{fieldLabel(c.field)}: <b className="text-rose-600">{fmtVal(c.from)}</b> ← <b className="text-emerald-700">{fmtVal(c.to)}</b></span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+// Legacy thin wrapper — the old «💲 التسعير والخصومات» dialog now renders the SAME editor
+function PricingConfigDialog({ open, onOpenChange }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto" dir="rtl">
+      <DialogContent className="max-w-5xl max-h-[92vh] overflow-y-auto" dir="rtl">
         <DialogHeader>
           <DialogTitle>💲 إعدادات التسعير والخصومات</DialogTitle>
           <DialogDescription>أي تغيير هنا ينعكس آلياً على شاشة الباقات لدى جميع المشتركين</DialogDescription>
         </DialogHeader>
-        {/* Flexible discount */}
-        <div className={`p-3 rounded-lg border-2 ${cfg.discount_enabled ? 'bg-rose-50 border-rose-300' : 'bg-slate-50 border-slate-200'}`}>
-          <div className="flex items-center gap-4 flex-wrap">
-            <Button type="button" size="sm" onClick={() => setCfg({ ...cfg, discount_enabled: !cfg.discount_enabled })}
-              className={cfg.discount_enabled ? 'bg-rose-600 hover:bg-rose-700 text-white' : 'bg-slate-300 hover:bg-slate-400 text-slate-700'}>
-              {cfg.discount_enabled ? '🔥 الخصم مفعّل' : '⭕ الخصم متوقف'}
-            </Button>
-            <div className="flex items-center gap-2">
-              <Label className="text-xs">نسبة الخصم %</Label>
-              <Input type="number" min="0" max="95" value={cfg.discount_percent} onChange={e => setCfg({ ...cfg, discount_percent: Number(e.target.value) })} className="w-24 font-black text-center" disabled={!cfg.discount_enabled} />
-            </div>
-            <div className="flex items-center gap-2">
-              <Label className="text-xs">عدد الأقساط</Label>
-              <Input type="number" min="1" max="12" value={cfg.installments_count} onChange={e => setCfg({ ...cfg, installments_count: Number(e.target.value) })} className="w-20 font-black text-center" />
-            </div>
-          </div>
-        </div>
-        {/* Plans editor with live price preview */}
-        <div className="grid md:grid-cols-3 gap-3">
-          {cfg.plans.map(p => {
-            const final = Math.round(p.annual_price * (100 - disc)) / 100
-            return (
-              <Card key={p.key} className="border-2">
-                <CardHeader className="pb-2 bg-slate-50">
-                  <CardTitle className="text-sm">{p.icon} {p.name_ar} <span className="text-[10px] text-slate-400 font-mono">({p.key})</span></CardTitle>
-                </CardHeader>
-                <CardContent className="pt-3 space-y-2">
-                  <Field label="السعر السنوي الأساسي $"><Input type="number" min="0" value={p.annual_price} onChange={e => setPlan(p.key, { annual_price: Number(e.target.value) })} className="font-black" /></Field>
-                  <div className="grid grid-cols-2 gap-2">
-                    <Field label="حد المستخدمين (0=∞)"><Input type="number" min="0" value={p.max_users} onChange={e => setPlan(p.key, { max_users: Number(e.target.value) })} /></Field>
-                    <Field label="حد الفروع (0=∞)"><Input type="number" min="0" value={p.max_branches} onChange={e => setPlan(p.key, { max_branches: Number(e.target.value) })} /></Field>
-                  </div>
-                  <Field label={`المزايا (سطر لكل ميزة — ${(p.features || []).length})`}>
-                    <Textarea rows={6} value={(p.features || []).join('\n')} onChange={e => setPlan(p.key, { features: e.target.value.split('\n') })} className="text-xs" />
-                  </Field>
-                  <div className="p-2 rounded bg-blue-50 border border-blue-200 text-[11px] space-y-0.5">
-                    <div className="font-bold text-blue-800">معاينة حية:</div>
-                    <div>سنوي: {disc > 0 && <span className="line-through text-slate-400">${p.annual_price}</span>} <b className="text-slate-900">${disc > 0 ? final : p.annual_price}</b></div>
-                    <div>قسط: {disc > 0 && <span className="line-through text-slate-400">${Math.round((p.annual_price / n) * 100) / 100}</span>} <b className="text-slate-900">${Math.round(((disc > 0 ? final : p.annual_price) / n) * 100) / 100}</b> × {n}</div>
-                  </div>
-                </CardContent>
-              </Card>
-            )
-          })}
-        </div>
-        <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ تذكير: مراقبة التأشيرات وإدارة البكجات متاحة في جميع الباقات بلا استثناء — أبقِها ضمن المزايا الثلاث.</div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button>
-          <Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? 'جارٍ الحفظ...' : '💾 حفظ ونشر التسعير'}</Button>
-        </DialogFooter>
+        {open && <PricingConfigEditor onDone={() => onOpenChange(false)} />}
       </DialogContent>
     </Dialog>
   )
@@ -1022,6 +1247,721 @@ function InstallmentsDialog({ row, onClose, onChanged }) {
   )
 }
 
+// v4.0 — «زيادة حصة القيود» (renamed from the misleading «إضافة رصيد»): it raises the
+// JOURNAL-ENTRIES quota — it adds NO money to any wallet. ONE path only: POST /topup.
+function QuotaIncreaseDialog({ target, onClose, onChanged }) {
+  const [amount, setAmount] = useState(500)
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [opId, setOpId] = useState(null) // v4.0.1 — idempotency key per dialog session
+  useEffect(() => { if (target) setOpId((typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`) }, [target])
+  if (!target) return null
+  const q = target.journal_quota || { used: 0, limit: 0 }
+  const remaining = Math.max(0, (q.limit || 0) - (q.used || 0))
+  const submit = async () => {
+    const n = Number(amount)
+    if (!n || n < 1) return toast.error('أدخل مقدار الزيادة')
+    if (!note.trim()) return toast.error('سبب الزيادة مطلوب')
+    try {
+      setBusy(true)
+      const r = await api(`/admin/tenants/${target.id}/topup`, { method: 'POST', body: { amount: n, note, op_id: opId } })
+      toast.success(r.duplicate ? 'ℹ️ هذه العملية نُفذت مسبقاً — لم تُنشأ زيادة ثانية' : `✅ زيدت حصة القيود: ${r.quota.prev_limit} ← ${r.quota.new_limit} (المتبقي الآن ${r.quota.remaining})`)
+      onChanged(); onClose()
+    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <Dialog open={!!target} onOpenChange={v => { if (!v) onClose() }}>
+      <DialogContent className="max-w-md" dir="rtl">
+        <DialogHeader>
+          <DialogTitle>➕ زيادة حصة القيود: {target.name}</DialogTitle>
+          <DialogDescription>تزيد حصة قيود اليومية فقط — لا تضيف أي أموال إلى محفظة المكتب</DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <div className="p-2 rounded border bg-slate-50"><div className="text-[10px] text-slate-500">الحصة الحالية</div><div className="font-black">{q.limit ?? 0}</div></div>
+          <div className="p-2 rounded border bg-amber-50"><div className="text-[10px] text-slate-500">المستخدم</div><div className="font-black text-amber-700">{q.used ?? 0}</div></div>
+          <div className="p-2 rounded border bg-emerald-50"><div className="text-[10px] text-slate-500">المتبقي</div><div className="font-black text-emerald-700">{remaining}</div></div>
+        </div>
+        <Field label="مقدار الزيادة (عدد القيود) *"><Input type="number" min="1" max="1000000" value={amount} onChange={e => setAmount(e.target.value)} className="font-black" /></Field>
+        <Field label="سبب الزيادة *"><Input value={note} onChange={e => setNote(e.target.value)} placeholder="مثال: تجديد اشتراك سنوي / تعويض / عرض ترويجي" /></Field>
+        <div className="text-[10px] text-slate-500">تُسجَّل العملية باسم المنفذ والتاريخ والسبب في سجل زيادات المكتب (top_ups).</div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>إلغاء</Button>
+          <Button onClick={submit} disabled={busy} className="bg-emerald-600 hover:bg-emerald-700 text-white">{busy ? '...' : '➕ تنفيذ الزيادة'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// v4.0 — Batch 2: «الاشتراكات والأقساط» screen inside TenantApp — reuses the OLD APIs
+// and dialogs verbatim (confirm-payment v2.8, installments v3.16, unlimited toggle v3.14,
+// EditTenantDialog overrides). Demo→Paid conversion lives here.
+function PlatformSubscriptionsScreen() {
+  const [data, setData] = useState(null)
+  const [instRows, setInstRows] = useState([])
+  const [instTarget, setInstTarget] = useState(null)
+  const [editing, setEditing] = useState(null)
+  const [quotaTarget, setQuotaTarget] = useState(null)
+  const [q, setQ] = useState('')
+  const load = async () => {
+    try {
+      const [d, ins] = await Promise.all([
+        api('/admin/tenants'),
+        api('/admin/installments-overview').catch(() => []),
+      ])
+      setData(d); setInstRows(ins || [])
+    } catch (e) { toast.error(e.message) }
+  }
+  useEffect(() => { load() }, [])
+  const insById = {}
+  for (const r of instRows) insById[r.id] = r
+  const tenants = (data?.tenants || []).filter(t => !t.is_platform_org && (!q.trim() || `${t.name} ${t.slug || ''}`.includes(q.trim())))
+  const trialCount = tenants.filter(t => (t.subscription || 'trial') === 'trial').length
+  const paidCount = tenants.filter(t => t.subscription === 'paid' || t.activation_confirmed).length
+  const overdueCount = instRows.filter(r => r.overdue).length
+  const confirmPayment = async (t) => {
+    if (!(await askConfirm({ title: 'تحويل إلى مدفوع (Demo → Paid)', desc: `تأكيد أن المكتب "${t.name}" قد دفع؟ سيُفعَّل الاشتراك المدفوع فوراً.`, icon: '💳', confirmLabel: 'تأكيد الدفع' }))) return
+    try {
+      const r = await api(`/admin/tenants/${t.id}/confirm-payment`, { method: 'POST' })
+      toast.success(r.referrer_bonus ? `✅ تم التأكيد + منح +${r.referrer_bonus.bonus_added} قيد إلى "${r.referrer_bonus.referrer_name}"` : '✅ تم تأكيد الدفع — المكتب مدفوع الآن')
+      load()
+    } catch (e) { toast.error(e.message) }
+  }
+  const toggleUnlimited = async (t) => {
+    const next = !t.unlimited_journals
+    if (!(await askConfirm({ title: next ? '♾️ فتح القيود المحاسبية' : '🔒 إغلاق القيود المحاسبية', desc: next ? `فتح قيود غير محدودة للمكتب "${t.name}"؟ (مثلاً بعد سداد آخر قسط أو دفع سنوي)` : `إعادة المكتب "${t.name}" إلى الحصة المحدودة؟`, icon: next ? '♾️' : '🔒', confirmLabel: 'تأكيد' }))) return
+    try { await api(`/admin/tenants/${t.id}`, { method: 'PATCH', body: { unlimited_journals: next } }); toast.success(next ? '♾️ فُتحت القيود' : '🔒 أُغلقت القيود'); load() }
+    catch (e) { toast.error(e.message) }
+  }
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h2 className="text-xl font-extrabold">💳 الاشتراكات والأقساط</h2>
+          <div className="text-xs text-slate-500">التحويل من تجريبي إلى مدفوع، جدولة الأقساط، فتح/إغلاق القيود، وزيادة حصة القيود</div>
+        </div>
+        <Input value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 بحث بالاسم..." className="h-9 w-52" />
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">المكاتب</div><div className="text-xl font-black">{tenants.length}</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">تجريبي</div><div className="text-xl font-black text-amber-600">{trialCount}</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">مدفوع</div><div className="text-xl font-black text-emerald-600">{paidCount}</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">أقساط متأخرة</div><div className={`text-xl font-black ${overdueCount ? 'text-rose-600' : 'text-slate-700'}`}>{overdueCount}</div></CardContent></Card>
+      </div>
+      <Card>
+        <CardContent className="pt-4 overflow-x-auto">
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead>المكتب</TableHead>
+              <TableHead>الاشتراك</TableHead>
+              <TableHead>الباقة · الدفع</TableHead>
+              <TableHead className="text-center">حصة القيود</TableHead>
+              <TableHead className="text-center">الأقساط</TableHead>
+              <TableHead>انتهاء الاشتراك</TableHead>
+              <TableHead className="text-left">إجراءات</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>
+              {tenants.map(t => {
+                const qta = t.journal_quota || { used: 0, limit: 0 }
+                const ins = insById[t.id]
+                const isPaid = t.subscription === 'paid' || t.activation_confirmed
+                const expired = t.subscription_expires_at && new Date(t.subscription_expires_at) < new Date()
+                return (
+                  <TableRow key={t.id} className={ins?.overdue ? 'bg-rose-50/60' : ''}>
+                    <TableCell><div className="font-semibold text-sm">{t.name}</div><div className="text-[10px] text-slate-400 font-mono">{t.slug}</div></TableCell>
+                    <TableCell>
+                      {isPaid
+                        ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">💰 مدفوع</Badge>
+                        : <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100">🧪 تجريبي</Badge>}
+                      {t.activation_confirmed && <div className="text-[9px] text-emerald-600 mt-0.5">✅ دفع مؤكد</div>}
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      <div>{t.plan_tier === 'silver' ? '🥈 سيلفر' : t.plan_tier === 'gold' ? '🥇 جولد' : t.plan_tier === 'enterprise' ? '🏢 إنتربرايز' : t.plan_tier || '—'}</div>
+                      <div className="text-[10px] text-slate-500">{t.billing_mode === 'annual' ? '📅 سنوي' : t.billing_mode === 'installments' ? '💳 أقساط' : '—'} {t.unlimited_journals && <span className="text-emerald-600 font-bold">♾️</span>}</div>
+                    </TableCell>
+                    <TableCell className="text-center">
+                      <div className="text-xs font-bold">{t.unlimited_journals ? '♾️ مفتوحة' : `${qta.used} / ${qta.limit}`}</div>
+                      {!t.unlimited_journals && <div className="text-[9px] text-slate-400">متبقٍ {Math.max(0, (qta.limit || 0) - (qta.used || 0))}</div>}
+                    </TableCell>
+                    <TableCell className="text-center">
+                      {ins && ins.total_count > 0 ? (
+                        <div>
+                          <span className="text-xs font-black">{ins.paid_count}/{ins.total_count}</span>
+                          {ins.overdue && <Badge className="bg-rose-600 text-white text-[9px] mr-1">متأخر</Badge>}
+                          {ins.all_paid && <Badge className="bg-emerald-600 text-white text-[9px] mr-1">مكتمل</Badge>}
+                        </div>
+                      ) : <span className="text-[10px] text-slate-400">بلا جدول</span>}
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      {t.subscription_expires_at ? <span className={expired ? 'text-rose-600 font-bold' : ''}>{String(t.subscription_expires_at).slice(0, 10)}{expired && ' ⚠️'}</span> : '—'}
+                    </TableCell>
+                    <TableCell className="text-left">
+                      <div className="flex gap-1 justify-end flex-wrap">
+                        {!t.activation_confirmed && <Button size="sm" variant="outline" className="h-7 text-[11px] text-blue-600 border-blue-300" onClick={() => confirmPayment(t)}>💳 تأكيد الدفع</Button>}
+                        <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => setInstTarget({ id: t.id, name: t.name, plan_tier: t.plan_tier, installments: (insById[t.id]?.installments) || t.installments || [], unlimited_journals: !!t.unlimited_journals })}>📅 الأقساط</Button>
+                        <Button size="sm" variant="outline" className={`h-7 text-[11px] ${t.unlimited_journals ? 'text-rose-600' : 'text-emerald-600'}`} onClick={() => toggleUnlimited(t)}>{t.unlimited_journals ? '🔒 إغلاق القيود' : '♾️ فتح القيود'}</Button>
+                        <Button size="sm" variant="outline" className="h-7 text-[11px] text-emerald-700" onClick={() => setQuotaTarget(t)}>➕ زيادة حصة القيود</Button>
+                        <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => setEditing(t)}><Settings className="w-3 h-3" /></Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+              {tenants.length === 0 && <TableRow><TableCell colSpan={7} className="text-center py-8 text-slate-400">لا توجد مكاتب</TableCell></TableRow>}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+      <InstallmentsDialog row={instTarget} onClose={() => setInstTarget(null)} onChanged={load} />
+      <EditTenantDialog tenant={editing} onOpenChange={v => { if (!v) setEditing(null) }} onSaved={() => { setEditing(null); load() }} />
+      <QuotaIncreaseDialog target={quotaTarget} onClose={() => setQuotaTarget(null)} onChanged={load} />
+    </div>
+  )
+}
+
+// v4.2 — «مبيعات برنامج رحّال»: PROGRAM sales (plans/subscriptions/renewals) built on
+// EXISTING data only (tenants + pricing_config + installments + confirm-payment) —
+// NO parallel sales engine, NO travel data (tickets/visas/services are excluded by design).
+// A true draft-sale object with its own timeline needs a NEW collection → pending approval.
+function ProgramSalesScreen() {
+  const [data, setData] = useState(null)
+  const [cfg, setCfg] = useState(null)
+  const [instRows, setInstRows] = useState([])
+  const [editing, setEditing] = useState(null)
+  const [instTarget, setInstTarget] = useState(null)
+  const [q, setQ] = useState('')
+  const [fPlan, setFPlan] = useState('all')
+  const [fStatus, setFStatus] = useState('all')
+  const load = async () => {
+    try {
+      const [d, c, ins] = await Promise.all([
+        api('/admin/tenants'),
+        api('/admin/pricing-config').catch(() => null),
+        api('/admin/installments-overview').catch(() => []),
+      ])
+      setData(d); setCfg(c); setInstRows(ins || [])
+    } catch (e) { toast.error(e.message) }
+  }
+  useEffect(() => { load() }, [])
+  const insById = {}; for (const r of instRows) insById[r.id] = r
+  const disc = cfg?.discount_enabled ? (Number(cfg.discount_percent) || 0) : 0
+  const saleRow = (t) => {
+    const p = (cfg?.plans || []).find(x => x.key === t.plan_tier)
+    const base = p ? Number(p.annual_price) || 0 : null
+    const final = base !== null ? Math.round(base * (100 - disc)) / 100 : null
+    const ins = insById[t.id]
+    const paidAmt = (ins?.installments || t.installments || []).filter(i => i.paid).reduce((s, i) => s + (Number(i.amount) || 0), 0)
+    const totalAmt = Number(t.subscription_price) || final || 0
+    const isPaid = t.subscription === 'paid' || t.activation_confirmed
+    const status = isPaid ? 'مدفوع/مفعل'
+      : paidAmt > 0 ? 'دفع جزئي'
+        : ['silver', 'gold', 'enterprise'].includes(t.plan_tier) ? 'بانتظار الدفع'
+          : 'تجريبي (بلا بيع)'
+    return { t, p, base, final, ins, paidAmt, totalAmt, remaining: Math.max(0, totalAmt - paidAmt), status, currency: p?.currency || 'USD' }
+  }
+  const rows = (data?.tenants || []).filter(t => !t.is_platform_org).map(saleRow)
+    .filter(r => (fPlan === 'all' || r.t.plan_tier === fPlan))
+    .filter(r => (fStatus === 'all' || r.status === fStatus))
+    .filter(r => !q.trim() || `${r.t.name} ${r.t.slug || ''}`.includes(q.trim()))
+  const confirmPayment = async (t) => {
+    if (!(await askConfirm({ title: 'اعتماد البيع وتأكيد الدفع', desc: `اعتماد بيع الباقة للمكتب "${t.name}"؟ يتحول لمدفوع فوراً (لا يمكن تنفيذه مرتين).`, icon: '💳', confirmLabel: 'اعتماد وتأكيد' }))) return
+    try { await api(`/admin/tenants/${t.id}/confirm-payment`, { method: 'POST' }); toast.success('✅ اعتُمد البيع — المكتب مدفوع'); load() } catch (e) { toast.error(e.message) }
+  }
+  const exportCSV = () => {
+    const head = ['المكتب', 'الباقة', 'الحالة', 'السعر الأساسي', 'الخصم%', 'السعر النهائي (مرجعي)', 'سعر الاشتراك المسجل', 'العملة', 'طريقة الدفع', 'المدفوع', 'المتبقي', 'بداية التفعيل', 'انتهاء الاشتراك']
+    const lines = rows.map(r => [r.t.name, r.t.plan_tier || '', r.status, r.base ?? '', disc, r.final ?? '', r.t.subscription_price || '', r.currency, r.t.billing_mode || '', r.paidAmt, r.remaining, r.t.activation_confirmed_at ? String(r.t.activation_confirmed_at).slice(0, 10) : '', r.t.subscription_expires_at ? String(r.t.subscription_expires_at).slice(0, 10) : ''])
+    const csv = '\ufeff' + [head, ...lines].map(l => l.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = `rahaal-program-sales-${todayISO()}.csv`; a.click()
+  }
+  const st = { 'مدفوع/مفعل': 'bg-emerald-100 text-emerald-700', 'دفع جزئي': 'bg-blue-100 text-blue-700', 'بانتظار الدفع': 'bg-amber-100 text-amber-700', 'تجريبي (بلا بيع)': 'bg-slate-100 text-slate-600' }
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h2 className="text-xl font-extrabold">📈 مبيعات برنامج رحّال</h2>
+          <div className="text-xs text-slate-500">بيع الباقات والاشتراكات والتجديد — فوق بيانات الاشتراكات القائمة (بلا تذاكر/تأشيرات/سفر)</div>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <Input value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 بحث..." className="h-9 w-44" />
+          <select value={fPlan} onChange={e => setFPlan(e.target.value)} className="h-9 rounded-md border px-2 text-xs bg-white"><option value="all">كل الباقات</option><option value="silver">سيلفر</option><option value="gold">جولد</option><option value="enterprise">إنتربرايز</option></select>
+          <select value={fStatus} onChange={e => setFStatus(e.target.value)} className="h-9 rounded-md border px-2 text-xs bg-white"><option value="all">كل الحالات</option><option>بانتظار الدفع</option><option>دفع جزئي</option><option>مدفوع/مفعل</option><option>تجريبي (بلا بيع)</option></select>
+          <Button size="sm" variant="outline" onClick={exportCSV}>⬇️ تصدير CSV</Button>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {['بانتظار الدفع', 'دفع جزئي', 'مدفوع/مفعل', 'تجريبي (بلا بيع)'].map(s => (
+          <Card key={s}><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">{s}</div><div className="text-xl font-black">{rows.filter(r => r.status === s).length}</div></CardContent></Card>
+        ))}
+      </div>
+      <Card><CardContent className="pt-4 overflow-x-auto">
+        <Table>
+          <TableHeader><TableRow>
+            <TableHead>المكتب العميل</TableHead><TableHead>الباقة</TableHead><TableHead>حالة البيع</TableHead>
+            <TableHead className="text-center">التسعير المرجعي الحالي</TableHead><TableHead className="text-center">سعر الاشتراك</TableHead>
+            <TableHead className="text-center">المدفوع / المتبقي</TableHead><TableHead>الدفع</TableHead><TableHead>البداية → الانتهاء</TableHead><TableHead className="text-left">إجراءات</TableHead>
+          </TableRow></TableHeader>
+          <TableBody>
+            {rows.map(({ t, p, base, final, ins, paidAmt, remaining, status, currency }) => {
+              const cur = currency === 'USD' ? '$' : `${currency} `
+              return (
+                <TableRow key={t.id}>
+                  <TableCell><div className="font-semibold text-sm">{t.name}</div><div className="text-[10px] text-slate-400 font-mono">{t.slug}</div></TableCell>
+                  <TableCell className="text-xs">{p ? `${p.icon} ${p.name_ar}` : (t.plan_tier || '—')}</TableCell>
+                  <TableCell><Badge className={`${st[status]} hover:${st[status]}`}>{status}</Badge></TableCell>
+                  <TableCell className="text-center text-xs">{base !== null ? <><span className={disc > 0 ? 'line-through text-slate-400' : 'font-bold'}>{cur}{base}</span>{disc > 0 && <> <b>{cur}{final}</b> <span className="text-rose-600">(-{disc}%)</span></>}</> : '—'}</TableCell>
+                  <TableCell className="text-center text-xs font-bold">{t.subscription_price ? `${cur}${t.subscription_price}` : '—'}</TableCell>
+                  <TableCell className="text-center text-xs"><span className="text-emerald-700 font-bold">{cur}{paidAmt}</span> / <span className="text-amber-700">{cur}{remaining}</span>{ins?.overdue && <Badge className="bg-rose-600 text-white text-[9px] mr-1">متأخر</Badge>}</TableCell>
+                  <TableCell className="text-xs">{t.billing_mode === 'annual' ? '📅 سنوي' : t.billing_mode === 'installments' ? `💳 أقساط ${ins ? `${ins.paid_count}/${ins.total_count}` : ''}` : '—'}</TableCell>
+                  <TableCell className="text-[10px]">{t.activation_confirmed_at ? String(t.activation_confirmed_at).slice(0, 10) : '—'} ← {t.subscription_expires_at ? String(t.subscription_expires_at).slice(0, 10) : '—'}</TableCell>
+                  <TableCell className="text-left"><div className="flex gap-1 justify-end flex-wrap">
+                    <Button size="sm" variant="outline" className="h-7 text-[11px]" title="مسودة البيع: الباقة/السعر/العملة/طريقة الدفع/التواريخ" onClick={() => setEditing(t)}>📝 مسودة/تعديل</Button>
+                    {!t.activation_confirmed && ['silver', 'gold', 'enterprise'].includes(t.plan_tier) && <Button size="sm" variant="outline" className="h-7 text-[11px] text-blue-600 border-blue-300" onClick={() => confirmPayment(t)}>💳 اعتماد البيع</Button>}
+                    <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => setInstTarget({ id: t.id, name: t.name, plan_tier: t.plan_tier, installments: (insById[t.id]?.installments) || t.installments || [], unlimited_journals: !!t.unlimited_journals })}>📅 الأقساط</Button>
+                  </div></TableCell>
+                </TableRow>
+              )
+            })}
+            {rows.length === 0 && <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">لا نتائج</TableCell></TableRow>}
+          </TableBody>
+        </Table>
+      </CardContent></Card>
+      <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ حدود موثقة: الإلغاء/الاسترداد المالي غير متاح — لا ربط بعد بين الاعتماد وسندات القبض (فجوة موثقة)، وسجل «مسودة بيع» مستقل بجدول حالات كامل يحتاج Collection جديدة بانتظار موافقتك.</div>
+      <EditTenantDialog tenant={editing} onOpenChange={v => { if (!v) setEditing(null) }} onSaved={() => { setEditing(null); load() }} />
+      <InstallmentsDialog row={instTarget} onClose={() => setInstTarget(null)} onChanged={load} />
+    </div>
+  )
+}
+
+// v4.2 — Commission RULES manager (operational): stored in the existing platform_settings
+// collection — the financial commissions LEDGER awaits approval for a new collection.
+function CommissionRulesManager() {
+  const [rules, setRules] = useState(null)
+  const [meta, setMeta] = useState({})
+  const load = () => api('/admin/commission-rules').then(r => { setRules(r.rules || []); setMeta({ at: r.updated_at, by: r.updated_by }) }).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [])
+  const save = async (next, reasonMsg) => {
+    const reason = prompt('السبب (إلزامي — يسجل في التدقيق):', reasonMsg || '')
+    if (!reason) return
+    try { await api('/admin/commission-rules', { method: 'PUT', body: { rules: next, reason } }); toast.success('✅ حُفظت قواعد العمولات'); load() } catch (e) { toast.error(e.message) }
+  }
+  const addRule = () => {
+    const name = prompt('اسم القاعدة:', ''); if (!name) return
+    const type = prompt('النوع: percent = نسبة | fixed = مبلغ ثابت', 'percent'); if (type === null) return
+    const value = prompt(type === 'fixed' ? 'المبلغ:' : 'النسبة %:', '10'); if (value === null) return
+    const applies = prompt('تطبق على: silver / gold / enterprise / all', 'all'); if (applies === null) return
+    const benef = prompt('اسم المستفيد (مسوق/جهة):', ''); if (benef === null) return
+    save([...(rules || []), { name, type: type === 'fixed' ? 'fixed' : 'percent', value: Number(value) || 0, applies_to: applies, beneficiary_type: 'marketer', beneficiary_name: benef, active: true, priority: (rules || []).length }], `إضافة قاعدة ${name}`)
+  }
+  if (rules === null) return <div className="text-center py-4 text-slate-400 text-sm">جاري تحميل قواعد العمولات...</div>
+  return (
+    <Card>
+      <CardHeader className="pb-2 flex flex-row items-center justify-between">
+        <CardTitle className="text-sm">📐 قواعد العمولات (تشغيلي — v4.2)</CardTitle>
+        <Button size="sm" onClick={addRule}>➕ إضافة قاعدة</Button>
+      </CardHeader>
+      <CardContent>
+        {rules.length === 0 ? <div className="text-center text-slate-400 text-sm py-3">لا قواعد بعد — أضف الأولى</div> : (
+          <Table>
+            <TableHeader><TableRow><TableHead>القاعدة</TableHead><TableHead>النوع/القيمة</TableHead><TableHead>النطاق</TableHead><TableHead>المستفيد</TableHead><TableHead>الفترة</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">—</TableHead></TableRow></TableHeader>
+            <TableBody>
+              {rules.map((r, i) => (
+                <TableRow key={r.id || i} className={r.active === false ? 'opacity-50' : ''}>
+                  <TableCell className="font-semibold text-sm">{r.name}</TableCell>
+                  <TableCell className="text-xs">{r.type === 'fixed' ? `💵 ثابت ${r.value}` : `٪ نسبة ${r.value}%`}</TableCell>
+                  <TableCell className="text-xs">{r.applies_to === 'all' ? 'كل الباقات' : r.applies_to}</TableCell>
+                  <TableCell className="text-xs">{r.beneficiary_name || '—'} <span className="text-slate-400">({r.beneficiary_type})</span></TableCell>
+                  <TableCell className="text-[10px]">{r.start_at ? String(r.start_at).slice(0, 10) : '∞'} ← {r.end_at ? String(r.end_at).slice(0, 10) : '∞'}</TableCell>
+                  <TableCell><Badge className={r.active !== false ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}>{r.active !== false ? 'نشطة' : 'معطلة'}</Badge></TableCell>
+                  <TableCell className="text-left"><div className="flex gap-1 justify-end">
+                    <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => {
+                      const value = prompt('القيمة الجديدة:', r.value); if (value === null) return
+                      save(rules.map((x, j) => j === i ? { ...x, value: Number(value) || 0 } : x), `تعديل قيمة ${r.name}`)
+                    }}>✏️ تعديل</Button>
+                    <Button size="sm" variant="outline" className={`h-7 text-[10px] ${r.active !== false ? 'text-rose-600' : 'text-emerald-600'}`} onClick={() => save(rules.map((x, j) => j === i ? { ...x, active: x.active === false } : x), `${r.active !== false ? 'تعطيل' : 'تفعيل'} ${r.name}`)}>{r.active !== false ? '⛔ تعطيل' : '✅ تفعيل'}</Button>
+                  </div></TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+        <div className="text-[10px] text-slate-500 mt-2">آخر تحديث: {meta.by || '—'} · {meta.at ? new Date(meta.at).toLocaleString('ar-EG') : '—'} — منع التداخل مفروض في الخادم (409) · كل حفظ يسجل في التدقيق بسبب إلزامي</div>
+        <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mt-2">⚠️ سجل عمليات العمولة المالي (استحقاق/اعتماد/دفع/عكس) يتطلب Collection مالية جديدة — متوقف بانتظار موافقتك الصريحة قبل الإنشاء.</div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// v4.3 — «مركز الطلبات»: the ONE operational registry (platform_orders). Sales are
+// order types here; the existing specialized requests aggregation is embedded below.
+function OrdersScreen({ salesOnly = false }) {
+  const [rows, setRows] = useState(null)
+  const [types, setTypes] = useState({ types: {}, status_labels: {} })
+  const [tenants, setTenants] = useState([])
+  const [fStatus, setFStatus] = useState('')
+  const [fType, setFType] = useState('')
+  const [q, setQ] = useState('')
+  const [detail, setDetail] = useState(null)
+  const [creating, setCreating] = useState(false)
+  const load = () => {
+    const qs = new URLSearchParams()
+    if (salesOnly) qs.set('category', 'sales')
+    if (fStatus) qs.set('status', fStatus)
+    if (fType) qs.set('type', fType)
+    if (q.trim()) qs.set('q', q.trim())
+    api(`/admin/orders?${qs}`).then(r => setRows(r.rows || [])).catch(e => toast.error(e.message))
+  }
+  useEffect(() => {
+    api('/admin/orders/types').then(setTypes).catch(() => {})
+    api('/admin/tenants').then(d => setTenants((d?.tenants || []).filter(t => !t.is_platform_org))).catch(() => {})
+  }, [])
+  useEffect(() => { load() }, [fStatus, fType, salesOnly])
+  const SL = types.status_labels || {}
+  const act = async (o, action, extra = {}, promptReason = true) => {
+    const reason = promptReason ? prompt('السبب (إلزامي):') : 'تحديث'
+    if (promptReason && !reason) return
+    try { await api(`/admin/orders/${o.id}`, { method: 'PATCH', body: { action, reason, ...extra } }); toast.success('✅ تم'); load(); if (detail?.order?.id === o.id) openDetail(o) } catch (e) { toast.error(e.message) }
+  }
+  const openDetail = async (o) => { try { setDetail(await api(`/admin/orders/${o.id}`)) } catch (e) { toast.error(e.message) } }
+  const exportCSV = () => {
+    const head = ['المرجع', 'النوع', 'المكتب', 'الحالة', 'الأولوية', 'المبلغ', 'العملة', 'المسؤول', 'الاستحقاق', 'أُنشئ']
+    const lines = (rows || []).map(o => [o.ref, o.type_label, o.tenant_name || '', SL[o.status] || o.status, o.priority, o.amount ?? '', o.currency, o.assigned_to || '', o.due_at ? String(o.due_at).slice(0, 10) : '', String(o.created_at).slice(0, 10)])
+    const csv = '\ufeff' + [head, ...lines].map(l => l.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = `rahaal-orders-${todayISO()}.csv`; a.click()
+  }
+  const stBadge = { new: 'bg-blue-100 text-blue-700', under_review: 'bg-indigo-100 text-indigo-700', needs_info: 'bg-purple-100 text-purple-700', awaiting_payment: 'bg-amber-100 text-amber-700', awaiting_approval: 'bg-orange-100 text-orange-700', approved: 'bg-emerald-100 text-emerald-700', rejected: 'bg-rose-100 text-rose-700', executed: 'bg-teal-100 text-teal-700', completed: 'bg-green-100 text-green-800', cancelled: 'bg-slate-200 text-slate-600' }
+  const openCount = (rows || []).filter(o => ['new', 'under_review', 'needs_info', 'awaiting_payment', 'awaiting_approval'].includes(o.status)).length
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h2 className="text-xl font-extrabold">{salesOnly ? '🧾 أوامر البيع (من مركز الطلبات — المصدر نفسه)' : '📥 مركز الطلبات'}</h2>
+          {!salesOnly && <div className="text-xs text-slate-500">السجل التشغيلي الموحد — المبيعات أنواع طلبات هنا (platform_orders) بلا نسخة ثانية</div>}
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <Input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && load()} placeholder="🔍 مرجع/مكتب..." className="h-9 w-40" />
+          <select value={fType} onChange={e => setFType(e.target.value)} className="h-9 rounded-md border px-2 text-xs bg-white"><option value="">كل الأنواع</option>{Object.entries(types.types || {}).filter(([, v]) => !salesOnly || v.category === 'sales').map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}</select>
+          <select value={fStatus} onChange={e => setFStatus(e.target.value)} className="h-9 rounded-md border px-2 text-xs bg-white"><option value="">كل الحالات</option>{Object.entries(SL).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+          <Button size="sm" variant="outline" onClick={exportCSV}>⬇️ CSV</Button>
+          <Button size="sm" onClick={() => setCreating(true)}>➕ طلب جديد</Button>
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">إجمالي (المعروض)</div><div className="text-xl font-black">{rows?.length ?? '—'}</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">مفتوحة</div><div className="text-xl font-black text-amber-600">{openCount}</div></CardContent></Card>
+        <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">متأخرة</div><div className="text-xl font-black text-rose-600">{(rows || []).filter(o => o.late).length}</div></CardContent></Card>
+      </div>
+      <Card><CardContent className="pt-4 overflow-x-auto">
+        <Table>
+          <TableHeader><TableRow><TableHead>المرجع</TableHead><TableHead>النوع</TableHead><TableHead>المكتب</TableHead><TableHead>المبلغ</TableHead><TableHead>الحالة</TableHead><TableHead>الأولوية</TableHead><TableHead>المسؤول</TableHead><TableHead>الاستحقاق</TableHead><TableHead className="text-left">إجراءات</TableHead></TableRow></TableHeader>
+          <TableBody>
+            {rows === null ? <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">جاري التحميل...</TableCell></TableRow>
+              : rows.map(o => (
+                <TableRow key={o.id} className={o.late ? 'bg-rose-50/60' : ''}>
+                  <TableCell className="font-mono text-xs font-bold">{o.ref}</TableCell>
+                  <TableCell className="text-xs">{o.type_label}<div className="text-[9px] text-slate-400">{o.category === 'sales' ? '🧾 مبيعات' : '🛠️ إداري'}{o.financial && ' · مالي'}</div></TableCell>
+                  <TableCell className="text-xs">{o.tenant_name || '—'}</TableCell>
+                  <TableCell className="text-xs font-bold">{o.amount != null ? `${o.currency === 'USD' ? '$' : o.currency + ' '}${o.amount}` : '—'}</TableCell>
+                  <TableCell><Badge className={`${stBadge[o.status]} hover:${stBadge[o.status]}`}>{SL[o.status] || o.status}</Badge>{o.late && <div className="text-[9px] text-rose-600 font-bold">⏰ متأخر</div>}</TableCell>
+                  <TableCell className="text-xs">{o.priority}</TableCell>
+                  <TableCell className="text-[10px]">{o.assigned_to || o.assigned_department || '—'}</TableCell>
+                  <TableCell className="text-[10px]">{o.due_at ? String(o.due_at).slice(0, 10) : '—'}</TableCell>
+                  <TableCell className="text-left"><div className="flex gap-1 justify-end flex-wrap">
+                    <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => openDetail(o)}>👁️ Timeline</Button>
+                    {['new', 'under_review', 'needs_info', 'awaiting_payment', 'awaiting_approval'].includes(o.status) && <>
+                      <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => { const a2 = prompt('تعيين إلى (بريد المدير أو اسم القسم):', o.assigned_to || ''); if (a2 === null) return; act(o, 'assign', { assignee: a2 }) }}>👤 تعيين</Button>
+                      <Button size="sm" variant="outline" className="h-7 text-[10px] text-emerald-700" onClick={() => act(o, 'approve')}>✅ اعتماد</Button>
+                      <Button size="sm" variant="outline" className="h-7 text-[10px] text-rose-600" onClick={() => act(o, 'reject')}>⛔ رفض</Button>
+                      <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => act(o, 'cancel')}>🚫 إلغاء</Button>
+                    </>}
+                    {o.status === 'approved' && <Button size="sm" variant="outline" className="h-7 text-[10px] text-teal-700" onClick={() => act(o, 'execute')}>⚙️ تنفيذ</Button>}
+                    {o.status === 'executed' && <Button size="sm" variant="outline" className="h-7 text-[10px] text-green-700" onClick={() => act(o, 'complete')}>🏁 إكمال</Button>}
+                    {['rejected', 'cancelled'].includes(o.status) && <>
+                      <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => act(o, 'reopen')}>↩️ إعادة فتح</Button>
+                      <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => act(o, 'archive')}>🗄️ أرشفة</Button>
+                    </>}
+                  </div></TableCell>
+                </TableRow>
+              ))}
+            {rows?.length === 0 && <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">لا طلبات — أنشئ الأول</TableCell></TableRow>}
+          </TableBody>
+        </Table>
+      </CardContent></Card>
+      {creating && <OrderCreateDialog types={types.types} tenants={tenants} salesOnly={salesOnly} onClose={() => setCreating(false)} onDone={() => { setCreating(false); load() }} />}
+      {detail && (
+        <Dialog open onOpenChange={() => setDetail(null)}><DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto" dir="rtl">
+          <DialogHeader><DialogTitle>📄 {detail.order?.ref} — {detail.order?.type_label}</DialogTitle>
+            <DialogDescription>{detail.order?.tenant_name || ''} · الحالة: {SL[detail.order?.status] || detail.order?.status} · أنشأه {detail.order?.created_by}</DialogDescription></DialogHeader>
+          {detail.order?.details && <div className="text-xs bg-slate-50 rounded p-2">{detail.order.details}</div>}
+          {(detail.commissions || []).length > 0 && <div className="text-xs bg-fuchsia-50 border border-fuchsia-200 rounded p-2">٪ عمولات مرتبطة: {detail.commissions.map(c => `${c.amount} ${c.currency} (${c.beneficiary_name})`).join(' · ')}</div>}
+          <div className="text-xs font-black">Timeline:</div>
+          <div className="space-y-1 max-h-64 overflow-y-auto">
+            {(detail.order?.events || []).slice().reverse().map((e, i) => (
+              <div key={i} className="text-[11px] p-2 rounded border bg-white flex justify-between gap-2">
+                <span><b>{e.type}</b> — {e.note}</span>
+                <span className="text-slate-400 font-mono whitespace-nowrap">{e.by?.split('@')[0]} · {e.at ? new Date(e.at).toLocaleString('ar-EG') : ''}</span>
+              </div>
+            ))}
+          </div>
+        </DialogContent></Dialog>
+      )}
+    </div>
+  )
+}
+
+function OrderCreateDialog({ types, tenants, salesOnly, onClose, onDone }) {
+  const [f, setF] = useState({ type: salesOnly ? 'new_subscription' : 'other', tenant_id: '', plan_key: '', amount: '', currency: 'USD', priority: 'normal', due_at: '', details: '' })
+  const [busy, setBusy] = useState(false)
+  const [opId] = useState(() => (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`)
+  const submit = async () => {
+    try {
+      setBusy(true)
+      const r = await api('/admin/orders', { method: 'POST', body: { ...f, amount: f.amount === '' ? undefined : Number(f.amount), op_id: opId } })
+      toast.success(r.duplicate ? 'ℹ️ الطلب موجود مسبقاً (منع التكرار)' : `✅ أُنشئ الطلب ${r.order.ref}`)
+      onDone()
+    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <Dialog open onOpenChange={v => { if (!v) onClose() }}><DialogContent className="max-w-lg" dir="rtl">
+      <DialogHeader><DialogTitle>➕ طلب جديد {salesOnly ? '(أمر بيع)' : ''}</DialogTitle><DialogDescription>رقم مرجعي موحد ORD تلقائي · Idempotency مفعلة</DialogDescription></DialogHeader>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="النوع *"><select value={f.type} onChange={e => setF({ ...f, type: e.target.value })} className="h-9 w-full rounded-md border px-2 text-xs bg-white">{Object.entries(types || {}).filter(([, v]) => !salesOnly || v.category === 'sales').map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}</select></Field>
+        <Field label="المكتب"><select value={f.tenant_id} onChange={e => setF({ ...f, tenant_id: e.target.value })} className="h-9 w-full rounded-md border px-2 text-xs bg-white"><option value="">— بلا —</option>{tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></Field>
+        <Field label="الباقة"><select value={f.plan_key} onChange={e => setF({ ...f, plan_key: e.target.value })} className="h-9 w-full rounded-md border px-2 text-xs bg-white"><option value="">—</option><option value="silver">سيلفر</option><option value="gold">جولد</option><option value="enterprise">إنتربرايز</option></select></Field>
+        <Field label="الأولوية"><select value={f.priority} onChange={e => setF({ ...f, priority: e.target.value })} className="h-9 w-full rounded-md border px-2 text-xs bg-white"><option value="low">منخفضة</option><option value="normal">عادية</option><option value="high">عالية</option><option value="critical">حرجة</option></select></Field>
+        <Field label="المبلغ"><Input type="number" min="0" value={f.amount} onChange={e => setF({ ...f, amount: e.target.value })} /></Field>
+        <Field label="العملة"><Input value={f.currency} onChange={e => setF({ ...f, currency: e.target.value.toUpperCase() })} dir="ltr" className="text-center" /></Field>
+        <Field label="تاريخ الاستحقاق"><Input type="date" value={f.due_at} onChange={e => setF({ ...f, due_at: e.target.value })} /></Field>
+      </div>
+      <Field label="التفاصيل"><Textarea rows={3} value={f.details} onChange={e => setF({ ...f, details: e.target.value })} /></Field>
+      <DialogFooter><Button variant="outline" onClick={onClose}>إلغاء</Button><Button onClick={submit} disabled={busy}>{busy ? '...' : '➕ إنشاء'}</Button></DialogFooter>
+    </DialogContent></Dialog>
+  )
+}
+
+// v4.3 — Program commissions LEDGER (platform_commissions): linked to platform_orders,
+// full snapshot, unique index against duplicates. Pay is blocked until financial linkage.
+function CommissionsLedger() {
+  const [rows, setRows] = useState(null)
+  const [labels, setLabels] = useState({})
+  const [rules, setRules] = useState([])
+  const [salesOrders, setSalesOrders] = useState([])
+  const load = () => {
+    api('/admin/commissions-ledger').then(r => { setRows(r.rows || []); setLabels(r.status_labels || {}) }).catch(e => toast.error(e.message))
+    api('/admin/commission-rules').then(r => setRules(r.rules || [])).catch(() => {})
+    api('/admin/orders?category=sales').then(r => setSalesOrders(r.rows || [])).catch(() => {})
+  }
+  useEffect(() => { load() }, [])
+  const createComm = async () => {
+    const activeRules = rules.filter(r => r.active !== false)
+    if (!salesOrders.length) return toast.error('لا أوامر بيع في مركز الطلبات بعد')
+    if (!activeRules.length) return toast.error('لا قواعد عمولة نشطة')
+    const oref = prompt(`مرجع أمر البيع:\n${salesOrders.slice(0, 8).map(o => `${o.ref} — ${o.tenant_name || ''} (${o.amount ?? '—'} ${o.currency})`).join('\n')}`)
+    if (!oref) return
+    const order = salesOrders.find(o => o.ref === oref.trim())
+    if (!order) return toast.error('مرجع غير موجود')
+    const rname = prompt(`اسم القاعدة:\n${activeRules.map(r => `${r.name} (${r.type === 'fixed' ? r.value : r.value + '%'})`).join('\n')}`, activeRules[0]?.name)
+    if (!rname) return
+    const rule = activeRules.find(r => r.name === rname.trim())
+    if (!rule) return toast.error('قاعدة غير موجودة')
+    const benef = prompt('المستفيد (بريد مستخدم/موظف قائم أو معرف مكتب — لا حسابات مسوقين):', rule.beneficiary_name || '')
+    if (!benef) return
+    try {
+      const r = await api('/admin/commissions-ledger', { method: 'POST', body: { order_id: order.id, rule_id: rule.id, beneficiary_key: benef, beneficiary_name: benef, reason: 'إنشاء عمولة من البيع' } })
+      toast.success(r.duplicate ? 'ℹ️ العمولة موجودة مسبقاً — لم تتكرر (Unique Index)' : `✅ أُنشئت عمولة ${r.commission.amount} ${r.commission.currency}`)
+      load()
+    } catch (e) { toast.error(e.message) }
+  }
+  const act = async (c, action) => {
+    const reason = prompt('السبب (إلزامي):'); if (!reason) return
+    try { await api(`/admin/commissions-ledger/${c.id}`, { method: 'PATCH', body: { action, reason } }); toast.success('✅ تم'); load() } catch (e) { toast.error(e.message) }
+  }
+  const stC = { pending: 'bg-slate-200 text-slate-700', due: 'bg-amber-100 text-amber-700', approved: 'bg-emerald-100 text-emerald-700', paid: 'bg-green-200 text-green-800', rejected: 'bg-rose-100 text-rose-700', cancelled: 'bg-slate-100 text-slate-500', reversed: 'bg-purple-100 text-purple-700' }
+  return (
+    <Card>
+      <CardHeader className="pb-2 flex flex-row items-center justify-between">
+        <CardTitle className="text-sm">💰 سجل عمولات البرنامج (platform_commissions — مرتبط بمركز الطلبات)</CardTitle>
+        <Button size="sm" onClick={createComm}>➕ عمولة من بيع</Button>
+      </CardHeader>
+      <CardContent>
+        {rows === null ? <div className="text-center text-slate-400 text-sm py-3">جاري التحميل...</div>
+          : rows.length === 0 ? <div className="text-center text-slate-400 text-sm py-3">لا عمولات مسجلة — أنشئ الأولى من أمر بيع</div>
+            : <Table>
+              <TableHeader><TableRow><TableHead>الطلب</TableHead><TableHead>المكتب/الباقة</TableHead><TableHead>القاعدة (Snapshot)</TableHead><TableHead>المستفيد</TableHead><TableHead className="text-center">الأساس ← العمولة</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">إجراءات</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {rows.map(c => (
+                  <TableRow key={c.id}>
+                    <TableCell className="font-mono text-xs font-bold">{c.order_ref}</TableCell>
+                    <TableCell className="text-xs">{c.tenant_name || '—'}<div className="text-[9px] text-slate-400">{c.plan_key || ''}</div></TableCell>
+                    <TableCell className="text-xs">{c.rule_name}<div className="text-[9px] text-slate-400">{c.rule_type === 'fixed' ? `ثابت ${c.rule_value}` : `${c.rule_value}%`}</div></TableCell>
+                    <TableCell className="text-xs">{c.beneficiary_name}<div className="text-[9px] text-slate-400">{c.beneficiary_type}</div></TableCell>
+                    <TableCell className="text-center text-xs">{c.basis} ← <b className="text-fuchsia-700">{c.amount} {c.currency}</b></TableCell>
+                    <TableCell><Badge className={`${stC[c.status]} hover:${stC[c.status]}`}>{labels[c.status] || c.status}</Badge></TableCell>
+                    <TableCell className="text-left"><div className="flex gap-1 justify-end flex-wrap">
+                      {c.status === 'pending' && <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => act(c, 'mark_due')}>⏳ استحقاق</Button>}
+                      {['pending', 'due'].includes(c.status) && <Button size="sm" variant="outline" className="h-7 text-[10px] text-emerald-700" onClick={() => act(c, 'approve')}>✅ اعتماد</Button>}
+                      {['due', 'approved'].includes(c.status) && <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => act(c, 'hold')}>⏸️ تعليق</Button>}
+                      {!['paid', 'reversed', 'cancelled', 'rejected'].includes(c.status) && <Button size="sm" variant="outline" className="h-7 text-[10px] text-rose-600" onClick={() => act(c, 'reject')}>⛔ رفض</Button>}
+                      {c.status === 'approved' && <Button size="sm" variant="outline" className="h-7 text-[10px] text-purple-700" onClick={() => act(c, 'reverse')}>↩️ عكس</Button>}
+                      {['pending', 'due'].includes(c.status) && <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => act(c, 'cancel')}>🚫 إلغاء</Button>}
+                      <Button size="sm" variant="outline" className="h-7 text-[10px] opacity-60" onClick={() => act(c, 'pay')}>💵 دفع</Button>
+                    </div></TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>}
+        <div className="text-[10px] text-slate-500 mt-2">المبلغ المعتمد/المدفوع لا يُعدل مباشرة — التصحيح بالعكس الموثق فقط · التكرار ممنوع بـUnique Index (طلب+قاعدة+مستفيد) · الدفع محجوب حتى اكتمال ربط سند الصرف</div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// ============ v4.4 — CONSOLIDATION HUBS (reuse-only: existing components as tabs) ============
+function HubTabs({ tabs, initial }) {
+  const [t, setT] = useState(initial || tabs[0].key)
+  const cur = tabs.find(x => x.key === t) || tabs[0]
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-1 flex-wrap">
+        {tabs.map(x => (
+          <button key={x.key} onClick={() => setT(x.key)}
+            className={`px-4 py-1.5 rounded-lg text-sm font-bold border ${t === x.key ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+            {x.label}
+          </button>
+        ))}
+      </div>
+      <div key={cur.key}>{cur.render()}</div>
+    </div>
+  )
+}
+
+// «إدارة المكاتب» — one section: offices list (old panel) + verifications tab + Office 360°
+function PlatformOfficesHub() {
+  return <HubTabs tabs={[
+    { key: 'list', label: '🏢 المكاتب', render: () => <SuperAdminPanel embedded /> },
+    { key: 'verify', label: '✅ توثيق المكاتب', render: () => <OfficeVerificationsPanel /> },
+    { key: 'office360', label: '🔍 Office 360°', render: () => <OfficesSection /> },
+  ]} />
+}
+
+// «المستخدمون والصلاحيات» — one section: rahaal managers + roles/permissions + password reset requests
+function PlatformPeopleHub() {
+  return <HubTabs tabs={[
+    { key: 'staff', label: '👑 مديرو رحّال', render: () => <AdminStaffCenter /> },
+    { key: 'perms', label: '🛡️ الأدوار والصلاحيات (مستخدمو المنصة)', render: () => <AdminPermsCenter /> },
+    { key: 'resets', label: '🔑 طلبات استعادة كلمة المرور', render: () => <ResetRequestsPanel /> },
+  ]} />
+}
+
+// «إعدادات النظام» — one entry: general/maintenance, backup, audit&security, health
+// (v4.4.1 — «العملات وأسعار الصرف» moved OUT of system settings into «الصناديق والبنوك»)
+function PlatformSystemHub() {
+  return <HubTabs tabs={[
+    { key: 'system', label: '⚙️ عام وصيانة وبيئة', render: () => <AdminSystemCenter /> },
+    { key: 'backup', label: '💾 النسخ الاحتياطي والاستعادة', render: () => <AdminBackupCenter /> },
+    { key: 'audit', label: '🕵️ Audit & Security', render: () => <AdminAuditCenter /> },
+    { key: 'health', label: '❤️ System Health', render: () => <AdminHealthCenter /> },
+  ]} />
+}
+
+// «الصناديق والبنوك» (super admin only wrapper): tab 1 = the ORIGINAL financial screen
+// untouched (boxes + bank accounts); then (v4.4.1 order): currencies & FX rates —
+// definitions/buy-sell rates/history (NOT «حركة العملات» which stays untouched for
+// actual exchange operations) — then payment methods & financial entities (with
+// receiving accounts). Single source: existing components/APIs/collections only.
+function BoxesBanksHub() {
+  return <HubTabs tabs={[
+    { key: 'boxes', label: '🏦 الصناديق والحسابات البنكية (المحتوى الأصلي)', render: () => <BoxesScreen /> },
+    { key: 'currency', label: '💱 العملات وأسعار الصرف', render: () => <AdminCurrencyCenter /> },
+    { key: 'payfin', label: '💳 طرق الدفع والجهات المالية وحسابات الاستلام', render: () => <AdminPayFinCenter /> },
+  ]} />
+}
+
+// v4.4 — «توثيق المكاتب» tab (reuses the existing verification APIs — no new workflow)
+function OfficeVerificationsPanel() {
+  const [rows, setRows] = useState(null)
+  const load = () => api('/admin/office-verifications').then(r => setRows(r.verifications || r.rows || r.requests || (Array.isArray(r) ? r : []))).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [])
+  const decide = async (r, decision) => {
+    const reason = prompt(decision === 'verified' ? 'ملاحظة الاعتماد (اختياري):' : 'سبب الرفض (إلزامي):')
+    if (decision === 'rejected' && !reason) return
+    if (reason === null) return
+    try { await api(`/admin/office-verifications/${r.tenant_id}/decision`, { method: 'POST', body: { decision, reason: reason || '' } }); toast.success('✅ تم'); load() } catch (e) { toast.error(e.message) }
+  }
+  const stV = { pending: 'bg-amber-100 text-amber-700', verified: 'bg-emerald-100 text-emerald-700', rejected: 'bg-rose-100 text-rose-700', unverified: 'bg-slate-100 text-slate-500' }
+  const stL = { pending: 'معلق للمراجعة', verified: 'موثق', rejected: 'مرفوض', unverified: 'لم يقدم طلباً' }
+  return (
+    <Card>
+      <CardHeader className="pb-2"><CardTitle className="text-sm">✅ طلبات توثيق المكاتب</CardTitle></CardHeader>
+      <CardContent>
+        {rows === null ? <div className="text-center text-slate-400 text-sm py-4">جاري التحميل...</div>
+          : rows.length === 0 ? <div className="text-center text-slate-400 text-sm py-4">لا طلبات توثيق</div>
+            : <Table>
+              <TableHeader><TableRow><TableHead>المكتب</TableHead><TableHead>المستندات</TableHead><TableHead>تاريخ التقديم</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">القرار</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {rows.map(r => (
+                  <TableRow key={r.tenant_id}>
+                    <TableCell className="text-sm font-semibold">{r.office_name || r.tenant_id}</TableCell>
+                    <TableCell className="text-xs">{(r.documents || []).length} مستند{r.reject_reason && <div className="text-[9px] text-rose-500">آخر رفض: {r.reject_reason}</div>}</TableCell>
+                    <TableCell className="text-[10px]">{r.submitted_at ? String(r.submitted_at).slice(0, 10) : '—'}</TableCell>
+                    <TableCell><Badge className={stV[r.status] || 'bg-slate-100 text-slate-600'}>{stL[r.status] || r.status}</Badge></TableCell>
+                    <TableCell className="text-left">{['pending', 'rejected'].includes(r.status) && <div className="flex gap-1 justify-end">
+                      <Button size="sm" variant="outline" className="h-7 text-[10px] text-emerald-700" onClick={() => decide(r, 'verified')}>✅ اعتماد</Button>
+                      {r.status === 'pending' && <Button size="sm" variant="outline" className="h-7 text-[10px] text-rose-600" onClick={() => decide(r, 'rejected')}>⛔ رفض</Button>}
+                    </div>}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>}
+      </CardContent>
+    </Card>
+  )
+}
+
+// v4.4 — password reset requests moved to its proper tab (reuses the same APIs and the
+// existing AdminResetPasswordDialog — the legacy inline card was hidden in embedded mode)
+function ResetRequestsPanel() {
+  const [rows, setRows] = useState(null)
+  const [target, setTarget] = useState(null)
+  const load = () => api('/admin/password-reset-requests').then(r => setRows(Array.isArray(r) ? r : (r.rows || []))).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [])
+  const reject = async (r) => {
+    if (!(await askConfirm({ title: 'رفض الطلب', desc: `رفض طلب استعادة كلمة المرور لـ ${r.email}؟`, icon: '⛔', confirmLabel: 'رفض' }))) return
+    try { await api(`/admin/password-reset-requests/${r.id}`, { method: 'PATCH', body: { action: 'reject' } }); toast.success('تم الرفض'); load() } catch (e) { toast.error(e.message) }
+  }
+  const pending = (rows || []).filter(r => r.status === 'pending')
+  const done = (rows || []).filter(r => r.status !== 'pending')
+  return (
+    <div className="space-y-4">
+      <Card className={pending.length ? 'border-orange-300' : ''}>
+        <CardHeader className="pb-2"><CardTitle className="text-sm">🔑 طلبات استعادة كلمة المرور {pending.length > 0 && <Badge className="bg-orange-500 text-white mr-2">{pending.length} معلق</Badge>}</CardTitle></CardHeader>
+        <CardContent>
+          {rows === null ? <div className="text-center text-slate-400 text-sm py-4">جاري التحميل...</div>
+            : rows.length === 0 ? <div className="text-center text-slate-400 text-sm py-4">لا طلبات</div>
+              : <Table>
+                <TableHeader><TableRow><TableHead>البريد</TableHead><TableHead>الاسم/المكتب</TableHead><TableHead>الهاتف</TableHead><TableHead>التاريخ</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">إجراءات</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {[...pending, ...done].map(r => (
+                    <TableRow key={r.id} className={r.status === 'pending' ? 'bg-orange-50/50' : ''}>
+                      <TableCell className="font-mono text-xs" dir="ltr">{r.email}</TableCell>
+                      <TableCell className="text-xs">{r.user_name || '—'}<div className="text-[9px] text-slate-400">{r.tenant_name || ''}</div></TableCell>
+                      <TableCell className="text-xs" dir="ltr">{r.phone || '—'}</TableCell>
+                      <TableCell className="text-[10px]">{r.created_at ? new Date(r.created_at).toLocaleString('ar-EG') : '—'}</TableCell>
+                      <TableCell><Badge className={r.status === 'pending' ? 'bg-orange-100 text-orange-700' : r.status === 'reset' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}>{r.status === 'pending' ? 'معلق' : r.status === 'reset' ? 'تم التعيين' : 'مرفوض'}</Badge></TableCell>
+                      <TableCell className="text-left">{r.status === 'pending' && <div className="flex gap-1 justify-end">
+                        <Button size="sm" variant="outline" className="h-7 text-[10px] text-emerald-700" onClick={() => setTarget(r)}>🔐 تعيين كلمة مرور</Button>
+                        <Button size="sm" variant="outline" className="h-7 text-[10px] text-rose-600" onClick={() => reject(r)}>⛔ رفض</Button>
+                      </div>}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>}
+        </CardContent>
+      </Card>
+      <AdminResetPasswordDialog req={target} onClose={() => setTarget(null)} onDone={load} />
+    </div>
+  )
+}
+
 function NewTenantDialog({ open, onOpenChange, onSaved }) {
   const [f, setF] = useState({ name: '', owner_name: '', owner_email: '', owner_password: '', max_users: 2, max_branches: 1, subscription: 'trial', referral_code: '' })
   const [saving, setSaving] = useState(false)
@@ -1046,7 +1986,7 @@ function NewTenantDialog({ open, onOpenChange, onSaved }) {
           <Field label="بريد المالك" required><Input dir="ltr" type="email" value={f.owner_email} onChange={e => setF({ ...f, owner_email: e.target.value })} placeholder="owner@office.com" /></Field>
           <Field label="كلمة المرور" required><Input dir="ltr" type="text" value={f.owner_password} onChange={e => setF({ ...f, owner_password: e.target.value })} placeholder="اختر كلمة مرور قوية" /></Field>
           <Field label="حد المستخدمين"><Input type="number" min={1} value={f.max_users} onChange={e => setF({ ...f, max_users: e.target.value })} /></Field>
-          <Field label="عدد الفروع"><Input type="number" min={1} value={f.max_branches} onChange={e => setF({ ...f, max_branches: e.target.value })} /></Field>
+          <Field label="عدد الفروع ⚠️ غير مفعل تشغيلياً"><Input type="number" min={1} value={f.max_branches} onChange={e => setF({ ...f, max_branches: e.target.value })} /></Field>
           <Field label="🎁 رمز الإحالة (اختياري)"><Input dir="ltr" value={f.referral_code} onChange={e => setF({ ...f, referral_code: e.target.value.toUpperCase() })} placeholder="مثال: ABCD1234" /></Field>
         </div>
         <DialogFooter>
@@ -1108,7 +2048,7 @@ function EditTenantDialog({ tenant, onOpenChange, onSaved }) {
             </Select>
           </Field>
           <Field label="حد المستخدمين"><Input type="number" min="0" value={f.max_users || 1} onChange={e => setF({ ...f, max_users: Number(e.target.value) })} /></Field>
-          <Field label="عدد الفروع"><Input type="number" min="0" value={f.max_branches || 1} onChange={e => setF({ ...f, max_branches: Number(e.target.value) })} /></Field>
+          <Field label="عدد الفروع ⚠️ غير مفعل تشغيلياً"><Input type="number" min="0" value={f.max_branches || 1} onChange={e => setF({ ...f, max_branches: Number(e.target.value) })} /></Field>
         </div>
         {/* v3.14 — Manual unlimited-journals switch (e.g. after final installment payment) */}
         <div className={`p-3 rounded-lg border flex items-center justify-between ${f.unlimited_journals ? 'bg-emerald-50 border-emerald-300' : 'bg-slate-50 border-slate-200'}`}>
@@ -1496,6 +2436,23 @@ const NAV = [
   { id: 'journal',   label: 'قيود اليومية', icon: ReceiptText, color: 'from-slate-700 to-slate-500' },
   { id: 'reports',   label: 'التقارير المالية', icon: BarChart3, color: 'from-cyan-600 to-blue-500' },
   { id: 'affiliate', label: 'التسويق بالعمولة', icon: User, color: 'from-emerald-600 to-teal-500' },
+  // v3.99 — Batch 1: old Super Admin sections merged into the shared sidebar (platform SA only — see canModule)
+  { id: 'platform-offices', label: 'إدارة المكاتب', icon: Building2, color: 'from-slate-700 to-blue-600', group: 'إدارة رحّال' },
+  // v4.0 — Batch 2: old plans/pricing + subscriptions/installments restored inside TenantApp
+  { id: 'platform-plans', label: 'الباقات والتسعير', icon: Wallet, color: 'from-emerald-700 to-teal-500', group: 'إدارة رحّال' },
+  { id: 'platform-subs', label: 'الاشتراكات والأقساط', icon: ReceiptText, color: 'from-blue-700 to-indigo-500', group: 'إدارة رحّال' },
+  // v4.4 — ONE consolidated entry «المستخدمون والصلاحيات» (tabs: مديرو رحّال / الأدوار / طلبات استعادة كلمة المرور) — replaces the two separate entries
+  { id: 'platform-people', label: 'المستخدمون والصلاحيات', icon: Users, color: 'from-cyan-700 to-sky-500', group: 'إدارة رحّال' },
+  // v4.1 — Group 2 (moved as-is): Rahaal software sales + commissions center
+  { id: 'platform-sales', label: 'مبيعات برنامج رحّال', icon: TrendingUp, color: 'from-green-700 to-emerald-500', group: 'إدارة رحّال' },
+  { id: 'platform-commissions', label: 'مركز العمولات', icon: Percent, color: 'from-fuchsia-700 to-pink-500', group: 'إدارة رحّال' },
+  // v4.3 — Group 3: unified orders registry + notifications center
+  { id: 'platform-orders', label: 'مركز الطلبات', icon: Inbox, color: 'from-amber-700 to-orange-500', group: 'إدارة رحّال' },
+  { id: 'platform-notify', label: 'مركز التنبيهات', icon: Bell, color: 'from-rose-700 to-red-500', group: 'إدارة رحّال' },
+  // v4.4 — consolidated admin entries: system settings hub + standalone geo section
+  { id: 'platform-system', label: 'إعدادات النظام', icon: Settings, color: 'from-slate-700 to-gray-500', group: 'إدارة رحّال' },
+  { id: 'platform-geo', label: 'المواقع الجغرافية', icon: MapPin, color: 'from-lime-700 to-green-500', group: 'إدارة رحّال' },
+  { id: 'platform-ads', label: 'الإعلانات والعروض', icon: ImageIcon, color: 'from-orange-600 to-amber-500', group: 'إدارة رحّال' },
   { id: 'help',      label: '📖 دليل الاستخدام', icon: BookOpenText, color: 'from-pink-600 to-rose-500' },
   { id: 'settings',  label: 'إعدادات المكتب', icon: Settings, color: 'from-slate-800 to-slate-600' },
 ]
@@ -1512,10 +2469,37 @@ const MODULE_LABELS = [
 ]
 const canModule = (user, tabId) => {
   if (!user) return false
+  // v3.99 — Batch 1: «إدارة رحّال» group is for the PLATFORM SUPER ADMIN only
+  // (checked BEFORE the owner shortcut so office owners never see it)
+  if (String(tabId).startsWith('platform-')) return user.role === 'super_admin'
   if (user.role === 'owner') return true
-  if (tabId === 'settings') return false
+  // v3.98 — Phase 1: the platform SA manages his own company office settings
+  // (currencies & rates live here). Staff still never see settings.
+  if (tabId === 'settings') return user.role === 'super_admin'
   return user.permissions?.[`mod_${String(tabId).replace(/-/g, '_')}`] !== false
 }
+
+// v4.7 — SA sidebar VISUAL grouping only (collapsible). Existing NAV entries/ids/labels are
+// reused untouched — this is a render-time arrangement for the platform Super Admin ONLY;
+// office owners/staff keep the exact flat sidebar they had. No section merge, no new dashboard.
+const SA_SIDEBAR_GROUPS = [
+  {
+    id: 'grp-rahaal', label: 'إدارة رحّال', emoji: '🏢',
+    items: ['platform-offices', 'platform-people', 'platform-plans', 'platform-subs', 'platform-sales', 'platform-orders', 'platform-commissions', 'platform-ads', 'platform-notify'],
+  },
+  {
+    id: 'grp-finance', label: 'المحاسبة والإدارة المالية', emoji: '💰',
+    items: ['fx', 'receipt', 'payment', 'clients', 'suppliers', 'boxes', 'chart', 'journal'],
+  },
+  {
+    id: 'grp-reports', label: 'التقارير', emoji: '📊',
+    items: ['reports'],
+  },
+  {
+    id: 'grp-system', label: 'النظام والإعدادات', emoji: '⚙️',
+    items: ['platform-system', 'platform-geo'],
+  },
+]
 
 // v3.46 — Idle session auto-lock configuration (centralized — adjust here)
 const IDLE_TIMEOUT_MINUTES = 15
@@ -1547,8 +2531,24 @@ const playMeraajChime = () => {
   } catch { /* autoplay blocked — silent fallback, toast still shows */ }
 }
 
-function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
+function Sidebar({ current, onChange, mobileOpen, onMobileClose, onOpenPlatform = null }) {
   const { tenant, settings, user } = useAuth()
+  // v4.7 — SA collapsible groups: multiple groups may stay open; the group holding the
+  // active tab opens automatically (without closing others). Pure visual state.
+  const isPlatformSA = user?.role === 'super_admin'
+  const [openGroups, setOpenGroups] = useState(() => {
+    const g = SA_SIDEBAR_GROUPS.find(x => x.items.includes(current))
+    return new Set(g ? [g.id] : [])
+  })
+  useEffect(() => {
+    const g = SA_SIDEBAR_GROUPS.find(x => x.items.includes(current))
+    if (g) setOpenGroups(prev => (prev.has(g.id) ? prev : new Set([...prev, g.id])))
+  }, [current])
+  const toggleGroup = (gid) => setOpenGroups(prev => {
+    const next = new Set(prev)
+    if (next.has(gid)) next.delete(gid); else next.add(gid)
+    return next
+  })
   // v3.86 — swipe-right on the drawer closes it (RTL: drawer lives on the right edge)
   const swipeRef = useRef(null)
   const onTouchStart = (e) => { swipeRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY } }
@@ -1597,33 +2597,99 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
         </div>
       </div>
       <nav className="flex-1 overflow-y-auto overscroll-contain p-2 md:p-3 space-y-1" style={{ touchAction: 'pan-y' }}>
-        {NAV.filter(n => canModule(user, n.id)).map(item => {
-          const Icon = item.icon
-          const active = current === item.id
+        {(() => {
+          // permission filtering stays EXACTLY as before (canModule) — a hidden item never
+          // renders, and a group with zero visible items disappears entirely.
+          const allowed = NAV.filter(n => canModule(user, n.id))
+          const renderItem = (item) => {
+            const Icon = item.icon
+            const active = current === item.id
+            return (
+              <button
+                key={item.id}
+                onClick={() => onChange(item.id)}
+                title={item.label}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 min-h-[44px] rounded-lg text-sm font-medium transition-all ${
+                  active ? 'bg-white/10 text-white shadow-inner' : 'text-slate-300 hover:bg-white/5 hover:text-white'
+                }`}
+              >
+                <span className={`w-8 h-8 rounded-md flex items-center justify-center bg-gradient-to-br ${item.color} ${active ? 'shadow-lg' : 'opacity-80'} shrink-0`}>
+                  <Icon className="w-4 h-4 text-white" />
+                </span>
+                <span className="flex-1 text-right">{item.label}</span>
+                {active && <ChevronLeft className="w-4 h-4 text-slate-400" />}
+              </button>
+            )
+          }
+          if (!isPlatformSA) {
+            // office owners/staff: the exact same flat sidebar as before (untouched)
+            return allowed.map((item, idx, arr) => {
+              const groupHeader = item.group && arr[idx - 1]?.group !== item.group
+                ? <div key={`${item.id}-group`} className="pt-3 pb-1 px-3 text-[10px] font-black text-amber-400/90 tracking-widest">🏢 {item.group}</div>
+                : null
+              return [groupHeader, renderItem(item)]
+            })
+          }
+          // v4.7 — platform SA: «لوحة التحكم» pinned on top, then the 4 collapsible groups,
+          // then the remaining standalone entries in their original order.
+          const byId = Object.fromEntries(allowed.map(n => [n.id, n]))
+          const groupedIds = new Set(SA_SIDEBAR_GROUPS.flatMap(g => g.items))
+          const dash = byId['dashboard']
+          const standalone = allowed.filter(n => n.id !== 'dashboard' && !groupedIds.has(n.id))
           return (
-            <button
-              key={item.id}
-              onClick={() => onChange(item.id)}
-              title={item.label}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 min-h-[44px] rounded-lg text-sm font-medium transition-all ${
-                active ? 'bg-white/10 text-white shadow-inner' : 'text-slate-300 hover:bg-white/5 hover:text-white'
-              }`}
-            >
-              <span className={`w-8 h-8 rounded-md flex items-center justify-center bg-gradient-to-br ${item.color} ${active ? 'shadow-lg' : 'opacity-80'} shrink-0`}>
-                <Icon className="w-4 h-4 text-white" />
-              </span>
-              <span className="flex-1 text-right">{item.label}</span>
-              {active && <ChevronLeft className="w-4 h-4 text-slate-400" />}
-            </button>
+            <>
+              {dash && renderItem(dash)}
+              {SA_SIDEBAR_GROUPS.map(g => {
+                const items = g.items.map(id => byId[id]).filter(Boolean)
+                if (items.length === 0) return null // group fully hidden by permissions
+                const open = openGroups.has(g.id)
+                const hasActive = items.some(i => i.id === current)
+                return (
+                  <div key={g.id} className="pt-1">
+                    <button
+                      onClick={() => toggleGroup(g.id)}
+                      aria-expanded={open}
+                      className={`w-full flex items-center gap-2 px-3 py-2 min-h-[42px] rounded-lg text-[12px] font-black tracking-wide transition-all ${
+                        hasActive ? 'text-amber-300 bg-white/5' : 'text-amber-400/90 hover:bg-white/5'
+                      }`}
+                    >
+                      <span className="text-sm">{g.emoji}</span>
+                      <span className="flex-1 text-right">{g.label}</span>
+                      <span className="text-[9px] font-bold text-slate-400 bg-white/10 rounded-full px-1.5 py-0.5">{items.length}</span>
+                      {open ? <ChevronDown className="w-4 h-4 text-slate-300" /> : <ChevronLeft className="w-4 h-4 text-slate-400" />}
+                    </button>
+                    {open && (
+                      <div className="mr-3 pr-1 border-r border-white/10 space-y-1 mt-1">
+                        {items.map(renderItem)}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+              {standalone.length > 0 && <div className="pt-2 pb-1 px-3 text-[10px] font-black text-slate-400/80 tracking-widest">أقسام المكتب</div>}
+              {standalone.map(renderItem)}
+            </>
           )
-        })}
+        })()}
       </nav>
+      {/* v3.98 — Phase 1: clear path from the company book to the EXISTING platform
+          admin sections (no new dashboard) — visible only for the platform SA */}
+      {onOpenPlatform && (
+        <div className="p-2 md:p-3 border-t border-slate-800/70">
+          <button
+            onClick={onOpenPlatform}
+            className="w-full flex items-center justify-center gap-2 px-3 py-2.5 min-h-[44px] rounded-lg text-sm font-bold bg-gradient-to-l from-amber-600 to-orange-500 text-white shadow-lg hover:opacity-90 transition"
+          >
+            🛡️ إدارة المنصة
+          </button>
+        </div>
+      )}
       <div className="p-2 md:p-3 border-t border-slate-800/70">
         <div className="flex items-center gap-3 p-2 rounded-lg bg-white/5">
           <div className="w-9 h-9 rounded-full grad-brand flex items-center justify-center shrink-0"><User className="w-4 h-4 text-white" /></div>
           <div className="flex-1 min-w-0">
             <div className="text-xs font-semibold truncate">{user.name}</div>
-            <div className="text-[10px] text-slate-400 truncate">{user.role === 'owner' ? 'مالك المكتب' : 'موظف'}</div>
+            <div className="text-[10px] text-slate-400 truncate">{user.role === 'owner' ? 'مالك المكتب' : user.role === 'super_admin' ? 'المشرف العام' : 'موظف'}</div>
           </div>
         </div>
       </div>
@@ -4572,13 +5638,34 @@ function ChartScreen() {
       if (editing) await api(`/accounts/${editing.id}`, { method: 'PUT', body: { name_ar: form.name_ar, type: form.type, parent: form.parent || null, is_group: form.is_group, notes: form.notes } })
       // v3.89 — when the code matches the auto-preview, send it EMPTY so the backend
       // generates it atomically (collision-free even under concurrent creation)
-      else await api('/accounts', { method: 'POST', body: (form.parent && (!form.code || form.code === autoCode)) ? { ...form, code: '' } : form })
+      else {
+        const created = await api('/accounts', { method: 'POST', body: (form.parent && (!form.code || form.code === autoCode)) ? { ...form, code: '' } : form })
+        // v3.92 — COA→operational auto-link feedback
+        if (created?.operational_link?.created) toast.success(`🔗 أُنشئ ${created.operational_link.kind} تشغيلي مرتبط تلقائياً (${created.code}) — سيظهر في الشاشة التشغيلية والسندات`)
+      }
       setOpen(false); setEditing(null); load(); loadTree(); toast.success(editing ? 'تم التعديل' : 'تمت الإضافة') // v3.88.4 — U-008: refresh the TREE view too
     } catch (e) { toast.error(e.message) }
   }
+  // v3.92 — orphan-link audit & safe repair (owner-triggered, idempotent)
+  const [linkAudit, setLinkAudit] = useState(null)
+  const [linkOpen, setLinkOpen] = useState(false)
+  const runLinkAudit = async () => { try { setLinkAudit(await api('/accounts/link-audit')); setLinkOpen(true) } catch (e) { toast.error(e.message) } }
+  const runLinkRepair = async () => {
+    if (!(await askConfirm({ title: 'ربط الحسابات اليتيمة بالسجلات التشغيلية', desc: 'سيُنشأ سجل تشغيلي (صندوق/عميل/مورد) لكل حساب غير مرتبط — عملية آمنة وIdempotent بدون إعادة ترقيم. حالات تعارض الأسماء تُتخطى وتُعرض.', icon: '🔗', confirmLabel: 'تنفيذ الربط الآمن' }))) return
+    try {
+      const r = await api('/accounts/link-repair', { method: 'POST' })
+      toast.success(`🔗 تم ربط ${r.repaired_count} حساباً${r.skipped_conflicts?.length ? ` — تُخطي ${r.skipped_conflicts.length} (تعارض أسماء)` : ''}`)
+      setLinkAudit(await api('/accounts/link-audit')); load(); loadTree()
+    } catch (e) { toast.error(e.message) }
+  }
   const del = async (a) => {
-    if (!(await askConfirm({ title: 'حذف الحساب المحاسبي', desc: `حذف الحساب ${a.code} — ${a.name_ar}؟`, variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
-    try { await api(`/accounts/${a.id}`, { method: 'DELETE' }); load(); loadTree(); toast.success('تم الحذف') } // v3.88.4 — U-008
+    // v3.92.1 — required copy: unused accounts get the standard irreversible-delete confirm;
+    // used accounts are blocked by the backend with the "linked to operations" message.
+    if (!(await askConfirm({ title: 'حذف الحساب المحاسبي', desc: `هل أنت متأكد من حذف الحساب ${a.code} — ${a.name_ar}؟ لا يمكن التراجع بعد الحذف.`, variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
+    try {
+      const r = await api(`/accounts/${a.id}`, { method: 'DELETE' }); load(); loadTree()
+      toast.success(r?.cascade_deleted ? `تم حذف الحساب و${r.cascade_deleted} المرتبط به (غير مستخدم)` : 'تم الحذف')
+    } // v3.88.4 — U-008
     catch (e) { toast.error(e.message) }
   }
   // v3.88.3 — Equity added as a first-class account type (COA v2 already contains the
@@ -4655,6 +5742,7 @@ function ChartScreen() {
             ) : <span className="w-5 h-5 inline-block" />}
             <span className="font-mono text-[11px] font-bold px-1.5 py-0.5 rounded bg-white/70 border">{node.code}</span>
             <span className="text-sm font-semibold truncate">{node.name}</span>
+            {node.linked_entity && <span title={`مرتبط بسجل تشغيلي (${node.linked_entity.type === 'box' ? 'صندوق/بنك' : node.linked_entity.type === 'client' ? 'عميل' : 'مورد'})`} className="text-emerald-600 text-xs">🔗</span>}
             {node.is_group && <Badge variant="outline" className="text-[10px] shrink-0">📁 مجموعة</Badge>}
             {node.is_parent && <Badge variant="outline" className="text-[10px] shrink-0 bg-white">🌳 شجري · {node.next_child_seq} فرع</Badge>}
           </div>
@@ -4693,7 +5781,41 @@ function ChartScreen() {
   return (
     <div className="space-y-6">
       <TopBar title="الدليل المحاسبي" subtitle="شجرة الحسابات الرئيسية والفرعية — يدعم الحسابات المجمعة (parent/child)"
-        right={<Button onClick={() => { setEditing(null); setOpen(true) }} className="gap-2 grad-brand text-white"><Plus className="w-4 h-4" /> حساب جديد</Button>} />
+        right={<div className="flex items-center gap-2">
+          <Button variant="outline" onClick={runLinkAudit} className="gap-2">🔗 فحص الربط التشغيلي</Button>
+          <Button onClick={() => { setEditing(null); setOpen(true) }} className="gap-2 grad-brand text-white"><Plus className="w-4 h-4" /> حساب جديد</Button>
+        </div>} />
+      {/* v3.92 — orphan-link audit dialog */}
+      <Dialog open={linkOpen} onOpenChange={setLinkOpen}>
+        <DialogContent dir="rtl" className="max-w-2xl">
+          <DialogHeader><DialogTitle>🔗 ربط حسابات الدليل بالسجلات التشغيلية (1101 / 1102 / 1103 / 2101)</DialogTitle></DialogHeader>
+          {!linkAudit ? <div className="text-slate-400 text-center py-6">جارِ الفحص…</div> : (
+            <div className="space-y-3 text-sm">
+              <div className="flex flex-wrap gap-2">
+                <Badge className="bg-emerald-100 text-emerald-700">مرتبط: {linkAudit.linked}</Badge>
+                <Badge className={linkAudit.orphans?.length ? 'bg-rose-100 text-rose-700' : 'bg-slate-100 text-slate-500'}>يتيم (بلا سجل تشغيلي): {linkAudit.orphans?.length || 0}</Badge>
+                <Badge className={linkAudit.conflicts?.length ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-500'}>تعارض اسم: {linkAudit.conflicts?.length || 0}</Badge>
+              </div>
+              {(linkAudit.orphans?.length > 0) && (
+                <div className="border rounded-lg p-3 bg-rose-50/50 max-h-48 overflow-y-auto space-y-1">
+                  {linkAudit.orphans.map(o => <div key={o.code} className="text-xs flex gap-2"><span className="font-mono text-slate-500" dir="ltr">{o.code}</span><b>{o.name}</b><Badge variant="outline" className="text-[9px]">{o.kind}</Badge></div>)}
+                </div>
+              )}
+              {(linkAudit.conflicts?.length > 0) && (
+                <div className="border rounded-lg p-3 bg-orange-50/60 max-h-40 overflow-y-auto space-y-1">
+                  <div className="text-[11px] font-bold text-orange-800">تعارضات أسماء — لن تُربط تلقائياً (قرار يدوي): غيّر اسم الحساب أو السجل ثم أعد الفحص</div>
+                  {linkAudit.conflicts.map(o => <div key={o.code} className="text-xs flex gap-2"><span className="font-mono text-slate-500" dir="ltr">{o.code}</span><b>{o.name}</b><span className="text-orange-700">يتعارض مع حساب {o.conflict_with || '—'}</span></div>)}
+                </div>
+              )}
+              {(linkAudit.orphans?.length === 0 && linkAudit.conflicts?.length === 0) && <div className="text-emerald-700 font-semibold">✅ كل الحسابات مرتبطة بسجلاتها التشغيلية</div>}
+              <div className="flex justify-between items-center pt-2">
+                <div className="text-[10px] text-slate-400">الربط بالهوية (account_code) وليس بالاسم · Idempotent · بدون إعادة ترقيم</div>
+                {linkAudit.orphans?.length > 0 && <Button onClick={runLinkRepair} className="bg-emerald-600 hover:bg-emerald-700 text-white gap-1">🔗 ربط آمن ({linkAudit.orphans.length})</Button>}
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* v3.10.0 — View mode toggle bar */}
       <Card>
@@ -10466,7 +11588,7 @@ function OfficeSettings() {
 // ================================================================
 // TENANT APP
 // ================================================================
-function TenantApp() {
+function TenantApp({ onOpenPlatform = null }) {
   const [tab, setTab] = useState('dashboard')
   // v3.86 — real mobile drawer state + edge-swipe to open (right edge, RTL)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
@@ -10716,6 +11838,7 @@ function TenantApp() {
         onChange={(id) => { setTab(id); setMobileNavOpen(false) }}
         mobileOpen={mobileNavOpen}
         onMobileClose={() => setMobileNavOpen(false)}
+        onOpenPlatform={onOpenPlatform}
       />
       {/* v3.86 — floating menu button (mobile only, hidden while drawer is open) */}
       {!mobileNavOpen && (
@@ -10867,7 +11990,9 @@ function TenantApp() {
             <div className="text-sm text-slate-500 mt-2">ليس لديك صلاحية لعرض هذا القسم — تواصل مع مالك المكتب لمنحك الصلاحية.</div>
           </CardContent></Card>
         )}
-        {tabAllowed && tab === 'dashboard' && <ErrorBoundary tabName="لوحة التحكم"><Dashboard setTab={setTab} /></ErrorBoundary>}
+        {/* v3.99 — Batch 1: platform SA gets the admin home (old admin KPIs, no travel widgets);
+            every other office keeps the original travel Dashboard untouched */}
+        {tabAllowed && tab === 'dashboard' && <ErrorBoundary tabName="لوحة التحكم">{user?.role === 'super_admin' ? <RahaalAdminHome setTab={setTab} /> : <Dashboard setTab={setTab} />}</ErrorBoundary>}
         {tabAllowed && tab === 'tickets' && <ErrorBoundary tabName="حجز التذاكر"><TicketsScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'visas' && <ErrorBoundary tabName="التأشيرات والخدمات"><VisasScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'services' && <ErrorBoundary tabName="الخدمات"><ServicesScreen /></ErrorBoundary>}
@@ -10878,7 +12003,9 @@ function TenantApp() {
         {tabAllowed && tab === 'payment' && <ErrorBoundary tabName="سند الصرف"><VoucherScreen mode="payment" /></ErrorBoundary>}
         {tabAllowed && tab === 'clients' && <ErrorBoundary tabName="العملاء"><PartiesScreen kind="clients" /></ErrorBoundary>}
         {tabAllowed && tab === 'suppliers' && <ErrorBoundary tabName="الموردون"><PartiesScreen kind="suppliers" /></ErrorBoundary>}
-        {tabAllowed && tab === 'boxes' && <ErrorBoundary tabName="الصناديق والبنوك"><BoxesScreen /></ErrorBoundary>}
+        {/* v4.4 — «الصناديق والبنوك»: original financial content UNTOUCHED (first tab, same component);
+            the super admin additionally sees the platform payment-methods/financial-entities tabs */}
+        {tabAllowed && tab === 'boxes' && <ErrorBoundary tabName="الصناديق والبنوك">{user?.role === 'super_admin' ? <BoxesBanksHub /> : <BoxesScreen />}</ErrorBoundary>}
         {tabAllowed && tab === 'chart' && <ErrorBoundary tabName="الدليل المحاسبي"><ChartScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'journal' && <ErrorBoundary tabName="قيود اليومية"><JournalScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'reports' && <ErrorBoundary tabName="التقارير المالية"><ReportsScreen /></ErrorBoundary>}
@@ -10886,6 +12013,22 @@ function TenantApp() {
         {tabAllowed && tab === 'visa-monitor' && <ErrorBoundary tabName="مراقبة التأشيرات"><VisaMonitorScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'settings' && user.role === 'owner' && <ErrorBoundary tabName="إعدادات المكتب"><OfficeSettings /></ErrorBoundary>}
         {tabAllowed && tab === 'affiliate' && <ErrorBoundary tabName="التسويق بالعمولة"><AffiliateScreen /></ErrorBoundary>}
+        {/* v3.99 — Batch 1: «إدارة رحّال» — the OLD live admin components reused as-is (embedded) */}
+        {tabAllowed && tab === 'platform-offices' && <ErrorBoundary tabName="إدارة المكاتب"><PlatformOfficesHub /></ErrorBoundary>}
+        {/* v4.0 — Batch 2: the OLD pricing editor (v3.14) + subscriptions/installments (v3.16) reused as screens */}
+        {tabAllowed && tab === 'platform-plans' && <ErrorBoundary tabName="الباقات والتسعير"><PricingConfigEditor asScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-subs' && <ErrorBoundary tabName="الاشتراكات والأقساط"><PlatformSubscriptionsScreen /></ErrorBoundary>}
+        {/* v4.4 — consolidated hubs: users&perms / system settings / geo (components reused as tabs — zero copies) */}
+        {tabAllowed && tab === 'platform-people' && <ErrorBoundary tabName="المستخدمون والصلاحيات"><PlatformPeopleHub /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-system' && <ErrorBoundary tabName="إعدادات النظام"><PlatformSystemHub /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-geo' && <ErrorBoundary tabName="المواقع الجغرافية"><AdminGeoCenter /></ErrorBoundary>}
+        {/* v4.2 — program sales replaces the travel-sales aggregation (unsuitable per user directive); commissions gains an operational rules manager */}
+        {tabAllowed && tab === 'platform-sales' && <ErrorBoundary tabName="مبيعات برنامج رحّال"><div className="space-y-6"><OrdersScreen salesOnly /><ProgramSalesScreen /></div></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-commissions' && <ErrorBoundary tabName="مركز العمولات"><div className="space-y-4"><CommissionRulesManager /><CommissionsLedger /><AdminCommissionsCenter /></div></ErrorBoundary>}
+        {/* v4.3 — Group 3: unified orders registry (+ existing specialized requests embedded) and notifications center (moved as-is) */}
+        {tabAllowed && tab === 'platform-orders' && <ErrorBoundary tabName="مركز الطلبات"><div className="space-y-6"><OrdersScreen /><div><div className="text-sm font-black text-slate-600 mb-2">📎 الطلبات المتخصصة القائمة (استعادة كلمات المرور / توثيق / سحب عمولات / معراج) — النظام القائم كما هو</div><AdminRequestsCenter /></div></div></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-notify' && <ErrorBoundary tabName="مركز التنبيهات"><AdminNotifyCenter /></ErrorBoundary>}
+        {tabAllowed && tab === 'platform-ads' && <ErrorBoundary tabName="الإعلانات والعروض"><AnnouncementsManager /></ErrorBoundary>}
         {tabAllowed && tab === 'help' && <ErrorBoundary tabName="دليل الاستخدام"><HelpCenter setTab={setTab} /></ErrorBoundary>}
 
         {/* v2.8.1 — Global footer with contact + Target Media badge */}
@@ -10948,8 +12091,9 @@ function PricingPlans({ tenant }) {
     enterprise: { ring: 'border-indigo-400', head: 'bg-gradient-to-l from-indigo-100 to-blue-50', badge: 'bg-indigo-600' },
   }
   const contactWA = (p) => {
+    const cur = (p.pricing?.currency || 'USD') === 'USD' ? '$' : `${p.pricing?.currency || ''} `
     const modeTxt = mode === 'annual' ? 'سنوي (دفعة واحدة — قيود مفتوحة)' : `أقساط (${cfg.installments_count} أقساط)`
-    const price = mode === 'annual' ? `$${p.pricing.annual.final}` : `$${p.pricing.installment.final_per} × ${cfg.installments_count}`
+    const price = mode === 'annual' ? `${cur}${p.pricing.annual.final}` : `${cur}${p.pricing.installment.final_per} × ${cfg.installments_count}`
     const msg = `أرغب في الاشتراك بباقة ${p.name_ar} — ${modeTxt} بسعر ${price}\nالمكتب: ${tenant?.name || ''}`
     window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
   }
@@ -10966,25 +12110,30 @@ function PricingPlans({ tenant }) {
           const st = PLAN_STYLE[p.key] || PLAN_STYLE.silver
           const isCurrent = tenant?.plan_tier === p.key
           const ann = p.pricing.annual, inst = p.pricing.installment
+          const cur = (p.pricing?.currency || 'USD') === 'USD' ? '$' : `${p.pricing?.currency || ''} ` // v4.0 — plan currency
+          const durTxt = p.duration_days && Number(p.duration_days) !== 365 ? `لكل ${p.duration_days} يوماً — دفعة واحدة` : 'سنوياً — دفعة واحدة' // v4.0 — plan duration
           return (
             <Card key={p.key} className={`${st.ring} border-2 relative overflow-hidden`}>
               {p.key === 'gold' && <div className="absolute top-2 left-2"><Badge className="bg-amber-500 text-white text-[10px]">⭐ الأكثر طلباً</Badge></div>}
               {isCurrent && <div className="absolute top-2 right-2"><Badge className="bg-emerald-600 text-white text-[10px]">باقتك الحالية</Badge></div>}
               <CardHeader className={`${st.head} pb-3`}>
                 <CardTitle className="text-center text-lg">{p.icon} {p.name_ar}</CardTitle>
+                {p.description && <div className="text-center text-[10.5px] text-slate-500">{p.description}</div>}
                 <div className="text-center mt-1">
                   {mode === 'annual' ? (
                     <>
-                      {hasDisc && <div className="text-slate-400 line-through text-base font-light">${ann.original}</div>}
-                      <div className="text-3xl font-black text-slate-900">${hasDisc ? ann.final : ann.original}</div>
-                      <div className="text-[11px] text-slate-500">سنوياً — دفعة واحدة</div>
+                      {hasDisc && <div className="text-slate-400 line-through text-base font-light">{cur}{ann.original}</div>}
+                      <div className="text-3xl font-black text-slate-900">{cur}{hasDisc ? ann.final : ann.original}</div>
+                      <div className="text-[11px] text-slate-500">{durTxt}</div>
+                      {hasDisc && ann.discount_value > 0 && <div className="text-[10px] font-bold text-rose-600">وفّرت {cur}{ann.discount_value} (خصم {cfg.discount_percent}%)</div>}
                       <div className="text-[11px] font-bold text-emerald-700 mt-1">♾️ قيود محاسبية مفتوحة فوراً</div>
                     </>
                   ) : (
                     <>
-                      {hasDisc && <div className="text-slate-400 line-through text-base font-light">${inst.original_per}</div>}
-                      <div className="text-3xl font-black text-slate-900">${hasDisc ? inst.final_per : inst.original_per}</div>
-                      <div className="text-[11px] text-slate-500">× {inst.count} أقساط (الإجمالي ${hasDisc ? inst.total_final : ann.original})</div>
+                      {hasDisc && <div className="text-slate-400 line-through text-base font-light">{cur}{inst.original_per}</div>}
+                      <div className="text-3xl font-black text-slate-900">{cur}{hasDisc ? inst.final_per : inst.original_per}</div>
+                      <div className="text-[11px] text-slate-500">× {inst.count} أقساط (الإجمالي {cur}{hasDisc ? inst.total_final : ann.original})</div>
+                      {hasDisc && ann.discount_value > 0 && <div className="text-[10px] font-bold text-rose-600">وفّرت {cur}{ann.discount_value} إجمالاً (خصم {cfg.discount_percent}%)</div>}
                       <div className="text-[11px] font-bold text-blue-700 mt-1">🔒 قيود محدودة حتى سداد آخر قسط</div>
                     </>
                   )}
@@ -11861,6 +13010,8 @@ function App() {
   }, [])
 
   useEffect(() => { refreshMe() }, [refreshMe])
+  // v3.98 — Phase 1: platform SA view switcher (company book ⇄ platform admin)
+  const [platformView, setPlatformView] = useState(false)
 
   // v3.46 — After an idle auto-lock, land directly on the LOGIN page (not the public landing)
   // so the user can resume quickly. Key is written only by the idle-lock logout.
@@ -11898,7 +13049,26 @@ function App() {
     <AuthCtx.Provider value={{ ...auth, refreshMe, logout }}>
       <TestEnvBadge />
       <ConfirmHost />
-      {auth.user.role === 'super_admin' ? <SuperAdminPanel /> : <TenantApp />}
+      {/* v3.90 — Phase 1: super_admin → new modular AdminApp shell. The legacy SuperAdminPanel
+          and AnnouncementsManager are passed in and REUSED inside it (zero loss, zero duplication)
+          v3.97 — Batch 5: rahaal admin staff (role=admin_staff) also mount the AdminApp — the
+          shell + server gate show/allow ONLY their granted sections. Tenant users never see it.
+          v3.98 — Phase 1 (Rahaal company book): the MAIN super_admin bound to the platform-org
+          tenant lands on the SAME shared TenantApp first (the company's own accounting book,
+          same engine, same tenant_id isolation — NOT a copy). «إدارة المنصة» in its sidebar
+          switches to the existing AdminApp; a back button returns to the company book. */}
+      {(() => {
+        const isPlatformSA = auth.user.role === 'super_admin' && !!auth.user.tenant_id
+        if (auth.user.role === 'admin_staff' || (auth.user.role === 'super_admin' && !isPlatformSA)) {
+          return <AdminApp legacyPanel={<SuperAdminPanel />} announcements={<AnnouncementsManager />} />
+        }
+        if (isPlatformSA) {
+          return platformView
+            ? <AdminApp legacyPanel={<SuperAdminPanel />} announcements={<AnnouncementsManager />} onBackToCompany={() => setPlatformView(false)} />
+            : <TenantApp onOpenPlatform={() => setPlatformView(true)} />
+        }
+        return <TenantApp />
+      })()}
     </AuthCtx.Provider>
   )
 }
