@@ -32,7 +32,7 @@ import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 // v3.87.5 — shared primitives + heavy screens extracted verbatim (structural move only)
 import { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_MAX_MB, DOC_MAX_FILE_BYTES, DOC_BATCH_MAX_MB, DOC_BATCH_MAX_BYTES, validateDocBatch, todayISO, api, AuthCtx, useAuth, Field, TopBar, ConfirmHost, askConfirm } from './shared'
-import AdminApp from './admin/shell' // v3.90 — Phase 1: modular Super Admin shell (reuses /api/admin/*)
+// v4.9 — AdminApp shell removed: TenantApp is THE single authoritative dashboard (see App root)
 // v4.1 — MOVED AS-IS from the v3.91–3.97 admin shell into TenantApp «إدارة رحّال»
 // (transfer only — zero new sections, same components, same /api/admin/* endpoints):
 import AdminStaffCenter from './admin/staff' // إدارة المستخدمين (v3.97)
@@ -2471,7 +2471,10 @@ const canModule = (user, tabId) => {
   if (!user) return false
   // v3.99 — Batch 1: «إدارة رحّال» group is for the PLATFORM SUPER ADMIN only
   // (checked BEFORE the owner shortcut so office owners never see it)
-  if (String(tabId).startsWith('platform-')) return user.role === 'super_admin'
+  // v4.9 — admin_staff (Rahaal managers) now also see the platform entries INSIDE TenantApp
+  // (the separate AdminApp shell was removed); every action stays server-gated per section
+  // via adminGate/adminCan — this is UI visibility only.
+  if (String(tabId).startsWith('platform-')) return user.role === 'super_admin' || user.role === 'admin_staff'
   if (user.role === 'owner') return true
   // v3.98 — Phase 1: the platform SA manages his own company office settings
   // (currencies & rates live here). Staff still never see settings.
@@ -2531,7 +2534,7 @@ const playMeraajChime = () => {
   } catch { /* autoplay blocked — silent fallback, toast still shows */ }
 }
 
-function Sidebar({ current, onChange, mobileOpen, onMobileClose, onOpenPlatform = null }) {
+function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
   const { tenant, settings, user } = useAuth()
   // v4.7 — SA collapsible groups: multiple groups may stay open; the group holding the
   // active tab opens automatically (without closing others). Pure visual state.
@@ -2672,18 +2675,6 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose, onOpenPlatform 
           )
         })()}
       </nav>
-      {/* v3.98 — Phase 1: clear path from the company book to the EXISTING platform
-          admin sections (no new dashboard) — visible only for the platform SA */}
-      {onOpenPlatform && (
-        <div className="p-2 md:p-3 border-t border-slate-800/70">
-          <button
-            onClick={onOpenPlatform}
-            className="w-full flex items-center justify-center gap-2 px-3 py-2.5 min-h-[44px] rounded-lg text-sm font-bold bg-gradient-to-l from-amber-600 to-orange-500 text-white shadow-lg hover:opacity-90 transition"
-          >
-            🛡️ إدارة المنصة
-          </button>
-        </div>
-      )}
       <div className="p-2 md:p-3 border-t border-slate-800/70">
         <div className="flex items-center gap-3 p-2 rounded-lg bg-white/5">
           <div className="w-9 h-9 rounded-full grad-brand flex items-center justify-center shrink-0"><User className="w-4 h-4 text-white" /></div>
@@ -11588,7 +11579,7 @@ function OfficeSettings() {
 // ================================================================
 // TENANT APP
 // ================================================================
-function TenantApp({ onOpenPlatform = null }) {
+function TenantApp() {
   const [tab, setTab] = useState('dashboard')
   // v3.86 — real mobile drawer state + edge-swipe to open (right edge, RTL)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
@@ -11838,7 +11829,6 @@ function TenantApp({ onOpenPlatform = null }) {
         onChange={(id) => { setTab(id); setMobileNavOpen(false) }}
         mobileOpen={mobileNavOpen}
         onMobileClose={() => setMobileNavOpen(false)}
-        onOpenPlatform={onOpenPlatform}
       />
       {/* v3.86 — floating menu button (mobile only, hidden while drawer is open) */}
       {!mobileNavOpen && (
@@ -13010,8 +13000,6 @@ function App() {
   }, [])
 
   useEffect(() => { refreshMe() }, [refreshMe])
-  // v3.98 — Phase 1: platform SA view switcher (company book ⇄ platform admin)
-  const [platformView, setPlatformView] = useState(false)
 
   // v3.46 — After an idle auto-lock, land directly on the LOGIN page (not the public landing)
   // so the user can resume quickly. Key is written only by the idle-lock logout.
@@ -13049,27 +13037,44 @@ function App() {
     <AuthCtx.Provider value={{ ...auth, refreshMe, logout }}>
       <TestEnvBadge />
       <ConfirmHost />
-      {/* v3.90 — Phase 1: super_admin → new modular AdminApp shell. The legacy SuperAdminPanel
-          and AnnouncementsManager are passed in and REUSED inside it (zero loss, zero duplication)
-          v3.97 — Batch 5: rahaal admin staff (role=admin_staff) also mount the AdminApp — the
-          shell + server gate show/allow ONLY their granted sections. Tenant users never see it.
-          v3.98 — Phase 1 (Rahaal company book): the MAIN super_admin bound to the platform-org
-          tenant lands on the SAME shared TenantApp first (the company's own accounting book,
-          same engine, same tenant_id isolation — NOT a copy). «إدارة المنصة» in its sidebar
-          switches to the existing AdminApp; a back button returns to the company book. */}
+      {/* v4.9 — TenantApp IS the single authoritative dashboard for Rahaal: the company
+          book (vouchers, boxes/banks, COA, journals) + the moved platform admin sections,
+          all RBAC-gated inside ONE app. The separate AdminApp shell was REMOVED, along
+          with the «إدارة المنصة» switcher and every fallback that used to route a platform
+          account to it. A platform account (super_admin / admin_staff) MUST already be
+          bound to the Rahaal company tenant; an unbound account gets an explicit blocking
+          notice — NO alternate panel to hide the problem, NO auto tenant creation, NO auto
+          binding on login (binding is a manual data operation that requires approval). */}
       {(() => {
-        const isPlatformSA = auth.user.role === 'super_admin' && !!auth.user.tenant_id
-        if (auth.user.role === 'admin_staff' || (auth.user.role === 'super_admin' && !isPlatformSA)) {
-          return <AdminApp legacyPanel={<SuperAdminPanel />} announcements={<AnnouncementsManager />} />
-        }
-        if (isPlatformSA) {
-          return platformView
-            ? <AdminApp legacyPanel={<SuperAdminPanel />} announcements={<AnnouncementsManager />} onBackToCompany={() => setPlatformView(false)} />
-            : <TenantApp onOpenPlatform={() => setPlatformView(true)} />
+        const isPlatformRole = auth.user.role === 'super_admin' || auth.user.role === 'admin_staff'
+        if (isPlatformRole && !auth.user.tenant_id) {
+          return <AdminBindingRequiredNotice user={auth.user} logout={logout} />
         }
         return <TenantApp />
       })()}
     </AuthCtx.Provider>
+  )
+}
+
+// v4.9 — explicit blocking notice for a platform account that is NOT bound to the Rahaal
+// company tenant. Deliberately does NOT open any panel and does NOT touch any data:
+// the binding itself (setting tenant_id on the user document) requires explicit approval.
+function AdminBindingRequiredNotice({ user, logout }) {
+  return (
+    <div dir="rtl" className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 p-4">
+      <div className="max-w-xl w-full bg-white rounded-2xl shadow-2xl p-8 text-center space-y-4">
+        <div className="w-16 h-16 mx-auto rounded-2xl bg-amber-100 flex items-center justify-center text-4xl">⚠️</div>
+        <h1 className="text-xl font-extrabold text-slate-800">حساب الإدارة غير مربوط بدفتر شركة رحّال</h1>
+        <p className="text-sm text-slate-600 leading-relaxed">
+          حسابك (<b>{user?.email}</b>) بدور «{user?.role === 'super_admin' ? 'المشرف العام' : 'موظف إدارة'}»
+          لكنه غير مربوط بأي Tenant، ولوحة التحكم المعتمدة هي تطبيق الشركة الموحّد (TenantApp).
+          لأسباب تتعلق بسلامة البيانات لا يُنشأ الربط تلقائياً عند الدخول —
+          يلزم ربط الحساب يدوياً بدفتر شركة رحّال عبر عملية معتمدة من الإدارة.
+        </p>
+        <div className="text-xs text-slate-400">راجع فريق التطوير لاعتماد الربط، ثم أعد تسجيل الدخول.</div>
+        <button onClick={logout} className="px-6 py-2.5 rounded-lg bg-slate-800 text-white text-sm font-bold hover:bg-slate-700 transition">تسجيل الخروج</button>
+      </div>
+    </div>
   )
 }
 
