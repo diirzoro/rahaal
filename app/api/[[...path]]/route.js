@@ -740,6 +740,123 @@ async function validateJournalLines(db, tenantId, lines) {
   return { ok: true }
 }
 
+// ============ v4.5 — ACCOUNTING CORE HARDENING (central invariants) ============
+// Engine/structural accounts the Accounting Engine depends on (Opening, Year Close,
+// Retained Earnings, FX, fixed postings). Protected in code regardless of is_system
+// flag or journal history — a core account matters even before its first posting.
+const ENGINE_ACCOUNT_CODES = new Set(Object.values(COA))
+
+// v4.5 — compatibility view of "inactive" (data uses mixed flags; storage unification
+// would need a Data Migration — handled in CODE only, migration logged as future need)
+const isInactiveAccount = (a) => !!a && (a.inactive === true || a.is_active === false || a.active === false || a.archived === true)
+
+// v4.5 — CENTRAL closed-period / closed-year guard. Every journal write (manual,
+// automatic, opening, transaction-generated) passes through this via the central
+// gate — no side path can forget it. Returns an error string or null.
+async function assertOpenPeriod(db, T, dateLike) {
+  const d = dateLike instanceof Date ? dateLike : new Date(dateLike || Date.now())
+  if (isNaN(d.getTime())) return 'تاريخ القيد غير صالح'
+  const yr = d.getFullYear()
+  const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
+  if (tenant?.closed_years?.includes(yr)) return `السنة المالية ${yr} مقفلة — لا يمكن إنشاء أو تعديل قيود بتاريخها`
+  const settings = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { period_lock: 1 } })
+  const closedUntil = settings?.period_lock?.closed_until || null
+  if (closedUntil && d.toISOString().slice(0, 10) <= String(closedUntil).slice(0, 10)) {
+    return `🔒 الفترة حتى ${closedUntil} مقفلة — استخدم قيد تسوية عكسي بالتاريخ الحالي بدلاً من التعديل الرجعي`
+  }
+  return null
+}
+
+// v4.5 — journal quota preflight (same rule as the central gate) so callers can
+// verify BEFORE applying cached-balance side effects (fail-fast, no partial state)
+async function assertJournalQuota(db, T) {
+  const t = await db.collection('tenants').findOne({ id: T })
+  if (!isUnlimitedTenant(t)) {
+    const q = t?.journal_quota || { used: 0, limit: 500 }
+    if (q.used >= q.limit) {
+      const err = new Error(`انتهت حصة قيود اليومية (${q.used}/${q.limit}). يرجى تجديد الاشتراك مع الإدارة العامة.`)
+      err.code = 'QUOTA_EXCEEDED'
+      throw err
+    }
+  }
+}
+
+// v4.5 — CENTRAL JOURNAL INVARIANTS: journal validity is an invariant of the gate,
+// not a courtesy of each business route. Covers: valid lines, non-negative amounts,
+// accounts exist + tenant-scoped, no Group posting, no posting to inactive accounts,
+// closed period/year guard, and multi-currency-aware balance (BASE-currency check —
+// per-currency comparison would falsely reject correct FX / manual_dual entries).
+async function enforceJournalInvariants(db, T, je, opts = {}) {
+  const lines = je.lines
+  if (!Array.isArray(lines) || lines.length === 0) throw new Error('القيد بلا أسطر — مرفوض')
+  // 1) line validity + accounts exist (tenant-scoped) + group-account guard + negatives
+  const v = await validateJournalLines(db, T, lines)
+  if (!v.ok) throw new Error(v.error)
+  // 2) inactive accounts never accept NEW postings (history/reports untouched)
+  const codes = [...new Set(lines.map(l => l.account_code).filter(c => c && c !== 'MANUAL'))]
+  if (codes.length) {
+    const inactive = await db.collection('accounts')
+      .find({ tenant_id: T, code: { $in: codes } }, { projection: { code: 1, name_ar: 1, inactive: 1, is_active: 1, active: 1, archived: 1 } })
+      .toArray()
+    const bad0 = inactive.find(isInactiveAccount)
+    if (bad0) throw new Error(`الحساب "${bad0.code} — ${bad0.name_ar || ''}" غير نشط — لا يقبل ترحيلاً جديداً (التاريخ محفوظ كما هو)`)
+  }
+  // 3) closed period / closed year — central, side-path-proof
+  if (!opts.bypassPeriodGuard) {
+    const perr = await assertOpenPeriod(db, T, je.date)
+    if (perr) { const e = new Error(perr); e.code = 'PERIOD_CLOSED'; throw e }
+  }
+  // 4) currency sanity
+  if (!je.currency || typeof je.currency !== 'string') throw new Error('عملة القيد مطلوبة')
+  // 5) balance invariant — multi-currency aware: totals are compared in the BASE
+  //    currency using tenant rates (FX and manual_dual are balanced in base by
+  //    construction; forcing per-currency equality would wrongly reject them).
+  //    Tolerance scales with line count to absorb legitimate 2dp per-line rounding.
+  const rates = (await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { rates: 1 } }))?.rates || DEFAULT_RATES
+  let totD = 0, totC = 0
+  for (const l of lines) {
+    const cur = l.currency || je.currency
+    const c2 = (cur && cur !== 'MULTI') ? cur : BASE_CURRENCY
+    totD += toBase(Number(l.debit) || 0, c2, rates)
+    totC += toBase(Number(l.credit) || 0, c2, rates)
+  }
+  const tolerance = Math.max(0.05, lines.length * 0.01)
+  if (Math.abs(totD - totC) > tolerance) {
+    const e = new Error(`القيد غير متوازن (بالعملة الأساس): مدين ${totD.toFixed(2)} ≠ دائن ${totC.toFixed(2)} — الفرق ${(totD - totC).toFixed(2)}`)
+    e.code = 'UNBALANCED_JOURNAL'
+    throw e
+  }
+}
+
+// v4.5 — inverse of reverseManualJournalEffects: RE-APPLIES the original cached-balance
+// effects of a manual/manual_dual JE. Used to RESTORE state when a posted-journal edit
+// fails midway (no partial state, no silent history loss).
+async function applyManualJournalEffects(db, T, je) {
+  const isMulti = je.currency === 'MULTI' || je.ref_type === 'manual_dual'
+  if (isMulti) {
+    for (const l of (je.lines || []).slice(0, 2)) {
+      const cur = l.currency
+      const debit = Number(l.debit) || 0, credit = Number(l.credit) || 0
+      const amt = debit > 0 ? debit : credit
+      const side = debit > 0 ? 'debit' : 'credit'
+      if (!cur || !l.party_id) continue
+      if (l.party_type === 'client') await updateBalance(db, 'clients', { id: l.party_id, tenant_id: T }, cur, side === 'debit' ? +amt : -amt)
+      if (l.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: l.party_id, tenant_id: T }, cur, side === 'debit' ? -amt : +amt)
+      if (l.party_type === 'box') await updateBalance(db, 'boxes', { id: l.party_id, tenant_id: T }, cur, side === 'debit' ? +amt : -amt)
+    }
+  } else {
+    for (const l of je.lines || []) {
+      const debit = Number(l.debit) || 0, credit = Number(l.credit) || 0
+      const delta = debit - credit
+      const cur = l.currency || je.currency
+      if (!l.party_id) continue
+      if (l.party_type === 'client') await updateBalance(db, 'clients', { id: l.party_id, tenant_id: T }, cur, +delta)
+      if (l.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: l.party_id, tenant_id: T }, cur, -delta)
+      if (l.party_type === 'box') await updateBalance(db, 'boxes', { id: l.party_id, tenant_id: T }, cur, +delta)
+    }
+  }
+}
+
 // v3.10.6 — Credit Limit + Freeze enforcement for credit sales
 async function checkClientCredit(db, tenantId, clientId, saleAmount, currency, settings) {
   if (!clientId) return { ok: true }
@@ -774,21 +891,27 @@ async function checkClientCredit(db, tenantId, clientId, saleAmount, currency, s
 }
 
 async function createJournalEntry(db, tenantId, { date, description, ref_type, ref_id, currency, lines }, opts = {}) {
-  // Enforce quota (skipped in edit mode, and bypassed entirely for unlimited tenants)
-  if (!opts.skipQuota) {
-    const t = await db.collection('tenants').findOne({ id: tenantId })
-    if (!isUnlimitedTenant(t)) {
-      const q = t?.journal_quota || { used: 0, limit: 500 }
-      if (q.used >= q.limit) {
-        const err = new Error(`انتهت حصة قيود اليومية (${q.used}/${q.limit}). يرجى تجديد الاشتراك مع الإدارة العامة.`)
-        err.code = 'QUOTA_EXCEEDED'
-        throw err
-      }
-    }
+  // v4.5 — generic idempotency (code-level): a caller may pass opts.idempotencyKey;
+  // the same financial operation never produces two journals on retry/concurrent calls.
+  // (DB-level unique index is intentionally NOT created now — would require checking
+  // existing production data first. Logged as deferred DB hardening.)
+  if (opts.idempotencyKey) {
+    const existing = await db.collection('journal_entries').findOne({ tenant_id: tenantId, idempotency_key: opts.idempotencyKey })
+    if (existing) return existing
   }
+  // Enforce quota (skipped in edit mode, and bypassed entirely for unlimited tenants)
+  if (!opts.skipQuota) await assertJournalQuota(db, tenantId)
   // v3.89 — opts.extra: optional passthrough marker fields (e.g. meraaj_booking_ref for
   // idempotent Meraaj postings). Spread FIRST so extras can NEVER override core JE fields.
   const je = { ...(opts.extra || {}), id: opts.existingJeId || uuidv4(), tenant_id: tenantId, date: new Date(date || Date.now()), description, ref_type, ref_id, currency, lines, created_at: opts.createdAt || new Date() }
+  // v4.5 — actor/source traceability for NEW journals (historical journals untouched):
+  // created_by falls back to any value already provided via opts.extra.
+  if (opts.actor && !je.created_by) je.created_by = opts.actor
+  if (opts.source && !je.source) je.source = opts.source
+  if (opts.idempotencyKey) je.idempotency_key = opts.idempotencyKey
+  // v4.5 — CENTRAL INVARIANTS (Priority 1+2+5): no automatic or manual journal can
+  // skip validation — lines/accounts/tenant/group/inactive/period/base-balance.
+  await enforceJournalInvariants(db, tenantId, je, opts)
   await db.collection('journal_entries').insertOne(je)
   if (!opts.skipQuota) await db.collection('tenants').updateOne({ id: tenantId }, { $inc: { 'journal_quota.used': 1 } })
   return je
@@ -6446,11 +6569,42 @@ async function handleRoute(request, { params }) {
       for (const k of ['name_ar', 'type', 'parent', 'is_group', 'notes']) if (b[k] !== undefined) upd[k] = b[k]
       // v3.87 — SYSTEM ACCOUNTS (e.g. 3103) are structurally immutable: code is never
       // editable via PUT, and type/parent/is_group are locked for system accounts.
-      if (acc.is_system && (upd.type !== undefined || upd.parent !== undefined || upd.is_group !== undefined)) {
-        return bad(`الحساب ${acc.code} حساب نظامي — لا يمكن تغيير نوعه أو موقعه في الشجرة`)
+      // v4.5 — the protection also covers ENGINE accounts (COA template codes that the
+      // accounting engine posts to: Opening / Year Closing / Retained Earnings / FX /
+      // fixed postings) even when is_system flag is absent and even BEFORE first use.
+      const structuralChange = upd.type !== undefined && upd.type !== acc.type
+        || upd.parent !== undefined && upd.parent !== acc.parent
+        || upd.is_group !== undefined && !!upd.is_group !== !!acc.is_group
+      if ((acc.is_system || ENGINE_ACCOUNT_CODES.has(acc.code)) && structuralChange) {
+        return bad(`الحساب ${acc.code} حساب نظامي/محركي — لا يمكن تغيير نوعه أو موقعه في الشجرة`)
       }
       if (b.code !== undefined && String(b.code) !== acc.code) {
-        return bad(acc.is_system ? `الحساب ${acc.code} حساب نظامي — لا يمكن تغيير رقمه` : 'تغيير رمز الحساب غير مدعوم — احذف الحساب وأنشئه من جديد بالرمز الصحيح')
+        return bad((acc.is_system || ENGINE_ACCOUNT_CODES.has(acc.code)) ? `الحساب ${acc.code} حساب نظامي — لا يمكن تغيير رقمه` : 'تغيير رمز الحساب غير مدعوم — احذف الحساب وأنشئه من جديد بالرمز الصحيح')
+      }
+      // v4.5 — HISTORY PROTECTION (Priority 3): an account already used in journal_entries
+      // must not be structurally reinterpreted (type/parent/group↔leaf). Safe descriptive
+      // edits (name/notes) remain allowed.
+      if (structuralChange) {
+        const usedCount = await db.collection('journal_entries').countDocuments({ tenant_id: T, 'lines.account_code': acc.code })
+        if (usedCount > 0) {
+          return bad(`الحساب ${acc.code} مستخدم في ${usedCount} قيداً — تغيير النوع/الأب/التجميع يعيد تفسير التاريخ المحاسبي وهو ممنوع. عدّل الاسم أو الملاحظات فقط، أو أنشئ حساباً جديداً`)
+        }
+        // group→leaf never allowed while children exist; leaf→group blocked above when used
+        if (upd.is_group !== undefined && !upd.is_group && acc.is_group) {
+          const kidsU = await db.collection('accounts').countDocuments({ tenant_id: T, parent: acc.code })
+          if (kidsU > 0) return bad(`لا يمكن تحويل المجموعة ${acc.code} إلى حساب تفصيلي — لديها ${kidsU} حساباً فرعياً`)
+        }
+        // v4.5 — parent must exist, be a GROUP, in the same tenant, and not the account itself
+        if (upd.parent !== undefined && upd.parent !== null && upd.parent !== '') {
+          if (String(upd.parent) === acc.code) return bad('لا يمكن جعل الحساب أباً لنفسه')
+          const newParent = await db.collection('accounts').findOne({ tenant_id: T, code: String(upd.parent) })
+          if (!newParent) return bad(`الحساب الأب "${upd.parent}" غير موجود في دليل هذا المكتب`)
+          if (!newParent.is_group) return bad(`الحساب الأب "${upd.parent}" ليس حساب مجموعة`)
+        }
+        // v4.5 — type must be a valid accounting type
+        if (upd.type !== undefined && !['asset', 'liability', 'equity', 'revenue', 'expense'].includes(upd.type)) {
+          return bad('نوع الحساب غير صالح (asset / liability / equity / revenue / expense)')
+        }
       }
       // v3.92 — rename keeps the SAME identity (account + operational record). The linked
       // record is found by account_code (never by name) and gets the new name — no new
@@ -6474,6 +6628,9 @@ async function handleRoute(request, { params }) {
       const acc = await db.collection('accounts').findOne({ id: acctIdMatch[1], tenant_id: T })
       if (!acc) return bad('الحساب غير موجود', 404)
       if (acc.is_system) return bad(`الحساب ${acc.code} — ${acc.name_ar} حساب نظامي ولا يمكن حذفه`)
+      // v4.5 — ENGINE accounts (COA template codes the engine posts to) are protected
+      // even without is_system flag and even before their first posting.
+      if (ENGINE_ACCOUNT_CODES.has(acc.code)) return bad(`الحساب ${acc.code} — ${acc.name_ar} حساب محركي أساسي (افتتاح/إقفال/أرباح مبقاة/فروقات صرف) ولا يمكن حذفه — يمكن تعطيله فقط`)
       // v3.92.1 — group protection: children accounts OR attached operational records block deletion
       const childCount = await db.collection('accounts').countDocuments({ tenant_id: T, parent: acc.code })
       if (childCount > 0) return bad(`لا يمكن حذف الحساب — مجموعة تحتوي على ${childCount} حساب فرعي. عالج الحسابات التابعة أولاً`)
@@ -7217,12 +7374,38 @@ async function handleRoute(request, { params }) {
       // v3.80 — reject future doc date EARLY (this handler deletes the old JE before re-creating,
       // with no restore-on-error mechanism — validating here prevents data loss)
       if (isFutureDocDate(b.date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ القيد)`)
+      // v4.5 — closed period/year guard on BOTH sides BEFORE any destructive step:
+      // the ORIGINAL date (a journal inside a closed period must not be silently rewritten)
+      // and the NEW date (validated again centrally, but checked here pre-destruction).
+      const perrOld = await assertOpenPeriod(db, T, oldJe.date)
+      if (perrOld) return bad(`القيد الأصلي داخل فترة/سنة مقفلة — ${perrOld}`)
+      const perrNew = await assertOpenPeriod(db, T, b.date)
+      if (perrNew) return bad(perrNew)
       // Reverse old effects
       await reverseManualJournalEffects(db, T, oldJe)
-      await db.collection('journal_entries').deleteOne({ id: jeId })
+      await db.collection('journal_entries').deleteOne({ id: jeId, tenant_id: T }) // v4.5 — tenant-scoped delete
       // Re-create with same id + skip quota
-      const result = await createManualJournal(db, T, b, { existingId: jeId, skipQuota: true, createdAt: oldJe.created_at })
-      if (result.error) return bad(result.error)
+      let result
+      try {
+        result = await createManualJournal(db, T, b, { existingId: jeId, skipQuota: true, createdAt: oldJe.created_at, actor: sess.user.email })
+      } catch (e) {
+        result = { error: e?.message || 'فشل غير متوقع أثناء إعادة إنشاء القيد' }
+      }
+      if (result.error) {
+        // v4.5 — NO PARTIAL STATE, NO SILENT HISTORY LOSS: restore the original journal
+        // and RE-APPLY its balance effects exactly as they were, then audit the failure.
+        const { _id: _omit, ...restoreDoc } = oldJe
+        await db.collection('journal_entries').insertOne({ ...restoreDoc })
+        await applyManualJournalEffects(db, T, oldJe)
+        try {
+          await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'edit_failed_restored', je_id: jeId, ref_type: oldJe.ref_type, error: String(result.error).slice(0, 300), by: sess.user.email, at: new Date() })
+        } catch { }
+        return bad(`فشل التعديل — استُرجع القيد الأصلي وأرصدته كما كانت. السبب: ${result.error}`)
+      }
+      // v4.5 — audit the successful modification of a POSTED journal (before-image kept)
+      try {
+        await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'edit', je_id: jeId, ref_type: oldJe.ref_type, before: { date: oldJe.date, description: oldJe.description, currency: oldJe.currency, lines: oldJe.lines }, by: sess.user.email, at: new Date() })
+      } catch { }
       return ok(result.doc)
     }
 
@@ -7250,9 +7433,10 @@ async function handleRoute(request, { params }) {
       if (!currency) return bad('العملة مطلوبة (SAR / USD / YER)')
       if (!date) return bad('تاريخ الافتتاح مطلوب')
       if (isFutureDocDate(date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ القيد الافتتاحي)`)
-      const olSettings = await db.collection('tenant_settings').findOne({ tenant_id: T })
-      const lockedUntil = olSettings?.period_lock?.closed_until || null
-      if (lockedUntil && date <= lockedUntil) return bad(`الفترة مقفلة حتى ${lockedUntil} — لا يمكن الإدخال بهذا التاريخ`)
+      // v4.5 — CENTRAL guard (closed YEAR + period lock together): this route writes the
+      // journal directly (bypassing the central gate) and previously missed closed_years.
+      const perrOp = await assertOpenPeriod(db, T, date)
+      if (perrOp) return bad(perrOp)
       // Resolve the target: party (box/client/supplier) or a direct COA leaf account
       let accountCode = null, accountName = null, partyType = null, partyId = null
       const kind = String(b.party_type || 'account')
@@ -7308,6 +7492,9 @@ async function handleRoute(request, { params }) {
       const date = String(b.date || '').slice(0, 10)
       if (!date) return bad('تاريخ الإقفال مطلوب')
       if (isFutureDocDate(date)) return bad(`${FUTURE_DOC_DATE_MSG} (تاريخ الإقفال)`)
+      // v4.5 — central closed year/period guard (this route writes journals directly)
+      const perrOc = await assertOpenPeriod(db, T, date)
+      if (perrOc) return bad(perrOc)
       // v3.87 — optional per-currency close: pass currency: 'SAR' to close ONLY that
       // currency independently; omit (or 'ALL') to close every non-zero currency.
       const onlyCcy = ['SAR', 'USD', 'YER'].includes(b.currency) ? b.currency : null
@@ -7346,12 +7533,20 @@ async function handleRoute(request, { params }) {
       if (!['manual', 'manual_dual', 'opening', 'opening_close'].includes(je.ref_type)) {
         return bad('لا يمكن حذف قيود المعاملات مباشرةً — احذف السجل المرتبط (تذكرة/سند/مصارفة)', 400)
       }
+      // v4.5 — deleting a journal dated inside a closed year/period silently rewrites
+      // closed books — centrally blocked (same rule as creation/edit).
+      const perrDel = await assertOpenPeriod(db, T, je.date)
+      if (perrDel) return bad(`القيد داخل فترة/سنة مقفلة ولا يُحذف — ${perrDel}`)
       for (const ln of je.lines || []) {
         if (!ln.party_type || !ln.party_id) continue
         const delta = round2n((ln.debit || 0) - (ln.credit || 0))
-        if (ln.party_type === 'box') await updateBalance(db, 'boxes', { id: ln.party_id, tenant_id: T }, je.currency, -delta)
-        if (ln.party_type === 'client') await updateBalance(db, 'clients', { id: ln.party_id, tenant_id: T }, je.currency, -delta)
-        if (ln.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: ln.party_id, tenant_id: T }, je.currency, delta)
+        // v4.5 — FIX: reversal must hit the LINE currency. For manual_dual the JE
+        // currency is 'MULTI' — using it here corrupted balances into a 'MULTI' bucket
+        // while the original effect lived under the real per-line currency.
+        const lnCur = ln.currency || je.currency
+        if (ln.party_type === 'box') await updateBalance(db, 'boxes', { id: ln.party_id, tenant_id: T }, lnCur, -delta)
+        if (ln.party_type === 'client') await updateBalance(db, 'clients', { id: ln.party_id, tenant_id: T }, lnCur, -delta)
+        if (ln.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: ln.party_id, tenant_id: T }, lnCur, delta)
       }
       await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T })
       await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'delete', je_id: je.id, ref_type: je.ref_type, description: je.description, currency: je.currency, lines: je.lines, by: sess.user.email, at: new Date() })
@@ -9050,6 +9245,10 @@ async function resolveAccountRef(db, T, ref) {
 
 async function createFx(db, T, b, opts = {}) {
   if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ عملية الصرافة)` } // v3.80
+  // v4.5 — FAIL-FAST before box/party balance side effects (Priority 13)
+  const perrFx = await assertOpenPeriod(db, T, b.date)
+  if (perrFx) return { error: perrFx }
+  if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
   if (!['buy', 'sell'].includes(b.type)) return { error: 'نوع العملية غير صالح' }
   if (!CURRENCIES.includes(b.currency) || !CURRENCIES.includes(b.counter_currency)) return { error: 'العملات غير صالحة' }
   if (b.currency === b.counter_currency) return { error: 'يجب اختيار عملتين مختلفتين' }
@@ -9165,6 +9364,12 @@ async function createFx(db, T, b, opts = {}) {
 
 async function createManualJournal(db, T, b, opts = {}) {
   if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ القيد)` } // v3.80
+  // v4.5 — FAIL-FAST before ANY cached-balance side effect (Priority 13): period/year
+  // guard + journal quota are verified here so "balance updated but journal failed"
+  // can no longer happen through this path.
+  const perr0 = await assertOpenPeriod(db, T, b.date)
+  if (perr0) return { error: perr0 }
+  if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
   // Modes:
   //  A) single: { date, currency, description, lines: [...] }
   //  B) dual:   { date, description, dual: true, debit_*, credit_* }
@@ -9205,7 +9410,7 @@ async function createManualJournal(db, T, b, opts = {}) {
     const je = await createJournalEntry(db, T, {
       date: b.date, description: (opts.existingId ? 'تعديل — ' : '') + (b.description || 'سند قيد ثنائي (مصارفة/تسوية)'),
       ref_type: 'manual_dual', ref_id: opts.existingId || uuidv4(), currency: 'MULTI', lines,
-    }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt })
+    }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal' })
     return { doc: { ...je, _id: undefined, fx_diff_usd: fxDiff } }
   }
   // Single-currency manual JE
@@ -9234,7 +9439,7 @@ async function createManualJournal(db, T, b, opts = {}) {
       currency: b.currency,
       debit: Number(l.debit) || 0, credit: Number(l.credit) || 0,
     })),
-  }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt })
+  }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal' })
   return { doc: { ...je, _id: undefined } }
 }
 

@@ -284,3 +284,14 @@ See /app/memory/test_credentials.md
 
 ## v4.4.1 — تصحيح نهائي: نقل «العملات وأسعار الصرف»
 - AdminCurrencyCenter انتقل من PlatformSystemHub (إعدادات النظام) إلى BoxesBanksHub («الصناديق والبنوك») كتبويب مستقل بالترتيب: الصناديق والحسابات البنكية (BoxesScreen الأصلي) ← العملات وأسعار الصرف ← طرق الدفع والجهات المالية وحسابات الاستلام. لم يعد يظهر في إعدادات النظام. «حركة العملات» (المصارفة الفعلية) لم تُمس. نفس المكوّن/APIs/Collections — لا مصدر ثانٍ. ملف واحد: page.js.
+
+## v4.5 — Accounting Core Hardening (Backend فقط — route.js وحده، +230/−25، صفر Frontend/Tests/Migration/بيانات)
+- بوابة مركزية: enforceJournalInvariants داخل createJournalEntry — أسطر صالحة، لا سالب، حسابات موجودة Tenant-scoped، لا ترحيل على مجموعة (إعادة استخدام validateJournalLines)، لا ترحيل على حساب غير نشط (توافق inactive/is_active/active/archived — توحيد التخزين يحتاج Migration مؤجل)، حارس السنة/الفترة المقفلة مركزياً (assertOpenPeriod)، توازن بالعملة الأساس (يحفظ منطق FX/manual_dual — tolerance متدرج max(0.05, lines×0.01)).
+- Idempotency عام: opts.idempotencyKey في البوابة (فحص Code-level؛ Unique Index مؤجل يحتاج فحص Duplicates بالإنتاج). Actor/Source: opts.actor/source للقيود الجديدة (يدوي/تعديل/FX مربوطة sess.user.email) — التاريخي بلا Backfill.
+- أولوية 13: assertJournalQuota + assertOpenPeriod يُنفذان مبكراً في createManualJournal وcreateFx قبل أي أثر على الأرصدة (fail-fast).
+- أولوية 6: PUT /journal-entries/:id — حارس فترة على تاريخ الأصل والجديد قبل أي تدمير، وعند فشل إعادة الإنشاء: استرجاع كامل للأصل وأرصدته (applyManualJournalEffects الجديدة = عكس reverseManualJournalEffects) + je_audit (edit / edit_failed_restored) + deleteOne صار Tenant-scoped (كان بلا tenant_id).
+- أولوية 7/13: DELETE JE — حارس سنة/فترة مقفلة + إصلاح عطل مؤكد: عكس أرصدة manual_dual كان يضرب عملة 'MULTI' الوهمية بدل عملة السطر (l.currency || je.currency).
+- أولوية 2: مسارا التجاوز المباشران (opening insertOne + opening-equity-close) صار فيهما assertOpenPeriod (كانا بلا فحص closed_years).
+- أولويات 3+4: PUT/DELETE الحسابات — ENGINE_ACCOUNT_CODES (كل قيم COA) محمية هيكلياً وحذفاً حتى بلا is_system وقبل أول استخدام؛ الحساب المستخدم في journal_entries يُمنع تغيير type/parent/is_group له (الاسم والملاحظات مسموحة)؛ تحقق الأب الجديد (موجود+مجموعة+ليس نفسه) وenum النوع؛ منع group→leaf مع وجود أبناء.
+- بلا تغيير: generateSubAccountCode (سليم)، partyLeafCode (صارم أصلاً)، COA migration functions (لم تُلمس)، Decimal128 (DEFERRED — REQUIRES DATA MIGRATION)، Immutable Journal+Reversal architecture (DEFERRED ARCHITECTURAL HARDENING).
+- مخاطر متبقية موثقة: مسارات تعديل المعاملات (تذاكر/سندات) تعكس الآثار قبل البوابة — رمي مركزي متأخر نظرياً ممكن (الاحتمال شبه معدوم لأن أسطر المحرك مبنية صحيحة)؛ فروقات أرصدة تاريخية محتملة من عطل MULTI القديم (تحتاج Reconciliation بموافقة).
