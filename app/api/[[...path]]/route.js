@@ -7436,7 +7436,24 @@ async function handleRoute(request, { params }) {
     if (route === '/journal-entries' && method === 'POST') {
       const b = await request.json()
       const result = await createManualJournal(db, T, b)
-      if (result.error) return bad(result.error)
+      if (result.error) {
+        // v4.8.2 — PR#18 (final point): the explicit unsafe state from createManualJournal
+        // is no longer dropped by bad() — HTTP 500 + unsafe_state + no_retry in the JSON
+        // body + je_audit (tenant/actor/state/error). Normal pre-write rejections
+        // (validation / dry-run / period / quota) keep their current bad(400) logic.
+        if (result.unsafe_state) {
+          console.error('[JE-CREATE] CRITICAL unsafe state', result.unsafe_state, result.error)
+          try {
+            await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'create_failed_unsafe_state', ref_type: b?.dual ? 'manual_dual' : 'manual', unsafe_state: result.unsafe_state, balances_need_manual_review: true, error: String(result.error).slice(0, 300), by: sess.user.email, at: new Date() })
+          } catch { }
+          return cors(NextResponse.json({
+            error: `⛔ ${result.error} — لا تُعد المحاولة؛ يلزم فحص يدوي فوري للقيد والأرصدة`,
+            unsafe_state: result.unsafe_state,
+            no_retry: true,
+          }, { status: 500 }))
+        }
+        return bad(result.error)
+      }
       return ok(result.doc)
     }
 
