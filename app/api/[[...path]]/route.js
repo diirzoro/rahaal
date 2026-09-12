@@ -920,8 +920,38 @@ async function createJournalEntry(db, tenantId, { date, description, ref_type, r
   // v4.5 — CENTRAL INVARIANTS (Priority 1+2+5): no automatic or manual journal can
   // skip validation — lines/accounts/tenant/group/inactive/period/base-balance.
   await enforceJournalInvariants(db, tenantId, je, opts)
-  await db.collection('journal_entries').insertOne(je)
-  if (!opts.skipQuota) await db.collection('tenants').updateOne({ id: tenantId }, { $inc: { 'journal_quota.used': 1 } })
+  // v4.8.1 — PR#18-1: EXPLICIT WRITE PHASES.
+  // Phase A — journal COMMIT. An insert error is verified against the collection:
+  //   provably NOT saved  → e.jePhase='pre_commit'      (caller may compensate safely)
+  //   verification failed → e.jePhase='commit_uncertain' (caller must NOT compensate —
+  //   reversing balances for a journal that may be saved corrupts the books)
+  //   saved despite the driver error → treated as committed (fall through to Phase B).
+  try {
+    await db.collection('journal_entries').insertOne(je)
+  } catch (insErr) {
+    let committed = false, verified = false
+    try {
+      committed = !!(await db.collection('journal_entries').findOne({ id: je.id, tenant_id: tenantId }, { projection: { id: 1 } }))
+      verified = true
+    } catch { /* verification unavailable → state unknown */ }
+    if (!verified) { insErr.jePhase = 'commit_uncertain'; throw insErr }
+    if (!committed) { insErr.jePhase = 'pre_commit'; throw insErr }
+    // committed=true: the journal IS saved — do not re-throw an "insert failure"
+  }
+  // Phase B — quota COUNTER. The journal is committed: a counter failure is NEVER
+  // treated as an insert failure (no caller may reverse balances for a saved journal)
+  // and is NEVER hidden — loud log + persisted audit record + flag on the returned doc.
+  if (!opts.skipQuota) {
+    try {
+      await db.collection('tenants').updateOne({ id: tenantId }, { $inc: { 'journal_quota.used': 1 } })
+    } catch (qErr) {
+      console.error('[JE] CRITICAL: quota counter update FAILED after journal commit', je.id, qErr)
+      try {
+        await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: tenantId, action: 'quota_increment_failed', je_id: je.id, ref_type: je.ref_type, error: String(qErr?.message || qErr).slice(0, 300), at: new Date() })
+      } catch { }
+      je.quota_counter_failed = true // surfaced, not hidden — journal itself is committed
+    }
+  }
   return je
 }
 
@@ -7439,6 +7469,27 @@ async function handleRoute(request, { params }) {
         result = { error: e?.message || 'فشل غير متوقع أثناء إعادة إنشاء القيد' }
       }
       if (result.error) {
+        // v4.8.1 — PR#18-2: UNSAFE STATES are handled explicitly and are NEVER recorded
+        // as a full restore (edit_failed_restored) nor announced as a successful recovery.
+        if (result.unsafe_state) {
+          console.error('[JE-EDIT] CRITICAL unsafe state for', jeId, result.unsafe_state, result.error)
+          let oldDocRestored = false
+          if (result.unsafe_state === 'partial') {
+            // journal NOT saved (id is free) → re-insert the ORIGINAL document only, to
+            // preserve ledger history. Balance re-apply is deliberately SKIPPED: residual
+            // partial effects of the new attempt are unknown — re-applying old effects
+            // on top could double-count. Balances require manual reconciliation.
+            try {
+              const { _id: _omitU, ...restoreDocU } = oldJe
+              await db.collection('journal_entries').insertOne({ ...restoreDocU })
+              oldDocRestored = true
+            } catch (rdErr) { console.error('[JE-EDIT] old-doc reinsert failed for', jeId, rdErr) }
+          } // 'uncertain': the NEW journal may already exist with the SAME id — reinserting would duplicate it
+          try {
+            await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'edit_failed_unsafe_state', je_id: jeId, ref_type: oldJe.ref_type, unsafe_state: result.unsafe_state, old_doc_restored: oldDocRestored, balances_need_manual_review: true, error: String(result.error).slice(0, 300), by: sess.user.email, at: new Date() })
+          } catch { }
+          return bad(`⛔ فشل التعديل بحالة غير آمنة (${result.unsafe_state === 'uncertain' ? 'حفظ القيد الجديد غير مؤكد' : 'أثر جزئي متبقٍ من المحاولة الجديدة'}) — لا تُعد المحاولة إطلاقاً؛ يلزم فحص يدوي فوري للقيد ${jeId} وأرصدة أطرافه قبل أي إجراء${oldDocRestored ? ' (أُعيد مستند القيد الأصلي للسجل دون إعادة تطبيق أرصدته)' : ''}. التفاصيل: ${result.error}`, 500)
+        }
         // v4.5/v4.8 — NO PARTIAL STATE, NO SILENT HISTORY LOSS: createManualJournal now
         // guarantees ZERO residual new-attempt effects (dry-run + tracked compensation),
         // so restoring the ORIGINAL journal + its effects fully returns the books to the
@@ -9489,8 +9540,14 @@ async function createManualJournal(db, T, b, opts = {}) {
       }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal' })
       return { doc: { ...je, _id: undefined, fx_diff_usd: fxDiff } }
     } catch (e) {
+      // v4.8.1 — PR#18-2: EXPLICIT machine-readable state for callers (PUT edit path).
+      // commit_uncertain → the journal MAY be saved (same id in edit mode): NO automatic
+      // compensation — reversing balances for a possibly-saved journal corrupts the books.
+      if (e?.jePhase === 'commit_uncertain') {
+        return { error: `⛔ حالة حفظ القيد غير مؤكدة (${e?.message}) — لم يُنفذ أي تعويض تلقائي حتى لا تُعكس أرصدة قيد ربما حُفظ؛ لا تُعد المحاولة — يلزم فحص يدوي فوري`, unsafe_state: 'uncertain', no_retry: true }
+      }
       try { await rollbackApplied() } catch (rbErr) {
-        return { error: `⛔ فشل القيد (${e?.message}) وتعذر اكتمال التراجع الآلي عن آثار المحاولة (${rbErr?.message}) — يلزم فحص يدوي فوري للأرصدة` }
+        return { error: `⛔ فشل القيد (${e?.message}) وتعذر اكتمال التراجع الآلي عن آثار المحاولة (${rbErr?.message}) — يلزم فحص يدوي فوري للأرصدة`, unsafe_state: 'partial', no_retry: true }
       }
       return { error: e?.message || 'فشل غير متوقع أثناء إنشاء القيد' }
     }
@@ -9531,8 +9588,12 @@ async function createManualJournal(db, T, b, opts = {}) {
     }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal' })
     return { doc: { ...je, _id: undefined } }
   } catch (e) {
+    // v4.8.1 — PR#18-2: EXPLICIT machine-readable state for callers (PUT edit path).
+    if (e?.jePhase === 'commit_uncertain') {
+      return { error: `⛔ حالة حفظ القيد غير مؤكدة (${e?.message}) — لم يُنفذ أي تعويض تلقائي حتى لا تُعكس أرصدة قيد ربما حُفظ؛ لا تُعد المحاولة — يلزم فحص يدوي فوري`, unsafe_state: 'uncertain', no_retry: true }
+    }
     try { await rollbackApplied() } catch (rbErr) {
-      return { error: `⛔ فشل القيد (${e?.message}) وتعذر اكتمال التراجع الآلي عن آثار المحاولة (${rbErr?.message}) — يلزم فحص يدوي فوري للأرصدة` }
+      return { error: `⛔ فشل القيد (${e?.message}) وتعذر اكتمال التراجع الآلي عن آثار المحاولة (${rbErr?.message}) — يلزم فحص يدوي فوري للأرصدة`, unsafe_state: 'partial', no_retry: true }
     }
     return { error: e?.message || 'فشل غير متوقع أثناء إنشاء القيد' }
   }

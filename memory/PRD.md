@@ -313,3 +313,8 @@ See /app/memory/test_credentials.md
 - PR#18-3: ensureIndexes في lib/adminOrders.js لم يعد يبتلع الفشل كـ"race" — يعيد {ok,error} ويسجل خطأً صريحاً؛ POST (إدراج) في الطلبات والعمولات يُرفض 503 إذا لم تثبت حماية Unique Index، والقراءة وPATCH متاحة (لا تعتمد على التفرد). لا إنشاء/تعديل فهارس نُفذ خلال المهمة (لم يُستدع أي معالج). معالجة تكرارات قائمة إن وجدت: BLOCKED — REQUIRES APPROVAL.
 - v4.7 (تجميع سايدبار SA): موجودة في مساحة العمل (page.js سطر 2482) — لم تُعد ولم تُحفظ إلى GitHub.
 - الدمج إلى main موقوف بانتظار مراجعة المستخدم وموافقته الصريحة.
+
+## v4.8.1 — PR#18 النقطتان المتبقيتان (route.js فقط، +65/−4، NOT TESTED — الفحص ممنوع بأمر المستخدم)
+- (1) createJournalEntry بمراحل كتابة صريحة: Phase A (حفظ القيد) — فشل insert يُتحقق منه من المجموعة: غير محفوظ=pre_commit (يجوز التعويض)، تعذر التحقق=commit_uncertain (يُمنع التعويض)، محفوظ رغم الخطأ=يُكمل كملتزَم. Phase B (عدّاد الحصة) — فشل العدّاد بعد الحفظ لا يُعامل كفشل إدراج أبداً (لا throw) ولا يُخفى: console.error + je_audit(quota_increment_failed) + علم quota_counter_failed على القيد المعاد.
+- (2) createManualJournal يعيد حالة صريحة للمستدعي: unsafe_state='uncertain' (لا تعويض إطلاقاً) أو 'partial' (فشل اكتمال التعويض) + no_retry. مسار PUT /journal-entries/:id يعالجها صراحةً: لا edit_failed_restored ولا إعلان استعادة؛ في partial يعاد إدراج مستند القيد الأصلي فقط (بلا إعادة تطبيق أرصدته — لتفادي العد المزدوج) وفي uncertain لا إدراج (القيد الجديد قد يكون محفوظاً بنفس الـid)؛ تدقيق je_audit(edit_failed_unsafe_state مع balances_need_manual_review) + إرجاع 500 وتحذير صريح بعدم إعادة المحاولة.
+- الدمج إلى main يبقى موقوفاً بانتظار المراجعة والموافقة الصريحة. لا GitHub/Deploy.
