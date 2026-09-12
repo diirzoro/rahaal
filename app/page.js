@@ -8,7 +8,7 @@ import {
   Plane, FileBadge2, LayoutDashboard, Users, Building2, ReceiptText, Wallet, Percent, Inbox, Bell, MapPin,
   ArrowDownLeft, ArrowUpRight, ArrowRight, BookOpenText, BarChart3, PieChart as PieIcon,
   Plus, Search, Calendar, TrendingUp, DollarSign, Sparkles, LogOut,
-  Filter, ChevronLeft, Activity, Banknote, Loader2, Landmark, ShieldCheck,
+  Filter, ChevronLeft, ChevronDown, Activity, Banknote, Loader2, Landmark, ShieldCheck,
   Building, Settings, Upload, Download, FileSpreadsheet, CheckCircle2, XCircle,
   AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key, Pencil,
   ArrowLeftRight, Briefcase, CalendarClock, LogIn, Package, Copy, RefreshCw,
@@ -2479,6 +2479,28 @@ const canModule = (user, tabId) => {
   return user.permissions?.[`mod_${String(tabId).replace(/-/g, '_')}`] !== false
 }
 
+// v4.7 — SA sidebar VISUAL grouping only (collapsible). Existing NAV entries/ids/labels are
+// reused untouched — this is a render-time arrangement for the platform Super Admin ONLY;
+// office owners/staff keep the exact flat sidebar they had. No section merge, no new dashboard.
+const SA_SIDEBAR_GROUPS = [
+  {
+    id: 'grp-rahaal', label: 'إدارة رحّال', emoji: '🏢',
+    items: ['platform-offices', 'platform-people', 'platform-plans', 'platform-subs', 'platform-sales', 'platform-orders', 'platform-commissions', 'platform-ads', 'platform-notify'],
+  },
+  {
+    id: 'grp-finance', label: 'المحاسبة والإدارة المالية', emoji: '💰',
+    items: ['fx', 'receipt', 'payment', 'clients', 'suppliers', 'boxes', 'chart', 'journal'],
+  },
+  {
+    id: 'grp-reports', label: 'التقارير', emoji: '📊',
+    items: ['reports'],
+  },
+  {
+    id: 'grp-system', label: 'النظام والإعدادات', emoji: '⚙️',
+    items: ['platform-system', 'platform-geo'],
+  },
+]
+
 // v3.46 — Idle session auto-lock configuration (centralized — adjust here)
 const IDLE_TIMEOUT_MINUTES = 15
 // sessionStorage key set ONLY at idle-logout and consumed once on next login.
@@ -2511,6 +2533,22 @@ const playMeraajChime = () => {
 
 function Sidebar({ current, onChange, mobileOpen, onMobileClose, onOpenPlatform = null }) {
   const { tenant, settings, user } = useAuth()
+  // v4.7 — SA collapsible groups: multiple groups may stay open; the group holding the
+  // active tab opens automatically (without closing others). Pure visual state.
+  const isPlatformSA = user?.role === 'super_admin'
+  const [openGroups, setOpenGroups] = useState(() => {
+    const g = SA_SIDEBAR_GROUPS.find(x => x.items.includes(current))
+    return new Set(g ? [g.id] : [])
+  })
+  useEffect(() => {
+    const g = SA_SIDEBAR_GROUPS.find(x => x.items.includes(current))
+    if (g) setOpenGroups(prev => (prev.has(g.id) ? prev : new Set([...prev, g.id])))
+  }, [current])
+  const toggleGroup = (gid) => setOpenGroups(prev => {
+    const next = new Set(prev)
+    if (next.has(gid)) next.delete(gid); else next.add(gid)
+    return next
+  })
   // v3.86 — swipe-right on the drawer closes it (RTL: drawer lives on the right edge)
   const swipeRef = useRef(null)
   const onTouchStart = (e) => { swipeRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY } }
@@ -2559,30 +2597,80 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose, onOpenPlatform 
         </div>
       </div>
       <nav className="flex-1 overflow-y-auto overscroll-contain p-2 md:p-3 space-y-1" style={{ touchAction: 'pan-y' }}>
-        {NAV.filter(n => canModule(user, n.id)).map((item, idx, arr) => {
-          const Icon = item.icon
-          const active = current === item.id
-          // v3.99 — Batch 1: group header (e.g. «إدارة رحّال») rendered once before its first item
-          const groupHeader = item.group && arr[idx - 1]?.group !== item.group
-            ? <div key={`${item.id}-group`} className="pt-3 pb-1 px-3 text-[10px] font-black text-amber-400/90 tracking-widest">🏢 {item.group}</div>
-            : null
-          return [groupHeader,
-            <button
-              key={item.id}
-              onClick={() => onChange(item.id)}
-              title={item.label}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 min-h-[44px] rounded-lg text-sm font-medium transition-all ${
-                active ? 'bg-white/10 text-white shadow-inner' : 'text-slate-300 hover:bg-white/5 hover:text-white'
-              }`}
-            >
-              <span className={`w-8 h-8 rounded-md flex items-center justify-center bg-gradient-to-br ${item.color} ${active ? 'shadow-lg' : 'opacity-80'} shrink-0`}>
-                <Icon className="w-4 h-4 text-white" />
-              </span>
-              <span className="flex-1 text-right">{item.label}</span>
-              {active && <ChevronLeft className="w-4 h-4 text-slate-400" />}
-            </button>,
-          ]
-        })}
+        {(() => {
+          // permission filtering stays EXACTLY as before (canModule) — a hidden item never
+          // renders, and a group with zero visible items disappears entirely.
+          const allowed = NAV.filter(n => canModule(user, n.id))
+          const renderItem = (item) => {
+            const Icon = item.icon
+            const active = current === item.id
+            return (
+              <button
+                key={item.id}
+                onClick={() => onChange(item.id)}
+                title={item.label}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 min-h-[44px] rounded-lg text-sm font-medium transition-all ${
+                  active ? 'bg-white/10 text-white shadow-inner' : 'text-slate-300 hover:bg-white/5 hover:text-white'
+                }`}
+              >
+                <span className={`w-8 h-8 rounded-md flex items-center justify-center bg-gradient-to-br ${item.color} ${active ? 'shadow-lg' : 'opacity-80'} shrink-0`}>
+                  <Icon className="w-4 h-4 text-white" />
+                </span>
+                <span className="flex-1 text-right">{item.label}</span>
+                {active && <ChevronLeft className="w-4 h-4 text-slate-400" />}
+              </button>
+            )
+          }
+          if (!isPlatformSA) {
+            // office owners/staff: the exact same flat sidebar as before (untouched)
+            return allowed.map((item, idx, arr) => {
+              const groupHeader = item.group && arr[idx - 1]?.group !== item.group
+                ? <div key={`${item.id}-group`} className="pt-3 pb-1 px-3 text-[10px] font-black text-amber-400/90 tracking-widest">🏢 {item.group}</div>
+                : null
+              return [groupHeader, renderItem(item)]
+            })
+          }
+          // v4.7 — platform SA: «لوحة التحكم» pinned on top, then the 4 collapsible groups,
+          // then the remaining standalone entries in their original order.
+          const byId = Object.fromEntries(allowed.map(n => [n.id, n]))
+          const groupedIds = new Set(SA_SIDEBAR_GROUPS.flatMap(g => g.items))
+          const dash = byId['dashboard']
+          const standalone = allowed.filter(n => n.id !== 'dashboard' && !groupedIds.has(n.id))
+          return (
+            <>
+              {dash && renderItem(dash)}
+              {SA_SIDEBAR_GROUPS.map(g => {
+                const items = g.items.map(id => byId[id]).filter(Boolean)
+                if (items.length === 0) return null // group fully hidden by permissions
+                const open = openGroups.has(g.id)
+                const hasActive = items.some(i => i.id === current)
+                return (
+                  <div key={g.id} className="pt-1">
+                    <button
+                      onClick={() => toggleGroup(g.id)}
+                      aria-expanded={open}
+                      className={`w-full flex items-center gap-2 px-3 py-2 min-h-[42px] rounded-lg text-[12px] font-black tracking-wide transition-all ${
+                        hasActive ? 'text-amber-300 bg-white/5' : 'text-amber-400/90 hover:bg-white/5'
+                      }`}
+                    >
+                      <span className="text-sm">{g.emoji}</span>
+                      <span className="flex-1 text-right">{g.label}</span>
+                      <span className="text-[9px] font-bold text-slate-400 bg-white/10 rounded-full px-1.5 py-0.5">{items.length}</span>
+                      {open ? <ChevronDown className="w-4 h-4 text-slate-300" /> : <ChevronLeft className="w-4 h-4 text-slate-400" />}
+                    </button>
+                    {open && (
+                      <div className="mr-3 pr-1 border-r border-white/10 space-y-1 mt-1">
+                        {items.map(renderItem)}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+              {standalone.length > 0 && <div className="pt-2 pb-1 px-3 text-[10px] font-black text-slate-400/80 tracking-widest">أقسام المكتب</div>}
+              {standalone.map(renderItem)}
+            </>
+          )
+        })()}
       </nav>
       {/* v3.98 — Phase 1: clear path from the company book to the EXISTING platform
           admin sections (no new dashboard) — visible only for the platform SA */}

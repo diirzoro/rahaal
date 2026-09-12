@@ -7439,11 +7439,21 @@ async function handleRoute(request, { params }) {
         result = { error: e?.message || 'فشل غير متوقع أثناء إعادة إنشاء القيد' }
       }
       if (result.error) {
-        // v4.5 — NO PARTIAL STATE, NO SILENT HISTORY LOSS: restore the original journal
-        // and RE-APPLY its balance effects exactly as they were, then audit the failure.
-        const { _id: _omit, ...restoreDoc } = oldJe
-        await db.collection('journal_entries').insertOne({ ...restoreDoc })
-        await applyManualJournalEffects(db, T, oldJe)
+        // v4.5/v4.8 — NO PARTIAL STATE, NO SILENT HISTORY LOSS: createManualJournal now
+        // guarantees ZERO residual new-attempt effects (dry-run + tracked compensation),
+        // so restoring the ORIGINAL journal + its effects fully returns the books to the
+        // pre-edit state. A restore failure is NEVER reported as a successful restore.
+        try {
+          const { _id: _omit, ...restoreDoc } = oldJe
+          await db.collection('journal_entries').insertOne({ ...restoreDoc })
+          await applyManualJournalEffects(db, T, oldJe)
+        } catch (restoreErr) {
+          console.error('[JE-EDIT] CRITICAL: restore failed for', jeId, restoreErr)
+          try {
+            await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'edit_failed_restore_failed', je_id: jeId, ref_type: oldJe.ref_type, error: `${String(result.error).slice(0, 200)} || restore: ${String(restoreErr?.message || restoreErr).slice(0, 200)}`, by: sess.user.email, at: new Date() })
+          } catch { }
+          return bad(`فشل التعديل (${result.error}) ثم فشلت الاستعادة التلقائية (${restoreErr?.message || restoreErr}) — لا تُعد المحاولة؛ يلزم فحص يدوي فوري للقيد ${jeId} وأرصدته`, 500)
+        }
         try {
           await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'edit_failed_restored', je_id: jeId, ref_type: oldJe.ref_type, error: String(result.error).slice(0, 300), by: sess.user.email, at: new Date() })
         } catch { }
@@ -9416,6 +9426,20 @@ async function createManualJournal(db, T, b, opts = {}) {
   const perr0 = await assertOpenPeriod(db, T, b.date)
   if (perr0) return { error: perr0 }
   if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
+  // v4.8 — PR#18-1: (a) the FINAL journal lines are dry-run through the central gate
+  // (enforceJournalInvariants — accounts/tenant/group/inactive/currency/base-balance/period)
+  // BEFORE any cached-balance effect; (b) every balance effect of THIS attempt is tracked,
+  // so a residual gate failure (true race only) compensates exactly what was applied —
+  // once, in reverse order, never a double reversal — and NEVER claims success if the
+  // compensation itself did not complete. Multi-currency/FX engine logic untouched.
+  const appliedFx = []
+  const applyTracked = async (col, pid, cur, delta) => {
+    await updateBalance(db, col, { id: pid, tenant_id: T }, cur, delta)
+    appliedFx.push({ col, pid, cur, delta })
+  }
+  const rollbackApplied = async () => {
+    for (const a of [...appliedFx].reverse()) await updateBalance(db, a.col, { id: a.pid, tenant_id: T }, a.cur, -a.delta)
+  }
   // Modes:
   //  A) single: { date, currency, description, lines: [...] }
   //  B) dual:   { date, description, dual: true, debit_*, credit_* }
@@ -9446,18 +9470,30 @@ async function createManualJournal(db, T, b, opts = {}) {
       if (fxDiff > 0) lines.push({ account_code: COA.FX_PNL, account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: BASE_CURRENCY, debit: 0, credit: +fxDiff.toFixed(2) })
       else lines.push({ account_code: COA.FX_PNL, account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: BASE_CURRENCY, debit: +Math.abs(fxDiff).toFixed(2), credit: 0 })
     }
-    for (const side of ['debit', 'credit']) {
-      const pt = b[`${side}_party_type`], pid = b[`${side}_party_id`], cur = b[`${side}_currency`]
-      const amt = side === 'debit' ? da : ca
-      if (pt === 'client' && pid) await updateBalance(db, 'clients', { id: pid, tenant_id: T }, cur, side === 'debit' ? amt : -amt)
-      if (pt === 'supplier' && pid) await updateBalance(db, 'suppliers', { id: pid, tenant_id: T }, cur, side === 'debit' ? -amt : amt)
-      if (pt === 'box' && pid) await updateBalance(db, 'boxes', { id: pid, tenant_id: T }, cur, side === 'debit' ? amt : -amt)
+    // v4.8 — PR#18-1: full central-gate DRY-RUN on the FINAL lines BEFORE any balance effect
+    // (rejecting e.g. an inactive account can no longer leave a changed balance without a journal)
+    try {
+      await enforceJournalInvariants(db, T, { date: b.date, currency: 'MULTI', lines })
+    } catch (e) { return { error: e.message } }
+    try {
+      for (const side of ['debit', 'credit']) {
+        const pt = b[`${side}_party_type`], pid = b[`${side}_party_id`], cur = b[`${side}_currency`]
+        const amt = side === 'debit' ? da : ca
+        if (pt === 'client' && pid) await applyTracked('clients', pid, cur, side === 'debit' ? amt : -amt)
+        if (pt === 'supplier' && pid) await applyTracked('suppliers', pid, cur, side === 'debit' ? -amt : amt)
+        if (pt === 'box' && pid) await applyTracked('boxes', pid, cur, side === 'debit' ? amt : -amt)
+      }
+      const je = await createJournalEntry(db, T, {
+        date: b.date, description: (opts.existingId ? 'تعديل — ' : '') + (b.description || 'سند قيد ثنائي (مصارفة/تسوية)'),
+        ref_type: 'manual_dual', ref_id: opts.existingId || uuidv4(), currency: 'MULTI', lines,
+      }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal' })
+      return { doc: { ...je, _id: undefined, fx_diff_usd: fxDiff } }
+    } catch (e) {
+      try { await rollbackApplied() } catch (rbErr) {
+        return { error: `⛔ فشل القيد (${e?.message}) وتعذر اكتمال التراجع الآلي عن آثار المحاولة (${rbErr?.message}) — يلزم فحص يدوي فوري للأرصدة` }
+      }
+      return { error: e?.message || 'فشل غير متوقع أثناء إنشاء القيد' }
     }
-    const je = await createJournalEntry(db, T, {
-      date: b.date, description: (opts.existingId ? 'تعديل — ' : '') + (b.description || 'سند قيد ثنائي (مصارفة/تسوية)'),
-      ref_type: 'manual_dual', ref_id: opts.existingId || uuidv4(), currency: 'MULTI', lines,
-    }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal' })
-    return { doc: { ...je, _id: undefined, fx_diff_usd: fxDiff } }
   }
   // Single-currency manual JE
   if (!CURRENCIES.includes(b.currency)) return { error: 'عملة غير صالحة' }
@@ -9469,24 +9505,37 @@ async function createManualJournal(db, T, b, opts = {}) {
   const totalD = lines.reduce((s, l) => s + (Number(l.debit) || 0), 0)
   const totalC = lines.reduce((s, l) => s + (Number(l.credit) || 0), 0)
   if (Math.abs(totalD - totalC) > 0.01) return { error: `القيد غير متوازن: مدين ${totalD.toFixed(2)} ≠ دائن ${totalC.toFixed(2)}` }
-  for (const l of lines) {
-    const debit = Number(l.debit) || 0, credit = Number(l.credit) || 0
-    const delta = debit - credit
-    if (l.party_type === 'client' && l.party_id) await updateBalance(db, 'clients', { id: l.party_id, tenant_id: T }, b.currency, delta)
-    if (l.party_type === 'supplier' && l.party_id) await updateBalance(db, 'suppliers', { id: l.party_id, tenant_id: T }, b.currency, -delta)
-    if (l.party_type === 'box' && l.party_id) await updateBalance(db, 'boxes', { id: l.party_id, tenant_id: T }, b.currency, delta)
+  // v4.8 — PR#18-1: build the EXACT final lines first, dry-run them through the central
+  // gate, and only then touch balances (tracked) — identical parity with createJournalEntry.
+  const mappedLines = lines.map(l => ({
+    account_code: l.account_code || 'MANUAL', account_name: l.account_name || '—',
+    party_type: l.party_type || 'manual', party_id: l.party_id || null, party_name: l.party_name || l.account_name || '—',
+    currency: b.currency,
+    debit: Number(l.debit) || 0, credit: Number(l.credit) || 0,
+  }))
+  try {
+    await enforceJournalInvariants(db, T, { date: b.date, currency: b.currency, lines: mappedLines })
+  } catch (e) { return { error: e.message } }
+  try {
+    for (const l of lines) {
+      const debit = Number(l.debit) || 0, credit = Number(l.credit) || 0
+      const delta = debit - credit
+      if (l.party_type === 'client' && l.party_id) await applyTracked('clients', l.party_id, b.currency, delta)
+      if (l.party_type === 'supplier' && l.party_id) await applyTracked('suppliers', l.party_id, b.currency, -delta)
+      if (l.party_type === 'box' && l.party_id) await applyTracked('boxes', l.party_id, b.currency, delta)
+    }
+    const je = await createJournalEntry(db, T, {
+      date: b.date, description: (opts.existingId ? 'تعديل — ' : '') + (b.description || 'قيد يومية يدوي'),
+      ref_type: 'manual', ref_id: opts.existingId || uuidv4(), currency: b.currency,
+      lines: mappedLines,
+    }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal' })
+    return { doc: { ...je, _id: undefined } }
+  } catch (e) {
+    try { await rollbackApplied() } catch (rbErr) {
+      return { error: `⛔ فشل القيد (${e?.message}) وتعذر اكتمال التراجع الآلي عن آثار المحاولة (${rbErr?.message}) — يلزم فحص يدوي فوري للأرصدة` }
+    }
+    return { error: e?.message || 'فشل غير متوقع أثناء إنشاء القيد' }
   }
-  const je = await createJournalEntry(db, T, {
-    date: b.date, description: (opts.existingId ? 'تعديل — ' : '') + (b.description || 'قيد يومية يدوي'),
-    ref_type: 'manual', ref_id: opts.existingId || uuidv4(), currency: b.currency,
-    lines: lines.map(l => ({
-      account_code: l.account_code || 'MANUAL', account_name: l.account_name || '—',
-      party_type: l.party_type || 'manual', party_id: l.party_id || null, party_name: l.party_name || l.account_name || '—',
-      currency: b.currency,
-      debit: Number(l.debit) || 0, credit: Number(l.credit) || 0,
-    })),
-  }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal' })
-  return { doc: { ...je, _id: undefined } }
 }
 
 async function computeDashboard(db, T) {
