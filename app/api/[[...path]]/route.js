@@ -564,7 +564,15 @@ function isFutureDocDate(dateVal) {
 }
 
 async function updateBalance(db, col, filter, currency, delta) {
-  await db.collection(col).updateOne(filter, { $inc: { [`balances.${currency}`]: delta } })
+  // v4.6 — RAH-ACC anti-corruption guard: a NaN/Infinity delta or a missing currency key
+  // would permanently corrupt the cached balance bucket ($inc NaN → the whole balance
+  // becomes NaN forever / a "balances.undefined" bucket appears). Fail LOUDLY instead —
+  // callers' restore paths (F-020) handle the abort; silent corruption never does.
+  const d = Number(delta)
+  if (!Number.isFinite(d)) throw new Error(`قيمة غير صالحة لتحديث الرصيد (${delta}) — أُوقفت العملية لحماية الأرصدة المخزنة`)
+  if (!currency || typeof currency !== 'string') throw new Error('عملة غير محددة لتحديث الرصيد — أُوقفت العملية لحماية الأرصدة المخزنة')
+  if (d === 0) return
+  await db.collection(col).updateOne(filter, { $inc: { [`balances.${currency}`]: d } })
 }
 
 // v3.10.7 — Chart of Accounts tree: atomic sequential code generator
@@ -5218,6 +5226,12 @@ async function handleRoute(request, { params }) {
       const [_, pkgId, bookingId] = pkgBookDelMatch
       const booking = await db.collection('package_bookings').findOne({ id: bookingId, tenant_id: T, package_id: pkgId })
       if (!booking) return bad('التسجيل غير موجود', 404)
+      // v4.6 — RAH-ACC: deleting a booking whose journal lives inside a closed year/period
+      // silently rewrites closed books — centrally blocked BEFORE any reversal (same rule
+      // as manual journal deletion).
+      const jeGuardPB = await db.collection('journal_entries').findOne({ ref_type: 'package_booking', ref_id: bookingId, tenant_id: T })
+      const perrPBD = await assertOpenPeriod(db, T, jeGuardPB?.date || booking.date || booking.created_at)
+      if (perrPBD) return bad(`الحجز داخل فترة/سنة مقفلة ولا يُحذف — ${perrPBD}`)
       // Reverse balances
       const cur = booking.currency || 'USD'
       const payMethod = booking.payment_method || 'credit'
@@ -5237,8 +5251,8 @@ async function handleRoute(request, { params }) {
       // Delete associated JE
       const je = await db.collection('journal_entries').findOne({ ref_type: 'package_booking', ref_id: bookingId, tenant_id: T })
       if (je) {
-        await db.collection('journal_entries').deleteOne({ id: je.id })
-        await db.collection('tenants').updateOne({ id: T }, { $inc: { 'journal_quota.used': -1 } })
+        await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T }) // v4.6 — tenant-scoped
+        await db.collection('tenants').updateOne({ id: T, 'journal_quota.used': { $gt: 0 } }, { $inc: { 'journal_quota.used': -1 } }) // v4.6 — never below 0
       }
       // Decrement package bookings count
       await db.collection('packages').updateOne({ id: pkgId, tenant_id: T }, { $inc: { bookings_count: -1 } })
@@ -5299,28 +5313,16 @@ async function handleRoute(request, { params }) {
         const { _id: _idL, ...restL } = updatedLight
         return ok({ ...restL, _light_update: true })
       }
-      // FULL RECALC — reverse old, then re-apply new
-      const oldPay = oldBooking.payment_method || 'credit'
-      if (oldPay === 'cash' && oldBooking.box_id) {
-        await updateBalance(db, 'boxes', { id: oldBooking.box_id, tenant_id: T }, cur, -(oldBooking.total_sale || 0))
-      } else if (oldBooking.client_id) {
-        await updateBalance(db, 'clients', { id: oldBooking.client_id, tenant_id: T }, cur, -(oldBooking.total_sale || 0))
-      }
-      if (Array.isArray(oldBooking.component_snapshots)) {
-        for (const comp of oldBooking.component_snapshots) {
-          if (comp.supplier_id && comp.cost_total) {
-            await updateBalance(db, 'suppliers', { id: comp.supplier_id, tenant_id: T }, cur, -(comp.cost_total || 0))
-          }
-        }
-      }
-      // v3.19 — Reverse old partner-commission share balance (it was applied as a negative on create)
-      if ((Number(oldBooking.commission_share_amount) || 0) > 0 && oldBooking.commission_partner_id) {
-        const oldPcCol = oldBooking.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
-        await updateBalance(db, oldPcCol, { id: oldBooking.commission_partner_id, tenant_id: T }, cur, +(Number(oldBooking.commission_share_amount) || 0))
-      }
+      // FULL RECALC — v4.6 RAH-ACC FIX: previously the old balances were reversed and the
+      // old JE deleted BEFORE the validations below (transport/client/box/leaf-accounts) —
+      // any early return or thrown error left a PERMANENT partial state (balances reversed,
+      // journal gone, booking unchanged). Now ALL validations + a JE dry-run happen FIRST;
+      // destructive steps are grouped at the end.
       const oldJe = await db.collection('journal_entries').findOne({ ref_type: 'package_booking', ref_id: bookingId2, tenant_id: T })
       const existingJeId = oldJe?.id || undefined
-      if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id })
+      // v4.6 — closed year/period guard on the ORIGINAL journal date BEFORE any destructive step
+      const perrPBE = await assertOpenPeriod(db, T, oldJe?.date || oldBooking.date || oldBooking.created_at)
+      if (perrPBE) return bad(`الحجز الأصلي داخل فترة/سنة مقفلة — لا يمكن تعديله: ${perrPBE}`)
       const newPax = Math.max(1, Number(body.pax_count ?? oldBooking.pax_count) || 1)
       const newPay = body.payment_method === 'cash' ? 'cash' : (body.payment_method === 'credit' ? 'credit' : (oldBooking.payment_method || 'credit'))
       // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id
@@ -5431,6 +5433,51 @@ async function handleRoute(request, { params }) {
       for (const sid of supIdsA) partyLeafCode(supDocsJE[sid])
       const pcDocA = (newPartnerShare > 0 && pcId) ? await db.collection(pcType === 'supplier' ? 'suppliers' : 'clients').findOne({ id: pcId, tenant_id: T }) : null
       const pcLeafA = pcDocA ? partyLeafCode(pcDocA) : null
+      // v4.6 — RAH-ACC: build + DRY-RUN validate the NEW journal BEFORE any destructive step
+      // (accounts exist / no group / no inactive / balanced in base / open period —
+      // a rejection here has ZERO side effects, nothing was reversed or deleted yet)
+      const jeDatePB = oldJe?.date || oldBooking.created_at || new Date()
+      const lines = []
+      if (newPay === 'cash') lines.push({ account_code: payLeafA, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
+      else lines.push({ account_code: payLeafA, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
+      const supGrouped = {}
+      for (const c of newSnapshots) {
+        if (!c.supplier_id || !c.cost_total) continue
+        supGrouped[c.supplier_id] = supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }
+        supGrouped[c.supplier_id].amount += c.cost_total
+      }
+      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: partyLeafCode(supDocsJE[sid]), account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
+      // v3.19 — Balanced JE: revenue = sale - Σ(supplier credits) - partnerShare (mirrors POST logic)
+      const supSumJE = +Object.values(supGrouped).reduce((s, x) => s + +x.amount.toFixed(2), 0).toFixed(2)
+      const commissionJE = +(total_sale - supSumJE).toFixed(2)
+      const revenueNet = +(commissionJE - newPartnerShare).toFixed(2)
+      if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkgDoc.name}`, debit: 0, credit: revenueNet })
+      if (newPartnerShare > 0) lines.push({ account_code: pcLeafA, account_name: pcType === 'supplier' ? 'الموردون' : 'العملاء', party_type: pcType, party_id: pcId, party_name: pcName || 'شريك عمولة', debit: 0, credit: newPartnerShare }) // v3.88.5 — pre-resolved leaf
+      try {
+        await enforceJournalInvariants(db, T, { date: jeDatePB, currency: cur, lines })
+      } catch (invErr) {
+        return bad(`تعذر التعديل — القيد الجديد مرفوض قبل تنفيذ أي أثر مالي: ${invErr.message}`)
+      }
+      // ===== v4.6 — destructive steps start ONLY here (every validation above passed) =====
+      const oldPay = oldBooking.payment_method || 'credit'
+      if (oldPay === 'cash' && oldBooking.box_id) {
+        await updateBalance(db, 'boxes', { id: oldBooking.box_id, tenant_id: T }, cur, -(oldBooking.total_sale || 0))
+      } else if (oldBooking.client_id) {
+        await updateBalance(db, 'clients', { id: oldBooking.client_id, tenant_id: T }, cur, -(oldBooking.total_sale || 0))
+      }
+      if (Array.isArray(oldBooking.component_snapshots)) {
+        for (const comp of oldBooking.component_snapshots) {
+          if (comp.supplier_id && comp.cost_total) {
+            await updateBalance(db, 'suppliers', { id: comp.supplier_id, tenant_id: T }, cur, -(comp.cost_total || 0))
+          }
+        }
+      }
+      // v3.19 — Reverse old partner-commission share balance (it was applied as a negative on create)
+      if ((Number(oldBooking.commission_share_amount) || 0) > 0 && oldBooking.commission_partner_id) {
+        const oldPcCol = oldBooking.commission_partner_type === 'supplier' ? 'suppliers' : 'clients'
+        await updateBalance(db, oldPcCol, { id: oldBooking.commission_partner_id, tenant_id: T }, cur, +(Number(oldBooking.commission_share_amount) || 0))
+      }
+      if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id, tenant_id: T }) // v4.6 — tenant-scoped
       if (newPay === 'cash') {
         await updateBalance(db, 'boxes', { id: box.id, tenant_id: T }, cur, total_sale)
       } else {
@@ -5491,24 +5538,8 @@ async function handleRoute(request, { params }) {
         const newStatus = newBooked >= target.capacity ? 'full' : (target.status === 'full' && newBooked < target.capacity ? 'open' : target.status)
         await db.collection('package_transports').updateOne({ id: newTransport.id, tenant_id: T }, { $set: { seats_booked: newBooked, status: newStatus } })
       }
-      const lines = []
-      if (newPay === 'cash') lines.push({ account_code: payLeafA, account_name: box.name_ar, party_type: 'box', party_id: box.id, party_name: box.name_ar, debit: total_sale, credit: 0 })
-      else lines.push({ account_code: payLeafA, account_name: 'حساب القبض', party_type: 'client', party_id: cli.id, party_name: cli.name, debit: total_sale, credit: 0 })
-      const supGrouped = {}
-      for (const c of newSnapshots) {
-        if (!c.supplier_id || !c.cost_total) continue
-        supGrouped[c.supplier_id] = supGrouped[c.supplier_id] || { name: c.supplier_name, amount: 0 }
-        supGrouped[c.supplier_id].amount += c.cost_total
-      }
-      for (const [sid, x] of Object.entries(supGrouped)) lines.push({ account_code: partyLeafCode(supDocsJE[sid]), account_name: 'الموردون', party_type: 'supplier', party_id: sid, party_name: x.name, debit: 0, credit: +x.amount.toFixed(2) })
-      // v3.19 — Balanced JE: revenue = sale - Σ(supplier credits) - partnerShare (mirrors POST logic)
-      const supSumJE = +Object.values(supGrouped).reduce((s, x) => s + +x.amount.toFixed(2), 0).toFixed(2)
-      const commissionJE = +(total_sale - supSumJE).toFixed(2)
-      const revenueNet = +(commissionJE - newPartnerShare).toFixed(2)
-      if (revenueNet !== 0) lines.push({ account_code: COA.REV_SERVICES, account_name: 'إيرادات خدمات إضافية', party_type: 'revenue', party_id: null, party_name: `إيراد باكج ${pkgDoc.name}`, debit: 0, credit: revenueNet })
-      if (newPartnerShare > 0) lines.push({ account_code: pcLeafA, account_name: pcType === 'supplier' ? 'الموردون' : 'العملاء', party_type: pcType, party_id: pcId, party_name: pcName || 'شريك عمولة', debit: 0, credit: newPartnerShare }) // v3.88.5 — pre-resolved leaf
       await createJournalEntry(db, T, {
-        date: oldJe?.date || updatedBooking.created_at || new Date(),
+        date: jeDatePB,
         description: `تسجيل ${updatedBooking.pilgrim_name} في ${pkgDoc.name} — ${newPax} فرد (تعديل)${newPartnerShare > 0 ? ` — عمولة مشتركة ${newPartnerShare} مع ${pcName || 'شريك'}` : ''}`,
         ref_type: 'package_booking', ref_id: bookingId2, currency: cur, lines,
       }, { skipQuota: true, existingJeId, createdAt: oldJe?.created_at || new Date() })
@@ -7151,6 +7182,9 @@ async function handleRoute(request, { params }) {
           const doc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
           if (!doc) { failed++; errors.push({ id: docId, error: 'غير موجود' }); continue }
           const je = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
+          // v4.6 — RAH-ACC: per-row closed year/period guard (bulk delete must not rewrite closed books)
+          const perrBD = await assertOpenPeriod(db, T, je?.date || doc.date)
+          if (perrBD) { failed++; errors.push({ id: docId, error: `داخل فترة/سنة مقفلة — ${perrBD}` }); continue }
           if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
             if (doc.payment_method === 'cash' && doc.box_id) {
               await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
@@ -7178,8 +7212,8 @@ async function handleRoute(request, { params }) {
             }
           }
           if (je) {
-            await db.collection('journal_entries').deleteOne({ id: je.id })
-            await db.collection('tenants').updateOne({ id: T }, { $inc: { 'journal_quota.used': -1 } })
+            await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T }) // v4.6 — tenant-scoped
+            await db.collection('tenants').updateOne({ id: T, 'journal_quota.used': { $gt: 0 } }, { $inc: { 'journal_quota.used': -1 } }) // v4.6 — never below 0
           }
           await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
           deleted++
@@ -7213,6 +7247,10 @@ async function handleRoute(request, { params }) {
           const oldDoc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
           if (!oldDoc) { failed++; errors.push({ id: docId, error: 'غير موجود' }); continue }
           const oldJe = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
+          // v4.6 — RAH-ACC: per-row closed year/period guard on the ORIGINAL side (bulk edit
+          // reverses + deletes + recreates — closed books must never be rewritten)
+          const perrBE = await assertOpenPeriod(db, T, oldJe?.date || oldDoc.date)
+          if (perrBE) { failed++; errors.push({ id: docId, error: `داخل فترة/سنة مقفلة — ${perrBE}` }); continue }
           // Build new body from oldDoc + partial changes
           const newBody = {
             date: oldDoc.date, currency: oldDoc.currency, exchange_rate: oldDoc.exchange_rate,
@@ -7237,7 +7275,7 @@ async function handleRoute(request, { params }) {
           if (newBody.payment_method === 'credit') newBody.box_id = null
           // Reverse old effects
           await reverseTransactionEffects(db, T, kind, oldDoc)
-          if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id })
+          if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id, tenant_id: T }) // v4.6 — tenant-scoped
           await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
           const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at }
           let result
@@ -7275,6 +7313,10 @@ async function handleRoute(request, { params }) {
       if (!doc) return bad('العنصر غير موجود', 404)
       // Reverse balance updates & delete linked journal entry
       const je = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
+      // v4.6 — RAH-ACC: a document whose journal lives inside a closed year/period must not
+      // be deleted — that silently rewrites closed books (same central rule as manual JEs).
+      const perrUD = await assertOpenPeriod(db, T, je?.date || doc.date)
+      if (perrUD) return bad(`السجل داخل فترة/سنة مقفلة ولا يُحذف — ${perrUD}`)
       if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
         if (doc.payment_method === 'cash' && doc.box_id) {
           await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
@@ -7302,8 +7344,8 @@ async function handleRoute(request, { params }) {
         }
       }
       if (je) {
-        await db.collection('journal_entries').deleteOne({ id: je.id })
-        await db.collection('tenants').updateOne({ id: T }, { $inc: { 'journal_quota.used': -1 } })
+        await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T }) // v4.6 — tenant-scoped
+        await db.collection('tenants').updateOne({ id: T, 'journal_quota.used': { $gt: 0 } }, { $inc: { 'journal_quota.used': -1 } }) // v4.6 — never below 0
       }
       await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
       return ok({ success: true, deleted: kind, id: docId })
@@ -7318,10 +7360,15 @@ async function handleRoute(request, { params }) {
       const oldDoc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
       if (!oldDoc) return bad('السجل غير موجود', 404)
       const oldJe = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
+      // v4.6 — RAH-ACC: closed year/period guard on the ORIGINAL side BEFORE any destructive
+      // step (same "both sides" rule as manual-journal edits in v4.5) — editing a document
+      // whose journal is inside a closed period silently rewrites closed books.
+      const perrUP = await assertOpenPeriod(db, T, oldJe?.date || oldDoc.date)
+      if (perrUP) return bad(`السجل الأصلي داخل فترة/سنة مقفلة — لا يمكن تعديله: ${perrUP}`)
       // Step 1: Reverse balance effects of the old record
       await reverseTransactionEffects(db, T, kind, oldDoc)
       // Step 2: Delete old JE (without decrementing quota, since we'll re-post)
-      if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id })
+      if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id, tenant_id: T }) // v4.6 — tenant-scoped
       // Step 3: Delete the old record so we can re-insert with same id
       await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
       // Step 4: Re-create with same id + skip quota (edit doesn't count against limit)
@@ -7452,6 +7499,9 @@ async function handleRoute(request, { params }) {
         const acct = await db.collection('accounts').findOne({ tenant_id: T, code: String(b.account_code || '') })
         if (!acct) return bad('الحساب غير موجود في الدليل')
         if (acct.is_group) return bad('اختر حساباً تفصيلياً (وليس مجموعة)')
+        // v4.6 — RAH-ACC: an inactive account must not receive a NEW opening balance
+        // (same central rule the journal gate applies — history untouched)
+        if (isInactiveAccount(acct)) return bad(`الحساب "${acct.code} — ${acct.name_ar || ''}" غير نشط — لا يقبل رصيداً افتتاحياً جديداً`)
         if (!['asset', 'liability', 'equity'].includes(acct.type)) {
           return bad('الأرصدة الافتتاحية للأصول والخصوم وحقوق الملكية فقط — نتيجة الإيرادات والمصروفات للسنة السابقة تُقفل ضمن الأرباح المبقاة (3102)')
         }
@@ -7699,7 +7749,7 @@ async function handleRoute(request, { params }) {
       if (!reAcct) return bad(`Preflight: حساب الأرباح المبقاة (${COA.RETAINED_EARNINGS}) غير موجود في شجرة الحسابات — رحّل الدليل إلى COA v2 أولاً (لن يُنشأ الحساب تلقائياً)`)
       if (reAcct.is_group) return bad(`Preflight: حساب الأرباح المبقاة (${COA.RETAINED_EARNINGS}) حساب مجموعة — يجب أن يكون حساباً تفصيلياً قابلاً للقيد`)
       if (reAcct.type !== 'equity') return bad(`Preflight: الحساب (${COA.RETAINED_EARNINGS}) ليس ضمن حقوق الملكية`)
-      if (reAcct.is_active === false) return bad(`Preflight: حساب الأرباح المبقاة (${COA.RETAINED_EARNINGS}) غير نشط`)
+      if (isInactiveAccount(reAcct)) return bad(`Preflight: حساب الأرباح المبقاة (${COA.RETAINED_EARNINGS}) غير نشط`) // v4.6 — unified inactive view
       // v3.88.4 — aggregate revenues/expenses PER CURRENCY (the old code mixed all
       // currencies into one USD-labelled JE) — string/Date-safe business-TZ filter.
       const yStart = bizDayStart(`${year}-01-01`), yEnd = bizDayEnd(`${year}-12-31`)
@@ -7743,7 +7793,10 @@ async function handleRoute(request, { params }) {
           description: `🔒 قيد إقفال السنة المالية ${year} (${ccy}) — تصفير الإيرادات والمصروفات وترحيل الصافي إلى الأرباح المبقاة (${COA.RETAINED_EARNINGS})`,
           ref_type: 'year_close', ref_id: `close-${year}`, currency: ccy,
           lines: closingLines.map(l => ({ ...l, currency: ccy, party_type: null, party_id: null, party_name: l.account_name })),
-        }, { skipQuota: true })
+          // v4.6 — RAH-ACC: idempotency per year+currency — a partial multi-currency failure
+          // followed by a retry can no longer DUPLICATE closing journals (double transfer to
+          // retained earnings). Reopen-year deletes these JEs, so a re-close starts fresh.
+        }, { skipQuota: true, idempotencyKey: `year_close:${year}:${ccy}` })
         results.push({ currency: ccy, net_profit: net, closing_je_id: closingJe.id, lines_count: closingLines.length })
       }
       if (results.length === 0) return bad(`لا توجد قيود إيرادات أو مصروفات في السنة ${year}`)
@@ -8727,17 +8780,12 @@ async function createTicket(db, T, b, opts = {}) {
   // v3.10.2 — Reject negative amounts across all numeric fields
   const numFields = ['cost', 'sale_price', 'discount', 'commission', 'partner_commission_share', 'partner_commission', 'commission_office_share']
   for (const f of numFields) if (b[f] !== undefined && Number(b[f]) < 0) return { error: `القيمة السالبة غير مسموحة في الحقل: ${f}` }
-  // v3.9.14 — Period lock: prevent creating records in a closed year
-  if (b.date) {
-    const yr = new Date(b.date).getFullYear()
-    const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
-    if (tenant?.closed_years?.includes(yr)) return { error: `السنة المالية ${yr} مقفلة — لا يمكن إضافة أو تعديل قيود بتاريخها` }
-    // v3.10.6 — Date-level period lock check
-    const settings = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { period_lock: 1 } })
-    if (settings?.period_lock?.closed_until && b.date <= settings.period_lock.closed_until) {
-      return { error: `🔒 الفترة حتى ${settings.period_lock.closed_until} مقفلة — استخدم قيد تسوية عكسي بالتاريخ الحالي بدلاً من التعديل الرجعي` }
-    }
-  }
+  // v4.6 — RAH-ACC: CENTRAL closed year/period fail-fast (the old local string compare
+  // missed a date-with-time on the boundary day → the central gate then threw AFTER the
+  // doc/balances were written). Journal quota is also preflighted — no partial state on 402.
+  const perrTk = await assertOpenPeriod(db, T, b.date)
+  if (perrTk) return { error: perrTk }
+  if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
   const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
   if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
   const cost = Number(b.cost) || 0, sale = Number(b.sale_price) || 0
@@ -8869,17 +8917,11 @@ async function createVisa(db, T, b, opts = {}) {
   // v3.10.2 — Reject negative amounts
   const numFields = ['cost', 'sale_price', 'discount', 'commission']
   for (const f of numFields) if (b[f] !== undefined && Number(b[f]) < 0) return { error: `القيمة السالبة غير مسموحة في الحقل: ${f}` }
-  // v3.9.14 — Period lock
-  if (b.date) {
-    const yr = new Date(b.date).getFullYear()
-    const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
-    if (tenant?.closed_years?.includes(yr)) return { error: `السنة المالية ${yr} مقفلة — لا يمكن إضافة أو تعديل قيود بتاريخها` }
-    // v3.10.6 — Date-level period lock check
-    const settings = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { period_lock: 1 } })
-    if (settings?.period_lock?.closed_until && b.date <= settings.period_lock.closed_until) {
-      return { error: `🔒 الفترة حتى ${settings.period_lock.closed_until} مقفلة — استخدم قيد تسوية عكسي بالتاريخ الحالي` }
-    }
-  }
+  // v4.6 — RAH-ACC: CENTRAL closed year/period fail-fast (boundary-day string-compare gap
+  // fixed) + journal quota preflight — no doc/balance write can precede a failing gate.
+  const perrVs = await assertOpenPeriod(db, T, b.date)
+  if (perrVs) return { error: perrVs }
+  if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
   const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
   if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
   const cost = Number(b.cost) || 0, sale = Number(b.sale_price) || 0
@@ -8949,6 +8991,10 @@ async function createVisa(db, T, b, opts = {}) {
   const boxLeaf = paymentMethod === 'cash' ? partyLeafCode(box) : null
   const cliLeaf = paymentMethod === 'cash' ? null : partyLeafCode(cli)
   const supLeaf = partyLeafCode(sup)
+  // v4.6 — RAH-ACC CRITICAL FIX: partnerLeaf was NEVER defined in createVisa (it exists in
+  // createTicket/createService) → any visa carrying a partner commission share crashed with
+  // a ReferenceError AFTER the doc + balances were written (partial state, no journal).
+  const partnerLeaf = partnerDoc ? partyLeafCode(partnerDoc) : null
   await db.collection('visas').insertOne(doc)
   await updateBalance(db, 'suppliers', { id: sup.id, tenant_id: T }, b.currency, cost)
   if (partnerShare > 0 && doc.commission_partner_id) {
@@ -9020,17 +9066,11 @@ async function createService(db, T, b, opts = {}) {
   // services were the only path missing it). Values are rejected, NEVER abs()-coerced.
   const numFieldsSvc = ['cost', 'sale_price', 'discount', 'commission', 'commission_share_value']
   for (const f of numFieldsSvc) if (b[f] !== undefined && Number(b[f]) < 0) return { error: `القيمة السالبة غير مسموحة في الحقل: ${f}` }
-  // v3.9.14 — Period lock: prevent creating records in a closed year
-  if (b.date) {
-    const yr = new Date(b.date).getFullYear()
-    const tenant = await db.collection('tenants').findOne({ id: T }, { projection: { closed_years: 1 } })
-    if (tenant?.closed_years?.includes(yr)) return { error: `السنة المالية ${yr} مقفلة — لا يمكن إضافة أو تعديل قيود بتاريخها` }
-    // v3.10.6 — Date-level period lock check
-    const settings = await db.collection('tenant_settings').findOne({ tenant_id: T }, { projection: { period_lock: 1 } })
-    if (settings?.period_lock?.closed_until && b.date <= settings.period_lock.closed_until) {
-      return { error: `🔒 الفترة حتى ${settings.period_lock.closed_until} مقفلة — استخدم قيد تسوية عكسي بالتاريخ الحالي بدلاً من التعديل الرجعي` }
-    }
-  }
+  // v4.6 — RAH-ACC: CENTRAL closed year/period fail-fast (boundary-day string-compare gap
+  // fixed) + journal quota preflight — no doc/balance write can precede a failing gate.
+  const perrSv = await assertOpenPeriod(db, T, b.date)
+  if (perrSv) return { error: perrSv }
+  if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
   const paymentMethod = b.payment_method === 'cash' ? 'cash' : 'credit'
   // v3.9.22 — Unified payment: credit needs client_id, cash needs box_id only
   if (paymentMethod === 'credit' && !b.client_id) return { error: 'العميل مطلوب للحجز الآجل' }
@@ -9136,6 +9176,12 @@ async function createVoucher(db, T, b, opts = {}) {
   const amount = Number(b.amount) || 0
   if (Number(b.amount) < 0) return { error: 'لا يُسمح بمبلغ سالب في السند' }
   if (amount <= 0) return { error: 'المبلغ يجب أن يكون أكبر من صفر' }
+  // v4.6 — RAH-ACC: vouchers had NO closed year/period check at all before their writes —
+  // the central gate then threw AFTER the voucher + balances were written (partial state).
+  // Fail-fast here + journal quota preflight (no partial state on 402 either).
+  const perrVc = await assertOpenPeriod(db, T, b.date)
+  if (perrVc) return { error: perrVc }
+  if (!opts.skipQuota) { try { await assertJournalQuota(db, T) } catch (e) { return { error: e.message } } }
   let partyName = ''
   let partyDoc = null // v3.88.4 — F-007: keep the party doc to post to its LEAF account
   let coaAccount = null // v3.79 — real COA account for expense/revenue vouchers

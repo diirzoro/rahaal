@@ -295,3 +295,14 @@ See /app/memory/test_credentials.md
 - أولويات 3+4: PUT/DELETE الحسابات — ENGINE_ACCOUNT_CODES (كل قيم COA) محمية هيكلياً وحذفاً حتى بلا is_system وقبل أول استخدام؛ الحساب المستخدم في journal_entries يُمنع تغيير type/parent/is_group له (الاسم والملاحظات مسموحة)؛ تحقق الأب الجديد (موجود+مجموعة+ليس نفسه) وenum النوع؛ منع group→leaf مع وجود أبناء.
 - بلا تغيير: generateSubAccountCode (سليم)، partyLeafCode (صارم أصلاً)، COA migration functions (لم تُلمس)، Decimal128 (DEFERRED — REQUIRES DATA MIGRATION)، Immutable Journal+Reversal architecture (DEFERRED ARCHITECTURAL HARDENING).
 - مخاطر متبقية موثقة: مسارات تعديل المعاملات (تذاكر/سندات) تعكس الآثار قبل البوابة — رمي مركزي متأخر نظرياً ممكن (الاحتمال شبه معدوم لأن أسطر المحرك مبنية صحيحة)؛ فروقات أرصدة تاريخية محتملة من عطل MULTI القديم (تحتاج Reconciliation بموافقة).
+
+## v4.6 — RAH-ACC Final Audit & Fixes (Backend فقط — route.js وحده، +127/−81، صفر Frontend/Tests/Migration/بيانات/GitHub)
+- CRITICAL: createVisa كان يستخدم partnerLeaf غير معرّف (ReferenceError) — أي تأشيرة بعمولة شريك كانت تنهار بعد كتابة الوثيقة والأرصدة (حالة جزئية بلا قيد). أُصلح بتعريف partnerLeaf قبل أول كتابة (F-007 STRICT).
+- CRITICAL: تعديل حجز الباكج (PATCH full-recalc) كان يعكس الأرصدة ويحذف القيد القديم قبل التحققات (transport/client/box/leaf) — أي early-return كان يترك حالة جزئية دائمة. أُعيدت الهيكلة: كل التحققات + بناء القيد الجديد + Dry-Run عبر enforceJournalInvariants أولاً، ثم الخطوات التدميرية مجمعة في النهاية (date=jeDatePB).
+- حُرّاس السنة/الفترة المقفلة أُضيفوا للمسارات الالتفافية: DELETE الموحد (tickets/visas/services/vouchers/fx)، bulk-delete (لكل صف)، PUT الموحد (الجهة الأصلية)، bulk-edit (لكل صف)، حذف حجز الباكج، وتعديله — نفس قاعدة v4.5 للقيود اليدوية.
+- استبدال فحص الفترة المحلي المعيب (مقارنة نصية تفوّت اليوم الحدّي مع تاريخ+وقت) في createTicket/createVisa/createService بالحارس المركزي assertOpenPeriod + إضافة الحارس لأول مرة إلى createVoucher (كان بلا أي فحص فترة قبل الكتابة) + preflight للحصة assertJournalQuota في الأربعة (لا حالة جزئية عند 402).
+- updateBalance: حارس مانع تلف — رفض NaN/Infinity ورفض عملة مفقودة (كان $inc NaN يفسد الرصيد نهائياً) + تخطي delta=0.
+- إقفال السنة: idempotencyKey لكل سنة+عملة (year_close:YYYY:CCY) — إعادة المحاولة بعد فشل جزئي متعدد العملات لا تكرر قيود الإقفال؛ reopen يحذف القيود فيبدأ الإقفال التالي نظيفاً. + توحيد فحص النشاط isInactiveAccount في Preflight.
+- القيد الافتتاحي: منع الرصيد الافتتاحي الجديد على حساب معطل (نفس قاعدة البوابة).
+- Tenant-scoping: 6 مواضع deleteOne للقيود صارت مقيدة بـ tenant_id + عدّاد journal_quota.used لا ينزل تحت الصفر (3 مواضع).
+- BLOCKED (يحتاج موافقة/Migration): توحيد تخزين أعلام inactive/is_active، Unique Index للـ idempotency_key بالقاعدة. DEFERRED (معماري): Decimal128، Immutable/Append-only Ledger، معاملات Mongo الذرية.
