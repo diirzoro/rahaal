@@ -10,7 +10,7 @@ import {
   Plus, Search, Calendar, TrendingUp, DollarSign, Sparkles, LogOut,
   Filter, ChevronLeft, ChevronDown, Activity, Banknote, Loader2, Landmark, ShieldCheck,
   Building, Settings, Upload, Download, FileSpreadsheet, CheckCircle2, XCircle,
-  AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key, Pencil,
+  AlertTriangle, Trash2, Power, User, Image as ImageIcon, Printer, Key, Pencil, Eye,
   ArrowLeftRight, Briefcase, CalendarClock, LogIn, Package, Copy, RefreshCw,
   Menu, X,
 } from 'lucide-react'
@@ -37,12 +37,12 @@ import { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_M
 // (transfer only — zero new sections, same components, same /api/admin/* endpoints):
 import AdminStaffCenter from './admin/staff' // إدارة المستخدمين (v3.97)
 import AdminPermsCenter from './admin/perms' // الأدوار والصلاحيات (v3.93)
-import AdminSalesCenter from './admin/sales' // مبيعات برنامج رحّال (v3.93)
+
 import AdminCommissionsCenter from './admin/commissions' // مركز العمولات (v3.94)
 import AdminNotifyCenter from './admin/notifications' // v4.3 — مركز التنبيهات (moved as-is)
 import AdminRequestsCenter from './admin/requests' // v4.3 — الطلبات المتخصصة القائمة (moved as-is)
 // v4.4 — scope-correction consolidation: existing components reused as TABS (no copies, no new engines)
-import OfficesSection from './admin/offices' // Office 360° viewer
+import OfficesSection, { Office360 } from './admin/offices' // Office 360° viewer
 import AdminSystemCenter from './admin/system'
 import AdminAuditCenter from './admin/audit'
 import AdminBackupCenter from './admin/backup'
@@ -575,6 +575,7 @@ function SuperAdminPanel({ embedded = false }) {
   const [instTarget, setInstTarget] = useState(null)
   const [quotaTarget, setQuotaTarget] = useState(null) // v4.0 — unified «زيادة حصة القيود» dialog
   const [activating, setActivating] = useState(null) // v5.2 — the ONLY Trial→Paid path
+  const [viewing, setViewing] = useState(null) // v4.9 — CRUD: View action → inline Office 360 (reused, no second details page)
   const [tq, setTq] = useState('') // v3.99 — Batch 1: search/filter (embedded mode)
   const load = async () => {
     try {
@@ -711,7 +712,7 @@ function SuperAdminPanel({ embedded = false }) {
           </Card>
         )}
 
-        <Card>
+        {viewing ? <Office360 office={viewing} onBack={() => setViewing(null)} /> : <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="flex items-center gap-2"><Building2 className="w-5 h-5 text-blue-600" /> إدارة المكاتب (Tenants)</CardTitle>
             <div className="flex gap-2 items-center flex-wrap">
@@ -762,18 +763,20 @@ function SuperAdminPanel({ embedded = false }) {
                       <TableCell className="text-xs">{fmtDate(t.created_at)}</TableCell>
                       <TableCell className="text-left">
                         <div className="flex gap-1 justify-end flex-wrap">
+                          {/* v4.9 — CRUD Tenants Actions: View | Edit | Suspend/Activate | Delete */}
+                          <Button size="sm" variant="outline" className="text-blue-600 border-blue-300" onClick={() => setViewing(t)}><Eye className="w-3 h-3" /> عرض</Button>
+                          <Button size="sm" variant="outline" onClick={() => setEditing(t)}><Settings className="w-3 h-3" /> تعديل</Button>
                           <Button size="sm" variant={t.status === 'suspended' ? 'default' : 'outline'} className={t.status === 'suspended' ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'text-amber-600 border-amber-300'} onClick={async () => {
                             const action = t.status === 'suspended' ? 'تفعيل' : 'تعليق'
                             if (!(await askConfirm({ title: 'تغيير حالة المكتب', desc: `${action} المكتب "${t.name}"؟`, icon: '🏢', confirmLabel: 'تأكيد' }))) return
                             try { const r = await api(`/admin/tenants/${t.id}/toggle-status`, { method: 'POST' }); toast.success(`تم — الحالة الآن: ${r.status === 'active' ? 'نشط' : 'معلّق'}`); load() }
                             catch (e) { toast.error(e.message) }
                           }}>{t.status === 'suspended' ? '▶️ تفعيل' : '⏸️ تعليق'}</Button>
+                          <Button size="sm" variant="outline" disabled className="text-slate-400 border-slate-200 cursor-not-allowed" title="الحذف الصلب غير متاح — يتطلب قرار تصميم (حذف ناعم / أرشيف). استخدم التعليق بدلاً منه."><Trash2 className="w-3 h-3" /> حذف</Button>
                           {!embedded && <Button size="sm" variant="outline" className="text-purple-600 border-purple-300" onClick={async () => {
                             if (!(await askConfirm({ title: `الدخول كمالك المكتب "${t.name}"`, desc: `ستُفتح جلسة مؤقتة (30 دقيقة) في تاب جديد. سيظهر شريط أحمر أعلى الشاشة يذكّرك بحالة الجلسة.`, icon: '👤', confirmLabel: 'فتح الجلسة' }))) return
                             try {
                               const r = await api(`/admin/tenants/${t.id}/impersonate`, { method: 'POST' })
-                              // Open new tab with the session cookie
-                              // The cookie is set by the backend already; open a new tab
                               window.open('/', '_blank')
                               toast.success(`🎭 جلسة "دخول كـ ${r.tenant.name}" فُتحت في تاب جديد`)
                             } catch (e) { toast.error(e.message) }
@@ -781,21 +784,7 @@ function SuperAdminPanel({ embedded = false }) {
                           {!embedded && !t.activation_confirmed && (
                             <Button size="sm" variant="outline" className="text-blue-600 border-blue-300" onClick={() => setActivating(t)}>💳 تفعيل الاشتراك</Button>
                           )}
-                          {/* v4.0 — renamed «رصيد» → «زيادة حصة القيود» + single unified POST /topup path */}
                           {!embedded && <Button size="sm" variant="outline" className="text-emerald-600" onClick={() => setQuotaTarget(t)}><Plus className="w-3 h-3" /> زيادة حصة القيود</Button>}
-                          <Button size="sm" variant="outline" onClick={() => setEditing(t)}><Settings className="w-3 h-3" /></Button>
-                          {!embedded && <Button size="sm" variant="outline" className={t.status === 'active' ? 'text-amber-600' : 'text-emerald-600'}
-                            onClick={async () => {
-                              const newStatus = t.status === 'active' ? 'suspended' : 'active'
-                              await api(`/admin/tenants/${t.id}`, { method: 'PATCH', body: { status: newStatus } })
-                              toast.success(newStatus === 'active' ? 'تم التفعيل' : 'تم الإيقاف'); load()
-                            }}><Power className="w-3 h-3" /></Button>}
-                          {!embedded && <Button size="sm" variant="outline" className="text-rose-600"
-                            onClick={async () => {
-                              if (!(await askConfirm({ title: 'حذف المكتب نهائياً', desc: `حذف المكتب "${t.name}" وجميع بياناته نهائياً؟`, icon: '🗑️', variant: 'danger', irreversible: true, confirmLabel: 'تأكيد الحذف' }))) return
-                              await api(`/admin/tenants/${t.id}`, { method: 'DELETE' })
-                              toast.success('تم الحذف'); load()
-                            }}><Trash2 className="w-3 h-3" /></Button>}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -807,7 +796,7 @@ function SuperAdminPanel({ embedded = false }) {
               </TableBody>
             </Table>
           </CardContent>
-        </Card>
+        </Card>}
 
         {/* v2.8 — Announcements Management (own tab in embedded mode) */}
         {!embedded && <AnnouncementsManager />}
@@ -2626,6 +2615,11 @@ const SA_SIDEBAR_GROUPS = [
   },
 ]
 
+// v5.1 — Travel-office operational modules are HIDDEN from the platform SA / Rahaal company
+// book (render-time visibility filter in the SA sidebar branch only). Their permissions for
+// regular travel offices remain exactly as-is — this list never touches canModule or the RBAC.
+const SA_OFFICE_MODULES = new Set(['tickets', 'visas', 'services', 'packages', 'meraaj', 'visa-monitor', 'query', 'affiliate'])
+
 // v3.46 — Idle session auto-lock configuration (centralized — adjust here)
 const IDLE_TIMEOUT_MINUTES = 15
 // sessionStorage key set ONLY at idle-logout and consumed once on next login.
@@ -2760,7 +2754,11 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
           const byId = Object.fromEntries(allowed.map(n => [n.id, n]))
           const groupedIds = new Set(SA_SIDEBAR_GROUPS.flatMap(g => g.items))
           const dash = byId['dashboard']
-          const standalone = allowed.filter(n => n.id !== 'dashboard' && !groupedIds.has(n.id))
+          // v5.1 — the «أقسام المكتب» operational group stays invisible for the platform SA /
+          // Rahaal company book. Only the SA sidebar branch is filtered — travel offices keep
+          // the exact flat sidebar (per canModule) below. «إعدادات المكتب» is an office-only
+          // skin (agency name/logo/header) that renders nearly empty for SA — hidden too.
+          const standalone = allowed.filter(n => n.id !== 'dashboard' && !groupedIds.has(n.id) && !SA_OFFICE_MODULES.has(n.id) && n.id !== 'settings')
           return (
             <>
               {dash && renderItem(dash)}
@@ -2791,12 +2789,27 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
                   </div>
                 )
               })}
-              {standalone.length > 0 && <div className="pt-2 pb-1 px-3 text-[10px] font-black text-slate-400/80 tracking-widest">أقسام المكتب</div>}
+              {standalone.some(n => SA_OFFICE_MODULES.has(n.id)) && <div className="pt-2 pb-1 px-3 text-[10px] font-black text-slate-400/80 tracking-widest">أقسام المكتب</div>}
               {standalone.map(renderItem)}
             </>
           )
         })()}
       </nav>
+      {/* v4.8 — Phase 2: «إدارة المنصة» is now a pure in-TenantApp navigation shortcut for the
+          platform SA — jumps to the «إدارة رحّال» group (first entry: platform-offices).
+          No AdminApp switch exists anymore — every role renders inside TenantApp. The nav id
+          follows the existing NAV/canModule path, so the group auto-opens via the existing
+          Sidebar effect, gated by RBAC only. */}
+      {isPlatformSA && (
+        <div className="p-2 md:p-3 border-t border-slate-800/70">
+          <button
+            onClick={() => onChange('platform-offices')}
+            className="w-full flex items-center justify-center gap-2 px-3 py-2.5 min-h-[44px] rounded-lg text-sm font-bold bg-gradient-to-l from-amber-600 to-orange-500 text-white shadow-lg hover:opacity-90 transition"
+          >
+            🛡️ إدارة المنصة
+          </button>
+        </div>
+      )}
       <div className="p-2 md:p-3 border-t border-slate-800/70">
         <div className="flex items-center gap-3 p-2 rounded-lg bg-white/5">
           <div className="w-9 h-9 rounded-full grad-brand flex items-center justify-center shrink-0"><User className="w-4 h-4 text-white" /></div>
@@ -13252,7 +13265,9 @@ function App() {
   }, [])
 
   useEffect(() => { refreshMe() }, [refreshMe])
-
+  // v4.8 — Phase 2: the platform SA no longer switches to the separate AdminApp view.
+  // «إدارة المنصة» is now a pure in-TenantApp navigation shortcut (see Sidebar), so the
+  // company-book ⇄ AdminApp switcher state was removed entirely.
   // v3.46 — After an idle auto-lock, land directly on the LOGIN page (not the public landing)
   // so the user can resume quickly. Key is written only by the idle-lock logout.
   useEffect(() => {
@@ -13289,14 +13304,13 @@ function App() {
     <AuthCtx.Provider value={{ ...auth, refreshMe, logout }}>
       <TestEnvBadge />
       <ConfirmHost />
-      {/* v4.9 — TenantApp IS the single authoritative dashboard for Rahaal: the company
-          book (vouchers, boxes/banks, COA, journals) + the moved platform admin sections,
-          all RBAC-gated inside ONE app. The separate AdminApp shell was REMOVED, along
-          with the «إدارة المنصة» switcher and every fallback that used to route a platform
-          account to it. A platform account (super_admin / admin_staff) MUST already be
-          bound to the Rahaal company tenant; an unbound account gets an explicit blocking
-          notice — NO alternate panel to hide the problem, NO auto tenant creation, NO auto
-          binding on login (binding is a manual data operation that requires approval). */}
+      {/* v4.9+v5 (merged) — TenantApp IS the single authoritative dashboard for every role:
+          the company book (vouchers, boxes/banks, COA, journals) + the moved platform admin
+          sections, all RBAC-gated inside ONE app. The separate AdminApp shell was REMOVED and
+          «إدارة المنصة» is a pure in-app navigation shortcut (see Sidebar). STRICTER Emergent
+          rule kept: a platform account (super_admin / admin_staff) MUST already be bound to
+          the Rahaal company tenant; an unbound account gets an explicit blocking notice —
+          NO alternate panel, NO auto tenant creation, NO auto binding on login. */}
       {(() => {
         const isPlatformRole = auth.user.role === 'super_admin' || auth.user.role === 'admin_staff'
         if (isPlatformRole && !auth.user.tenant_id) {

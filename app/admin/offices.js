@@ -277,7 +277,7 @@ const BranchesTab = ({ office }) => {
 }
 
 // ============================ OFFICE 360° ============================
-const Office360 = ({ office, onBack }) => {
+export const Office360 = ({ office, onBack }) => {
   const [tab, setTab] = useState('overview')
   const [cache, setCache] = useState({})
   const [loading, setLoading] = useState(false)
