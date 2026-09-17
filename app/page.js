@@ -2548,6 +2548,7 @@ const NAV = [
   { id: 'boxes',     label: 'الصناديق والبنوك', icon: Wallet, color: 'from-yellow-600 to-amber-500' },
   { id: 'chart',     label: 'الدليل المحاسبي', icon: BookOpenText, color: 'from-purple-600 to-fuchsia-500' },
   { id: 'journal',   label: 'قيود اليومية', icon: ReceiptText, color: 'from-slate-700 to-slate-500' },
+  { id: 'interbranch', label: 'التحويلات بين الفروع', icon: ArrowLeftRight, color: 'from-orange-600 to-amber-500' }, // v5.4
   { id: 'reports',   label: 'التقارير المالية', icon: BarChart3, color: 'from-cyan-600 to-blue-500' },
   { id: 'affiliate', label: 'التسويق بالعمولة', icon: User, color: 'from-emerald-600 to-teal-500' },
   // v3.99 — Batch 1: old Super Admin sections merged into the shared sidebar (platform SA only — see canModule)
@@ -2589,6 +2590,8 @@ const canModule = (user, tabId) => {
   // (the separate AdminApp shell was removed); every action stays server-gated per section
   // via adminGate/adminCan — this is UI visibility only.
   if (String(tabId).startsWith('platform-')) return user.role === 'super_admin' || user.role === 'admin_staff'
+  // v5.4 — inter-branch is an OPT-IN module: full accounting perms do NOT imply it
+  if (tabId === 'interbranch') return user.role === 'owner' || user.permissions?.mod_interbranch === true
   if (user.role === 'owner') return true
   // v3.98 — Phase 1: the platform SA manages his own company office settings
   // (currencies & rates live here). Staff still never see settings.
@@ -2606,7 +2609,7 @@ const SA_SIDEBAR_GROUPS = [
   },
   {
     id: 'grp-finance', label: 'المحاسبة والإدارة المالية', emoji: '💰',
-    items: ['fx', 'receipt', 'payment', 'clients', 'suppliers', 'boxes', 'chart', 'journal'],
+    items: ['fx', 'receipt', 'payment', 'clients', 'suppliers', 'boxes', 'chart', 'journal', 'interbranch'],
   },
   {
     id: 'grp-reports', label: 'التقارير', emoji: '📊',
@@ -6347,6 +6350,204 @@ function JournalScreen() {
   )
 }
 
+// v5.4 — HQ report-scope picker: «المركز | فرع محدد | كل الفروع (مجمع)».
+// Rendered ONLY for an owner NOT linked to a branch and only when branches exist.
+// Branch users never see it — the backend forces their own scope regardless.
+function BranchScopePicker({ value, onChange }) {
+  const { user } = useAuth()
+  const [branches, setBranches] = useState(null)
+  useEffect(() => {
+    if (user?.role !== 'owner' || user?.branch_id) { setBranches([]); return }
+    api('/tenant/branches').then(r => setBranches(r?.branches || [])).catch(() => setBranches([]))
+  }, [user])
+  if (!branches || branches.length === 0) return null
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)} className="h-9 rounded-md border border-slate-300 px-2 text-xs bg-white font-bold text-slate-700" title="نطاق التقرير">
+      <option value="">🏢 كل الفروع (مجمع)</option>
+      <option value="hq">🏠 المركز الرئيسي فقط</option>
+      {branches.map(b => <option key={b.id} value={b.id}>🏢 فرع: {b.name}</option>)}
+    </select>
+  )
+}
+
+// ============================================================================
+// v5.4 — INTER-BRANCH SCREEN (التحويلات بين الفروع)
+// Internal transfers only — NEVER revenue/expense. The counterparty account
+// picker shows NAMES + CODES only (backend-safe DTO): no balances, no history.
+// ============================================================================
+function InterBranchScreen() {
+  const { user, branch } = useAuth()
+  const [counterparties, setCounterparties] = useState([])
+  const [cpAccounts, setCpAccounts] = useState(null)
+  const [myBoxes, setMyBoxes] = useState([])
+  const [list, setList] = useState([])
+  const [recon, setRecon] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [opId, setOpId] = useState(() => (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`)
+  const [f, setF] = useState({ type: 'payment', counterparty: '', my_box_id: '', counterparty_box_id: '', amount: '', currency: 'YER', direction: 'out', description: '' })
+  const newOp = () => setOpId((typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`)
+  const isHQ = !user?.branch_id
+  const load = () => {
+    api('/interbranch/counterparties').then(setCounterparties).catch(e => toast.error(e.message))
+    api('/boxes').then(setMyBoxes).catch(() => {})
+    api('/interbranch/transactions').then(setList).catch(() => {})
+    if (!user?.branch_id) api('/interbranch/reconciliation').then(setRecon).catch(() => {})
+  }
+  useEffect(() => { load() }, [])
+  useEffect(() => {
+    setCpAccounts(null); setF(v => ({ ...v, counterparty_box_id: '' }))
+    if (f.counterparty === '') return
+    api(`/interbranch/accounts?branch=${f.counterparty || 'hq'}`).then(setCpAccounts).catch(e => toast.error(e.message))
+  }, [f.counterparty])
+  const submit = async () => {
+    if (!f.counterparty && f.counterparty !== 'hq') return toast.error('اختر الفرع المقابل')
+    if (!f.my_box_id) return toast.error('اختر صندوقك/بنكك')
+    if (!f.counterparty_box_id) return toast.error('اختر حساب الطرف المقابل')
+    if (!(Number(f.amount) > 0)) return toast.error('أدخل مبلغاً صحيحاً')
+    try {
+      setBusy(true)
+      const r = await api('/interbranch/transactions', {
+        method: 'POST',
+        body: {
+          type: f.type, counterparty_branch_id: f.counterparty === 'hq' ? null : f.counterparty,
+          my_box_id: f.my_box_id, counterparty_box_id: f.counterparty_box_id,
+          amount: Number(f.amount), currency: f.currency, direction: f.direction,
+          description: f.description, op_id: opId,
+        },
+      })
+      if (r.duplicate) toast.info('ℹ️ العملية منفذة مسبقاً — لا ازدواج مالي')
+      else toast.success(`✅ نُفذت العملية بقيدين متوازنين (مصدر + وجهة) — رقم المرجع ${String(r.tx?.id || '').slice(0, 8)}`, { duration: 7000 })
+      newOp()
+      setF(v => ({ ...v, amount: '', description: '' }))
+      load()
+    } catch (e) { toast.error(e.message); newOp() } finally { setBusy(false) }
+  }
+  const typeL = (t) => t === 'receipt' ? '📥 قبض بين الفروع' : t === 'payment' ? '📤 صرف بين الفروع' : '📝 قيد بين الفروع'
+  const stBadge = (st) => st === 'posted' ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">مرحّلة</Badge>
+    : st === 'failed' ? <Badge className="bg-rose-100 text-rose-700 hover:bg-rose-100">فاشلة (بلا أثر)</Badge>
+    : st === 'uncertain' ? <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100">⚠️ غير مؤكدة</Badge>
+    : <Badge variant="outline">قيد التنفيذ</Badge>
+  return (
+    <div className="space-y-6">
+      <TopBar title="التحويلات بين الفروع" subtitle="تحويلات داخلية بين المركز والفروع — قيدان متوازنان أوتوماتيكياً، ليست إيراداً ولا مصروفاً" />
+      <Card>
+        <CardHeader><CardTitle className="text-base">🔀 عملية جديدة <span className="text-[10px] font-normal text-slate-400 mr-2">نطاقك الحالي: {branch?.name ? `🏢 ${branch.name}` : '🏠 المركز الرئيسي'}</span></CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Field label="نوع العملية *">
+              <Select value={f.type} onValueChange={v => setF({ ...f, type: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="payment">📤 سند صرف بين الفروع (يخرج من صندوقي)</SelectItem>
+                  <SelectItem value="receipt">📥 سند قبض بين الفروع (يدخل صندوقي)</SelectItem>
+                  <SelectItem value="journal">📝 قيد بين الفروع</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="الفرع المقابل *">
+              <Select value={f.counterparty || 'none'} onValueChange={v => setF({ ...f, counterparty: v === 'none' ? '' : v })}>
+                <SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">— اختر —</SelectItem>
+                  {counterparties.map(c => <SelectItem key={c.id || 'hq'} value={c.id || 'hq'}>{c.id ? `🏢 ${c.name}` : '🏠 المركز الرئيسي (HQ)'}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label={f.type === 'receipt' ? 'إلى صندوقي/بنكي *' : 'من صندوقي/بنكي *'}>
+              <Select value={f.my_box_id || 'none'} onValueChange={v => setF({ ...f, my_box_id: v === 'none' ? '' : v })}>
+                <SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">— اختر —</SelectItem>
+                  {myBoxes.map(bx => <SelectItem key={bx.id} value={bx.id}>{bx.type === 'bank' ? '🏦' : '💵'} {bx.name_ar}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="حساب الطرف المقابل *">
+              <Select value={f.counterparty_box_id || 'none'} onValueChange={v => setF({ ...f, counterparty_box_id: v === 'none' ? '' : v })} disabled={!cpAccounts}>
+                <SelectTrigger><SelectValue placeholder={f.counterparty ? (cpAccounts ? 'اختر (أسماء فقط)' : 'جارِ التحميل…') : 'اختر الفرع أولاً'} /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">— اختر —</SelectItem>
+                  {(cpAccounts?.accounts || []).map(a => <SelectItem key={a.id} value={a.id}>{a.type === 'bank' ? '🏦' : '💵'} {a.name_ar} <span className="font-mono text-[10px] text-slate-400">({a.account_code})</span></SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Field label="المبلغ *"><Input dir="ltr" type="number" min="0" step="0.01" value={f.amount} onChange={e => setF({ ...f, amount: e.target.value })} /></Field>
+            <Field label="العملة *">
+              <Select value={f.currency} onValueChange={v => setF({ ...f, currency: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c] || c}</SelectItem>)}</SelectContent>
+              </Select>
+            </Field>
+            {f.type === 'journal' && (
+              <Field label="اتجاه القيد *">
+                <Select value={f.direction} onValueChange={v => setF({ ...f, direction: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="out">📤 من نطاقي إلى المقابل</SelectItem>
+                    <SelectItem value="in">📥 من المقابل إلى نطاقي</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
+            <Field label="البيان"><Input value={f.description} onChange={e => setF({ ...f, description: e.target.value })} placeholder="وصف اختياري" /></Field>
+          </div>
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="text-[10px] text-slate-400">🔒 Idempotent: الضغط المزدوج أو إعادة الإرسال لا يكرر الأثر المالي أبداً · حسابات الطرف المقابل تظهر بالأسماء فقط بلا أرصدة</div>
+            <Button onClick={submit} disabled={busy} className="grad-brand text-white">{busy ? '⏳ جارِ الترحيل…' : '✅ تنفيذ العملية (قيدان متوازنان)'}</Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {isHQ && recon && (
+        <Card className={recon.matched ? 'border-emerald-200' : 'border-amber-300'}>
+          <CardHeader><CardTitle className="text-sm">⚖️ تسوية الجاري المجمعة (HQ) {recon.matched ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 mr-2">متطابقة — صافي صفر</Badge> : <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 mr-2">⚠️ فروقات</Badge>}</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              {recon.accounts.map(a => (
+                <div key={a.code} className="p-2 rounded-lg border bg-slate-50">
+                  <div className="text-xs font-bold text-slate-700">{a.name} <span className="font-mono text-[10px] text-slate-400">({a.code})</span></div>
+                  {Object.keys(a.balances).length === 0 ? <div className="text-[10px] text-slate-400">لا حركات</div>
+                    : Object.entries(a.balances).map(([cur, v]) => <div key={cur} className="text-[11px] flex justify-between"><span>{cur}</span><span className={`font-bold ${v > 0 ? 'text-blue-700' : v < 0 ? 'text-rose-600' : 'text-slate-500'}`} dir="ltr">{fmt(v, cur)}</span></div>)}
+                </div>
+              ))}
+            </div>
+            <div className="text-[11px] text-slate-600">صافي شجرة 1104 لكل عملة (يجب أن يساوي صفراً): {Object.entries(recon.net_by_currency || {}).map(([c, v]) => <Badge key={c} variant="outline" className={`mx-1 font-mono ${Math.abs(v) > 0.01 ? 'text-amber-700 border-amber-400' : 'text-emerald-700'}`}>{c}: {v}</Badge>)}</div>
+            {recon.exceptions?.length > 0 && recon.exceptions.map((x, i) => <div key={i} className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">⚠️ {x.currency}: فرق {x.residual} — {x.note}</div>)}
+            {recon.attention_transactions?.length > 0 && (
+              <div className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded p-2">🔍 عمليات تحتاج مراجعة: {recon.attention_transactions.map(t => `${String(t.id).slice(0, 8)} (${t.status})`).join(' · ')}</div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader><CardTitle className="text-sm">📜 سجل العمليات {!isHQ && <span className="text-[10px] font-normal text-slate-400">— عمليات نطاقك فقط</span>}</CardTitle></CardHeader>
+        <CardContent className="overflow-x-auto">
+          {list.length === 0 ? <div className="text-center text-slate-400 text-sm py-6">لا عمليات بينية بعد</div> : (
+            <Table>
+              <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>من ← إلى</TableHead><TableHead className="text-center">المبلغ</TableHead><TableHead className="text-center">الحالة</TableHead><TableHead>بواسطة</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {list.map(t => (
+                  <TableRow key={t.id}>
+                    <TableCell className="text-xs whitespace-nowrap">{fmtDate(t.created_at)}</TableCell>
+                    <TableCell className="text-xs">{typeL(t.type)}</TableCell>
+                    <TableCell className="text-xs"><b>{t.source_branch_name}</b> ({t.source_box?.name}) ← <b>{t.destination_branch_name}</b> ({t.destination_box?.name})</TableCell>
+                    <TableCell className="text-center text-xs font-black" dir="ltr">{fmt(t.amount, t.currency)}</TableCell>
+                    <TableCell className="text-center">{stBadge(t.status)}</TableCell>
+                    <TableCell className="text-[10px]" dir="ltr">{t.created_by}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
 function ReportsScreen() {
   // v3.51 — RBAC Phase 3: account statements restricted to owner / fin_statements holders
   const { user: rsUser } = useAuth()
@@ -7278,6 +7479,7 @@ function StatementReport() {
   const [month, setMonth] = useState(todayISO().slice(0, 7))
   const [from, setFrom] = useState(new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10))
   const [to, setTo] = useState(todayISO())
+  const [scope, setScope] = useState('') // v5.4 — HQ scope
   useEffect(() => { api('/accounts/all').then(setAccounts).catch(() => {}) }, [])
   const selected = accounts.find(a => a.id === id)
   const list = accounts.filter(x => !q || x.name.includes(q) || (x.code || '').includes(q))
@@ -7287,9 +7489,10 @@ function StatementReport() {
     if (period === 'day') p.set('day', day)
     if (period === 'month') p.set('month', month)
     if (period === 'range' || period === 'up_to_date') { p.set('from', from); p.set('to', to) }
+    if (scope) p.set('branch', scope) // v5.4 — HQ scope
     try { setData(await api(`/reports/statement?${p}`)) } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load() }, [id, currencyMode, period, day, month, from, to])
+  useEffect(() => { load() }, [id, currencyMode, period, day, month, from, to, scope])
 
   // v3.3 — Human-readable period text
   const periodLabel = () => {
@@ -7478,10 +7681,11 @@ function StatementReport() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <Card><CardContent className="p-3">
           <div className="text-xs font-bold text-slate-600 mb-2">عرض العملات</div>
-          <div className="flex flex-wrap gap-1">
+          <div className="flex flex-wrap gap-1 items-center">
             {[{v:'all_summary',l:'كافة العملات (إجمالي)'},{v:'all_detail',l:'كافة العملات (تفصيلي)'},{v:'YER',l:'ريال يمني'},{v:'SAR',l:'ريال سعودي'},{v:'USD',l:'دولار'}].map(o => (
               <button key={o.v} onClick={() => setCurrencyMode(o.v)} className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${currencyMode === o.v ? 'bg-blue-500 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300 hover:border-blue-400'}`}>{o.l}</button>
             ))}
+            <BranchScopePicker value={scope} onChange={setScope} />
           </div>
         </CardContent></Card>
         <Card><CardContent className="p-3">
@@ -7578,9 +7782,14 @@ function StatementReport() {
 
 function TrialBalanceReport() {
   const [data, setData] = useState(null)
-  useEffect(() => { api('/reports/trial-balance').then(setData).catch(e => toast.error(e.message)) }, [])
+  const [scope, setScope] = useState('') // v5.4 — HQ: '' = all | 'hq' | branch id
+  useEffect(() => { api(`/reports/trial-balance${scope ? `?branch=${scope}` : ''}`).then(setData).catch(e => toast.error(e.message)) }, [scope])
   return (
     <Card><CardContent className="p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-xs text-slate-500 font-bold">النطاق:</div>
+        <BranchScopePicker value={scope} onChange={setScope} />
+      </div>
       {data && (<>
         <div className="grid grid-cols-3 gap-3 mb-4">{CURRENCIES.map(c => (<Card key={c}><CardContent className="p-3"><div className="text-xs text-slate-500">{c}</div><div className="flex justify-between text-sm mt-1"><span>مدين:</span><span className="font-bold text-blue-700">{fmt(data.totals[c].d, c)}</span></div><div className="flex justify-between text-sm"><span>دائن:</span><span className="font-bold text-rose-700">{fmt(data.totals[c].c, c)}</span></div><div className="flex justify-between text-sm mt-1 pt-1 border-t"><span>الفرق:</span><span className={`font-bold ${Math.abs(data.totals[c].d - data.totals[c].c) < 0.01 ? 'text-emerald-600' : 'text-amber-600'}`}>{fmt(data.totals[c].d - data.totals[c].c, c)}</span></div></CardContent></Card>))}</div>
         <Table><TableHeader><TableRow><TableHead>الكود</TableHead><TableHead>الحساب</TableHead><TableHead>الطرف</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
@@ -7594,11 +7803,12 @@ function TrialBalanceReport() {
 function IncomeStatement() {
   const [from, setFrom] = useState(new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10))
   const [to, setTo] = useState(todayISO()); const [data, setData] = useState(null)
-  const load = async () => { try { setData(await api(`/reports/income-statement?from=${from}&to=${to}`)) } catch (e) { toast.error(e.message) } }
-  useEffect(() => { load() }, [from, to])
+  const [scope, setScope] = useState('') // v5.4 — HQ scope
+  const load = async () => { try { setData(await api(`/reports/income-statement?from=${from}&to=${to}${scope ? `&branch=${scope}` : ''}`)) } catch (e) { toast.error(e.message) } }
+  useEffect(() => { load() }, [from, to, scope])
   return (
     <Card><CardContent className="p-4">
-      <DateRange from={from} setFrom={setFrom} to={to} setTo={setTo} />
+      <div className="flex flex-wrap items-center gap-3"><DateRange from={from} setFrom={setFrom} to={to} setTo={setTo} /><BranchScopePicker value={scope} onChange={setScope} /></div>
       {data && (
         <div className="space-y-4">
           <div><div className="text-sm font-bold text-slate-700 mb-2">الإيرادات</div>
@@ -7919,6 +8129,14 @@ const PERMISSION_GROUPS = [
     title: '💳 السندات والدليل المحاسبي', keys: [
       { k: 'vouchers_manage', l: 'إدارة سندات القبض/الصرف' },
       { k: 'accounts_manage', l: 'إدارة الدليل المحاسبي (شجرة الحسابات)' },
+    ]
+  },
+  {
+    title: '🔀 التحويلات بين الفروع (تفعيل صريح — لا تُمنح تلقائياً مع المحاسبة)', keys: [
+      { k: 'mod_interbranch', l: 'الوصول للتحويلات بين الفروع' },
+      { k: 'mod_interbranch_receipt', l: 'سند قبض بين الفروع' },
+      { k: 'mod_interbranch_payment', l: 'سند صرف بين الفروع' },
+      { k: 'mod_interbranch_journal', l: 'قيد بين الفروع' },
     ]
   },
   {
@@ -12267,6 +12485,7 @@ function TenantApp() {
         {tabAllowed && tab === 'boxes' && <ErrorBoundary tabName="الصناديق والبنوك">{user?.role === 'super_admin' ? <BoxesBanksHub /> : <BoxesScreen />}</ErrorBoundary>}
         {tabAllowed && tab === 'chart' && <ErrorBoundary tabName="الدليل المحاسبي"><ChartScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'journal' && <ErrorBoundary tabName="قيود اليومية"><JournalScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'interbranch' && <ErrorBoundary tabName="التحويلات بين الفروع"><InterBranchScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'reports' && <ErrorBoundary tabName="التقارير المالية"><ReportsScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'query' && <ErrorBoundary tabName="مركز الاستعلامات"><QueryCenterScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'visa-monitor' && <ErrorBoundary tabName="مراقبة التأشيرات"><VisaMonitorScreen /></ErrorBoundary>}

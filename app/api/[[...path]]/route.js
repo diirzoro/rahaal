@@ -298,6 +298,8 @@ const DEFAULT_STAFF_PERMISSIONS = {
   edit_price: false, apply_discount: false,
   can_close_periods: false,  // v3.10.6 — permission to lock/unlock financial periods
   can_refund: false,          // v3.10.6 — permission to refund/cancel transactions
+  // v5.4 — inter-branch (OPT-IN: default false — «full accounting» never implies it)
+  mod_interbranch: false, mod_interbranch_receipt: true, mod_interbranch_payment: true, mod_interbranch_journal: true,
   // v3.45 — RBAC Phase 1: module-level access (sidebar sections).
   // Operational modules default ON for staff; financial/sensitive modules default OFF.
   mod_dashboard: true, mod_tickets: true, mod_visas: true, mod_services: true, mod_packages: true,
@@ -1083,6 +1085,195 @@ async function createJournalEntry(db, tenantId, { date, description, ref_type, r
     }
   }
   return je
+}
+
+// ============================================================================
+// v5.4 — INTER-BRANCH ACCOUNTING ENGINE (Phase B)
+// Internal transfers between HQ and branches (or branch ↔ branch) inside ONE office.
+// ACCOUNTING MODEL (approved design):
+//   • Unified office COA + parent group «1104 — جاري الفروع» + ONE jari sub-account
+//     per scope (110401 HQ, 110402 branch …) — created idempotently on first use.
+//   • Every transaction posts TWO balanced journals through the EXISTING central
+//     gate (createJournalEntry — invariants, period locks, quota, idempotency):
+//       SOURCE book      (JE.branch_id = source):      Dr جاري[destination] / Cr source box
+//       DESTINATION book (JE.branch_id = destination): Dr destination box  / Cr جاري[source]
+//   • NO revenue/expense line exists — an internal transfer can NEVER inflate the
+//     income statement; consolidated, the 1104 subtree nets to ZERO per currency,
+//     any residual is a reconciliation EXCEPTION (never P&L).
+//   • Pairwise balances: jari account (counterparty) × JE.branch_id (side) —
+//     «جاري HQ مع فرع X» is a plain ledger query, no per-branch chart duplication.
+// ============================================================================
+const INTERBRANCH_PARENT_CODE = '1104' // free slot: 1101 صناديق، 1102 بنوك، 1103 عملاء
+
+async function ensureInterbranchParentGroup(db, T) {
+  const ex = await db.collection('accounts').findOne({ tenant_id: T, code: INTERBRANCH_PARENT_CODE })
+  if (ex) {
+    if (ex.is_group) return ex
+    throw new Error(`الكود ${INTERBRANCH_PARENT_CODE} مستخدم لحساب غير مجموعة في دليل هذا المكتب — مراجعة يدوية مطلوبة قبل تفعيل التحويلات بين الفروع`)
+  }
+  const parent11 = await db.collection('accounts').findOne({ tenant_id: T, code: COA.CURRENT_ASSETS })
+  if (!parent11) throw new Error('مجموعة الأصول المتداولة (11) غير موجودة في الدليل')
+  const doc = {
+    id: uuidv4(), tenant_id: T, code: INTERBRANCH_PARENT_CODE, name_ar: 'جاري الفروع (تحويلات داخلية)',
+    type: 'asset', parent: COA.CURRENT_ASSETS, is_group: true, is_system: true,
+    notes: 'v5.4 — تحويلات داخلية بين المركز والفروع: ليست إيراداً ولا مصروفاً، وتتصفّر مجمعةً عند اكتمال أطراف كل عملية',
+    created_at: new Date(),
+  }
+  await db.collection('accounts').insertOne(doc)
+  return doc
+}
+
+// ONE jari account per scope per office — idempotent by interbranch_scope link (never a duplicate)
+async function ensureJariAccount(db, T, scopeBranchId /* null = HQ */, scopeName) {
+  const scopeKey = scopeBranchId || 'hq'
+  const ex = await db.collection('accounts').findOne({ tenant_id: T, interbranch_scope: scopeKey })
+  if (ex) return ex
+  await ensureInterbranchParentGroup(db, T)
+  const info = await generateSubAccountCode(db, T, INTERBRANCH_PARENT_CODE)
+  const doc = {
+    id: uuidv4(), tenant_id: T, code: info.account_code, name_ar: `جاري — ${scopeName}`,
+    type: 'asset', parent: INTERBRANCH_PARENT_CODE, is_group: false, is_system: true,
+    interbranch_scope: scopeKey,
+    notes: 'v5.4 — حساب جاري داخلي (Internal Transfer)', created_at: new Date(),
+  }
+  await db.collection('accounts').insertOne(doc)
+  return doc
+}
+
+async function resolveIbScope(db, T, branchIdOrNull) {
+  if (!branchIdOrNull || branchIdOrNull === 'hq') return { id: null, key: 'hq', name: 'المركز الرئيسي', status: 'active' }
+  const br = await db.collection('branches').findOne({ tenant_id: T, id: branchIdOrNull })
+  if (!br) return null
+  return { id: br.id, key: br.id, name: br.name, status: br.status }
+}
+
+// ONE inter-branch financial operation = ATOMIC + IDEMPOTENT + AUDITABLE.
+// Either BOTH journals commit, or NOTHING has financial effect. Never one-sided.
+async function postInterbranchTransaction(db, T, actor, b) {
+  const type = String(b.type || '')
+  if (!['receipt', 'payment', 'journal'].includes(type)) return { error: 'نوع العملية غير صحيح (receipt / payment / journal)' }
+  const amount = Math.round((Number(b.amount) || 0) * 100) / 100
+  if (!(amount > 0)) return { error: 'المبلغ يجب أن يكون أكبر من صفر' }
+  const currency = String(b.currency || '').toUpperCase().trim()
+  if (!/^[A-Z]{3,5}$/.test(currency)) return { error: 'العملة غير صحيحة' }
+  const opId = String(b.op_id || '').trim()
+  if (!opId) return { error: 'op_id مطلوب (Idempotency)' }
+
+  // ---- Idempotency L1: the transaction registry (double click / retry / re-send) ----
+  const prev = await db.collection('interbranch_transactions').findOne({ tenant_id: T, op_id: opId })
+  if (prev) {
+    if (prev.status === 'posted') return { duplicate: true, tx: prev }
+    return { error: `توجد عملية سابقة بنفس المعرف حالتها «${prev.status}» — راجعها ثم أنشئ عملية جديدة (لا يعاد استخدام op_id)` }
+  }
+
+  // ---- Scopes: MINE from the SESSION (never the body); counterparty validated inside the SAME office ----
+  const myScope = await resolveIbScope(db, T, actor.branchId)
+  const cp = await resolveIbScope(db, T, b.counterparty_branch_id || null)
+  if (!cp) return { error: 'الفرع المقابل غير موجود في هذا المكتب' }
+  if (cp.id && cp.status !== 'active') return { error: 'الفرع المقابل موقوف — لا يمكن التحويل إليه' }
+  if ((cp.id || null) === (myScope.id || null)) return { error: 'لا يمكن إجراء عملية بينية مع نفس النطاق' }
+
+  // ---- Boxes: mine inside MY scope, counterparty's inside THEIR scope (server-verified) ----
+  const myBox = await db.collection('boxes').findOne({ id: String(b.my_box_id || ''), tenant_id: T, branch_id: myScope.id })
+  if (!myBox) return { error: '🚫 الصندوق/البنك المختار ليس ضمن نطاقك' }
+  const cpBox = await db.collection('boxes').findOne({ id: String(b.counterparty_box_id || ''), tenant_id: T, branch_id: cp.id })
+  if (!cpBox) return { error: '🚫 حساب الطرف المقابل غير موجود ضمن نطاق الفرع المقابل' }
+  if (!myBox.account_code || !cpBox.account_code) return { error: 'حساب غير مربوط بالدليل (account_code مفقود) — مراجعة مطلوبة' }
+
+  // Direction: payment = money leaves MY box → counterparty. receipt = money arrives INTO my box.
+  // journal = generic transfer entry with explicit direction (default: out).
+  const dirOut = type === 'payment' || (type === 'journal' && String(b.direction || 'out') !== 'in')
+  const src = dirOut ? { scope: myScope, box: myBox } : { scope: cp, box: cpBox }
+  const dst = dirOut ? { scope: cp, box: cpBox } : { scope: myScope, box: myBox }
+
+  // ---- Jari accounts (idempotent — one per scope, unified COA, no duplication) ----
+  let jariSrc, jariDst
+  try {
+    jariSrc = await ensureJariAccount(db, T, src.scope.id, src.scope.name)
+    jariDst = await ensureJariAccount(db, T, dst.scope.id, dst.scope.name)
+  } catch (accErr) { return { error: String(accErr?.message || accErr) } }
+
+  const txId = uuidv4()
+  const typeLabel = type === 'receipt' ? 'سند قبض بين الفروع' : type === 'payment' ? 'سند صرف بين الفروع' : 'قيد بين الفروع'
+  const desc = `${typeLabel}: ${src.scope.name} ← ${dst.scope.name}${b.description ? ' — ' + String(b.description).slice(0, 300) : ''}`
+  const date = b.date ? new Date(b.date) : new Date()
+
+  // ---- Audit-complete transaction registry doc (status machine: pending → posted | failed | uncertain) ----
+  const tx = {
+    id: txId, interbranch_transaction_id: txId, tenant_id: T, op_id: opId, type, status: 'pending',
+    source_branch_id: src.scope.id, source_branch_name: src.scope.name,
+    destination_branch_id: dst.scope.id, destination_branch_name: dst.scope.name,
+    source_box: { id: src.box.id, name: src.box.name_ar, account_code: src.box.account_code },
+    destination_box: { id: dst.box.id, name: dst.box.name_ar, account_code: dst.box.account_code },
+    jari_accounts: { source_scope: jariSrc.code, destination_scope: jariDst.code },
+    amount, currency, description: String(b.description || '').slice(0, 500),
+    created_by: actor.email, actor_user_id: actor.userId, actor_branch_id: actor.branchId ?? null,
+    je_ids: [], created_at: new Date(),
+  }
+  await db.collection('interbranch_transactions').insertOne(tx)
+  // Race double-check (same op_id concurrent): keep the OLDEST registry doc only
+  const race = await db.collection('interbranch_transactions').find({ tenant_id: T, op_id: opId }).sort({ created_at: 1 }).limit(1).toArray()
+  if (race[0] && race[0].id !== txId) {
+    await db.collection('interbranch_transactions').deleteOne({ id: txId, tenant_id: T })
+    return race[0].status === 'posted' ? { duplicate: true, tx: race[0] } : { error: 'عملية متزامنة بنفس المعرف قيد التنفيذ — أعد التحميل' }
+  }
+
+  // ---- Balanced journals (each side balanced INSIDE its own branch dimension) ----
+  const linesSrc = [
+    { account_code: jariDst.code, debit: amount, credit: 0 },
+    { account_code: src.box.account_code, party_type: 'box', party_id: src.box.id, party_name: src.box.name_ar, debit: 0, credit: amount },
+  ]
+  const linesDst = [
+    { account_code: dst.box.account_code, party_type: 'box', party_id: dst.box.id, party_name: dst.box.name_ar, debit: amount, credit: 0 },
+    { account_code: jariSrc.code, debit: 0, credit: amount },
+  ]
+
+  // ---- Journal 1: SOURCE side (all central invariants + period locks apply) ----
+  let je1 = null
+  try {
+    je1 = await createJournalEntry(db, T,
+      { date, description: `${desc} — طرف المصدر`, ref_type: 'interbranch', ref_id: txId, currency, lines: linesSrc },
+      { branchId: src.scope.id, idempotencyKey: `ib:${opId}:src`, actor: actor.email, source: 'interbranch' })
+  } catch (e1) {
+    await db.collection('interbranch_transactions').updateOne({ id: txId, tenant_id: T }, { $set: { status: 'failed', error: String(e1?.message || e1).slice(0, 400), failed_at: new Date() } })
+    return { error: `فشل قيد طرف المصدر — لا أثر مالي إطلاقاً: ${e1?.message || e1}` }
+  }
+  // ---- Journal 2: DESTINATION side — with SAFE compensation on failure ----
+  let je2 = null
+  try {
+    je2 = await createJournalEntry(db, T,
+      { date, description: `${desc} — طرف الوجهة`, ref_type: 'interbranch', ref_id: txId, currency, lines: linesDst },
+      { branchId: dst.scope.id, idempotencyKey: `ib:${opId}:dst`, actor: actor.email, source: 'interbranch' })
+  } catch (e2) {
+    if (e2?.jePhase === 'commit_uncertain') {
+      // v4.8 rule: NEVER compensate an uncertain commit — books integrity first
+      await db.collection('interbranch_transactions').updateOne({ id: txId, tenant_id: T }, { $set: { status: 'uncertain', je_ids: [je1.id], error: 'قيد الوجهة بحالة غير مؤكدة — راجع التسوية قبل أي إعادة', failed_at: new Date() } })
+      return { error: 'قيد طرف الوجهة بحالة غير مؤكدة (انقطاع أثناء الكتابة) — لم يُعكس طرف المصدر تلقائياً حفاظاً على الدفاتر. راجع شاشة التسوية' }
+    }
+    // destination provably NOT saved → full compensation of the source journal (+ its quota)
+    try {
+      await db.collection('journal_entries').deleteOne({ id: je1.id, tenant_id: T })
+      await db.collection('tenants').updateOne({ id: T, 'journal_quota.used': { $gt: 0 } }, { $inc: { 'journal_quota.used': -1 } })
+    } catch (compErr) {
+      try { await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'interbranch_compensation_failed', je_id: je1.id, tx_id: txId, error: String(compErr?.message || compErr).slice(0, 300), at: new Date() }) } catch { }
+      await db.collection('interbranch_transactions').updateOne({ id: txId, tenant_id: T }, { $set: { status: 'uncertain', je_ids: [je1.id], error: 'فشل قيد الوجهة وفشل تعويض المصدر — مراجعة فورية', failed_at: new Date() } })
+      return { error: 'فشل قيد الوجهة وتعذر التعويض — راجع شاشة التسوية فوراً (لا تُعِد الإرسال بنفس المعرف)' }
+    }
+    await db.collection('interbranch_transactions').updateOne({ id: txId, tenant_id: T }, { $set: { status: 'failed', error: String(e2?.message || e2).slice(0, 400), failed_at: new Date() } })
+    return { error: `فشل قيد طرف الوجهة — عُكس طرف المصدر بالكامل (لا أثر مالي): ${e2?.message || e2}` }
+  }
+
+  // ---- Denormalized box balances (ledger already committed = source of truth) ----
+  let balanceFlag = null
+  try {
+    await updateBalance(db, 'boxes', { id: src.box.id, tenant_id: T }, currency, -amount)
+    await updateBalance(db, 'boxes', { id: dst.box.id, tenant_id: T }, currency, +amount)
+  } catch (balErr) {
+    balanceFlag = String(balErr?.message || balErr).slice(0, 300)
+    try { await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'interbranch_balance_update_failed', tx_id: txId, error: balanceFlag, at: new Date() }) } catch { }
+  }
+  await db.collection('interbranch_transactions').updateOne({ id: txId, tenant_id: T }, { $set: { status: 'posted', je_ids: [je1.id, je2.id], posted_at: new Date(), ...(balanceFlag ? { balance_flag: balanceFlag } : {}) } })
+  return { tx: { ...tx, status: 'posted', je_ids: [je1.id, je2.id] }, journals: { source: je1.id, destination: je2.id } }
 }
 
 // ============ EDIT/REVERSAL ENGINE ============
@@ -4557,6 +4748,86 @@ async function handleRoute(request, { params }) {
       return ok(rTu)
     }
 
+    // ================= v5.4 — INTER-BRANCH (التحويلات بين الفروع) =================
+    // RBAC: OPT-IN module — «Full Accounting» does NOT imply inter-branch access.
+    // Owner always allowed; staff need permissions.mod_interbranch === true explicitly,
+    // then the per-operation keys (mod_interbranch_receipt/payment/journal) follow the
+    // existing «!== false» convention INSIDE the granted module.
+    if (route.startsWith('/interbranch')) {
+      const ibAllowed = (op) => {
+        if (sess.user.role === 'owner') return true
+        const p = sess.user.permissions || {}
+        if (p.mod_interbranch !== true) return false
+        return op ? p[`mod_interbranch_${op}`] !== false : true
+      }
+      if (!ibAllowed(null)) return bad('🚫 لا تملك صلاحية «التحويلات بين الفروع» — تُمنح صراحةً من مالك المكتب', 403)
+
+      if (route === '/interbranch/counterparties' && method === 'GET') {
+        // Counterparty scopes INSIDE the same office only (HQ + active branches, excluding own)
+        const brs = await db.collection('branches').find({ tenant_id: T, status: 'active' }).project({ _id: 0, id: 1, name: 1 }).toArray()
+        return ok([{ id: null, name: 'المركز الرئيسي (HQ)' }, ...brs].filter(x => (x.id || null) !== (B || null)))
+      }
+
+      if (route === '/interbranch/accounts' && method === 'GET') {
+        // SAFE ACCOUNT PICKER — Backend-safe DTO: name + account_code + type ONLY.
+        // NO balance / statement / history fields exist in this projection, and this
+        // endpoint grants NO regular GET access to the counterparty scope whatsoever.
+        const scope = await resolveIbScope(db, T, q.branch || null)
+        if (!scope) return bad('الفرع غير موجود', 404)
+        if ((scope.id || null) === (B || null)) return bad('اختر نطاقاً مقابلاً مختلفاً عن نطاقك', 400)
+        const rows = await db.collection('boxes')
+          .find({ tenant_id: T, branch_id: scope.id, active: { $ne: false } })
+          .project({ _id: 0, id: 1, name_ar: 1, account_code: 1, type: 1 })
+          .sort({ created_at: 1 }).toArray()
+        return ok({ scope: { id: scope.id, name: scope.name }, accounts: rows })
+      }
+
+      if (route === '/interbranch/transactions' && method === 'GET') {
+        const fIb = { tenant_id: T }
+        if (B) fIb.$or = [{ source_branch_id: B }, { destination_branch_id: B }] // branch user: own side only
+        else if (q.branch) { const sid = q.branch === 'hq' ? null : q.branch; fIb.$or = [{ source_branch_id: sid }, { destination_branch_id: sid }] }
+        return ok(clean(await db.collection('interbranch_transactions').find(fIb).sort({ created_at: -1 }).limit(300).toArray()))
+      }
+
+      if (route === '/interbranch/transactions' && method === 'POST') {
+        const bIb = await request.json()
+        const opName = bIb.type === 'receipt' ? 'receipt' : bIb.type === 'payment' ? 'payment' : 'journal'
+        if (!ibAllowed(opName)) return bad(`🚫 لا تملك صلاحية «${opName === 'receipt' ? 'قبض' : opName === 'payment' ? 'صرف' : 'قيد'} بين الفروع»`, 403)
+        const r = await postInterbranchTransaction(db, T, { userId: sess.user.id, email: sess.user.email, branchId: B }, bIb)
+        if (r.error) return bad(r.error)
+        if (r.duplicate) return ok({ duplicate: true, tx: clean([r.tx])[0] || null })
+        return ok({ success: true, tx: clean([r.tx])[0] || null, journals: r.journals })
+      }
+
+      if (route === '/interbranch/reconciliation' && method === 'GET') {
+        // HQ-only consolidated reconciliation: the 1104 subtree must net to ZERO per
+        // currency — a residual is an EXCEPTION (never revenue/expense).
+        if (B) return bad('🚫 التسوية المجمعة متاحة للمركز الرئيسي فقط', 403)
+        const jariAccounts = await db.collection('accounts').find({ tenant_id: T, interbranch_scope: { $exists: true } }).sort({ code: 1 }).toArray()
+        const codes = jariAccounts.map(a => a.code)
+        const jesIb = codes.length ? await db.collection('journal_entries').find({ tenant_id: T, 'lines.account_code': { $in: codes } }).toArray() : []
+        const perAccount = {}, netByCurrency = {}
+        for (const je of jesIb) for (const ln of (je.lines || [])) {
+          if (!codes.includes(ln.account_code)) continue
+          const cur = je.currency || 'USD'
+          const d = (Number(ln.debit) || 0) - (Number(ln.credit) || 0)
+          perAccount[ln.account_code] = perAccount[ln.account_code] || {}
+          perAccount[ln.account_code][cur] = Math.round(((perAccount[ln.account_code][cur] || 0) + d) * 100) / 100
+          netByCurrency[cur] = Math.round(((netByCurrency[cur] || 0) + d) * 100) / 100
+        }
+        const exceptions = Object.entries(netByCurrency)
+          .filter(([, v]) => Math.abs(v) > 0.01)
+          .map(([cur, v]) => ({ currency: cur, residual: v, note: 'فرق تسوية داخلي — ليس إيراداً ولا مصروفاً: راجع العمليات غير المكتملة أدناه' }))
+        const attention = await db.collection('interbranch_transactions').find({ tenant_id: T, status: { $in: ['uncertain', 'pending', 'failed'] } }).sort({ created_at: -1 }).limit(100).toArray()
+        return ok({
+          accounts: jariAccounts.map(a => ({ code: a.code, name: a.name_ar, scope: a.interbranch_scope, balances: perAccount[a.code] || {} })),
+          net_by_currency: netByCurrency, matched: exceptions.length === 0, exceptions,
+          attention_transactions: clean(attention),
+        })
+      }
+      return bad('مسار غير معروف', 404)
+    }
+
     const userIdMatch = route.match(/^\/tenant\/users\/([^/]+)$/)
     if (userIdMatch && method === 'PATCH') {
       if (sess.user.role !== 'owner') return bad('غير مصرح', 403)
@@ -5575,7 +5846,7 @@ async function handleRoute(request, { params }) {
     // Package bookings — register a client with auto-JE
     const pkgBookMatch = route.match(/^\/packages\/([^/]+)\/bookings$/)
     if (pkgBookMatch && method === 'GET') {
-      const list = await db.collection('package_bookings').find({ tenant_id: T, package_id: pkgBookMatch[1] }).sort({ created_at: -1 }).toArray()
+      const list = await db.collection('package_bookings').find({ ...(B ? btf : tf), package_id: pkgBookMatch[1] }).sort({ created_at: -1 }).toArray() // v5.4 — branch scope
       return ok(list.map(b => ({ ...b, _id: undefined })))
     }
 
@@ -6030,7 +6301,7 @@ async function handleRoute(request, { params }) {
         if (!box) return bad('الصندوق غير موجود')
       }
       const bookingDoc = {
-        id: uuidv4(), tenant_id: T, package_id: pkgId,
+        id: uuidv4(), tenant_id: T, branch_id: B, package_id: pkgId, // v5.4 — branch stamp (null = HQ)
         client_id: cli?.id || null,
         client_name: cli?.name || (payMethod === 'cash' ? (b.client_name || 'عميل نقدي') : ''),
         pilgrim_name: b.pilgrim_name || registrants[0]?.name || cli?.name || 'مسافر نقدي',
@@ -6131,7 +6402,7 @@ async function handleRoute(request, { params }) {
       await createJournalEntry(db, T, {
         date: new Date(), description: `تسجيل ${bookingDoc.pilgrim_name} في ${pkg.name} — ${pax} فرد${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${bookingDoc.commission_partner_name}` : ''}`,
         ref_type: 'package_booking', ref_id: bookingDoc.id, currency: cur, lines,
-      })
+      }, { branchId: B }) // v5.4 — branch dimension
       const { _id, ...rest } = bookingDoc
       await maybeEmitMeraajInventory(db, T, pkgBookMatch[1])
       return ok(rest)
@@ -7461,7 +7732,7 @@ async function handleRoute(request, { params }) {
 
     // Vouchers
     if (route === '/vouchers' && method === 'GET') {
-      const filter = { ...btf }; if (q.type) filter.type = q.type // v5.3 branch scope
+      const filter = B ? { ...btf } : (q.branch ? { ...tf, branch_id: q.branch === 'hq' ? null : q.branch } : { ...tf }); if (q.type) filter.type = q.type // v5.3/v5.4 branch scope + HQ filter
       return ok(clean(await db.collection('vouchers').find(filter).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
     }
     if (route === '/vouchers' && method === 'POST') {
@@ -7492,7 +7763,7 @@ async function handleRoute(request, { params }) {
     }
 
     // Journal entries
-    if (route === '/journal-entries' && method === 'GET') return ok(clean(await db.collection('journal_entries').find(btf) /* v5.3 branch scope */.sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+    if (route === '/journal-entries' && method === 'GET') return ok(clean(await db.collection('journal_entries').find(B ? btf : (q.branch ? { ...tf, branch_id: q.branch === 'hq' ? null : q.branch } : tf)) /* v5.3/v5.4 branch scope + HQ filter */.sort({ date: -1, created_at: -1 }).limit(500).toArray()))
 
     // v3.9.11 — Packages bulk operations
     if (route === '/packages/bulk-delete' && method === 'POST') {
@@ -7687,6 +7958,7 @@ async function handleRoute(request, { params }) {
       const coll = kind === 'fx' ? 'currency_exchanges' : kind
       const doc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
       if (!doc) return bad('العنصر غير موجود', 404)
+      if (!inBranch(doc)) return bad('🚫 غير مصرح — هذا السجل يخص نطاقاً آخر (فرع/مركز)', 403) // v5.4 — IDOR guard
       // Reverse balance updates & delete linked journal entry
       const je = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
       // v4.6 — RAH-ACC: a document whose journal lives inside a closed year/period must not
@@ -8081,10 +8353,11 @@ async function handleRoute(request, { params }) {
         const pOk = await db.collection(pc).findOne({ id: String(q.party_id), ...btf }, { projection: { id: 1 } })
         if (!pOk) return bad('🚫 غير مصرح — كشف حساب طرف خارج نطاق فرعك', 403)
       }
-      return ok(await reportStatement(db, T, { ...q, _branch_id: B }))
+      const stScope = B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) // v5.4 — HQ scope selector
+      return ok(await reportStatement(db, T, { ...q, _branch_id: stScope }))
     }
-    if (route === '/reports/trial-balance' && method === 'GET') return ok(await reportTrialBalance(db, T, B)) // v5.3 — branch trial balance for branch users
-    if (route === '/reports/income-statement' && method === 'GET') return ok(await reportIncome(db, T, { ...q, _branch_id: B })) // v5.3 — branch income for branch users
+    if (route === '/reports/trial-balance' && method === 'GET') return ok(await reportTrialBalance(db, T, B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null))) // v5.3/v5.4 — branch user: own scope; HQ: ?branch=<id>|hq|all
+    if (route === '/reports/income-statement' && method === 'GET') return ok(await reportIncome(db, T, { ...q, _branch_id: B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) })) // v5.3/v5.4 — branch/HQ scope
     // v3.10.4 — Unified Query & Filters for Visas + Tickets
     if (route === '/reports/query' && method === 'GET') {
       const from = q.from || null
@@ -10157,7 +10430,7 @@ async function reportStatement(db, T, q) {
   // v3.88.4 — F-016: everything BEFORE the period start is the OPENING BALANCE —
   // a period statement never starts from zero when prior activity exists.
   if (startDate) {
-    const priorJes = await db.collection('journal_entries').find({ tenant_id: T, ...(q._branch_id ? { branch_id: q._branch_id } : {}), ...dateRangeExpr('date', null, new Date(startDate.getTime() - 1)) }).toArray() // v5.3 — branch scope
+    const priorJes = await db.collection('journal_entries').find({ tenant_id: T, ...(q._branch_id ? { branch_id: q._branch_id === '__HQ__' ? null : q._branch_id } : {}), ...dateRangeExpr('date', null, new Date(startDate.getTime() - 1)) }).toArray() // v5.3/v5.4 — branch scope ('__HQ__' → NULL=HQ)
     for (const je of priorJes) for (const l of je.lines || []) {
       if (!matchesLine(l)) continue
       const cur = l.currency || je.currency
@@ -10172,7 +10445,7 @@ async function reportStatement(db, T, q) {
   }
 
   const rangeExpr = dateRangeExpr('date', startDate, endDate)
-  const jes = await db.collection('journal_entries').find({ tenant_id: T, ...(q._branch_id ? { branch_id: q._branch_id } : {}), ...(rangeExpr || {}) }).sort({ date: 1, created_at: 1 }).toArray() // v5.3 — branch scope
+  const jes = await db.collection('journal_entries').find({ tenant_id: T, ...(q._branch_id ? { branch_id: q._branch_id === '__HQ__' ? null : q._branch_id } : {}), ...(rangeExpr || {}) }).sort({ date: 1, created_at: 1 }).toArray() // v5.3/v5.4 — branch scope
   for (const je of jes) {
     for (const l of je.lines || []) {
       if (!matchesLine(l)) continue
@@ -10208,7 +10481,7 @@ async function reportStatement(db, T, q) {
   }
 }
 async function reportTrialBalance(db, T, branchId = null) { // v5.3 — branch trial balance
-  const jes = await db.collection('journal_entries').find({ tenant_id: T, ...(branchId ? { branch_id: branchId } : {}) }).toArray()
+  const jes = await db.collection('journal_entries').find({ tenant_id: T, ...(branchId ? { branch_id: branchId === '__HQ__' ? null : branchId } : {}) }).toArray()
   const map = {}
   for (const je of jes) {
     for (const l of je.lines || []) {
@@ -10239,7 +10512,7 @@ async function reportIncome(db, T, q) {
     to = q.to ? bizDayEnd(q.to) : bizDayEnd(bizTodayISO())
   }
   const rates = (await db.collection('tenant_settings').findOne({ tenant_id: T }))?.rates || DEFAULT_RATES
-  const jes = await db.collection('journal_entries').find({ tenant_id: T, ...(q._branch_id ? { branch_id: q._branch_id } : {}), ref_type: { $ne: 'year_close' }, ...dateRangeExpr('date', from, to) }).toArray() // v5.3 — branch scope
+  const jes = await db.collection('journal_entries').find({ tenant_id: T, ...(q._branch_id ? { branch_id: q._branch_id === '__HQ__' ? null : q._branch_id } : {}), ref_type: { $ne: 'year_close' }, ...dateRangeExpr('date', from, to) }).toArray() // v5.3/v5.4 — branch scope
   const zero = () => ({ USD: 0, SAR: 0, YER: 0 })
   const rev = { tickets: zero(), visas: zero(), services: zero(), other: zero() }
   const exp = zero()
