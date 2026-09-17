@@ -343,3 +343,8 @@ See /app/memory/test_credentials.md
 - Frontend: ActivateSubscriptionDialog (SSOT pricing display, editable account name, parent 1103 read-only, op_id idempotency) replaced ALL 3 confirm-payment buttons. InstallmentsDialog quota-based + box/bank required. Office 360: statement tab + owner WhatsApp/Call buttons. TenantApp Settings: owner branches tab (/tenant/branches, backend-driven limits).
 - Old installment offices left untouched (no bulk quota raise, no auto-unlimited). No migrations/backfills.
 - NEXT: user QA; then separate extended Enterprise branch-accounting QA (user-led; no design assumptions).
+
+## v5.3 Phase A — Branch Accounting Isolation (Safe Hardening) DONE
+- Branch scope from SESSION ONLY (users.branch_id → B, btf filter). Lists scoped: clients/suppliers/boxes/vouchers/JEs/tickets/visas/services + accounts/search picker (COA stays office-shared). Voucher POST 403 on cross-branch box/party. IDOR guards on unified/bulk/manual-JE edits. branch_id stamped (null=HQ) on ALL new financial docs via creators' opts.branchId. Reports branch-scoped (statement+party guard, trial-balance, income). /auth/me returns branch; Sidebar shows "الفرع الحالي" badge. Income-statement FIXED (services bucket was missing from UI details). limitLbl() shows "غير محدود" instead of 9999/null.
+- Security tests: 13/13 verified (10 explicit + 3 via server logs), QA53 data cleaned.
+- BLOCKED (approval needed): legacy NULL→HQ backfill policy; unique/compound indexes (tenant_id+branch_id); Inter-Branch engine (Phase B design proposed); Balance Sheet (gap analysis in report); packages module branch scoping.

@@ -96,6 +96,9 @@ class ErrorBoundary extends React.Component {
 // ================================================================
 
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' }) : '—'
+// v5.3 — point 24: display-only "unlimited" label (null / 0 / legacy 9999-style caps).
+// Real enforcement is untouched — this is pure UI formatting.
+const limitLbl = (v) => (v === null || v === undefined || Number(v) === 0 || Number(v) >= 9999) ? 'غير محدود' : v
 // v3.77 — documents upload helpers (base64 transport, MIME whitelist mirrors the server)
 // v3.87 — semantic COA anchors (mirror of the backend COA map — single source per side)
 const COA_FE = { CASHBOXES: '1101', BANKS: '1102', CLIENTS: '1103', SUPPLIERS: '2101', CAPITAL: '3101', RETAINED_EARNINGS: '3102', OPENING_EQUITY: '3103' }
@@ -544,7 +547,7 @@ function RahaalAdminHome({ setTab }) {
                   <TableCell className="font-semibold text-sm">{t.name}<div className="text-[10px] text-slate-400 font-mono">{t.slug}</div></TableCell>
                   <TableCell><Badge variant="outline">{t.subscription || 'trial'} • {t.plan_tier || 'standard'}</Badge></TableCell>
                   <TableCell>{t.status === 'suspended' ? <Badge className="bg-rose-100 text-rose-700">⏸️ موقوف</Badge> : <Badge className="bg-emerald-100 text-emerald-700">✅ نشط</Badge>}</TableCell>
-                  <TableCell className="text-center text-sm">{t.users_count}/{t.max_users}</TableCell>
+                  <TableCell className="text-center text-sm">{t.users_count} / {limitLbl(t.max_users)}</TableCell>
                   <TableCell className="text-xs">{fmtDate(t.created_at)}</TableCell>
                 </TableRow>
               ))}
@@ -753,7 +756,7 @@ function SuperAdminPanel({ embedded = false }) {
                         {t.referred_by && <div className="text-[10px] text-slate-500 mt-0.5">مُحال بواسطة: <span className="font-mono">{t.referred_by_name || t.referred_by.slice(0,8)}...</span></div>}
                         {t.activation_confirmed && <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 text-[10px] mt-1">✅ دفع مؤكد</Badge>}
                       </TableCell>
-                      <TableCell className="text-center">{t.users_count}/{t.max_users}</TableCell>
+                      <TableCell className="text-center">{t.users_count} / {limitLbl(t.max_users)}</TableCell>
                       <TableCell className="text-center">
                         <div className="flex flex-col items-center gap-1">
                           <div className={`text-xs font-bold ${pct >= 100 ? 'text-rose-600' : pct >= 90 ? 'text-amber-600' : 'text-slate-700'}`}>{q.used} / {q.limit}</div>
@@ -2651,7 +2654,7 @@ const playMeraajChime = () => {
 }
 
 function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
-  const { tenant, settings, user } = useAuth()
+  const { tenant, settings, user, branch } = useAuth() // v5.3 — branch for the current-branch badge
   // v4.7 — SA collapsible groups: multiple groups may stay open; the group holding the
   // active tab opens automatically (without closing others). Pure visual state.
   const isPlatformSA = user?.role === 'super_admin'
@@ -2816,6 +2819,7 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
           <div className="flex-1 min-w-0">
             <div className="text-xs font-semibold truncate">{user.name}</div>
             <div className="text-[10px] text-slate-400 truncate">{user.role === 'owner' ? 'مالك المكتب' : user.role === 'super_admin' ? 'المشرف العام' : 'موظف'}</div>
+            {branch?.name && <div className="mt-0.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-bold truncate max-w-full">🏢 الفرع الحالي: {branch.name}</div>}
           </div>
         </div>
       </div>
@@ -7598,7 +7602,7 @@ function IncomeStatement() {
       {data && (
         <div className="space-y-4">
           <div><div className="text-sm font-bold text-slate-700 mb-2">الإيرادات</div>
-            <div className="grid grid-cols-3 gap-2">{['tickets', 'visas', 'other'].map(k => (<Card key={k}><CardContent className="p-3"><div className="text-xs text-slate-500">{k === 'tickets' ? 'عمولات تذاكر' : k === 'visas' ? 'عمولات تأشيرات' : 'أخرى'}</div>{CURRENCIES.map(c => <div key={c} className="text-xs flex justify-between"><span>{c}</span><span className="font-bold text-emerald-600">{fmt(data.revenue[k][c], c)}</span></div>)}</CardContent></Card>))}</div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">{['tickets', 'visas', 'services', 'other'].map(k => (<Card key={k}><CardContent className="p-3"><div className="text-xs text-slate-500">{k === 'tickets' ? 'عمولات تذاكر' : k === 'visas' ? 'عمولات تأشيرات' : k === 'services' ? 'إيرادات خدمات' : 'أخرى'}</div>{CURRENCIES.map(c => <div key={c} className="text-xs flex justify-between"><span>{c}</span><span className="font-bold text-emerald-600">{fmt(data.revenue[k][c], c)}</span></div>)}</CardContent></Card>))}</div>
           </div>
           {(data.fx_gain_base ?? data.fx_gain_usd) !== undefined && (
             <Card className={`border-2 ${(data.fx_gain_base ?? data.fx_gain_usd) >= 0 ? 'border-emerald-200 bg-emerald-50/50' : 'border-rose-200 bg-rose-50/50'}`}>
@@ -11659,7 +11663,7 @@ function OfficeSettings() {
 
         <TabsContent value="users" className="mt-4">
           <Card>
-            <CardHeader className="flex flex-row items-center justify-between"><CardTitle>المستخدمون ({users.length}/{tenant?.max_users || 2})</CardTitle></CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between"><CardTitle>المستخدمون ({users.length} / {limitLbl(tenant?.max_users ?? 2)})</CardTitle></CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end mb-4 p-3 bg-slate-50 rounded-lg">
                 <Field label="الاسم"><Input value={newUser.name} onChange={e => setNewUser({ ...newUser, name: e.target.value })} /></Field>
@@ -13260,8 +13264,8 @@ function App() {
   const refreshMe = useCallback(async () => {
     try {
       const r = await api('/auth/me')
-      setAuth({ loading: false, user: r.user, tenant: r.tenant, settings: r.settings })
-    } catch { setAuth({ loading: false, user: null, tenant: null, settings: null }) }
+      setAuth({ loading: false, user: r.user, tenant: r.tenant, settings: r.settings, branch: r.branch || null }) // v5.3 — current-branch context
+    } catch { setAuth({ loading: false, user: null, tenant: null, settings: null, branch: null }) }
   }, [])
 
   useEffect(() => { refreshMe() }, [refreshMe])
@@ -13282,7 +13286,7 @@ function App() {
   }
   const logout = async () => {
     try { await api('/auth/logout', { method: 'POST' }) } catch {}
-    setAuth({ loading: false, user: null, tenant: null, settings: null })
+    setAuth({ loading: false, user: null, tenant: null, settings: null, branch: null })
     setPublicView('landing')
     toast.success('تم تسجيل الخروج')
   }

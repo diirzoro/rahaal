@@ -601,7 +601,7 @@ async function getPatSession(request, db) {
     return null
   }
 }
-function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : u.role === 'super_admin' ? { ...ownerPermissions(), ...(u.permissions || {}) } : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } } // v3.98 — platform SA in the company book = owner-equivalent perms, minus his explicit overrides (travel modules hidden)
+function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, branch_id: u.branch_id || null, /* v5.3 */ active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : u.role === 'super_admin' ? { ...ownerPermissions(), ...(u.permissions || {}) } : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } } // v3.98 — platform SA in the company book = owner-equivalent perms, minus his explicit overrides (travel modules hidden)
 // v3.97 — Batch 5: MAIN super admin realm check (role string is not enough —
 // a tenant user mistakenly holding 'super_admin' must NOT pass admin gates).
 // v3.98 — Phase 1 (Rahaal company book): the main SA may now be BOUND to the
@@ -1046,6 +1046,7 @@ async function createJournalEntry(db, tenantId, { date, description, ref_type, r
   if (opts.actor && !je.created_by) je.created_by = opts.actor
   if (opts.source && !je.source) je.source = opts.source
   if (opts.idempotencyKey) je.idempotency_key = opts.idempotencyKey
+  je.branch_id = opts.branchId ?? null // v5.3 — branch dimension on every NEW journal (null = HQ)
   // v4.5 — CENTRAL INVARIANTS (Priority 1+2+5): no automatic or manual journal can
   // skip validation — lines/accounts/tenant/group/inactive/period/base-balance.
   await enforceJournalInvariants(db, tenantId, je, opts)
@@ -1997,8 +1998,15 @@ async function handleRoute(request, { params }) {
       let tenantSettings = null
       if (sess.tenant) tenantSettings = await db.collection('tenant_settings').findOne({ tenant_id: sess.tenant.id })
       const quota = sess.tenant?.journal_quota || null
+      // v5.3 — UI context (point 23): the branch user must SEE his current branch
+      let myBranch = null
+      if (sess.user.branch_id) {
+        const brDoc = await db.collection('branches').findOne({ id: sess.user.branch_id, tenant_id: sess.user.tenant_id }, { projection: { _id: 0, id: 1, name: 1, status: 1 } })
+        if (brDoc) myBranch = brDoc
+      }
       return ok({
         user: sanitizeUser(sess.user),
+        branch: myBranch,
         tenant: sess.tenant ? { ...sanitizeTenant(sess.tenant), journal_quota: quota } : null,
         settings: tenantSettings ? { ...tenantSettings, _id: undefined } : null,
         impersonation: !!sess.impersonation,
@@ -2871,6 +2879,22 @@ async function handleRoute(request, { params }) {
     if (!sess.tenant) return bad('لا يوجد مكتب مرتبط بحسابك', 403)
     const T = sess.tenant.id
     const tf = { tenant_id: T }
+    // ========================================================================
+    // v5.3 — PHASE A: BRANCH ACCOUNTING ISOLATION (server-enforced)
+    // Branch context is derived EXCLUSIVELY from the authenticated session
+    // (users.branch_id) — NEVER from the request body (IDOR-safe).
+    //   B = null  → HQ / unassigned user → full office scope (unchanged behavior)
+    //   B = <id>  → branch-linked user  → office_id + branch_id scope on every
+    //               branch-scoped resource (clients, suppliers, boxes, vouchers,
+    //               journals, tickets, visas, services, exchanges, reports).
+    // Full permissions = full permissions INSIDE the branch, never office-wide.
+    // Legacy documents have NO branch_id → invisible to branch users (correct
+    // isolation; NO backfill — the legacy-NULL policy requires explicit approval).
+    // ========================================================================
+    const B = sess.user.branch_id || null
+    const btf = B ? { ...tf, branch_id: B } : tf
+    // IDOR guard for single-document access by a branch user
+    const inBranch = (doc) => !B || (!!doc && doc.branch_id === B)
 
     // Tenant Settings
     if (route === '/tenant/settings' && method === 'GET') {
@@ -5008,7 +5032,7 @@ async function handleRoute(request, { params }) {
           travel_mode: docType === 'bus' ? 'land' : 'air',
           exchange_rate: Number(b.exchange_rate) || 1,
         }
-        const r = await createTicket(db, T, payload)
+        const r = await createTicket(db, T, payload, { branchId: B }) // v5.3
         if (r.error) return bad(r.error)
         let usageOut = { plan: 'paid', unlimited: true, used: 0, limit: -1, remaining: -1 }
         if (!isPaidT) {
@@ -5040,7 +5064,7 @@ async function handleRoute(request, { params }) {
           // Preserve source metadata as attachment_url hint
           attachment_url: b.source_url || '',
         }
-        const r = await createVisa(db, T, payload)
+        const r = await createVisa(db, T, payload, { branchId: B }) // v5.3
         if (r.error) return bad(r.error)
         let usageOut = { plan: 'paid', unlimited: true, used: 0, limit: -1, remaining: -1 }
         if (!isPaidT) {
@@ -6258,7 +6282,7 @@ async function handleRoute(request, { params }) {
     }
 
     // Clients
-    if (route === '/clients' && method === 'GET') return ok(clean(await db.collection('clients').find(tf).sort({ created_at: -1 }).toArray()))
+    if (route === '/clients' && method === 'GET') return ok(clean(await db.collection('clients').find(btf) /* v5.3 branch scope */.sort({ created_at: -1 }).toArray()))
     if (route === '/clients' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم العميل مطلوب')
@@ -6267,7 +6291,7 @@ async function handleRoute(request, { params }) {
       let accountInfo = {}
       try { accountInfo = await generateSubAccountCode(db, T, parent_code) } catch (e) { return bad(e.message) }
       const doc = {
-        id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '',
+        id: uuidv4(), tenant_id: T, branch_id: B, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', // v5.3 — branch stamp
         address: b.address || '', email: b.email || '', notes: b.notes || '', parent_code, ...accountInfo,
         credit_limit: Number(b.credit_limit) || 0,  // v3.10.6 — 0 = no limit
         credit_currency: b.credit_currency || 'USD',
@@ -6304,14 +6328,14 @@ async function handleRoute(request, { params }) {
     }
 
     // Suppliers
-    if (route === '/suppliers' && method === 'GET') return ok(clean(await db.collection('suppliers').find(tf).sort({ created_at: -1 }).toArray()))
+    if (route === '/suppliers' && method === 'GET') return ok(clean(await db.collection('suppliers').find(btf) /* v5.3 branch scope */.sort({ created_at: -1 }).toArray()))
     if (route === '/suppliers' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم المورد مطلوب')
       const parent_code = String(b.parent_code || COA.SUPPLIERS) // v3.9.3 — default to الموردون والوكلاء (دائنون)
       let accountInfo = {}
       try { accountInfo = await generateSubAccountCode(db, T, parent_code) } catch (e) { return bad(e.message) }
-      const doc = { id: uuidv4(), tenant_id: T, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', parent_code, ...accountInfo, balances: emptyBalances(), created_at: new Date() }
+      const doc = { id: uuidv4(), tenant_id: T, branch_id: B, name: b.name, phone: b.phone || '', whatsapp: b.whatsapp || b.phone || '', address: b.address || '', email: b.email || '', notes: b.notes || '', parent_code, ...accountInfo, balances: emptyBalances(), created_at: new Date() } // v5.3 — branch stamp
       await db.collection('suppliers').insertOne(doc)
       const { _id, ...rest } = doc; return ok(rest)
     }
@@ -6342,7 +6366,7 @@ async function handleRoute(request, { params }) {
     // Boxes
     // v3.51 — RBAC Phase 3: staff restricted to specific boxes see ONLY those boxes (names & balances)
     if (route === '/boxes' && method === 'GET') {
-      const allBoxes = clean(await db.collection('boxes').find(tf).sort({ created_at: 1 }).toArray())
+      const allBoxes = clean(await db.collection('boxes').find(btf).sort({ created_at: 1 }).toArray()) // v5.3 branch scope
       const abIds = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
       if (sess.user.role !== 'owner' && abIds.length > 0) return ok(allBoxes.filter(x => abIds.includes(x.id)))
       return ok(allBoxes)
@@ -6355,7 +6379,7 @@ async function handleRoute(request, { params }) {
       const parent_code = String(b.parent_code || defaultParent)
       let accountInfo = {}
       try { accountInfo = await generateSubAccountCode(db, T, parent_code) } catch (e) { return bad(e.message) }
-      const doc = { id: uuidv4(), tenant_id: T, name_ar: b.name_ar, type, parent_code, ...accountInfo, balances: emptyBalances(), created_at: new Date() }
+      const doc = { id: uuidv4(), tenant_id: T, branch_id: B, name_ar: b.name_ar, type, parent_code, ...accountInfo, balances: emptyBalances(), created_at: new Date() } // v5.3 — branch stamp (null = HQ)
       await db.collection('boxes').insertOne(doc)
       const { _id, ...rest } = doc; return ok(rest)
     }
@@ -6684,7 +6708,7 @@ async function handleRoute(request, { params }) {
       const includeInactive = String(q.include_inactive || '0') === '1'
       const lim = Math.min(Number(q.limit) || 30, 100)
       const filterInactive = includeInactive ? {} : { $or: [{ inactive: { $exists: false } }, { inactive: { $ne: true } }] }
-      const baseQ = { tenant_id: T, ...filterInactive }
+      const baseQ = { ...btf, ...filterInactive } // v5.3 — picker branch scope (COA accounts below stay office-shared)
       const results = []
       const wantAll = wantType === 'all'
       const wantParty = wantType === 'party' // v3.79 — clients + suppliers combined (partner pickers)
@@ -7112,19 +7136,19 @@ async function handleRoute(request, { params }) {
       return ok({ voucher: result.doc, statement_id: stmt.id, settled_amount: amount, settled_currency: currency })
     }
 
-    if (route === '/tickets' && method === 'GET') return ok(clean(await db.collection('tickets').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+    if (route === '/tickets' && method === 'GET') return ok(clean(await db.collection('tickets').find(btf) /* v5.3 branch scope */.sort({ date: -1, created_at: -1 }).limit(500).toArray()))
     if (route === '/tickets' && method === 'POST') {
       const b = await request.json()
-      const result = await createTicket(db, T, b)
+      const result = await createTicket(db, T, b, { branchId: B }) // v5.3
       if (result.error) return bad(result.error)
       return ok(result.doc)
     }
 
     // Visas
-    if (route === '/visas' && method === 'GET') return ok(clean(await db.collection('visas').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+    if (route === '/visas' && method === 'GET') return ok(clean(await db.collection('visas').find(btf) /* v5.3 branch scope */.sort({ date: -1, created_at: -1 }).limit(500).toArray()))
     if (route === '/visas' && method === 'POST') {
       const b = await request.json()
-      const result = await createVisa(db, T, b)
+      const result = await createVisa(db, T, b, { branchId: B }) // v5.3
       if (result.error) return bad(result.error)
       return ok(result.doc)
     }
@@ -7182,10 +7206,10 @@ async function handleRoute(request, { params }) {
       return ok({ success: true })
     }
 
-    if (route === '/services' && method === 'GET') return ok(clean(await db.collection('services').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+    if (route === '/services' && method === 'GET') return ok(clean(await db.collection('services').find(btf) /* v5.3 branch scope */.sort({ date: -1, created_at: -1 }).limit(500).toArray()))
     if (route === '/services' && method === 'POST') {
       const b = await request.json()
-      const result = await createService(db, T, b)
+      const result = await createService(db, T, b, { branchId: B }) // v5.3
       if (result.error) return bad(result.error)
       return ok(result.doc)
     }
@@ -7308,7 +7332,7 @@ async function handleRoute(request, { params }) {
         const payload = box
           ? { ...r, client_id: null, client_name: nameTrim, supplier_id: sup.id, payment_method: 'cash', box_id: box.id }
           : { ...r, client_id: cli.id, supplier_id: sup.id, payment_method: r.payment_method === 'cash' ? 'cash' : 'credit' }
-        const result = await createTicket(db, T, payload)
+        const result = await createTicket(db, T, payload, { branchId: B }) // v5.3
         if (result.error) { failed++; errors.push({ row: r.__row, errors: [result.error] }) } else created++
       }
       return ok({ created, skipped, failed, errors })
@@ -7429,7 +7453,7 @@ async function handleRoute(request, { params }) {
         const payload = box
           ? { ...r, client_id: null, client_name: nameTrim, supplier_id: sup.id, payment_method: 'cash', box_id: box.id }
           : { ...r, client_id: cli.id, supplier_id: sup.id, payment_method: r.payment_method === 'cash' ? 'cash' : 'credit' }
-        const result = await createVisa(db, T, payload)
+        const result = await createVisa(db, T, payload, { branchId: B }) // v5.3
         if (result.error) { failed++; errors.push({ row: r.__row, errors: [result.error] }) } else created++
       }
       return ok({ created, skipped, failed, errors })
@@ -7437,7 +7461,7 @@ async function handleRoute(request, { params }) {
 
     // Vouchers
     if (route === '/vouchers' && method === 'GET') {
-      const filter = { ...tf }; if (q.type) filter.type = q.type
+      const filter = { ...btf }; if (q.type) filter.type = q.type // v5.3 branch scope
       return ok(clean(await db.collection('vouchers').find(filter).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
     }
     if (route === '/vouchers' && method === 'POST') {
@@ -7449,13 +7473,26 @@ async function handleRoute(request, { params }) {
           return bad('🚫 غير مصرح — هذا الصندوق خارج الصناديق المسموحة لك', 403)
         }
       }
-      const result = await createVoucher(db, T, b)
+      // v5.3 — BRANCH ISOLATION: box + party must belong to the actor's branch scope.
+      // IDs from the request body are NEVER trusted — verified against btf (session-derived).
+      if (B) {
+        if (b.box_id) {
+          const bxChk = await db.collection('boxes').findOne({ id: String(b.box_id), ...btf }, { projection: { id: 1 } })
+          if (!bxChk) return bad('🚫 غير مصرح — الصندوق/البنك المختار خارج نطاق فرعك', 403)
+        }
+        if (b.party_id && ['client', 'supplier'].includes(String(b.party_type))) {
+          const pColl = String(b.party_type) === 'client' ? 'clients' : 'suppliers'
+          const ptChk = await db.collection(pColl).findOne({ id: String(b.party_id), ...btf }, { projection: { id: 1 } })
+          if (!ptChk) return bad('🚫 غير مصرح — الطرف المختار خارج نطاق فرعك', 403)
+        }
+      }
+      const result = await createVoucher(db, T, b, { branchId: B }) // v5.3
       if (result.error) return bad(result.error)
       return ok(result.doc)
     }
 
     // Journal entries
-    if (route === '/journal-entries' && method === 'GET') return ok(clean(await db.collection('journal_entries').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+    if (route === '/journal-entries' && method === 'GET') return ok(clean(await db.collection('journal_entries').find(btf) /* v5.3 branch scope */.sort({ date: -1, created_at: -1 }).limit(500).toArray()))
 
     // v3.9.11 — Packages bulk operations
     if (route === '/packages/bulk-delete' && method === 'POST') {
@@ -7584,6 +7621,7 @@ async function handleRoute(request, { params }) {
         try {
           const oldDoc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
           if (!oldDoc) { failed++; errors.push({ id: docId, error: 'غير موجود' }); continue }
+          if (!inBranch(oldDoc)) { failed++; errors.push({ id: docId, error: '🚫 السجل يخص نطاقاً آخر (فرع/مركز)' }); continue } // v5.3 — IDOR guard
           const oldJe = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
           // v4.6 — RAH-ACC: per-row closed year/period guard on the ORIGINAL side (bulk edit
           // reverses + deletes + recreates — closed books must never be rewritten)
@@ -7615,7 +7653,7 @@ async function handleRoute(request, { params }) {
           await reverseTransactionEffects(db, T, kind, oldDoc)
           if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id, tenant_id: T }) // v4.6 — tenant-scoped
           await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
-          const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at }
+          const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at, branchId: oldDoc.branch_id ?? null } // v5.3 — preserve origin branch
           let result
           try {
             if (kind === 'tickets') result = await createTicket(db, T, newBody, opts)
@@ -7697,6 +7735,7 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       const oldDoc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
       if (!oldDoc) return bad('السجل غير موجود', 404)
+      if (!inBranch(oldDoc)) return bad('🚫 غير مصرح — هذا السجل يخص نطاقاً آخر (فرع/مركز)', 403) // v5.3 — IDOR guard
       const oldJe = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
       // v4.6 — RAH-ACC: closed year/period guard on the ORIGINAL side BEFORE any destructive
       // step (same "both sides" rule as manual-journal edits in v4.5) — editing a document
@@ -7711,7 +7750,7 @@ async function handleRoute(request, { params }) {
       await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
       // Step 4: Re-create with same id + skip quota (edit doesn't count against limit)
       let result
-      const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at }
+      const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at, branchId: oldDoc.branch_id ?? null } // v5.3 — preserve origin branch
       try {
         if (kind === 'tickets') result = await createTicket(db, T, b, opts)
         else if (kind === 'visas') result = await createVisa(db, T, b, opts)
@@ -7743,7 +7782,7 @@ async function handleRoute(request, { params }) {
     // Manual Journal Voucher (single-currency or dual)
     if (route === '/journal-entries' && method === 'POST') {
       const b = await request.json()
-      const result = await createManualJournal(db, T, b)
+      const result = await createManualJournal(db, T, b, { branchId: B }) // v5.3
       if (result.error) {
         // v4.8.2 — PR#18 (final point): the explicit unsafe state from createManualJournal
         // is no longer dropped by bad() — HTTP 500 + unsafe_state + no_retry in the JSON
@@ -7772,6 +7811,7 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       const oldJe = await db.collection('journal_entries').findOne({ id: jeId, tenant_id: T })
       if (!oldJe) return bad('القيد غير موجود', 404)
+      if (!inBranch(oldJe)) return bad('🚫 غير مصرح — هذا القيد يخص نطاقاً آخر (فرع/مركز)', 403) // v5.3 — IDOR guard
       if (!['manual', 'manual_dual'].includes(oldJe.ref_type)) return bad('لا يمكن تعديل قيود المعاملات مباشرةً — عدّل السجل المرتبط', 400)
       // v3.80 — reject future doc date EARLY (this handler deletes the old JE before re-creating,
       // with no restore-on-error mechanism — validating here prevents data loss)
@@ -7789,7 +7829,7 @@ async function handleRoute(request, { params }) {
       // Re-create with same id + skip quota
       let result
       try {
-        result = await createManualJournal(db, T, b, { existingId: jeId, skipQuota: true, createdAt: oldJe.created_at, actor: sess.user.email })
+        result = await createManualJournal(db, T, b, { existingId: jeId, skipQuota: true, createdAt: oldJe.created_at, actor: sess.user.email, branchId: oldJe.branch_id ?? null }) // v5.3 — preserve origin branch
       } catch (e) {
         result = { error: e?.message || 'فشل غير متوقع أثناء إعادة إنشاء القيد' }
       }
@@ -7848,7 +7888,7 @@ async function handleRoute(request, { params }) {
     }
     if (route === '/fx' && method === 'POST') {
       const b = await request.json()
-      const result = await createFx(db, T, b)
+      const result = await createFx(db, T, b, { branchId: B }) // v5.3
       if (result.error) return bad(result.error)
       return ok(result.doc)
     }
@@ -8033,9 +8073,18 @@ async function handleRoute(request, { params }) {
 
     // Reports
     if (route === '/reports/profits' && method === 'GET') return ok(await reportProfits(db, T, q))
-    if (route === '/reports/statement' && method === 'GET') return ok(await reportStatement(db, T, q))
-    if (route === '/reports/trial-balance' && method === 'GET') return ok(await reportTrialBalance(db, T))
-    if (route === '/reports/income-statement' && method === 'GET') return ok(await reportIncome(db, T, q))
+    if (route === '/reports/statement' && method === 'GET') {
+      // v5.3 — branch user: (1) party must be inside his branch scope (2) rows/summary
+      // derive ONLY from his branch's journals. HQ (B=null) keeps full-office behavior.
+      if (B && q.party_id && ['client', 'supplier', 'box'].includes(String(q.party_type))) {
+        const pc = String(q.party_type) === 'client' ? 'clients' : String(q.party_type) === 'supplier' ? 'suppliers' : 'boxes'
+        const pOk = await db.collection(pc).findOne({ id: String(q.party_id), ...btf }, { projection: { id: 1 } })
+        if (!pOk) return bad('🚫 غير مصرح — كشف حساب طرف خارج نطاق فرعك', 403)
+      }
+      return ok(await reportStatement(db, T, { ...q, _branch_id: B }))
+    }
+    if (route === '/reports/trial-balance' && method === 'GET') return ok(await reportTrialBalance(db, T, B)) // v5.3 — branch trial balance for branch users
+    if (route === '/reports/income-statement' && method === 'GET') return ok(await reportIncome(db, T, { ...q, _branch_id: B })) // v5.3 — branch income for branch users
     // v3.10.4 — Unified Query & Filters for Visas + Tickets
     if (route === '/reports/query' && method === 'GET') {
       const from = q.from || null
@@ -9199,7 +9248,7 @@ async function createTicket(db, T, b, opts = {}) {
     if (!box) return { error: 'الصندوق غير موجود' }
   }
   const doc = {
-    id: opts.existingId || uuidv4(), tenant_id: T, date: new Date(b.date || Date.now()), currency: b.currency,
+    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, // v5.3 — branch stamp (null = HQ) date: new Date(b.date || Date.now()), currency: b.currency,
     exchange_rate: Number(b.exchange_rate) || 1,
     client_id: cli?.id || null, client_name: cli?.name || (paymentMethod === 'cash' ? (b.client_name || 'عميل نقدي') : ''),
     supplier_id: sup.id, supplier_name: sup.name,
@@ -9286,7 +9335,7 @@ async function createTicket(db, T, b, opts = {}) {
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}حجز تذكرة ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} PNR ${doc.pnr || '-'} — ${cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
     ref_type: 'ticket', ref_id: doc.id, currency: b.currency, lines,
-  }, { skipQuota: !!opts.skipQuota })
+  }, { skipQuota: !!opts.skipQuota, branchId: opts.branchId ?? null })
   const { _id, ...rest } = doc; return { doc: rest }
 }
 
@@ -9335,7 +9384,7 @@ async function createVisa(db, T, b, opts = {}) {
     if (!box) return { error: 'الصندوق غير موجود' }
   }
   const doc = {
-    id: opts.existingId || uuidv4(), tenant_id: T, date: new Date(b.date || Date.now()), service_type: b.service_type || 'تأشيرة عمرة',
+    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, // v5.3 — branch stamp (null = HQ) date: new Date(b.date || Date.now()), service_type: b.service_type || 'تأشيرة عمرة',
     currency: b.currency, exchange_rate: Number(b.exchange_rate) || 1,
     client_id: cli?.id || null, client_name: cli?.name || (paymentMethod === 'cash' ? (b.client_name || 'عميل نقدي') : ''),
     supplier_id: sup.id, supplier_name: sup.name,
@@ -9405,7 +9454,7 @@ async function createVisa(db, T, b, opts = {}) {
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.passenger_name || cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
     ref_type: 'visa', ref_id: doc.id, currency: b.currency, lines,
-  }, { skipQuota: !!opts.skipQuota })
+  }, { skipQuota: !!opts.skipQuota, branchId: opts.branchId ?? null })
   // v3.10.5 — Auto-create Visa Monitor record if destination_country + passport are provided
   if (!opts.existingId && b.destination_country && b.passport_no) {
     try {
@@ -9485,7 +9534,7 @@ async function createService(db, T, b, opts = {}) {
     if (!box) return { error: 'الصندوق غير موجود' }
   }
   const doc = {
-    id: opts.existingId || uuidv4(), tenant_id: T, date: new Date(b.date || Date.now()),
+    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, // v5.3 — branch stamp (null = HQ) date: new Date(b.date || Date.now()),
     service_type: b.service_type || 'خدمات متنوعة',
     description: b.description || '',
     currency: b.currency, exchange_rate: Number(b.exchange_rate) || 1,
@@ -9551,7 +9600,7 @@ async function createService(db, T, b, opts = {}) {
   await createJournalEntry(db, T, {
     date: doc.date, description: `${opts.existingId ? 'تعديل ' : ''}${doc.service_type} ${paymentMethod === 'cash' ? '(نقد)' : '(آجل)'} — ${doc.beneficiary_name || cli?.name || doc.client_name || sup.name}${partnerShare > 0 ? ` — عمولة مشتركة ${partnerShare} مع ${doc.commission_partner_name}` : ''}`,
     ref_type: 'service', ref_id: doc.id, currency: b.currency, lines,
-  }, { skipQuota: !!opts.skipQuota })
+  }, { skipQuota: !!opts.skipQuota, branchId: opts.branchId ?? null })
   const { _id, ...rest } = doc; return { doc: rest }
 }
 
@@ -9606,7 +9655,7 @@ async function createVoucher(db, T, b, opts = {}) {
   const box = await db.collection('boxes').findOne({ id: b.box_id, tenant_id: T })
   if (!box) return { error: 'الصندوق/البنك غير موجود' }
   const doc = {
-    id: opts.existingId || uuidv4(), tenant_id: T, type: b.type, date: new Date(b.date || Date.now()),
+    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, // v5.3 — branch stamp (null = HQ) type: b.type, date: new Date(b.date || Date.now()),
     currency: b.currency, amount, party_type: b.party_type, party_id: b.party_id || null,
     party_name: partyName, box_id: box.id, box_name: box.name_ar,
     coa_account_code: coaAccount?.code || null, coa_account_name: coaAccount?.name_ar || null, // v3.79
@@ -9650,7 +9699,7 @@ async function createVoucher(db, T, b, opts = {}) {
     date: doc.date,
     description: (b.type === 'receipt' ? 'سند قبض — ' : 'سند صرف — ') + (doc.description || partyName),
     ref_type: b.type === 'receipt' ? 'receipt' : 'payment', ref_id: doc.id, currency: b.currency, lines,
-  }, { skipQuota: !!opts.skipQuota })
+  }, { skipQuota: !!opts.skipQuota, branchId: opts.branchId ?? null })
   const { _id, ...rest } = doc; return { doc: rest }
 }
 
@@ -9727,7 +9776,7 @@ async function createFx(db, T, b, opts = {}) {
   const outBase = toBase(counter_amount, b.counter_currency, rates)
   const fx_gain_base = +(b.type === 'buy' ? (inBase - outBase) : (outBase - inBase)).toFixed(4)
   const doc = {
-    id: opts.existingId || uuidv4(), tenant_id: T, type: b.type,
+    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, // v5.3 — branch stamp (null = HQ) type: b.type,
     date: new Date(b.date || Date.now()),
     currency: b.currency, amount, exchange_rate: rate,
     counter_currency: b.counter_currency, counter_amount,
@@ -9790,7 +9839,7 @@ async function createFx(db, T, b, opts = {}) {
     description: `${opts.existingId ? 'تعديل ' : ''}${b.type === 'buy' ? 'شراء عملة' : 'بيع عملة'} — ${amount} ${b.currency} @ ${rate} ${b.counter_currency}${doc.customer_name ? ' — ' + doc.customer_name : ''}${payment_method === 'account' ? ' [حساب]' : ''}`,
     ref_type: b.type === 'buy' ? 'fx_buy' : 'fx_sell',
     ref_id: doc.id, currency: 'MULTI', lines,
-  }, { skipQuota: !!opts.skipQuota })
+  }, { skipQuota: !!opts.skipQuota, branchId: opts.branchId ?? null })
   const { _id, ...rest } = doc; return { doc: rest }
 }
 
@@ -9862,7 +9911,7 @@ async function createManualJournal(db, T, b, opts = {}) {
       const je = await createJournalEntry(db, T, {
         date: b.date, description: (opts.existingId ? 'تعديل — ' : '') + (b.description || 'سند قيد ثنائي (مصارفة/تسوية)'),
         ref_type: 'manual_dual', ref_id: opts.existingId || uuidv4(), currency: 'MULTI', lines,
-      }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal' })
+      }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal', branchId: opts.branchId ?? null })
       return { doc: { ...je, _id: undefined, fx_diff_usd: fxDiff } }
     } catch (e) {
       // v4.8.1 — PR#18-2: EXPLICIT machine-readable state for callers (PUT edit path).
@@ -9910,7 +9959,7 @@ async function createManualJournal(db, T, b, opts = {}) {
       date: b.date, description: (opts.existingId ? 'تعديل — ' : '') + (b.description || 'قيد يومية يدوي'),
       ref_type: 'manual', ref_id: opts.existingId || uuidv4(), currency: b.currency,
       lines: mappedLines,
-    }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal' })
+    }, { skipQuota: !!opts.skipQuota, existingJeId: opts.existingId, createdAt: opts.createdAt, actor: opts.actor, source: 'manual_journal', branchId: opts.branchId ?? null })
     return { doc: { ...je, _id: undefined } }
   } catch (e) {
     // v4.8.1 — PR#18-2: EXPLICIT machine-readable state for callers (PUT edit path).
@@ -10108,7 +10157,7 @@ async function reportStatement(db, T, q) {
   // v3.88.4 — F-016: everything BEFORE the period start is the OPENING BALANCE —
   // a period statement never starts from zero when prior activity exists.
   if (startDate) {
-    const priorJes = await db.collection('journal_entries').find({ tenant_id: T, ...dateRangeExpr('date', null, new Date(startDate.getTime() - 1)) }).toArray()
+    const priorJes = await db.collection('journal_entries').find({ tenant_id: T, ...(q._branch_id ? { branch_id: q._branch_id } : {}), ...dateRangeExpr('date', null, new Date(startDate.getTime() - 1)) }).toArray() // v5.3 — branch scope
     for (const je of priorJes) for (const l of je.lines || []) {
       if (!matchesLine(l)) continue
       const cur = l.currency || je.currency
@@ -10123,7 +10172,7 @@ async function reportStatement(db, T, q) {
   }
 
   const rangeExpr = dateRangeExpr('date', startDate, endDate)
-  const jes = await db.collection('journal_entries').find({ tenant_id: T, ...(rangeExpr || {}) }).sort({ date: 1, created_at: 1 }).toArray()
+  const jes = await db.collection('journal_entries').find({ tenant_id: T, ...(q._branch_id ? { branch_id: q._branch_id } : {}), ...(rangeExpr || {}) }).sort({ date: 1, created_at: 1 }).toArray() // v5.3 — branch scope
   for (const je of jes) {
     for (const l of je.lines || []) {
       if (!matchesLine(l)) continue
@@ -10158,8 +10207,8 @@ async function reportStatement(db, T, q) {
     summary, currency_mode: mode, period: q.period || 'all',
   }
 }
-async function reportTrialBalance(db, T) {
-  const jes = await db.collection('journal_entries').find({ tenant_id: T }).toArray()
+async function reportTrialBalance(db, T, branchId = null) { // v5.3 — branch trial balance
+  const jes = await db.collection('journal_entries').find({ tenant_id: T, ...(branchId ? { branch_id: branchId } : {}) }).toArray()
   const map = {}
   for (const je of jes) {
     for (const l of je.lines || []) {
@@ -10190,7 +10239,7 @@ async function reportIncome(db, T, q) {
     to = q.to ? bizDayEnd(q.to) : bizDayEnd(bizTodayISO())
   }
   const rates = (await db.collection('tenant_settings').findOne({ tenant_id: T }))?.rates || DEFAULT_RATES
-  const jes = await db.collection('journal_entries').find({ tenant_id: T, ref_type: { $ne: 'year_close' }, ...dateRangeExpr('date', from, to) }).toArray()
+  const jes = await db.collection('journal_entries').find({ tenant_id: T, ...(q._branch_id ? { branch_id: q._branch_id } : {}), ref_type: { $ne: 'year_close' }, ...dateRangeExpr('date', from, to) }).toArray() // v5.3 — branch scope
   const zero = () => ({ USD: 0, SAR: 0, YER: 0 })
   const rev = { tickets: zero(), visas: zero(), services: zero(), other: zero() }
   const exp = zero()
