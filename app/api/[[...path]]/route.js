@@ -1298,9 +1298,12 @@ async function reverseTransactionEffects(db, T, kind, doc) {
       if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
       if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
     } else {
+      // v5.5 — FIX (Double Balance Effect): exact negation of createVoucher's payment effects
+      // (create: box −amount, supplier −amount, client +amount) → reverse: box +, supplier +, client −.
+      // The previous signs (supplier −, client +) DOUBLED the party on every payment edit/delete.
       await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, +doc.amount)
-      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
-      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
+      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
+      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
     }
   } else if (kind === 'fx') {
     // Use stored refs (falls back to box_currency_id for pre-v2.6 records)
@@ -1341,9 +1344,11 @@ async function restoreTransactionEffects(db, T, kind, doc) {
       if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
       if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
     } else {
+      // v5.5 — FIX: restore re-applies the ORIGINAL payment effects exactly
+      // (box −amount, supplier −amount, client +amount) — mirror of the corrected reversal.
       await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.amount)
-      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
-      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+      if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
+      if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
     }
   } else if (kind === 'fx') {
     const refCur = doc.currency_ref || { kind: 'box', id: doc.box_currency_id }
@@ -7915,6 +7920,12 @@ async function handleRoute(request, { params }) {
             passport_no: oldDoc.passport_no, nationality: oldDoc.nationality, service_type: oldDoc.service_type,
             visa_type: oldDoc.visa_type, entry_date: oldDoc.entry_date, exit_date: oldDoc.exit_date,
             travel_date: oldDoc.travel_date, notes: oldDoc.notes, description: oldDoc.description,
+            // v5.5 — FIX: partner-commission fields were DROPPED during bulk-edit reconstruction,
+            // silently deleting the partner share on every bulk edit of a partner-share document.
+            discount: oldDoc.discount,
+            commission_partner_type: oldDoc.commission_partner_type, commission_partner_id: oldDoc.commission_partner_id,
+            commission_partner_name: oldDoc.commission_partner_name,
+            commission_share_mode: oldDoc.commission_share_mode, commission_share_value: oldDoc.commission_share_value,
           }
           for (const k of changeKeys) newBody[k] = changes[k]
           // If payment_method switching from credit->cash, require box_id
@@ -8005,50 +8016,75 @@ async function handleRoute(request, { params }) {
       const [_, kind, docId] = putMatch
       const coll = kind === 'fx' ? 'currency_exchanges' : kind
       const b = await request.json()
-      const oldDoc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
-      if (!oldDoc) return bad('السجل غير موجود', 404)
-      if (!inBranch(oldDoc)) return bad('🚫 غير مصرح — هذا السجل يخص نطاقاً آخر (فرع/مركز)', 403) // v5.3 — IDOR guard
-      const oldJe = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
-      // v4.6 — RAH-ACC: closed year/period guard on the ORIGINAL side BEFORE any destructive
-      // step (same "both sides" rule as manual-journal edits in v4.5) — editing a document
-      // whose journal is inside a closed period silently rewrites closed books.
-      const perrUP = await assertOpenPeriod(db, T, oldJe?.date || oldDoc.date)
-      if (perrUP) return bad(`السجل الأصلي داخل فترة/سنة مقفلة — لا يمكن تعديله: ${perrUP}`)
-      // Step 1: Reverse balance effects of the old record
-      await reverseTransactionEffects(db, T, kind, oldDoc)
-      // Step 2: Delete old JE (without decrementing quota, since we'll re-post)
-      if (oldJe) await db.collection('journal_entries').deleteOne({ id: oldJe.id, tenant_id: T }) // v4.6 — tenant-scoped
-      // Step 3: Delete the old record so we can re-insert with same id
-      await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
-      // Step 4: Re-create with same id + skip quota (edit doesn't count against limit)
-      let result
-      const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at, branchId: oldDoc.branch_id ?? null } // v5.3 — preserve origin branch
+      // v5.5.2 — TRUE EDIT MUTEX via an _id-unique lock DOCUMENT (MongoDB's built-in _id
+      // uniqueness = real mutual exclusion). A lock FIELD on the record itself (v5.5.1)
+      // died with the delete→recreate cycle: editor B claimed the half-built recreated doc
+      // BEFORE its journal existed → orphan duplicate JE (QA57). The lock doc lives in
+      // 'edit_locks', survives the whole window, auto-expires after 60s (crashed editor),
+      // and is ALWAYS released in finally — success, validation failure, or restore.
+      const lockId = `edit:${T}:${coll}:${docId}`
+      const nowMs = Date.now()
       try {
-        if (kind === 'tickets') result = await createTicket(db, T, b, opts)
-        else if (kind === 'visas') result = await createVisa(db, T, b, opts)
-        else if (kind === 'services') result = await createService(db, T, b, opts)
-        else if (kind === 'vouchers') result = await createVoucher(db, T, { ...b, type: b.type || oldDoc.type }, opts)
-        else if (kind === 'fx') result = await createFx(db, T, { ...b, type: b.type || oldDoc.type }, opts)
-      } catch (createErr) {
-        // v3.88.5 — F-020: thrown errors (e.g. PARTY_NO_LEAF_ACCOUNT) take the SAME restore path
-        result = { error: createErr.message }
-      }
-      if (result.error) {
-        // v3.88.5 — F-020 ATOMIC RESTORE (review round): restore failures are NEVER swallowed.
-        // replaceOne+upsert is idempotent (safe even if the failed create partially inserted a
-        // doc with the same id); order is doc → JE → balances, and ANY restore failure aborts
-        // with a loud 500 — balances can never be restored while the doc/JE restore failed.
-        try {
-          await db.collection(coll).replaceOne({ id: docId, tenant_id: T }, oldDoc, { upsert: true })
-          if (oldJe) await db.collection('journal_entries').replaceOne({ id: oldJe.id, tenant_id: T }, oldJe, { upsert: true })
-          await restoreTransactionEffects(db, T, kind, oldDoc)
-        } catch (restoreErr) {
-          console.error(`[F-020] CRITICAL: restore failed for ${kind}/${docId}:`, restoreErr)
-          return bad(`فشل التعديل (${result.error}) ثم فشلت الاستعادة التلقائية (${restoreErr.message}) — لا تُعد المحاولة؛ يلزم فحص يدوي فوري للسجل ${docId} وقيده وأرصدته`, 500)
+        await db.collection('edit_locks').insertOne({ _id: lockId, at: new Date(nowMs) })
+      } catch {
+        const curLk = await db.collection('edit_locks').findOne({ _id: lockId })
+        if (curLk?.at && new Date(curLk.at).getTime() > nowMs - 60000) {
+          return bad('⚠️ عملية تعديل أخرى قيد التنفيذ لنفس السجل — انتظر لحظة ثم أعد المحاولة (لا تكرار للأثر المالي)', 409)
         }
-        return bad(`${result.error} — لم يُطبق أي تغيير: تمت استعادة السجل والقيد والأرصدة الأصلية كما كانت`)
+        // stale lock (crashed editor) — atomic takeover bound to the observed timestamp
+        const takeLk = await db.collection('edit_locks').updateOne({ _id: lockId, at: curLk?.at ?? null }, { $set: { at: new Date(nowMs) } })
+        if (takeLk.matchedCount === 0) return bad('⚠️ عملية تعديل أخرى قيد التنفيذ لنفس السجل — أعد المحاولة', 409)
       }
-      return ok(result.doc)
+      try {
+        // Fresh reads INSIDE the lock (never a pre-claim snapshot)
+        const oldDoc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
+        if (!oldDoc) return bad('السجل غير موجود', 404)
+        if (!inBranch(oldDoc)) return bad('🚫 غير مصرح — هذا السجل يخص نطاقاً آخر (فرع/مركز)', 403) // v5.3 — IDOR guard
+        const oldJe = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
+        // v4.6 — RAH-ACC: closed year/period guard on the ORIGINAL side BEFORE any destructive
+        // step (same "both sides" rule as manual-journal edits in v4.5) — editing a document
+        // whose journal is inside a closed period silently rewrites closed books.
+        const perrUP = await assertOpenPeriod(db, T, oldJe?.date || oldDoc.date)
+        if (perrUP) return bad(`السجل الأصلي داخل فترة/سنة مقفلة — لا يمكن تعديله: ${perrUP}`)
+        // Step 1: Reverse balance effects of the old record
+        await reverseTransactionEffects(db, T, kind, oldDoc)
+        // Step 2: Delete old JE(s) — deleteMany also HEALS any orphan duplicate journal left
+        // by the pre-fix race (same ref_id) so the ledger converges back to exactly one JE.
+        await db.collection('journal_entries').deleteMany({ ref_id: docId, tenant_id: T })
+        // Step 3: Delete the old record so we can re-insert with same id
+        await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
+        // Step 4: Re-create with same id + skip quota (edit doesn't count against limit)
+        let result
+        const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at, branchId: oldDoc.branch_id ?? null } // v5.3 — preserve origin branch
+        try {
+          if (kind === 'tickets') result = await createTicket(db, T, b, opts)
+          else if (kind === 'visas') result = await createVisa(db, T, b, opts)
+          else if (kind === 'services') result = await createService(db, T, b, opts)
+          else if (kind === 'vouchers') result = await createVoucher(db, T, { ...b, type: b.type || oldDoc.type }, opts)
+          else if (kind === 'fx') result = await createFx(db, T, { ...b, type: b.type || oldDoc.type }, opts)
+        } catch (createErr) {
+          // v3.88.5 — F-020: thrown errors (e.g. PARTY_NO_LEAF_ACCOUNT) take the SAME restore path
+          result = { error: createErr.message }
+        }
+        if (result.error) {
+          // v3.88.5 — F-020 ATOMIC RESTORE (review round): restore failures are NEVER swallowed.
+          // replaceOne+upsert is idempotent (safe even if the failed create partially inserted a
+          // doc with the same id); order is doc → JE → balances, and ANY restore failure aborts
+          // with a loud 500 — balances can never be restored while the doc/JE restore failed.
+          try {
+            await db.collection(coll).replaceOne({ id: docId, tenant_id: T }, oldDoc, { upsert: true })
+            if (oldJe) await db.collection('journal_entries').replaceOne({ id: oldJe.id, tenant_id: T }, oldJe, { upsert: true })
+            await restoreTransactionEffects(db, T, kind, oldDoc)
+          } catch (restoreErr) {
+            console.error(`[F-020] CRITICAL: restore failed for ${kind}/${docId}:`, restoreErr)
+            return bad(`فشل التعديل (${result.error}) ثم فشلت الاستعادة التلقائية (${restoreErr.message}) — لا تُعد المحاولة؛ يلزم فحص يدوي فوري للسجل ${docId} وقيده وأرصدته`, 500)
+          }
+          return bad(`${result.error} — لم يُطبق أي تغيير: تمت استعادة السجل والقيد والأرصدة الأصلية كما كانت`)
+        }
+        return ok(result.doc)
+      } finally {
+        try { await db.collection('edit_locks').deleteOne({ _id: lockId }) } catch { }
+      }
     }
 
     // Manual Journal Voucher (single-currency or dual)
@@ -9521,7 +9557,7 @@ async function createTicket(db, T, b, opts = {}) {
     if (!box) return { error: 'الصندوق غير موجود' }
   }
   const doc = {
-    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, // v5.3 — branch stamp (null = HQ) date: new Date(b.date || Date.now()), currency: b.currency,
+    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, /* v5.3 branch stamp (null=HQ) */ date: new Date(b.date || Date.now()), currency: b.currency,
     exchange_rate: Number(b.exchange_rate) || 1,
     client_id: cli?.id || null, client_name: cli?.name || (paymentMethod === 'cash' ? (b.client_name || 'عميل نقدي') : ''),
     supplier_id: sup.id, supplier_name: sup.name,
@@ -9657,7 +9693,7 @@ async function createVisa(db, T, b, opts = {}) {
     if (!box) return { error: 'الصندوق غير موجود' }
   }
   const doc = {
-    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, // v5.3 — branch stamp (null = HQ) date: new Date(b.date || Date.now()), service_type: b.service_type || 'تأشيرة عمرة',
+    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, /* v5.3 branch stamp (null=HQ) */ date: new Date(b.date || Date.now()), service_type: b.service_type || 'تأشيرة عمرة',
     currency: b.currency, exchange_rate: Number(b.exchange_rate) || 1,
     client_id: cli?.id || null, client_name: cli?.name || (paymentMethod === 'cash' ? (b.client_name || 'عميل نقدي') : ''),
     supplier_id: sup.id, supplier_name: sup.name,
@@ -9807,7 +9843,7 @@ async function createService(db, T, b, opts = {}) {
     if (!box) return { error: 'الصندوق غير موجود' }
   }
   const doc = {
-    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, // v5.3 — branch stamp (null = HQ) date: new Date(b.date || Date.now()),
+    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, /* v5.3 branch stamp (null=HQ) */ date: new Date(b.date || Date.now()),
     service_type: b.service_type || 'خدمات متنوعة',
     description: b.description || '',
     currency: b.currency, exchange_rate: Number(b.exchange_rate) || 1,
@@ -9928,7 +9964,7 @@ async function createVoucher(db, T, b, opts = {}) {
   const box = await db.collection('boxes').findOne({ id: b.box_id, tenant_id: T })
   if (!box) return { error: 'الصندوق/البنك غير موجود' }
   const doc = {
-    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, // v5.3 — branch stamp (null = HQ) type: b.type, date: new Date(b.date || Date.now()),
+    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, /* v5.3 branch stamp (null=HQ) */ type: b.type, date: new Date(b.date || Date.now()),
     currency: b.currency, amount, party_type: b.party_type, party_id: b.party_id || null,
     party_name: partyName, box_id: box.id, box_name: box.name_ar,
     coa_account_code: coaAccount?.code || null, coa_account_name: coaAccount?.name_ar || null, // v3.79
@@ -10049,7 +10085,7 @@ async function createFx(db, T, b, opts = {}) {
   const outBase = toBase(counter_amount, b.counter_currency, rates)
   const fx_gain_base = +(b.type === 'buy' ? (inBase - outBase) : (outBase - inBase)).toFixed(4)
   const doc = {
-    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, // v5.3 — branch stamp (null = HQ) type: b.type,
+    id: opts.existingId || uuidv4(), tenant_id: T, branch_id: opts.branchId ?? null, /* v5.3 branch stamp (null=HQ) */ type: b.type,
     date: new Date(b.date || Date.now()),
     currency: b.currency, amount, exchange_rate: rate,
     counter_currency: b.counter_currency, counter_amount,

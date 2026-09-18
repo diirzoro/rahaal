@@ -1,0 +1,122 @@
+[12:05:32.270] ================================================================================
+[12:05:32.270] QA58 — v5.5.2 EDIT MUTEX RETEST
+[12:05:32.270] ================================================================================
+[12:05:32.270] Creating QA58 office via signup...
+[12:05:32.777] ✅ Office created: tenant_id=343edd07-b583-4ed0-af3d-d7d061f4bf97
+[12:05:32.778] Creating QA58 client...
+[12:05:32.975] ✅ Client created: id=561a4270-8de3-46c9-8397-d0347f2a207e
+[12:05:32.976] Creating QA58 box...
+[12:05:33.170] ✅ Box created: id=7abdbd4c-37e5-4ab9-a28c-be2023910ca3
+[12:05:33.171] Creating receipt voucher (amount=100)...
+[12:05:33.418] ✅ Voucher created: id=3c05e86f-1198-4bd0-81de-c67242d5287b, amount=100
+[12:05:33.419] 
+================================================================================
+[12:05:33.419] S1 STRESS TEST: 10 iterations, 2 concurrent PUTs each
+[12:05:33.419] ================================================================================
+[12:05:33.419] 
+--- Iteration 1: amount=111 ---
+[12:05:33.676] PUT 1: status=409, elapsed=0.217s
+[12:05:33.676] PUT 2: status=200, elapsed=0.255s
+[12:05:34.182] MongoDB: JE count=1, box=111, client=-111, lock=False
+[12:05:34.182] ✅ PASS iter1: (200,409) + 1 JE + correct balances
+[12:05:34.182] 
+--- Iteration 2: amount=112 ---
+[12:05:34.869] PUT 1: status=409, elapsed=0.483s
+[12:05:34.869] PUT 2: status=200, elapsed=0.685s
+[12:05:35.374] MongoDB: JE count=1, box=112, client=-112, lock=False
+[12:05:35.374] ✅ PASS iter2: (200,409) + 1 JE + correct balances
+[12:05:35.374] 
+--- Iteration 3: amount=113 ---
+[12:05:35.992] PUT 1: status=409, elapsed=0.598s
+[12:05:35.992] PUT 2: status=200, elapsed=0.616s
+[12:05:36.497] MongoDB: JE count=1, box=113, client=-113, lock=False
+[12:05:36.497] ✅ PASS iter3: (200,409) + 1 JE + correct balances
+[12:05:36.497] 
+--- Iteration 4: amount=114 ---
+[12:05:40.148] PUT 1: status=200, elapsed=0.249s
+[12:05:40.148] PUT 2: status=200, elapsed=3.650s
+[12:05:40.654] MongoDB: JE count=1, box=114, client=-114, lock=False
+[12:05:40.654] ✅ PASS iter4: (200,200 clean sequential) + 1 JE + correct balances
+[12:05:40.654] 
+--- Iteration 5: amount=115 ---
+[12:05:40.992] PUT 1: status=409, elapsed=0.282s
+[12:05:40.992] PUT 2: status=200, elapsed=0.336s
+[12:05:41.496] MongoDB: JE count=1, box=115, client=-115, lock=False
+[12:05:41.497] ✅ PASS iter5: (200,409) + 1 JE + correct balances
+[12:05:41.497] 
+--- Iteration 6: amount=116 ---
+[12:05:41.766] PUT 1: status=409, elapsed=0.255s
+[12:05:41.766] PUT 2: status=200, elapsed=0.267s
+[12:05:42.271] MongoDB: JE count=1, box=116, client=-116, lock=False
+[12:05:42.271] ✅ PASS iter6: (200,409) + 1 JE + correct balances
+[12:05:42.271] 
+--- Iteration 7: amount=117 ---
+[12:05:42.549] PUT 1: status=409, elapsed=0.244s
+[12:05:42.549] PUT 2: status=200, elapsed=0.276s
+[12:05:43.053] MongoDB: JE count=1, box=117, client=-117, lock=False
+[12:05:43.053] ✅ PASS iter7: (200,409) + 1 JE + correct balances
+[12:05:43.053] 
+--- Iteration 8: amount=118 ---
+[12:05:43.354] PUT 1: status=409, elapsed=0.283s
+[12:05:43.354] PUT 2: status=200, elapsed=0.299s
+[12:05:43.859] MongoDB: JE count=1, box=118, client=-118, lock=False
+[12:05:43.859] ✅ PASS iter8: (200,409) + 1 JE + correct balances
+[12:05:43.859] 
+--- Iteration 9: amount=119 ---
+[12:05:44.138] PUT 1: status=409, elapsed=0.259s
+[12:05:44.138] PUT 2: status=200, elapsed=0.278s
+[12:05:44.642] MongoDB: JE count=1, box=119, client=-119, lock=False
+[12:05:44.642] ✅ PASS iter9: (200,409) + 1 JE + correct balances
+[12:05:44.642] 
+--- Iteration 10: amount=120 ---
+[12:05:44.922] PUT 1: status=409, elapsed=0.245s
+[12:05:44.922] PUT 2: status=200, elapsed=0.277s
+[12:05:45.427] MongoDB: JE count=1, box=120, client=-120, lock=False
+[12:05:45.427] ✅ PASS iter10: (200,409) + 1 JE + correct balances
+[12:05:45.427] 
+================================================================================
+[12:05:45.427] S1 STRESS RESULT: 10/10 PASSED, 0/10 FAILED
+[12:05:45.427] ================================================================================
+[12:05:45.427] 
+================================================================================
+[12:05:45.427] S2: Single PUT after stress loop (amount 200)
+[12:05:45.427] ================================================================================
+[12:05:46.438] MongoDB: JE count=1, box=200, client=-200, lock=False
+[12:05:46.438] ✅ S2 PASS: 1 JE, correct balances (+200/-200), no stuck lock
+[12:05:46.438] 
+================================================================================
+[12:05:46.438] S3: Orphan healing test
+[12:05:46.438] ================================================================================
+[12:05:46.441] Current JE: id=89ccf506-6c76-4de2-ba97-6aee15b52016
+[12:05:46.441] ✅ Inserted fake duplicate JE: id=995d49fc-497a-4fb7-ad10-781fbd4aa006
+[12:05:46.442] JE count before PUT: 2 (expected 2)
+[12:05:47.245] MongoDB after PUT: JE count=1, box=210, client=-210
+[12:05:47.245] ✅ S3 PASS: deleteMany removed BOTH old JEs (including fake orphan), exactly 1 fresh JE remains, balances correct (+210/-210)
+[12:05:47.246] 
+================================================================================
+[12:05:47.246] S4: Failure path releases lock
+[12:05:47.246] ================================================================================
+[12:05:47.484] ✅ PUT with invalid box_id failed as expected: 400
+[12:05:47.987] ✅ Lock released after failed PUT
+[12:05:48.740] ✅ S4 PASS: Valid PUT succeeded immediately after failed PUT, correct balances
+[12:05:48.741] 
+================================================================================
+[12:05:48.741] FINAL SUMMARY
+[12:05:48.741] ================================================================================
+[12:05:48.741] S1 STRESS (10 iterations): ✅ PASS
+[12:05:48.741] S2 Single PUT: ✅ PASS
+[12:05:48.741] S3 Orphan healing: ✅ PASS
+[12:05:48.741] S4 Failure path: ✅ PASS
+[12:05:48.741] 
+OVERALL: 4/4 tests PASSED
+[12:05:48.741] 
+================================================================================
+[12:05:48.741] CLEANUP: Removing all QA58 data
+[12:05:48.741] ================================================================================
+[12:05:48.976] Delete voucher: 200
+[12:05:49.123] Delete client: 200
+[12:05:49.125] Delete box: 1 deleted
+[12:05:49.128] Delete edit_locks: 0 deleted
+[12:05:49.128] 
+Verifying zero QA58 residue...
+[12:05:49.130] ✅ ZERO RESIDUE: All QA58 data cleaned

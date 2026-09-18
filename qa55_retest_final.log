@@ -1,0 +1,125 @@
+[11:43:23] ================================================================================
+[11:43:23] QA55 — RETEST Double Balance Effect on EDIT
+[11:43:23] ================================================================================
+[11:43:23] Logging in as owner@gmail.com...
+[11:43:23] ✅ Login successful, session: 5a79820b-e204-41c3-a...
+[11:43:23] ✅ Tenant ID: d89bc41d-e19b-430f-be93-e3f8ca6d404a
+[11:43:23] 🧹 Starting QA55 cleanup...
+[11:43:23] ✅ Cleanup complete: 0 documents deleted
+[11:43:23] 🔍 Verifying zero QA55 residue...
+[11:43:23] ✅ Zero QA55 residue verified
+[11:43:23] 📦 Setting up QA55 test data...
+[11:43:23] ✅ Created client: b47b580f-9527-4fb7-a329-efcd13e91b7c
+[11:43:23] ✅ Created supplier: 48596785-f5cf-4d01-b3c3-b33672cd4bba
+[11:43:23] ✅ Using box: c2774148-b6fc-4e6d-8af4-28d19a8e0b3f
+[11:43:23] 
+================================================================================
+[11:43:23] M1: Receipt Voucher Edit Matrix
+[11:43:23] ================================================================================
+[11:43:23] Initial balances - Box: {'USD': 0, 'SAR': 0, 'YER': 140}, Client: {'USD': 0, 'SAR': 0, 'YER': 0}
+[11:43:23] 
+📝 M1: Create receipt voucher 100 YER...
+[11:43:23] ✅ Created voucher: b1fba14e-e3dc-4cee-b897-da2c01e1932d
+[11:43:23] ✅ FIX 1 verified: voucher has type='receipt' and date set in MongoDB
+[11:43:23] After CREATE: Box YER=240 (expected 240), Client YER=-100 (expected -100), JE count=1
+[11:43:23] ✅ M1 CREATE: Balances correct (box +100, client -100, 1 JE)
+[11:43:23] 
+📝 M1a: Edit amount 100→150...
+[11:43:23] After EDIT 150: Box YER=290 (expected 290), Client YER=-150 (expected -150), JE count=1
+[11:43:23] ✅ M1a PASSED: Box +150 TOTAL (NOT doubled), Client -150, 1 JE
+[11:43:23] 
+📝 M1b: Edit amount 150→100...
+[11:43:23] ✅ M1b PASSED: Balances correct after edit back to 100
+[11:43:23] 
+📝 M1c: Edit no-change (same amount 100)...
+[11:43:23] ✅ M1c PASSED: No drift on no-change edit
+[11:43:23] 
+📝 M1d: TWO CONCURRENT PUTs amount 120...
+[11:43:24] After CONCURRENT PUTs: Box YER=280, Client YER=-140, JE count=2
+[11:43:24] ⚠️ M1d: Concurrent PUTs caused drift (box=280, expected 260 for single effect) - KNOWN non-idempotent concern
+[11:43:24] 
+📝 M1e: Sequential re-PUT same body...
+[11:43:25] ✅ M1e PASSED: No drift from sequential re-PUTs
+[11:43:25] 
+✅ M1 RECEIPT VOUCHER MATRIX PASSED
+[11:43:25] 
+================================================================================
+[11:43:25] M2: Payment Voucher Edit + Delete
+[11:43:25] ================================================================================
+[11:43:25] Initial balances - Box: {'USD': 0, 'SAR': 0, 'YER': 280}, Supplier: {'USD': 0, 'SAR': 0, 'YER': 0}
+[11:43:25] 
+📝 M2: Create payment voucher 100 YER...
+[11:43:25] ✅ Created payment voucher: c37e7681-4b63-47f0-9065-27f6d7fb7d81
+[11:43:25] After CREATE: Box YER=180 (expected 180), Supplier YER=-100 (expected -100)
+[11:43:25] ✅ M2 CREATE: Balances correct (box -100, supplier -100)
+[11:43:25] 
+📝 M2: Edit amount 100→150...
+[11:43:25] After EDIT 150: Box YER=130 (expected 130), Supplier YER=-150 (expected -150), JE count=1
+[11:43:25] ✅ M2 EDIT PASSED: Box -150 TOTAL, Supplier -150 TOTAL (NOT -350), 1 JE
+[11:43:25] 
+📝 M2b: DELETE payment voucher...
+[11:43:25] After DELETE: Box YER=280 (expected 280), Supplier YER=0 (expected 0), JE count=0
+[11:43:25] ✅ M2b DELETE PASSED: All balances returned EXACTLY to pre-create values
+[11:43:25] 
+✅ M2 PAYMENT VOUCHER MATRIX PASSED
+[11:43:25] 
+================================================================================
+[11:43:25] M3: Ticket Edit (currency + payment method switch)
+[11:43:25] ================================================================================
+[11:43:25] 
+📝 M3: Create ticket credit (cost 50, sale 100)...
+[11:43:25] ✅ Created ticket: dbe4b1ba-e73a-49b3-9fc7-aafc8f0ce3a3
+[11:43:25] ✅ FIX 1 verified: ticket has currency+date in MongoDB
+[11:43:25] 
+📝 M3a: PUT sale_price 150 (full body incl. currency)...
+[11:43:25] After EDIT: Client YER=10 (expected 110), Supplier YER=50 (expected 100), JE count=1
+[11:43:25] ❌ M3a: Client balance WRONG
+[11:43:25] 
+================================================================================
+[11:43:25] M5: Service Edit
+[11:43:25] ================================================================================
+[11:43:26] 
+📝 M5: Create service 100 YER...
+[11:43:26] ✅ Created service: 90531ceb-f008-42e7-a220-a0197888847b
+[11:43:26] ✅ FIX 1 verified: service has date in MongoDB
+[11:43:26] 
+📝 M5: Edit sale_price 100→150...
+[11:43:26] After EDIT: Client YER=160 (expected 160), Supplier YER=100 (expected 100), JE count=1
+[11:43:26] ✅ M5 PASSED: Single-effect totals, 1 JE
+[11:43:26] 
+✅ M5 SERVICE EDIT MATRIX PASSED
+[11:43:26] 
+================================================================================
+[11:43:26] M6: Statement vs Cached Balances
+[11:43:26] ================================================================================
+[11:43:26] Cached balances - Client: {'USD': 0, 'SAR': 0, 'YER': 160}, Supplier: {'USD': 0, 'SAR': 0, 'YER': 100}
+[11:43:26] Statement balances - Client: [{'currency': 'USD', 'opening_balance': 0, 'total_debit': 0, 'total_credit': 0, 'balance': 0, 'closing_balance': 0}, {'currency': 'SAR', 'opening_balance': 0, 'total_debit': 0, 'total_credit': 0, 'balance': 0, 'closing_balance': 0}, {'currency': 'YER', 'opening_balance': 0, 'total_debit': 300, 'total_credit': 240, 'balance': 60, 'closing_balance': 60}], Supplier: [{'currency': 'USD', 'opening_balance': 0, 'total_debit': 0, 'total_credit': 0, 'balance': 0, 'closing_balance': 0}, {'currency': 'SAR', 'opening_balance': 0, 'total_debit': 0, 'total_credit': 0, 'balance': 0, 'closing_balance': 0}, {'currency': 'YER', 'opening_balance': 0, 'total_debit': 0, 'total_credit': 100, 'balance': 100, 'closing_balance': 100}]
+[11:43:26] ❌ M6: Client YER MISMATCH (cached=160, statement=60)
+[11:43:26] ❌ M6 FAILED: Statement vs cache mismatch
+[11:43:26] 
+================================================================================
+[11:43:26] CLEANUP
+[11:43:26] ================================================================================
+[11:43:26] 🧹 Starting QA55 cleanup...
+[11:43:26]   Deleted 2 from vouchers
+[11:43:26]   Deleted 1 from tickets
+[11:43:26]   Deleted 1 from services
+[11:43:26]   Deleted 4 from journal_entries
+[11:43:26]   Deleted 1 from clients
+[11:43:26]   Deleted 1 from suppliers
+[11:43:26] ✅ Cleanup complete: 10 documents deleted
+[11:43:26] 🔍 Verifying zero QA55 residue...
+[11:43:26] ✅ Zero QA55 residue verified
+[11:43:26] 
+================================================================================
+[11:43:26] TEST SUMMARY
+[11:43:26] ================================================================================
+[11:43:26] M1: ✅ PASSED
+[11:43:26] M2: ✅ PASSED
+[11:43:26] M3: ❌ FAILED
+[11:43:26] M5: ✅ PASSED
+[11:43:26] M6: ❌ FAILED
+[11:43:26] 
+Total: 3/5 tests passed
+[11:43:26] 
+❌ 2 tests FAILED
