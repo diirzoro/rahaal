@@ -20,6 +20,15 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 - Meraaj E2E 15/15 test (blocked on Meraaj team configuring temp secret)
 - Package Comparison feature (deferred by user)
 
+## v5.6 (completed) — Financial Hardening & Accounting UX consolidated round
+- P0 GATE PASSED: Double Balance Effect fix fully re-verified with evidence matrices (QA60 25/25, QA62 38/40→D/E 14/14, QA63 F1 10/10). NEW root cause found & fixed during gate: single DELETE + bulk-delete handlers used inline duplicated reversal MISSING partner commission-share reversal → unified both on central reverseTransactionEffects. v5.5.3: edit-lock release is ownership-bound by timestamp (stalled editor can't delete a takeover's lock).
+- Journal entries: server-side date filters (today/week/month/all/range, biz TZ UTC+3, week starts Saturday) + advanced search (description/client/supplier/debit_account/credit_account/amount × contains/not_contains/equals).
+- Trial balance: mode=summary|detailed + currency=YER|SAR|USD independent filter (no netting). FE toggles + grouped detailed view.
+- FX: same-account lock mode (normal exchange, counterpart auto-locked read-only) + explicit bilateral exception; editable Total with reverse effective-rate (total÷amount @6dp) — doc=JE=balances always same total; equity/COA accounts now first-class in FX account mode (FE sent code but BE looked up uuid — fixed both: resolveAccountRef accepts uuid-or-code + fail-fast leaf/active guard before side effects).
+- WhatsApp collection message on client/supplier cards: dynamic by NET balance direction only (never classification), respectful neutral Arabic, prefilled draft only.
+- Read-only historical drift detector: /app/scripts/detect_balance_drift_readonly.js (NO writes; local scan found 9 drifted party-currency pairs incl. partner-share signature). NO backfill executed (user constraint).
+- CONSTRAINTS: No deploy, no GitHub push, no migration/backfill — Taher handles deployment after review.
+
 ## v3.54 (completed) — Meraaj booking notification chime
 - playMeraajChime() module helper (Web Audio API, two-tone 880Hz→1174Hz sine chime, ~0.5s, no external file, cached AudioContext, silent fallback if autoplay blocked).
 - Poll logic refined with meraajInitRef: first poll after login → reminder toast only (NO sound); subsequent count INCREASE → toast + chime. Verified: audio API path ok, 0 console errors.

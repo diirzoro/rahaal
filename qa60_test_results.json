@@ -1,0 +1,236 @@
+{
+  "MATRIX A - RECEIPT VOUCHER": [
+    {
+      "test": "A1",
+      "doc_amount": 100,
+      "je_count": 1,
+      "je_balanced": true,
+      "je_total": 100,
+      "statement_net": -100,
+      "cached_balance": -100,
+      "box_balance": 100,
+      "pass": true
+    },
+    {
+      "test": "A2",
+      "doc_amount": 150,
+      "je_count": 1,
+      "je_balanced": true,
+      "je_total": 150,
+      "statement_net": -150,
+      "cached_balance": -150,
+      "box_balance": 150,
+      "pass": true
+    },
+    {
+      "test": "A3",
+      "doc_amount": 100,
+      "je_count": 1,
+      "je_balanced": true,
+      "je_total": 100,
+      "statement_net": -100,
+      "cached_balance": -100,
+      "box_balance": 100,
+      "pass": true
+    },
+    {
+      "test": "A4",
+      "doc_amount": 120,
+      "je_count": 1,
+      "je_balanced": true,
+      "je_total": 120,
+      "statement_net": -120,
+      "cached_balance": -120,
+      "box_balance": 120,
+      "pass": true
+    },
+    {
+      "test": "A5",
+      "doc_amount": 120,
+      "je_count": 1,
+      "je_balanced": true,
+      "je_total": 120,
+      "statement_net": -120,
+      "cached_balance": -120,
+      "box_balance": 120,
+      "pass": true
+    },
+    {
+      "test": "A6",
+      "doc_amount": 120,
+      "je_count": 1,
+      "je_balanced": true,
+      "je_total": 120,
+      "statement_net": -120,
+      "cached_balance": -120,
+      "box_balance": 120,
+      "pass": true
+    },
+    {
+      "test": "A7",
+      "pass": true,
+      "client_balance": 0,
+      "box_balance": 0,
+      "je_count": 0
+    }
+  ],
+  "MATRIX B - PAYMENT VOUCHER": [
+    {
+      "test": "B1",
+      "doc_amount": 100,
+      "je_count": 1,
+      "je_balanced": true,
+      "je_total": 100,
+      "statement_net": -100,
+      "cached_balance": -100,
+      "box_balance": -100,
+      "pass": true
+    },
+    {
+      "test": "B2",
+      "doc_amount": 150,
+      "je_count": 1,
+      "je_balanced": true,
+      "je_total": 150,
+      "statement_net": -150,
+      "cached_balance": -150,
+      "box_balance": -150,
+      "pass": true
+    },
+    {
+      "test": "B3",
+      "doc_amount": 100,
+      "je_count": 1,
+      "je_balanced": true,
+      "je_total": 100,
+      "statement_net": -100,
+      "cached_balance": -100,
+      "box_balance": -100,
+      "pass": true
+    },
+    {
+      "test": "B4",
+      "doc_amount": 120,
+      "je_count": 1,
+      "je_balanced": true,
+      "je_total": 120,
+      "statement_net": -120,
+      "cached_balance": -120,
+      "box_balance": -120,
+      "pass": true
+    },
+    {
+      "test": "B7",
+      "pass": true,
+      "supplier_balance": 0,
+      "box_balance": 0,
+      "je_count": 0
+    }
+  ],
+  "MATRIX C - TICKET": [
+    {
+      "test": "C1",
+      "pass": true,
+      "client_balance": 100,
+      "supplier_balance": 70,
+      "je_count": 1
+    },
+    {
+      "test": "C2",
+      "pass": true,
+      "client_balance": 150,
+      "supplier_balance": 70,
+      "je_count": 1
+    },
+    {
+      "test": "C3",
+      "pass": true,
+      "client_balance": 120,
+      "supplier_balance": 70,
+      "je_count": 1
+    },
+    {
+      "test": "C5",
+      "pass": true,
+      "client_balance": 0,
+      "supplier_balance": 0,
+      "je_count": 0
+    }
+  ],
+  "MATRIX F - CONCURRENCY": [
+    {
+      "test": "F1-iter1",
+      "pass": true,
+      "je_count": 1,
+      "success_count": 1,
+      "conflict_count": 1,
+      "winning_amount": 140,
+      "client_balance": -140,
+      "box_balance": 140
+    },
+    {
+      "test": "F1-iter2",
+      "pass": true,
+      "je_count": 1,
+      "success_count": 1,
+      "conflict_count": 1,
+      "winning_amount": 130,
+      "client_balance": -130,
+      "box_balance": 130
+    },
+    {
+      "test": "F1-iter3",
+      "pass": true,
+      "je_count": 1,
+      "success_count": 1,
+      "conflict_count": 1,
+      "winning_amount": 140,
+      "client_balance": -140,
+      "box_balance": 140
+    },
+    {
+      "test": "F1-iter4",
+      "pass": true,
+      "je_count": 1,
+      "success_count": 1,
+      "conflict_count": 1,
+      "winning_amount": 130,
+      "client_balance": -130,
+      "box_balance": 130
+    },
+    {
+      "test": "F1-iter5",
+      "pass": true,
+      "je_count": 1,
+      "success_count": 1,
+      "conflict_count": 1,
+      "winning_amount": 130,
+      "client_balance": -130,
+      "box_balance": 130
+    },
+    {
+      "test": "F2",
+      "pass": true,
+      "status": 200,
+      "lock_exists": false
+    },
+    {
+      "test": "F3",
+      "pass": true,
+      "status": 409,
+      "lock_still_exists": true
+    },
+    {
+      "test": "F4",
+      "pass": true,
+      "status": 400,
+      "lock_exists": false,
+      "balances_unchanged": true
+    },
+    {
+      "test": "F4-recovery",
+      "pass": true,
+      "status": 200
+    }
+  ]
+}

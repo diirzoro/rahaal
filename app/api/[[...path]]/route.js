@@ -7768,7 +7768,50 @@ async function handleRoute(request, { params }) {
     }
 
     // Journal entries
-    if (route === '/journal-entries' && method === 'GET') return ok(clean(await db.collection('journal_entries').find(B ? btf : (q.branch ? { ...tf, branch_id: q.branch === 'hq' ? null : q.branch } : tf)) /* v5.3/v5.4 branch scope + HQ filter */.sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+    if (route === '/journal-entries' && method === 'GET') {
+      // v5.6 — SERVER-SIDE date filters + advanced search. The list is capped at 500 docs,
+      // so filtering MUST happen in the MongoDB query itself (not by hiding rows client-side).
+      const jq = B ? { ...btf } : (q.branch ? { ...tf, branch_id: q.branch === 'hq' ? null : q.branch } : { ...tf }) /* v5.3/v5.4 branch scope + HQ filter */
+      const andConds = []
+      // ---- date filter: period=today|week|month|all|range (+from/to YYYY-MM-DD) ----
+      const period = String(q.period || 'all').toLowerCase()
+      const todayIso = bizTodayISO()
+      let fromD = null, toD = null
+      if (period === 'today') { fromD = bizDayStart(todayIso); toD = bizDayEnd(todayIso) }
+      else if (period === 'week') {
+        // business week starts Saturday (UTC+3 business timezone)
+        const nowBiz = new Date(Date.now() + 3 * 3600e3)
+        const sinceSat = (nowBiz.getUTCDay() + 1) % 7
+        fromD = bizDayStart(new Date(nowBiz.getTime() - sinceSat * 86400e3).toISOString().slice(0, 10))
+        toD = bizDayEnd(todayIso)
+      } else if (period === 'month') { fromD = bizDayStart(`${todayIso.slice(0, 7)}-01`); toD = bizDayEnd(todayIso) }
+      else if (period === 'range') { if (q.from) fromD = bizDayStart(q.from); if (q.to) toD = bizDayEnd(q.to) }
+      const drJe = dateRangeExpr('date', fromD, toD)
+      if (drJe) andConds.push(drJe)
+      // ---- advanced search: search_field + search_op (contains|not_contains|equals) + search_value ----
+      const sField = String(q.search_field || '').toLowerCase()
+      const sOp = String(q.search_op || 'contains').toLowerCase()
+      const sVal = String(q.search_value || '').trim()
+      if (sField && sVal) {
+        const esc = sVal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const rx = sOp === 'equals' ? new RegExp(`^${esc}$`, 'i') : new RegExp(esc, 'i')
+        const wrap = (cond) => sOp === 'not_contains' ? { $nor: [cond] } : cond
+        if (sField === 'description') andConds.push(wrap({ description: rx }))
+        else if (sField === 'client') andConds.push(wrap({ lines: { $elemMatch: { party_type: 'client', party_name: rx } } }))
+        else if (sField === 'supplier') andConds.push(wrap({ lines: { $elemMatch: { party_type: 'supplier', party_name: rx } } }))
+        else if (sField === 'debit_account') andConds.push(wrap({ lines: { $elemMatch: { debit: { $gt: 0 }, $or: [{ account_name: rx }, { account_code: rx }, { party_name: rx }] } } }))
+        else if (sField === 'credit_account') andConds.push(wrap({ lines: { $elemMatch: { credit: { $gt: 0 }, $or: [{ account_name: rx }, { account_code: rx }, { party_name: rx }] } } }))
+        else if (sField === 'amount') {
+          const num = Number(sVal)
+          if (Number.isFinite(num)) {
+            const near = { $gte: num - 0.005, $lte: num + 0.005 }
+            andConds.push({ lines: { $elemMatch: { $or: [{ debit: near }, { credit: near }] } } })
+          }
+        }
+      }
+      const finalJq = andConds.length ? { ...jq, $and: andConds } : jq
+      return ok(clean(await db.collection('journal_entries').find(finalJq).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+    }
 
     // v3.9.11 — Packages bulk operations
     if (route === '/packages/bulk-delete' && method === 'POST') {
@@ -7836,32 +7879,9 @@ async function handleRoute(request, { params }) {
           // v4.6 — RAH-ACC: per-row closed year/period guard (bulk delete must not rewrite closed books)
           const perrBD = await assertOpenPeriod(db, T, je?.date || doc.date)
           if (perrBD) { failed++; errors.push({ id: docId, error: `داخل فترة/سنة مقفلة — ${perrBD}` }); continue }
-          if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
-            if (doc.payment_method === 'cash' && doc.box_id) {
-              await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
-            } else if (doc.client_id) {
-              await updateBalance(db, 'clients', { id: doc.client_id, tenant_id: T }, doc.currency, -doc.sale_price)
-            }
-            if (doc.supplier_id) await updateBalance(db, 'suppliers', { id: doc.supplier_id, tenant_id: T }, doc.currency, -doc.cost)
-          } else if (kind === 'vouchers') {
-            if (doc.type === 'receipt') {
-              await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.amount)
-              if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
-              if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
-            } else {
-              await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, +doc.amount)
-              if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
-              if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
-            }
-          } else if (kind === 'fx') {
-            if (doc.type === 'buy') {
-              await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, -doc.amount)
-              await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, +doc.counter_amount)
-            } else {
-              await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, +doc.amount)
-              await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, -doc.counter_amount)
-            }
-          }
+          // v5.5.3 — P0 ROOT-CAUSE FIX: inline duplicate reversal (missing partner
+          // commission-share + fx account-ref handling) unified on the central engine.
+          await reverseTransactionEffects(db, T, kind, doc)
           if (je) {
             await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T }) // v4.6 — tenant-scoped
             await db.collection('tenants').updateOne({ id: T, 'journal_quota.used': { $gt: 0 } }, { $inc: { 'journal_quota.used': -1 } }) // v4.6 — never below 0
@@ -7976,32 +7996,11 @@ async function handleRoute(request, { params }) {
       // be deleted — that silently rewrites closed books (same central rule as manual JEs).
       const perrUD = await assertOpenPeriod(db, T, je?.date || doc.date)
       if (perrUD) return bad(`السجل داخل فترة/سنة مقفلة ولا يُحذف — ${perrUD}`)
-      if (kind === 'tickets' || kind === 'visas' || kind === 'services') {
-        if (doc.payment_method === 'cash' && doc.box_id) {
-          await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.sale_price)
-        } else {
-          await updateBalance(db, 'clients', { id: doc.client_id, tenant_id: T }, doc.currency, -doc.sale_price)
-        }
-        await updateBalance(db, 'suppliers', { id: doc.supplier_id, tenant_id: T }, doc.currency, -doc.cost)
-      } else if (kind === 'vouchers') {
-        if (doc.type === 'receipt') {
-          await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, -doc.amount)
-          if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
-          if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
-        } else {
-          await updateBalance(db, 'boxes', { id: doc.box_id, tenant_id: T }, doc.currency, +doc.amount)
-          if (doc.party_type === 'supplier') await updateBalance(db, 'suppliers', { id: doc.party_id, tenant_id: T }, doc.currency, +doc.amount)
-          if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
-        }
-      } else if (kind === 'fx') {
-        if (doc.type === 'buy') {
-          await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, -doc.amount)
-          await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, +doc.counter_amount)
-        } else {
-          await updateBalance(db, 'boxes', { id: doc.box_currency_id, tenant_id: T }, doc.currency, +doc.amount)
-          await updateBalance(db, 'boxes', { id: doc.box_counter_id, tenant_id: T }, doc.counter_currency, -doc.counter_amount)
-        }
-      }
+      // v5.5.3 — P0 ROOT-CAUSE FIX: the inline reversal here was a DUPLICATE of
+      // reverseTransactionEffects that was missing the partner commission-share reversal
+      // (and fx account-ref resolution) — every DELETE of a partner-share doc left the
+      // partner balance drifted forever. Unified on the central engine (single source).
+      await reverseTransactionEffects(db, T, kind, doc)
       if (je) {
         await db.collection('journal_entries').deleteOne({ id: je.id, tenant_id: T }) // v4.6 — tenant-scoped
         await db.collection('tenants').updateOne({ id: T, 'journal_quota.used': { $gt: 0 } }, { $inc: { 'journal_quota.used': -1 } }) // v4.6 — never below 0
@@ -8083,7 +8082,10 @@ async function handleRoute(request, { params }) {
         }
         return ok(result.doc)
       } finally {
-        try { await db.collection('edit_locks').deleteOne({ _id: lockId }) } catch { }
+        // v5.5.3 — OWNERSHIP-BOUND release: delete ONLY the lock WE own (matching our timestamp).
+        // Without this, a stalled editor (>60s) finishing late would delete the lock of the editor
+        // that legitimately took over — letting a THIRD editor enter mid-window (double processing).
+        try { await db.collection('edit_locks').deleteOne({ _id: lockId, at: new Date(nowMs) }) } catch { }
       }
     }
 
@@ -8392,7 +8394,7 @@ async function handleRoute(request, { params }) {
       const stScope = B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) // v5.4 — HQ scope selector
       return ok(await reportStatement(db, T, { ...q, _branch_id: stScope }))
     }
-    if (route === '/reports/trial-balance' && method === 'GET') return ok(await reportTrialBalance(db, T, B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null))) // v5.3/v5.4 — branch user: own scope; HQ: ?branch=<id>|hq|all
+    if (route === '/reports/trial-balance' && method === 'GET') return ok(await reportTrialBalance(db, T, B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null), { mode: q.mode, currency: q.currency })) // v5.3/v5.4 branch scope | v5.6 mode+currency
     if (route === '/reports/income-statement' && method === 'GET') return ok(await reportIncome(db, T, { ...q, _branch_id: B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) })) // v5.3/v5.4 — branch/HQ scope
     // v3.10.4 — Unified Query & Filters for Visas + Tickets
     if (route === '/reports/query' && method === 'GET') {
@@ -10027,8 +10029,13 @@ async function resolveAccountRef(db, T, ref) {
     return d ? { kind: 'box', id: d.id, name: d.name_ar, code: partyLeafCode(d, d.type === 'cash' ? COA.CASHBOXES : COA.BANKS), updateBalance: true, collection: 'boxes', debitSign: +1 } : null
   }
   if (ref.kind === 'account') {
-    const d = await db.collection('accounts').findOne({ id: ref.id, tenant_id: T })
-    return d ? { kind: 'account', id: d.id, name: d.name_ar || d.name, code: d.code, updateBalance: false, collection: 'accounts', debitSign: +1 } : null
+    // v5.6 — EQUITY FIRST-CLASS + robustness: accept BOTH the account uuid and the account
+    // CODE as the ref id (the FX form historically sent the code — every COA selection,
+    // equity included, silently failed the uuid-only lookup with «اختر الحسابين للطرفين»).
+    // ALL five COA types (asset/liability/equity/revenue/expense) are valid here — the
+    // leaf-only + active checks are enforced by the caller (fail-fast, before side effects).
+    const d = await db.collection('accounts').findOne({ tenant_id: T, $or: [{ id: ref.id }, { code: ref.id }] })
+    return d ? { kind: 'account', id: d.id, name: d.name_ar || d.name, code: d.code, updateBalance: false, collection: 'accounts', debitSign: +1, is_group: !!d.is_group, inactive: isInactiveAccount(d), acct_type: d.type } : null
   }
   return null
 }
@@ -10043,10 +10050,25 @@ async function createFx(db, T, b, opts = {}) {
   if (!CURRENCIES.includes(b.currency) || !CURRENCIES.includes(b.counter_currency)) return { error: 'العملات غير صالحة' }
   if (b.currency === b.counter_currency) return { error: 'يجب اختيار عملتين مختلفتين' }
   const amount = Number(b.amount) || 0
-  const rate = Number(b.exchange_rate) || 0
-  if (Number(b.amount) < 0 || Number(b.exchange_rate) < 0) return { error: 'لا يُسمح بقيم سالبة في المبلغ أو سعر الصرف' }
-  if (amount <= 0 || rate <= 0) return { error: 'المبلغ وسعر الصرف مطلوبان' }
-  const counter_amount = +(amount * rate).toFixed(2)
+  const rateIn = Number(b.exchange_rate) || 0
+  const totalIn = Number(b.counter_amount) || 0
+  if (Number(b.amount) < 0 || Number(b.exchange_rate) < 0 || Number(b.counter_amount) < 0) return { error: 'لا يُسمح بقيم سالبة في المبلغ أو سعر الصرف أو القيمة الإجمالية' }
+  if (amount <= 0) return { error: 'المبلغ مطلوب' }
+  // v5.6 — EDITABLE TOTAL + REVERSE RATE: when an explicit total (counter_amount) is sent,
+  // it is the SINGLE SOURCE OF TRUTH — the effective exchange rate is derived (total ÷ amount)
+  // with 6-dp precision and stored. Doc, journal lines and balances all use the SAME final
+  // total, so no hidden rounding difference can exist between them. Without an explicit
+  // total, the classic amount × rate behavior is preserved unchanged.
+  let rate, counter_amount
+  if (totalIn > 0) {
+    counter_amount = +totalIn.toFixed(2)
+    rate = +(counter_amount / amount).toFixed(6)
+    if (!(rate > 0)) return { error: 'القيمة الإجمالية غير صالحة لاشتقاق سعر الصرف' }
+  } else {
+    if (rateIn <= 0) return { error: 'المبلغ وسعر الصرف مطلوبان' }
+    rate = rateIn
+    counter_amount = +(amount * rateIn).toFixed(2)
+  }
   const payment_method = b.payment_method === 'account' ? 'account' : 'cash'
   // Resolve refs — 'cash' uses box_currency_id/box_counter_id; 'account' uses currency_ref/counter_ref (or falls back)
   const refCur = b.currency_ref ? { kind: b.currency_ref.kind, id: b.currency_ref.id } : { kind: 'box', id: b.box_currency_id }
@@ -10054,6 +10076,14 @@ async function createFx(db, T, b, opts = {}) {
   const accCur = await resolveAccountRef(db, T, refCur)
   const accCounter = await resolveAccountRef(db, T, refCounter)
   if (!accCur || !accCounter) return { error: payment_method === 'cash' ? 'اختر صناديق العملتين' : 'اختر الحسابين للطرفين' }
+  // v5.6 — FAIL-FAST postability guard (BEFORE doc insert / balance side effects):
+  // any COA account type (equity included) is welcome, but ONLY active LEAF accounts.
+  for (const [sideName, acc] of [['طرف العملة', accCur], ['الطرف المقابل', accCounter]]) {
+    if (acc.kind === 'account') {
+      if (acc.is_group) return { error: `الحساب «${acc.name}» (${acc.code}) حساب مجموعة/تصنيف — الترحيل يكون على حساب تفصيلي نهائي فقط (${sideName})` }
+      if (acc.inactive) return { error: `الحساب «${acc.name}» (${acc.code}) غير نشط — لا يقبل ترحيلاً جديداً (${sideName})` }
+    }
+  }
   const rates = (await db.collection('tenant_settings').findOne({ tenant_id: T }))?.rates || DEFAULT_RATES
   // v3.88.4 — F-004: sanity-check the rate against the registered reference range BEFORE
   // accepting the exchange. Base pairs use the currency's own min/max; cross pairs are
@@ -10516,22 +10546,28 @@ async function reportStatement(db, T, q) {
     summary, currency_mode: mode, period: q.period || 'all',
   }
 }
-async function reportTrialBalance(db, T, branchId = null) { // v5.3 — branch trial balance
+async function reportTrialBalance(db, T, branchId = null, opts = {}) { // v5.3 — branch trial balance | v5.6 — summary/detailed + currency filter
+  const mode = opts.mode === 'summary' ? 'summary' : 'detailed'
+  const curF = ['USD', 'SAR', 'YER'].includes(String(opts.currency || '').toUpperCase()) ? String(opts.currency).toUpperCase() : null
   const jes = await db.collection('journal_entries').find({ tenant_id: T, ...(branchId ? { branch_id: branchId === '__HQ__' ? null : branchId } : {}) }).toArray()
   const map = {}
   for (const je of jes) {
     for (const l of je.lines || []) {
       const cur = l.currency || je.currency
+      if (curF && cur !== curF) continue // v5.6 — per-currency trial balance: NO netting across currencies
       const label = l.party_name || l.account_name
-      const key = `${l.account_code}|${cur}|${label}`
-      if (!map[key]) map[key] = { code: l.account_code, name: l.account_name, party_name: l.party_name, currency: cur, debit: 0, credit: 0 }
+      // v5.6 — summary mode aggregates by ACCOUNT only (party dimension collapsed);
+      // detailed mode keeps the party-level breakdown under each account.
+      const key = mode === 'summary' ? `${l.account_code}|${cur}` : `${l.account_code}|${cur}|${label}`
+      if (!map[key]) map[key] = { code: l.account_code, name: l.account_name, party_name: mode === 'summary' ? '' : l.party_name, currency: cur, debit: 0, credit: 0 }
       map[key].debit += l.debit || 0; map[key].credit += l.credit || 0
     }
   }
-  const rows = Object.values(map).map(r => ({ ...r, balance: r.debit - r.credit }))
+  const rows = Object.values(map).map(r => ({ ...r, debit: +r.debit.toFixed(2), credit: +r.credit.toFixed(2), balance: +(r.debit - r.credit).toFixed(2) }))
+  rows.sort((a, b) => String(a.code).localeCompare(String(b.code)) || String(a.currency).localeCompare(String(b.currency)))
   const totals = { USD: { d: 0, c: 0 }, SAR: { d: 0, c: 0 }, YER: { d: 0, c: 0 } }
   for (const r of rows) { if (totals[r.currency]) { totals[r.currency].d += r.debit; totals[r.currency].c += r.credit } }
-  return { rows, totals }
+  return { rows, totals, mode, currency: curF }
 }
 async function reportIncome(db, T, q) {
   // v3.88.4 — F-012 ROOT-CAUSE REWRITE: the income statement now derives from the JOURNAL

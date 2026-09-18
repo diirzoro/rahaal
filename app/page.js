@@ -141,6 +141,28 @@ function openWhatsApp(phone, message = '') {
   window.open(url, '_blank', 'noopener,noreferrer')
   return true
 }
+// v5.6 — Dynamic, respectful collection (مطالبة) message for counterparty cards.
+// DECISION IS BASED ONLY ON THE NET BALANCE AND ITS DIRECTION — never on the
+// client/supplier classification (the same party can both buy from us and sell to us).
+// clients collection: balance > 0 ⇒ counterparty owes the office.
+// suppliers collection: balance < 0 ⇒ counterparty owes the office.
+// If the office owes THEM or balance is zero ⇒ NO payment demand is generated.
+// Neutral wording (السادة/ ... المحترمون) — the party may be a person, agency, office or company.
+// The message opens as a PREFILLED DRAFT only; the user reviews then sends manually.
+function waCollectionMessage(r, kind) {
+  const balances = r.balances || {}
+  const owedToUs = []
+  for (const [cur, v0] of Object.entries(balances)) {
+    const v = Number(v0) || 0
+    if (!v || !['USD', 'SAR', 'YER'].includes(cur)) continue
+    const owes = kind === 'clients' ? v > 0 : v < 0
+    if (owes) owedToUs.push(`${Math.abs(v).toLocaleString('en-US')} ${cur}`)
+  }
+  if (owedToUs.length === 0) {
+    return `السلام عليكم ورحمة الله وبركاته،\nالسادة/ ${r.name} المحترمون،\nنشكر لكم حسن تعاملكم معنا، ونسعد بخدمتكم دائماً.\nوتقبلوا خالص التحية والتقدير.`
+  }
+  return `السلام عليكم ورحمة الله وبركاته،\nالسادة/ ${r.name} المحترمون،\nنأمل منكم التكرم بتسوية الرصيد المستحق عليكم والبالغ ${owedToUs.join(' و ')}.\nشاكرين لكم حسن تعاونكم وتقبلوا خالص التحية والتقدير.`
+}
 // Smart templates for tickets / visas / services
 function tplTicket(t) {
   const name = t.passenger_name || t.client_name || 'العميل'
@@ -2299,6 +2321,9 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
   }, [open])
   const typeIcon = { client: '👤', supplier: '🏭', box: '💰', account: '📒' }
   const typeLabel = { client: 'عميل', supplier: 'مورد', box: 'صندوق', account: 'حساب' }
+  // v5.6 — Equity first-class: COA rows show their REAL account type (not a generic label)
+  const acctTypeLabel = { asset: 'أصول', liability: 'خصوم', equity: 'حقوق ملكية', revenue: 'إيراد', expense: 'مصروف' }
+  const rowTypeLabel = (r) => r.type === 'account' ? (acctTypeLabel[r.acct_type] || 'حساب') : (typeLabel[r.type] || '')
   const typeBadge = { client: 'bg-emerald-50 text-emerald-700 border-emerald-200', supplier: 'bg-rose-50 text-rose-700 border-rose-200', box: 'bg-blue-50 text-blue-700 border-blue-200', account: 'bg-purple-50 text-purple-700 border-purple-200' }
   const pick = (r) => { setSelected(r); onChange?.(r); setOpen(false); setQuery('') }
   const clear = (e) => { e.stopPropagation(); setSelected(null); onChange?.(null); setQuery('') }
@@ -2365,7 +2390,7 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
                 <span className="text-base shrink-0">{typeIcon[r.type] || '•'}</span>
                 <span className={`font-mono text-[11px] font-bold px-1.5 py-0.5 rounded border shrink-0 whitespace-nowrap ${typeBadge[r.type] || 'bg-slate-50 border-slate-200'}`}>{r.account_code}</span>
                 <span className="flex-1 truncate text-slate-800">{r.name}</span>
-                <span className="text-[10px] text-slate-400 shrink-0 whitespace-nowrap">{typeLabel[r.type] || ''}</span>
+                <span className="text-[10px] text-slate-400 shrink-0 whitespace-nowrap">{rowTypeLabel(r)}</span>
                 <span className="text-[10px] font-mono text-slate-500 shrink-0 whitespace-nowrap">
                   {Object.entries(r.balances || {}).filter(([, v]) => Number(v) !== 0).slice(0, 1).map(([c, v]) => `${c}:${Number(v).toLocaleString()}`).join('')}
                 </span>
@@ -5590,7 +5615,7 @@ function PartiesScreen({ kind }) {
                 <div className={`w-10 h-10 rounded-lg ${cfg.grad} flex items-center justify-center`}><cfg.icon className="w-5 h-5 text-white" /></div>
               </div>
               <div className="flex items-center gap-1 mt-2 flex-wrap">
-                <WaBtn phone={r.whatsapp || r.phone} message={`السلام عليكم ${r.name}،`} size="xs" iconOnly={false} label="واتساب" />
+                <WaBtn phone={r.whatsapp || r.phone} message={waCollectionMessage(r, kind)} size="xs" iconOnly={false} label="واتساب" />
                 <Button size="sm" variant="ghost" onClick={() => { setEditing(r); setOpen(true) }} className="h-6 px-2 text-xs gap-1"><Pencil className="w-3 h-3" /> تعديل</Button>
                 <Button size="sm" variant="ghost" onClick={() => del(r)} className="h-6 px-2 text-xs text-rose-600 gap-1"><Trash2 className="w-3 h-3" /> حذف</Button>
               </div>
@@ -6227,8 +6252,33 @@ function JournalScreen() {
   const [equityOpen, setEquityOpen] = useState(false)
   const [selectedId, setSelectedId] = useState(null)
   const [editing, setEditing] = useState(null)
-  const load = () => api('/journal-entries').then(setRows).catch(e => toast.error(e.message))
+  // v5.6 — server-side date filter + advanced search state
+  const [period, setPeriod] = useState('all')            // today|week|month|all|range
+  const [rangeFrom, setRangeFrom] = useState('')
+  const [rangeTo, setRangeTo] = useState('')
+  const [sField, setSField] = useState('description')    // description|client|supplier|debit_account|credit_account|amount
+  const [sOp, setSOp] = useState('contains')             // contains|not_contains|equals
+  const [sVal, setSVal] = useState('')
+  const [activeSearch, setActiveSearch] = useState(null) // applied search snapshot
+  const buildQuery = (p = period, srch = activeSearch) => {
+    const parts = []
+    if (p && p !== 'all') {
+      parts.push(`period=${p}`)
+      if (p === 'range') { if (rangeFrom) parts.push(`from=${rangeFrom}`); if (rangeTo) parts.push(`to=${rangeTo}`) }
+    }
+    if (srch?.value) parts.push(`search_field=${srch.field}&search_op=${srch.op}&search_value=${encodeURIComponent(srch.value)}`)
+    return parts.length ? `?${parts.join('&')}` : ''
+  }
+  const load = (p = period, srch = activeSearch) => api(`/journal-entries${buildQuery(p, srch)}`).then(setRows).catch(e => toast.error(e.message))
   useEffect(() => { load() }, [])
+  const applyPeriod = (p) => { setPeriod(p); if (p !== 'range') load(p, activeSearch) }
+  const applyRange = () => { if (!rangeFrom && !rangeTo) return toast.error('حدد تاريخ البداية أو النهاية'); load('range', activeSearch) }
+  const applySearch = () => {
+    if (!sVal.trim()) return toast.error('أدخل قيمة البحث')
+    const srch = { field: sField, op: sOp, value: sVal.trim() }
+    setActiveSearch(srch); load(period, srch)
+  }
+  const clearSearch = () => { setActiveSearch(null); setSVal(''); load(period, null) }
   const selected = rows.find(je => je.id === selectedId)
   const isEditableJe = selected && (selected.ref_type === 'manual' || selected.ref_type === 'manual_dual')
   const isDeletableJe = selected && ['manual', 'manual_dual', 'opening', 'opening_close'].includes(selected.ref_type)
@@ -6294,10 +6344,54 @@ function JournalScreen() {
           <Button size="sm" onClick={() => setEquityOpen(true)} variant="outline" className="gap-1 border-indigo-300 text-indigo-700 hover:bg-indigo-50">⚖️ إقفال الأرصدة الافتتاحية (3103)</Button>
         </div>} />
       <ActionToolbar
-        addLabel="إضافة قيد يومي" onAdd={handleAdd} onRefresh={load}
+        addLabel="إضافة قيد يومي" onAdd={handleAdd} onRefresh={() => load()}
         onEdit={handleEdit} onDelete={handleDelete} onPrintTable={handlePrintTable}
         selectedId={selectedId} count={rows.length}
       />
+      {/* v5.6 — date filters (server-side) */}
+      <Card>
+        <CardContent className="p-3 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-black text-slate-600 shrink-0">📅 الفترة:</span>
+            {[['today', 'اليوم'], ['week', 'هذا الأسبوع'], ['month', 'هذا الشهر'], ['all', 'كل الفترات'], ['range', 'فترة مخصصة']].map(([k, lbl]) => (
+              <button key={k} onClick={() => applyPeriod(k)} className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${period === k ? 'bg-blue-600 text-white border-blue-700 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-blue-400'}`}>{lbl}</button>
+            ))}
+            {period === 'range' && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <Input type="date" value={rangeFrom} onChange={e => setRangeFrom(e.target.value)} className="h-8 w-36 text-xs" />
+                <span className="text-xs text-slate-400">→</span>
+                <Input type="date" value={rangeTo} onChange={e => setRangeTo(e.target.value)} className="h-8 w-36 text-xs" />
+                <Button size="sm" className="h-8 text-xs" onClick={applyRange}>تطبيق</Button>
+              </div>
+            )}
+          </div>
+          {/* v5.6 — advanced search (server-side operators) */}
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
+            <span className="text-xs font-black text-slate-600 shrink-0">🔎 بحث متقدم:</span>
+            <select value={sField} onChange={e => setSField(e.target.value)} className="h-8 text-xs border rounded-md px-2 bg-white font-bold">
+              <option value="description">الملاحظة / البيان</option>
+              <option value="client">اسم العميل</option>
+              <option value="supplier">اسم المورد</option>
+              <option value="debit_account">الحساب المدين</option>
+              <option value="credit_account">الحساب الدائن</option>
+              <option value="amount">المبلغ</option>
+            </select>
+            <select value={sOp} onChange={e => setSOp(e.target.value)} className="h-8 text-xs border rounded-md px-2 bg-white font-bold" disabled={sField === 'amount'}>
+              <option value="contains">يحتوي على</option>
+              <option value="not_contains">لا يحتوي على</option>
+              <option value="equals">يساوي</option>
+            </select>
+            <Input value={sVal} onChange={e => setSVal(e.target.value)} onKeyDown={e => e.key === 'Enter' && applySearch()} placeholder={sField === 'amount' ? 'مثال: 150' : 'قيمة البحث...'} className="h-8 w-52 text-xs" />
+            <Button size="sm" className="h-8 text-xs bg-blue-600 hover:bg-blue-700" onClick={applySearch}>بحث</Button>
+            {activeSearch && (
+              <Badge variant="outline" className="text-[11px] gap-1 border-blue-300 text-blue-700">
+                {activeSearch.value}
+                <button onClick={clearSearch} className="text-rose-500 hover:text-rose-700 font-black mr-1">✕</button>
+              </Badge>
+            )}
+          </div>
+        </CardContent>
+      </Card>
       <div className="space-y-3">
         {rows.map(je => {
           const totalDebit = (je.lines || []).reduce((s, l) => s + (l.debit || 0), 0)
@@ -7783,18 +7877,81 @@ function StatementReport() {
 function TrialBalanceReport() {
   const [data, setData] = useState(null)
   const [scope, setScope] = useState('') // v5.4 — HQ: '' = all | 'hq' | branch id
-  useEffect(() => { api(`/reports/trial-balance${scope ? `?branch=${scope}` : ''}`).then(setData).catch(e => toast.error(e.message)) }, [scope])
+  const [mode, setMode] = useState('detailed')   // v5.6 — 'summary' | 'detailed'
+  const [ccy, setCcy] = useState('')             // v5.6 — '' = all | YER | SAR | USD
+  useEffect(() => {
+    const ps = []
+    if (scope) ps.push(`branch=${scope}`)
+    ps.push(`mode=${mode}`)
+    if (ccy) ps.push(`currency=${ccy}`)
+    api(`/reports/trial-balance?${ps.join('&')}`).then(setData).catch(e => toast.error(e.message))
+  }, [scope, mode, ccy])
+  const shownCurrencies = ccy ? [ccy] : CURRENCIES
+  // v5.6 — detailed mode: group party rows under their main account (code+currency)
+  const groups = useMemo(() => {
+    if (!data || mode !== 'detailed') return []
+    const g = new Map()
+    for (const r of data.rows) {
+      const k = `${r.code}|${r.currency}`
+      if (!g.has(k)) g.set(k, { code: r.code, name: r.name, currency: r.currency, debit: 0, credit: 0, parties: [] })
+      const grp = g.get(k)
+      grp.debit += r.debit; grp.credit += r.credit
+      grp.parties.push(r)
+    }
+    return [...g.values()]
+  }, [data, mode])
   return (
     <Card><CardContent className="p-4">
-      <div className="flex items-center justify-between mb-3">
-        <div className="text-xs text-slate-500 font-bold">النطاق:</div>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* v5.6 — summary / detailed toggle */}
+          <div className="flex rounded-lg border border-slate-300 overflow-hidden">
+            <button onClick={() => setMode('summary')} className={`px-3 py-1.5 text-xs font-bold transition ${mode === 'summary' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>📊 إجمالي</button>
+            <button onClick={() => setMode('detailed')} className={`px-3 py-1.5 text-xs font-bold transition ${mode === 'detailed' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>📋 تفصيلي</button>
+          </div>
+          {/* v5.6 — per-currency trial balance (independent, no cross-currency netting) */}
+          <div className="flex rounded-lg border border-slate-300 overflow-hidden">
+            {[['', 'كل العملات'], ['YER', 'YER'], ['SAR', 'SAR'], ['USD', 'USD']].map(([k, lbl]) => (
+              <button key={k} onClick={() => setCcy(k)} className={`px-3 py-1.5 text-xs font-bold transition ${ccy === k ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>{lbl}</button>
+            ))}
+          </div>
+        </div>
         <BranchScopePicker value={scope} onChange={setScope} />
       </div>
       {data && (<>
-        <div className="grid grid-cols-3 gap-3 mb-4">{CURRENCIES.map(c => (<Card key={c}><CardContent className="p-3"><div className="text-xs text-slate-500">{c}</div><div className="flex justify-between text-sm mt-1"><span>مدين:</span><span className="font-bold text-blue-700">{fmt(data.totals[c].d, c)}</span></div><div className="flex justify-between text-sm"><span>دائن:</span><span className="font-bold text-rose-700">{fmt(data.totals[c].c, c)}</span></div><div className="flex justify-between text-sm mt-1 pt-1 border-t"><span>الفرق:</span><span className={`font-bold ${Math.abs(data.totals[c].d - data.totals[c].c) < 0.01 ? 'text-emerald-600' : 'text-amber-600'}`}>{fmt(data.totals[c].d - data.totals[c].c, c)}</span></div></CardContent></Card>))}</div>
-        <Table><TableHeader><TableRow><TableHead>الكود</TableHead><TableHead>الحساب</TableHead><TableHead>الطرف</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
-          <TableBody>{data.rows.map((r, i) => (<TableRow key={i}><TableCell className="font-mono text-xs">{r.code}</TableCell><TableCell>{r.name}</TableCell><TableCell className="text-xs">{r.party_name || '—'}</TableCell><TableCell>{r.currency}</TableCell><TableCell className="text-left text-blue-700">{fmt(r.debit, r.currency)}</TableCell><TableCell className="text-left text-rose-700">{fmt(r.credit, r.currency)}</TableCell><TableCell className={`text-left font-bold ${r.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(r.balance, r.currency)}</TableCell></TableRow>))}</TableBody>
-        </Table>
+        <div className={`grid gap-3 mb-4 ${shownCurrencies.length === 1 ? 'grid-cols-1 max-w-sm' : 'grid-cols-3'}`}>{shownCurrencies.map(c => (<Card key={c}><CardContent className="p-3"><div className="text-xs text-slate-500">{c}</div><div className="flex justify-between text-sm mt-1"><span>مدين:</span><span className="font-bold text-blue-700">{fmt(data.totals[c].d, c)}</span></div><div className="flex justify-between text-sm"><span>دائن:</span><span className="font-bold text-rose-700">{fmt(data.totals[c].c, c)}</span></div><div className="flex justify-between text-sm mt-1 pt-1 border-t"><span>الفرق:</span><span className={`font-bold ${Math.abs(data.totals[c].d - data.totals[c].c) < 0.01 ? 'text-emerald-600' : 'text-amber-600'}`}>{fmt(data.totals[c].d - data.totals[c].c, c)}</span></div></CardContent></Card>))}</div>
+        {mode === 'summary' ? (
+          <Table><TableHeader><TableRow><TableHead>الكود</TableHead><TableHead>الحساب</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
+            <TableBody>{data.rows.map((r, i) => (<TableRow key={i}><TableCell className="font-mono text-xs">{r.code}</TableCell><TableCell className="font-bold">{r.name}</TableCell><TableCell>{r.currency}</TableCell><TableCell className="text-left text-blue-700">{fmt(r.debit, r.currency)}</TableCell><TableCell className="text-left text-rose-700">{fmt(r.credit, r.currency)}</TableCell><TableCell className={`text-left font-bold ${r.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(r.balance, r.currency)}</TableCell></TableRow>))}</TableBody>
+          </Table>
+        ) : (
+          <Table><TableHeader><TableRow><TableHead>الكود</TableHead><TableHead>الحساب / الطرف</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
+            <TableBody>
+              {groups.map((g, gi) => (
+                <React.Fragment key={gi}>
+                  <TableRow className="bg-slate-50">
+                    <TableCell className="font-mono text-xs font-black">{g.code}</TableCell>
+                    <TableCell className="font-black text-slate-800">{g.name}</TableCell>
+                    <TableCell><Badge variant="outline" className="text-[10px]">{g.currency}</Badge></TableCell>
+                    <TableCell className="text-left font-bold text-blue-700">{fmt(g.debit, g.currency)}</TableCell>
+                    <TableCell className="text-left font-bold text-rose-700">{fmt(g.credit, g.currency)}</TableCell>
+                    <TableCell className={`text-left font-black ${g.debit - g.credit >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(g.debit - g.credit, g.currency)}</TableCell>
+                  </TableRow>
+                  {g.parties.length > 1 || (g.parties[0]?.party_name && g.parties[0].party_name !== g.name) ? g.parties.map((r, i) => (
+                    <TableRow key={i} className="text-slate-600">
+                      <TableCell></TableCell>
+                      <TableCell className="text-xs pr-8">↳ {r.party_name || r.name}</TableCell>
+                      <TableCell className="text-xs">{r.currency}</TableCell>
+                      <TableCell className="text-left text-xs text-blue-600">{fmt(r.debit, r.currency)}</TableCell>
+                      <TableCell className="text-left text-xs text-rose-600">{fmt(r.credit, r.currency)}</TableCell>
+                      <TableCell className={`text-left text-xs font-bold ${r.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(r.balance, r.currency)}</TableCell>
+                    </TableRow>
+                  )) : null}
+                </React.Fragment>
+              ))}
+            </TableBody>
+          </Table>
+        )}
       </>)}
     </CardContent></Card>
   )
@@ -12823,6 +12980,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
     : { title: 'بيع عملات', color: 'grad-rose', desc: 'يبيع المكتب عملة للزبون ويستلم مقابلها بعملة أخرى' }
   const emptyForm = {
     date: todayISO(), currency: 'USD', amount: '', exchange_rate: '',
+    counter_amount: '', // v5.6 — editable total (reverse-rate source of truth when edited)
     counter_currency: 'SAR', payment_method: 'cash',
     box_currency_id: '', box_counter_id: '',
     account_currency_id: '', account_counter_id: '',  // For 'account' mode; encoded as `${kind}:${id}`
@@ -12832,6 +12990,10 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [allAccounts, setAllAccounts] = useState([])
+  // v5.6 — SAME-ACCOUNT LOCK: normal exchange uses ONE account for BOTH sides (auto-locked
+  // counterpart). Explicit bilateral entries (two different accounts) are the exception mode.
+  const [entryMode, setEntryMode] = useState('same') // 'same' | 'bilateral'
+  const [sameSel, setSameSel] = useState(null)        // selected entity in same-account mode
   useEffect(() => {
     if (!open) return
     if (record) {
@@ -12839,6 +13001,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
         date: record.date ? new Date(record.date).toISOString().slice(0,10) : todayISO(),
         currency: record.currency || 'USD', amount: record.amount ?? '',
         exchange_rate: record.exchange_rate ?? '',
+        counter_amount: record.counter_amount ?? '',
         counter_currency: record.counter_currency || 'SAR',
         payment_method: record.payment_method || 'cash',
         box_currency_id: record.box_currency_id || '',
@@ -12850,8 +13013,20 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
         source_of_funds: record.source_of_funds || '', purpose: record.purpose || '',
         remarks: record.remarks || '',
       })
+      // v5.6 — detect mode from the stored refs: same id on both sides ⇒ normal (same-account)
+      const refA = record.currency_ref?.id || record.box_currency_id
+      const refB = record.counter_ref?.id || record.box_counter_id
+      if (refA && refA === refB) {
+        setEntryMode('same')
+        setSameSel({ id: refA, type: record.currency_ref?.kind || 'box', name: record.currency_ref?.name || record.box_currency_name || '', account_code: record.currency_ref?.code || '' })
+      } else {
+        setEntryMode('bilateral')
+        setSameSel(null)
+      }
     } else {
       setForm(emptyForm)
+      setEntryMode('same')
+      setSameSel(null)
     }
   }, [open, record])
   useEffect(() => {
@@ -12865,13 +13040,36 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
       api('/accounts/all').then(setAllAccounts).catch(() => {})
     }
   }, [open, form.payment_method])
-  const counter_amount = (Number(form.amount) || 0) * (Number(form.exchange_rate) || 0)
+  // v5.6 — LAST-EDITED-FIELD rule (no calculation loop): each handler recomputes ONLY the
+  // dependent field, never itself. amount/rate edits ⇒ total recalculated; total edit ⇒
+  // effective rate derived (total ÷ amount) at 6-dp precision.
+  const setAmount = (v) => setForm(f => {
+    const a = Number(v) || 0, r = Number(f.exchange_rate) || 0
+    return { ...f, amount: v, counter_amount: a > 0 && r > 0 ? +(a * r).toFixed(2) : f.counter_amount }
+  })
+  const setRate = (v) => setForm(f => {
+    const a = Number(f.amount) || 0, r = Number(v) || 0
+    return { ...f, exchange_rate: v, counter_amount: a > 0 && r > 0 ? +(a * r).toFixed(2) : f.counter_amount }
+  })
+  const setTotal = (v) => setForm(f => {
+    const a = Number(f.amount) || 0, t = Number(v) || 0
+    return { ...f, counter_amount: v, exchange_rate: a > 0 && t > 0 ? +(t / a).toFixed(6) : f.exchange_rate }
+  })
+  const counter_amount = Number(form.counter_amount) || ((Number(form.amount) || 0) * (Number(form.exchange_rate) || 0))
   const parseRef = (v) => { if (!v) return null; const [kind, id] = v.split(':'); return { kind, id } }
   const submit = async () => {
-    if (!form.amount || !form.exchange_rate) return toast.error('أدخل المبلغ وسعر الصرف')
+    if (!form.amount || !form.exchange_rate) return toast.error('أدخل المبلغ وسعر الصرف (أو القيمة الإجمالية)')
     if (form.currency === form.counter_currency) return toast.error('اختر عملتين مختلفتين')
     const body = { type, ...form }
-    if (form.payment_method === 'account') {
+    if (entryMode === 'same') {
+      // v5.6 — normal exchange: SAME account on both sides, counterpart auto-locked
+      if (!sameSel?.id) return toast.error('اختر الحساب (يُستخدم تلقائياً للطرفين)')
+      const kind = sameSel.type === 'account' ? 'account' : sameSel.type
+      body.currency_ref = { kind, id: sameSel.id }
+      body.counter_ref = { kind, id: sameSel.id }
+      body.payment_method = kind === 'box' ? 'cash' : 'account'
+      if (kind === 'box') { body.box_currency_id = sameSel.id; body.box_counter_id = sameSel.id }
+    } else if (form.payment_method === 'account') {
       if (!form.account_currency_id || !form.account_counter_id) return toast.error('اختر الحسابين للطرفين')
       body.currency_ref = parseRef(form.account_currency_id)
       body.counter_ref = parseRef(form.account_counter_id)
@@ -12882,7 +13080,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
       setSaving(true)
       if (isEdit) await api(`/fx/${record.id}`, { method: 'PUT', body })
       else await api('/fx', { method: 'POST', body })
-      onOpenChange(false); onSaved(); setForm(f => ({ ...f, amount: '', exchange_rate: '', customer_name: '', customer_phone: '', id_number: '', source_of_funds: '', purpose: '', remarks: '' }))
+      onOpenChange(false); onSaved(); setForm(f => ({ ...f, amount: '', exchange_rate: '', counter_amount: '', customer_name: '', customer_phone: '', id_number: '', source_of_funds: '', purpose: '', remarks: '' }))
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
   const isCash = form.payment_method === 'cash'
@@ -12900,7 +13098,22 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
           <DialogDescription>{isEdit ? 'سيتم عكس القيد المحاسبي القديم وإعادة الترحيل بالقيم الجديدة تلقائياً' : cfg.desc}</DialogDescription>
         </DialogHeader>
 
-        {/* Payment method selector */}
+        {/* v5.6 — Entry mode: normal (same account, locked counterpart) vs explicit bilateral */}
+        <div className="p-3 rounded-lg border border-slate-200 bg-slate-50">
+          <div className="text-xs font-bold text-slate-600 mb-2">نمط العملية</div>
+          <div className="flex gap-2 flex-wrap">
+            <button onClick={() => setEntryMode('same')} className={`px-4 py-2 rounded-lg text-sm font-bold border transition ${entryMode === 'same' ? 'bg-emerald-500 text-white border-emerald-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-emerald-400'}`}>🔁 صرافة عادية — حساب واحد للطرفين</button>
+            <button onClick={() => setEntryMode('bilateral')} className={`px-4 py-2 rounded-lg text-sm font-bold border transition ${entryMode === 'bilateral' ? 'bg-blue-500 text-white border-blue-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-blue-400'}`}>⚖️ قيد ثنائي — حسابان مختلفان</button>
+          </div>
+          {entryMode === 'same' ? (
+            <div className="text-[11px] text-emerald-700 mt-2">🔒 الطرف المقابل يتحدد تلقائياً بنفس الحساب المختار (صندوق، بنك، عميل، مورد، أو أي حساب ترحيل من الدليل) ولا يمكن استبداله</div>
+          ) : (
+            <div className="text-[11px] text-blue-700 mt-2">⚠️ النمط الثنائي الصريح فقط: يسمح بأن يكون حساب المدين مختلفاً عن حساب الدائن</div>
+          )}
+        </div>
+
+        {/* Payment method selector — bilateral mode only */}
+        {entryMode === 'bilateral' && (
         <div className="p-3 rounded-lg border border-slate-200 bg-slate-50">
           <div className="text-xs font-bold text-slate-600 mb-2">طريقة الدفع / التسوية</div>
           <div className="flex gap-2">
@@ -12908,23 +13121,37 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
             <button onClick={() => setForm({ ...form, payment_method: 'account' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition ${!isCash ? 'bg-blue-500 text-white border-blue-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-blue-400'}`}>📒 حساب (الدليل المحاسبي كامل)</button>
           </div>
           {!isCash && (
-            <div className="text-[11px] text-blue-700 mt-2">✨ يتم تسوية العملية على حسابات من الدليل المحاسبي (عملاء، موردين، مصروفات، إيرادات، أصول، خصوم...) دون تحريك نقدي</div>
+            <div className="text-[11px] text-blue-700 mt-2">✨ يتم تسوية العملية على حسابات من الدليل المحاسبي (عملاء، موردين، مصروفات، إيرادات، أصول، خصوم، حقوق ملكية...) دون تحريك نقدي</div>
           )}
         </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-2">
           <Field label="التاريخ"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
           <Field label="العملة" required><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
-          <Field label="المبلغ" required><Input type="number" min="0" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
-          <Field label="سعر الصرف" required><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} className="text-lg font-bold" /></Field>
+          <Field label="المبلغ" required><Input type="number" min="0" step="0.01" value={form.amount} onChange={e => setAmount(e.target.value)} className="text-lg font-bold" /></Field>
+          <Field label="سعر الصرف" required><Input type="number" min="0" step="0.000001" value={form.exchange_rate} onChange={e => setRate(e.target.value)} className="text-lg font-bold" /></Field>
 
           <Field label="المقابل بعملة" required><Select value={form.counter_currency} onValueChange={v => setForm({ ...form, counter_currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
-          <Field label="القيمة الإجمالية">
-            <div className={`px-3 py-2 rounded-md border text-lg font-extrabold bg-blue-50 border-blue-200 text-blue-700`}>
-              {fmt(counter_amount, form.counter_currency)}
-            </div>
+          <Field label="القيمة الإجمالية ✏️">
+            {/* v5.6 — editable total: editing it derives the effective rate (total ÷ amount) */}
+            <Input type="number" min="0" step="0.01" value={form.counter_amount === '' ? (counter_amount || '') : form.counter_amount} onChange={e => setTotal(e.target.value)} className="text-lg font-extrabold bg-blue-50 border-blue-200 text-blue-700" />
+            {Number(form.amount) > 0 && Number(form.counter_amount) > 0 && (
+              <div className="text-[10px] text-blue-600 mt-1 font-mono">السعر الفعلي: {(Number(form.counter_amount) / Number(form.amount)).toFixed(6)}</div>
+            )}
           </Field>
-          {isCash ? (
+          {entryMode === 'same' ? (
+            <>
+              <Field label={`الحساب (${form.currency} ⇄ ${form.counter_currency}) 🔍`} required>
+                <AccountAutocomplete type="all" value={sameSel?.id || null} onChange={setSameSel} placeholder="صندوق / بنك / عميل / مورد / حساب دليل..." />
+              </Field>
+              <Field label="الطرف المقابل 🔒">
+                <div className="px-3 py-2 rounded-md border-2 border-slate-200 bg-slate-100 text-sm font-bold text-slate-500 min-h-[38px] flex items-center gap-2 cursor-not-allowed select-none">
+                  🔒 {sameSel ? `${sameSel.account_code ? sameSel.account_code + ' — ' : ''}${sameSel.name} (نفس الحساب)` : 'يتحدد تلقائياً بنفس الحساب'}
+                </div>
+              </Field>
+            </>
+          ) : isCash ? (
             <>
               <Field label={`صندوق ${form.currency} 🔍`} required>
                 <AccountAutocomplete type="box" value={form.box_currency_id || null} onChange={(sel) => setForm({ ...form, box_currency_id: sel?.id || '' })} placeholder={`اختر صندوق ${form.currency}...`} />
@@ -12939,7 +13166,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
                 <AccountAutocomplete
                   type="all"
                   value={form.account_currency_id ? form.account_currency_id.split(':')[1] : null}
-                  onChange={(sel) => setForm({ ...form, account_currency_id: sel ? `${sel.type === 'account' ? 'account' : sel.type}:${sel.type === 'account' ? sel.account_code : sel.id}` : '' })}
+                  onChange={(sel) => setForm({ ...form, account_currency_id: sel ? `${sel.type}:${sel.id}` : '' })}
                   placeholder={`اختر حساب ${form.currency}...`}
                 />
               </Field>
@@ -12947,7 +13174,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
                 <AccountAutocomplete
                   type="all"
                   value={form.account_counter_id ? form.account_counter_id.split(':')[1] : null}
-                  onChange={(sel) => setForm({ ...form, account_counter_id: sel ? `${sel.type === 'account' ? 'account' : sel.type}:${sel.type === 'account' ? sel.account_code : sel.id}` : '' })}
+                  onChange={(sel) => setForm({ ...form, account_counter_id: sel ? `${sel.type}:${sel.id}` : '' })}
                   placeholder={`اختر حساب ${form.counter_currency}...`}
                 />
               </Field>

@@ -1,0 +1,483 @@
+{
+  "MATRIX A - RECEIPT VOUCHER": [
+    {
+      "test": "A1",
+      "pass": true,
+      "client_balance": -100,
+      "supplier_balance": 0,
+      "partner_balance": 0,
+      "box_balance": 100,
+      "expected_client": -100,
+      "expected_supplier": 0,
+      "expected_partner": 0,
+      "expected_box": 100,
+      "je_count": 1
+    },
+    {
+      "test": "A2",
+      "pass": true,
+      "client_balance": -150,
+      "supplier_balance": 0,
+      "partner_balance": 0,
+      "box_balance": 150,
+      "expected_client": -150,
+      "expected_supplier": 0,
+      "expected_partner": 0,
+      "expected_box": 150,
+      "je_count": 1
+    },
+    {
+      "test": "A3",
+      "pass": true,
+      "client_balance": -100,
+      "supplier_balance": 0,
+      "partner_balance": 0,
+      "box_balance": 100,
+      "expected_client": -100,
+      "expected_supplier": 0,
+      "expected_partner": 0,
+      "expected_box": 100,
+      "je_count": 1
+    },
+    {
+      "test": "A4",
+      "pass": true,
+      "client_balance": -120,
+      "supplier_balance": 0,
+      "partner_balance": 0,
+      "box_balance": 120,
+      "expected_client": -120,
+      "expected_supplier": 0,
+      "expected_partner": 0,
+      "expected_box": 120,
+      "je_count": 1
+    },
+    {
+      "test": "A5",
+      "pass": true,
+      "client_balance": -120,
+      "supplier_balance": 0,
+      "partner_balance": 0,
+      "box_balance": 120,
+      "expected_client": -120,
+      "expected_supplier": 0,
+      "expected_partner": 0,
+      "expected_box": 120,
+      "je_count": 1
+    },
+    {
+      "test": "A6",
+      "pass": true,
+      "client_balance": -120,
+      "supplier_balance": 0,
+      "partner_balance": 0,
+      "box_balance": 120,
+      "expected_client": -120,
+      "expected_supplier": 0,
+      "expected_partner": 0,
+      "expected_box": 120,
+      "je_count": 1
+    },
+    {
+      "test": "A7",
+      "pass": true,
+      "client_balance": 0,
+      "supplier_balance": 0,
+      "partner_balance": 0,
+      "box_balance": 0,
+      "expected_client": 0,
+      "expected_supplier": 0,
+      "expected_partner": 0,
+      "expected_box": 0,
+      "je_count": 0
+    }
+  ],
+  "MATRIX B - PAYMENT VOUCHER": [
+    {
+      "test": "B1",
+      "pass": true,
+      "client_balance": 0,
+      "supplier_balance": -100,
+      "partner_balance": 0,
+      "box_balance": -100,
+      "expected_client": 0,
+      "expected_supplier": -100,
+      "expected_partner": 0,
+      "expected_box": -100,
+      "je_count": 1
+    },
+    {
+      "test": "B2",
+      "pass": true,
+      "client_balance": 0,
+      "supplier_balance": -150,
+      "partner_balance": 0,
+      "box_balance": -150,
+      "expected_client": 0,
+      "expected_supplier": -150,
+      "expected_partner": 0,
+      "expected_box": -150,
+      "je_count": 1
+    },
+    {
+      "test": "B3",
+      "pass": true,
+      "client_balance": 0,
+      "supplier_balance": -100,
+      "partner_balance": 0,
+      "box_balance": -100,
+      "expected_client": 0,
+      "expected_supplier": -100,
+      "expected_partner": 0,
+      "expected_box": -100,
+      "je_count": 1
+    },
+    {
+      "test": "B4",
+      "pass": true,
+      "client_balance": 0,
+      "supplier_balance": -120,
+      "partner_balance": 0,
+      "box_balance": -120,
+      "expected_client": 0,
+      "expected_supplier": -120,
+      "expected_partner": 0,
+      "expected_box": -120,
+      "je_count": 1
+    },
+    {
+      "test": "B7",
+      "pass": true,
+      "client_balance": 0,
+      "supplier_balance": 0,
+      "partner_balance": 0,
+      "box_balance": 0,
+      "expected_client": 0,
+      "expected_supplier": 0,
+      "expected_partner": 0,
+      "expected_box": 0,
+      "je_count": 0
+    }
+  ],
+  "MATRIX C - TICKET": [
+    {
+      "test": "C1",
+      "pass": true,
+      "client_balance": 100,
+      "supplier_balance": 70,
+      "partner_balance": 0,
+      "box_balance": 0,
+      "expected_client": 100,
+      "expected_supplier": 70,
+      "expected_partner": 0,
+      "expected_box": 0,
+      "je_count": 1
+    },
+    {
+      "test": "C2",
+      "pass": true,
+      "client_balance": 150,
+      "supplier_balance": 70,
+      "partner_balance": 0,
+      "box_balance": 0,
+      "expected_client": 150,
+      "expected_supplier": 70,
+      "expected_partner": 0,
+      "expected_box": 0,
+      "je_count": 1
+    },
+    {
+      "test": "C3",
+      "pass": true,
+      "client_balance": 120,
+      "supplier_balance": 70,
+      "partner_balance": 0,
+      "box_balance": 0,
+      "expected_client": 120,
+      "expected_supplier": 70,
+      "expected_partner": 0,
+      "expected_box": 0,
+      "je_count": 1
+    },
+    {
+      "test": "C4",
+      "pass": true,
+      "client_balance": 120,
+      "supplier_balance": 70,
+      "partner_balance": 0,
+      "box_balance": 0,
+      "expected_client": 120,
+      "expected_supplier": 70,
+      "expected_partner": 0,
+      "expected_box": 0,
+      "je_count": 1
+    },
+    {
+      "test": "C5",
+      "pass": true,
+      "client_balance": 0,
+      "supplier_balance": 0,
+      "partner_balance": 0,
+      "box_balance": 0,
+      "expected_client": 0,
+      "expected_supplier": 0,
+      "expected_partner": 0,
+      "expected_box": 0,
+      "je_count": 0
+    }
+  ],
+  "MATRIX D - COMMISSION PARTNER": [
+    {
+      "test": "D1",
+      "pass": true,
+      "client_balance": 100,
+      "supplier_balance": 70,
+      "partner_balance": -10,
+      "box_balance": 0,
+      "expected_client": 100,
+      "expected_supplier": 70,
+      "expected_partner": -10,
+      "expected_box": 0,
+      "je_count": 1
+    },
+    {
+      "test": "D2",
+      "pass": true,
+      "client_balance": 150,
+      "supplier_balance": 70,
+      "partner_balance": -10,
+      "box_balance": 0,
+      "expected_client": 150,
+      "expected_supplier": 70,
+      "expected_partner": -10,
+      "expected_box": 0,
+      "je_count": 1
+    },
+    {
+      "test": "D3",
+      "pass": true,
+      "client_balance": 150,
+      "supplier_balance": 70,
+      "partner_balance": -20,
+      "box_balance": 0,
+      "expected_client": 150,
+      "expected_supplier": 70,
+      "expected_partner": -20,
+      "expected_box": 0,
+      "je_count": 1
+    },
+    {
+      "test": "D4",
+      "pass": true,
+      "client_balance": 150,
+      "supplier_balance": 70,
+      "partner_balance": -40,
+      "box_balance": 0,
+      "expected_client": 150,
+      "expected_supplier": 70,
+      "expected_partner": -40,
+      "expected_box": 0,
+      "je_count": 1
+    },
+    {
+      "test": "D5-create",
+      "pass": true,
+      "client_balance": 150,
+      "supplier_balance": 120,
+      "partner_balance": -50,
+      "box_balance": 100,
+      "expected_client": 150,
+      "expected_supplier": 120,
+      "expected_partner": -50,
+      "expected_box": 100,
+      "je_count": 1
+    },
+    {
+      "test": "D5-edit",
+      "pass": true,
+      "client_balance": 150,
+      "supplier_balance": 120,
+      "partner_balance": -50,
+      "box_balance": 150,
+      "expected_client": 150,
+      "expected_supplier": 120,
+      "expected_partner": -50,
+      "expected_box": 150,
+      "je_count": 1
+    },
+    {
+      "test": "D6",
+      "pass": true,
+      "client_balance": 0,
+      "supplier_balance": 0,
+      "partner_balance": 0,
+      "box_balance": 0,
+      "expected_client": 0,
+      "expected_supplier": 0,
+      "expected_partner": 0,
+      "expected_box": 0,
+      "je_count_ticket": 0,
+      "je_count_service": 0
+    }
+  ],
+  "MATRIX E - BULK OPERATIONS": [
+    {
+      "test": "E1-create",
+      "pass": true,
+      "client_balance": 200,
+      "supplier_balance": 140,
+      "partner_balance": 0,
+      "box_balance": 0,
+      "expected_client": 200,
+      "expected_supplier": 140,
+      "expected_partner": 0,
+      "expected_box": 0
+    },
+    {
+      "test": "E1-bulk-edit",
+      "pass": true,
+      "client_balance": 0,
+      "supplier_balance": 140,
+      "partner_balance": 0,
+      "box_balance": 200,
+      "expected_client": 0,
+      "expected_supplier": 140,
+      "expected_partner": 0,
+      "expected_box": 200,
+      "je_count_1": 1,
+      "je_count_2": 1
+    },
+    {
+      "test": "E2-create",
+      "pass": true,
+      "client_balance": 100,
+      "supplier_balance": 210,
+      "partner_balance": -10,
+      "box_balance": 200,
+      "expected_client": 100,
+      "expected_supplier": 210,
+      "expected_partner": -10,
+      "expected_box": 200
+    },
+    {
+      "test": "E2-bulk-edit",
+      "pass": true,
+      "client_balance": 100,
+      "supplier_balance": 210,
+      "partner_balance": -10,
+      "box_balance": 200,
+      "expected_client": 100,
+      "expected_supplier": 210,
+      "expected_partner": -10,
+      "expected_box": 200,
+      "je_count": 1
+    },
+    {
+      "test": "E3",
+      "pass": true,
+      "client_balance": 100,
+      "supplier_balance": 210,
+      "partner_balance": -10,
+      "box_balance": 200,
+      "expected_client": 100,
+      "expected_supplier": 210,
+      "expected_partner": -10,
+      "expected_box": 200,
+      "je_count": 1
+    },
+    {
+      "test": "E4",
+      "pass": true,
+      "client_yer": 0,
+      "supplier_yer": 140,
+      "partner_yer": 0,
+      "box_yer": 200,
+      "client_sar": 100,
+      "supplier_sar": 70,
+      "partner_sar": -10,
+      "je_count": 1
+    },
+    {
+      "test": "E5",
+      "pass": true,
+      "client_yer": 0,
+      "supplier_yer": 0,
+      "partner_yer": 0,
+      "box_yer": 0,
+      "client_sar": 0,
+      "supplier_sar": 0,
+      "partner_sar": 0,
+      "je_counts": [
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "MATRIX F - CONCURRENCY": [
+    {
+      "test": "F1-iter1",
+      "pass": true,
+      "je_count": 1,
+      "winning_amount": 140,
+      "client_balance": -140,
+      "box_balance": 140
+    },
+    {
+      "test": "F1-iter2",
+      "pass": true,
+      "je_count": 1,
+      "winning_amount": 140,
+      "client_balance": -140,
+      "box_balance": 140
+    },
+    {
+      "test": "F1-iter3",
+      "pass": true,
+      "je_count": 1,
+      "winning_amount": 140,
+      "client_balance": -140,
+      "box_balance": 140
+    },
+    {
+      "test": "F1-iter4",
+      "pass": false,
+      "je_count": 1,
+      "winning_amount": 130,
+      "client_balance": -140,
+      "box_balance": 140
+    },
+    {
+      "test": "F1-iter5",
+      "pass": false,
+      "je_count": 1,
+      "winning_amount": 140,
+      "client_balance": -130,
+      "box_balance": 130
+    },
+    {
+      "test": "F2",
+      "pass": true,
+      "status": 200,
+      "lock_exists": false
+    },
+    {
+      "test": "F3",
+      "pass": true,
+      "status": 409,
+      "lock_still_exists": true
+    },
+    {
+      "test": "F4",
+      "pass": true,
+      "status": 400,
+      "lock_exists": false,
+      "balances_unchanged": true
+    },
+    {
+      "test": "F4-recovery",
+      "pass": true,
+      "status": 200
+    }
+  ]
+}
