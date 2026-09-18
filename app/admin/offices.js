@@ -73,6 +73,27 @@ const StatusBadge = ({ status }) => (
   </Badge>
 )
 
+// v5.7 — shared paged table renderer (unified PaginationBar) used by ALL Office 360 tab lists
+const PagedRows = ({ rows, cols }) => {
+  const pager = useClientPager(rows || [])
+  return (
+    <>
+      <Table>
+        <TableHeader><TableRow>{cols.map(c => <TableHead key={c.h} className={c.center ? 'text-center' : ''}>{c.h}</TableHead>)}</TableRow></TableHeader>
+        <TableBody>
+          {pager.paged.map((r, i) => (
+            <TableRow key={r.id || i}>
+              {cols.map(c => <TableCell key={c.h} className={`text-xs ${c.center ? 'text-center' : ''}`}>{c.v(r)}</TableCell>)}
+            </TableRow>
+          ))}
+          {(!rows || rows.length === 0) && <TableRow><TableCell colSpan={cols.length} className="text-center text-slate-400 py-6">لا توجد بيانات</TableCell></TableRow>}
+        </TableBody>
+      </Table>
+      {(rows || []).length > 0 && <PaginationBar lq={pager.lq} />}
+    </>
+  )
+}
+
 const MiniStat = ({ icon: Icon, label, value }) => (
   <div className="p-3 rounded-xl bg-white border shadow-sm flex items-center gap-2.5">
     <div className="w-9 h-9 rounded-lg bg-slate-100 flex items-center justify-center shrink-0"><Icon className="w-4 h-4 text-slate-600" /></div>
@@ -107,6 +128,7 @@ const StatementTab = ({ office }) => {
   const [data, setData] = useState(null)
   const [err, setErr] = useState(null)
   const [loading, setLoading] = useState(true)
+  const stPager = useClientPager(data?.statement?.rows || []) // v5.7 — unified pagination (global rule)
   const load = () => {
     setLoading(true); setErr(null)
     api(`/admin/tenants/${office.id}/office-statement`)
@@ -156,7 +178,7 @@ const StatementTab = ({ office }) => {
               <TableHead className="text-center">الرصيد الجاري</TableHead><TableHead className="text-center">العملة</TableHead>
             </TableRow></TableHeader>
             <TableBody>
-              {rows.map((r, i) => (
+              {stPager.paged.map((r, i) => (
                 <TableRow key={i} className={r.ref_type === 'opening_balance' ? 'bg-slate-50' : ''}>
                   <TableCell className="text-xs whitespace-nowrap">{dt(r.date)}</TableCell>
                   <TableCell className="text-xs">{r.description || '—'}</TableCell>
@@ -170,6 +192,7 @@ const StatementTab = ({ office }) => {
             </TableBody>
           </Table>
         )}
+        {rows.length > 0 && <PaginationBar lq={stPager.lq} />} {/* v5.7 — unified pagination */}
       </CardContent></Card>
     </div>
   )
@@ -348,19 +371,10 @@ export const Office360 = ({ office, onBack }) => {
 
   const ov = cache.overview
 
-  const renderRows = (rows, cols) => (
-    <Table>
-      <TableHeader><TableRow>{cols.map(c => <TableHead key={c.h} className={c.center ? 'text-center' : ''}>{c.h}</TableHead>)}</TableRow></TableHeader>
-      <TableBody>
-        {(rows || []).map((r, i) => (
-          <TableRow key={r.id || i}>
-            {cols.map(c => <TableCell key={c.h} className={`text-xs ${c.center ? 'text-center' : ''}`}>{c.v(r)}</TableCell>)}
-          </TableRow>
-        ))}
-        {(!rows || rows.length === 0) && <TableRow><TableCell colSpan={cols.length} className="text-center text-slate-400 py-6">لا توجد بيانات</TableCell></TableRow>}
-      </TableBody>
-    </Table>
-  )
+  // v5.7 — renderRows now delegates to the shared PagedRows component:
+  // ONE change gives unified pagination to EVERY Office 360 tab list
+  // (users/sales/vouchers/accounting/clients/suppliers/boxes/subscription/activity).
+  const renderRows = (rows, cols) => <PagedRows rows={rows} cols={cols} />
 
   return (
     <div className="space-y-4">

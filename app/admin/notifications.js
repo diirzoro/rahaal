@@ -16,7 +16,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { toast } from 'sonner'
 import { RefreshCw, Bell, Settings, Check, Archive, ArchiveRestore, CheckCheck, Lock, Zap } from 'lucide-react'
-import { api } from '../shared'
+import { api, useClientPager, PaginationBar } from '../shared'
 
 const dtt = (v) => (v ? new Date(v).toLocaleString('ar-EG') : '—')
 const PRI = { info: ['معلوماتي', 'bg-blue-100 text-blue-700'], action: ['إجراء مطلوب', 'bg-amber-100 text-amber-800'], warning: ['تحذير', 'bg-orange-100 text-orange-700'], critical: ['حرج', 'bg-rose-100 text-rose-700'] }
@@ -58,6 +58,7 @@ const SettingDialog = ({ s, onClose, onSaved }) => {
 const AdminNotifyCenter = ({ onNavigate }) => {
   const [tab, setTab] = useState('inbox')
   const [feed, setFeed] = useState(null)
+  const storedPager = useClientPager(feed?.stored || []) // v5.7 — unified pagination (global rule)
   const [settings, setSettings] = useState(null)
   const [catalogNote, setCatalogNote] = useState('')
   const [f, setF] = useState({ type: '', priority: '', q: '', status: '' })
@@ -144,7 +145,10 @@ const AdminNotifyCenter = ({ onNavigate }) => {
           <div className="space-y-1.5">
             {feed === null ? <div className="py-10 text-center text-slate-400">جارِ التحميل...</div>
               : feed.stored.length === 0 ? <Card><CardContent className="py-10 text-center text-slate-400 text-sm"><Bell className="w-8 h-8 mx-auto mb-2 opacity-40" /> لا إشعارات مخزنة في هذا المجلد</CardContent></Card>
-                : feed.stored.map(n => <NotifRow key={n.id} n={n} />)}
+                : <>
+                  {storedPager.paged.map(n => <NotifRow key={n.id} n={n} />)}
+                  <PaginationBar lq={storedPager.lq} /> {/* v5.7 — unified pagination */}
+                </>}
           </div>
         </>
       )}

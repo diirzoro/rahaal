@@ -54,6 +54,9 @@ const AdminAuditCenter = () => {
   const [total, setTotal] = useState(0)
   const [gaps, setGaps] = useState([])
   const [skip, setSkip] = useState(0)
+  // v5.7 — unified rows-per-page (same options + persisted key as the shared PaginationBar)
+  const [ps, setPs] = useState(() => { try { const v = parseInt(localStorage.getItem('rahaal_ps')); return [20, 50, 100, 200, 1000].includes(v) ? v : 50 } catch { return 50 } })
+  const setPageSize = (n) => { setPs(n); setSkip(0); try { localStorage.setItem('rahaal_ps', String(n)) } catch { } }
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
 
@@ -65,14 +68,14 @@ const AdminAuditCenter = () => {
   const load = async (over = {}) => {
     setLoading(true)
     try {
-      const o = { ...f, ...over, skip: over.skip ?? skip, limit: 50 }
+      const o = { ...f, ...over, skip: over.skip ?? skip, limit: ps }
       const qs = Object.entries(o).filter(([, v]) => v !== '' && v !== undefined).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&')
       const r = await api(`/admin/audit/list?${qs}`)
       setRows(r.rows || []); setTotal(r.total_matched || 0); setGaps(r.gaps || [])
     } catch (e) { toast.error(e.message) }
     setLoading(false)
   }
-  useEffect(() => { load() }, [skip])
+  useEffect(() => { load() }, [skip, ps])
 
   return (
     <div className="space-y-3">
@@ -135,9 +138,15 @@ const AdminAuditCenter = () => {
           </Table>
         </div>
         <div className="flex items-center justify-between mt-2 text-xs text-slate-500">
-          <Button size="sm" variant="outline" disabled={skip === 0} onClick={() => setSkip(Math.max(0, skip - 50))} className="gap-1"><ChevronRight className="w-3.5 h-3.5" /> السابق</Button>
-          <span>{total ? `${skip + 1}–${Math.min(skip + 50, total)} من ${total}` : ''}</span>
-          <Button size="sm" variant="outline" disabled={skip + 50 >= total} onClick={() => setSkip(skip + 50)} className="gap-1">التالي <ChevronLeft className="w-3.5 h-3.5" /></Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" disabled={skip === 0} onClick={() => setSkip(Math.max(0, skip - ps))} className="gap-1"><ChevronRight className="w-3.5 h-3.5" /> السابق</Button>
+            <span className="text-[11px] font-bold">سجلات/صفحة:</span>
+            <select value={ps} onChange={e => setPageSize(parseInt(e.target.value))} className="h-7 text-xs border rounded-md px-1.5 bg-white font-bold">
+              {[20, 50, 100, 200, 1000].map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </div>
+          <span>{total ? `عرض ${skip + 1}–${Math.min(skip + ps, total)} من ${total} · صفحة ${Math.floor(skip / ps) + 1} من ${Math.max(1, Math.ceil(total / ps))}` : ''}</span>
+          <Button size="sm" variant="outline" disabled={skip + ps >= total} onClick={() => setSkip(skip + ps)} className="gap-1">التالي <ChevronLeft className="w-3.5 h-3.5" /></Button>
         </div>
       </CardContent></Card>
 

@@ -17,7 +17,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { toast } from 'sonner'
 import { RefreshCw, Plus, Pencil, Lock, Coins, History, Globe } from 'lucide-react'
-import { api } from '../shared'
+import { api, useClientPager, PaginationBar } from '../shared'
 
 const dtt = (v) => (v ? new Date(v).toLocaleString('ar-EG') : '—')
 const fld = (l, node) => <div><div className="text-xs font-bold text-slate-500 mb-1">{l}</div>{node}</div>
@@ -116,6 +116,10 @@ const AdminCurrencyCenter = () => {
   const [histTenant, setHistTenant] = useState('')
   const [dlg, setDlg] = useState(null)
   const [q, setQ] = useState('')
+  // v5.7 — unified pagination (global rule)
+  const curPager = useClientPager((curs?.rows || []).filter(r => !q || r.code.includes(q.toUpperCase()) || (r.name_ar || '').includes(q)))
+  const ratesPager = useClientPager(rates?.rows || [])
+  const histPager = useClientPager(hist?.rows || [])
 
   const loadCurs = () => api('/admin/currency/currencies').then(setCurs).catch(e => toast.error(e.message))
   const loadRates = () => api('/admin/currency/rates').then(setRates).catch(e => toast.error(e.message))
@@ -152,7 +156,7 @@ const AdminCurrencyCenter = () => {
               </TableRow></TableHeader>
               <TableBody>
                 {!curs ? <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">جارِ التحميل...</TableCell></TableRow>
-                  : curs.rows.filter(r => !q || r.code.includes(q.toUpperCase()) || (r.name_ar || '').includes(q)).map(r => (
+                  : curPager.paged.map(r => (
                     <TableRow key={r.code} className={r.active === false ? 'opacity-50' : ''}>
                       <TableCell><div className="font-extrabold text-sm font-mono">{r.code}</div><div className="text-[10px] text-slate-400">{r.name_ar}</div></TableCell>
                       <TableCell className="text-sm font-bold">{r.symbol}</TableCell>
@@ -172,6 +176,7 @@ const AdminCurrencyCenter = () => {
               </TableBody>
             </Table>
           </div>
+          <PaginationBar lq={curPager.lq} /> {/* v5.7 — unified pagination */}
         </CardContent></Card>
       )}
 
@@ -193,7 +198,7 @@ const AdminCurrencyCenter = () => {
               </TableRow></TableHeader>
               <TableBody>
                 {!rates ? <TableRow><TableCell colSpan={5} className="text-center py-8 text-slate-400">جارِ التحميل...</TableCell></TableRow>
-                  : rates.rows.map(r => (
+                  : ratesPager.paged.map(r => (
                     <TableRow key={r.tenant_id}>
                       <TableCell><div className="text-xs font-bold">{r.tenant_name}</div>{r.using_defaults && <Badge variant="outline" className="text-[9px] text-amber-700">يستخدم افتراضي النظام</Badge>}</TableCell>
                       <TableCell className="text-[10px] max-w-[220px]">{fmtRate(r.rates?.USD)}</TableCell>
@@ -205,6 +210,7 @@ const AdminCurrencyCenter = () => {
               </TableBody>
             </Table>
           </div>
+          <PaginationBar lq={ratesPager.lq} /> {/* v5.7 — unified pagination */}
           <div className="text-[10px] text-slate-400">تعميم أسعار موحدة على جميع المكاتب متاح عبر API بمسار Maker–Checker ثنائي الخطوات (/admin/currency/rates/apply-global) — لم يُفعّل زر مباشر له في الواجهة حمايةً من التعميم غير المقصود (نقطة قرار)</div>
         </CardContent></Card>
       )}
@@ -229,7 +235,7 @@ const AdminCurrencyCenter = () => {
               <TableBody>
                 {!hist ? <TableRow><TableCell colSpan={6} className="text-center py-8 text-slate-400">جارِ التحميل...</TableCell></TableRow>
                   : hist.rows.length === 0 ? <TableRow><TableCell colSpan={6} className="text-center py-8 text-slate-400">لا إصدارات بعد — يبدأ السجل مع أول تعديل من هذا المركز (التعديلات السابقة من داخل المكاتب لم تكن تُؤرشف — فجوة موثقة)</TableCell></TableRow>
-                    : hist.rows.map(h => (
+                    : histPager.paged.map(h => (
                       <TableRow key={h.id}>
                         <TableCell className="text-[10px] whitespace-nowrap">{dtt(h.effective_from)}</TableCell>
                         <TableCell className="text-[10px] whitespace-nowrap">{h.effective_to ? dtt(h.effective_to) : <Badge className="bg-emerald-100 text-emerald-700 text-[9px]">سارٍ الآن</Badge>}</TableCell>
@@ -242,6 +248,7 @@ const AdminCurrencyCenter = () => {
               </TableBody>
             </Table>
           </div>
+          <PaginationBar lq={histPager.lq} /> {/* v5.7 — unified pagination */}
         </CardContent></Card>
       )}
 

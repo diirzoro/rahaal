@@ -235,6 +235,7 @@ input, select, textarea, button {
 }
 .rahaal-xscroll > div {
   overflow: visible !important;
+  max-height: none !important;
 }
 .rahaal-xscroll thead {
   position: sticky;
@@ -242,5 +243,25 @@ input, select, textarea, button {
   z-index: 5;
 }
 .rahaal-xscroll thead th {
+  background: #f8fafc;
+}
+/* v5.7 GLOBAL RULE — EVERY shadcn <Table> wrapper (.table-scroll) gets the same
+   sticky-scroll behavior app-wide (capability-based, not per-screen):
+   the wrapper owns BOTH scroll axes with a capped height, so the horizontal
+   scrollbar is ALWAYS reachable at the visible bottom of the table area
+   without scrolling past the last row. Sticky header keeps context.
+   Small tables are unaffected (max-height only caps when exceeded). */
+.table-scroll {
+  max-height: 72vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.table-scroll thead {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.table-scroll thead th {
   background: #f8fafc;
 }

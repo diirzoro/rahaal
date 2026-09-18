@@ -14,7 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { toast } from 'sonner'
 import { RefreshCw, Plus, Pencil, Power, ListChecks, Lock, ExternalLink, ArrowRight } from 'lucide-react'
-import { api } from '../shared'
+import { api, useClientPager, PaginationBar } from '../shared'
 
 const fld = (l, node) => <div><div className="text-xs font-bold text-slate-500 mb-1">{l}</div>{node}</div>
 
@@ -51,6 +51,7 @@ const AdminRefDataCenter = ({ onNavigate }) => {
   const [sel, setSel] = useState(null) // managed list key
   const [data, setData] = useState(null)
   const [q, setQ] = useState('')
+  const rdPager = useClientPager((data?.items || []).filter(it => !q || (it.label || '').includes(q) || (it.label_en || '').toLowerCase().includes(q.toLowerCase()))) // v5.7 — unified pagination
   const [dlg, setDlg] = useState(null)
   const can = (a) => perms?.all || (perms?.perms?.refdata || []).includes(a)
 
@@ -81,7 +82,7 @@ const AdminRefDataCenter = ({ onNavigate }) => {
         </div>
         <div className="text-[11px] text-slate-500">{data.list?.desc}</div>
         <Table><TableHeader><TableRow><TableHead className="text-right">الاسم</TableHead><TableHead className="text-right">EN</TableHead><TableHead className="text-right">ترتيب</TableHead><TableHead className="text-right">الحالة</TableHead><TableHead className="text-right">—</TableHead></TableRow></TableHeader>
-          <TableBody>{(data.items || []).map(it => (
+          <TableBody>{rdPager.paged.map(it => (
             <TableRow key={it.key} className={it.active ? '' : 'opacity-50'}>
               <TableCell className="font-bold">{it.label}<div className="text-[10px] text-slate-500">{it.notes || ''}</div></TableCell>
               <TableCell className="text-xs" dir="ltr">{it.label_en || '—'}</TableCell>
@@ -94,6 +95,7 @@ const AdminRefDataCenter = ({ onNavigate }) => {
             </TableRow>))}
             {!(data.items || []).length && <TableRow><TableCell colSpan={5} className="text-center text-slate-400 py-8">لا عناصر بعد{can('create') ? ' — أضف أول عنصر من زر الإضافة' : ' — لا تملك صلاحية الإضافة'}</TableCell></TableRow>}
           </TableBody></Table>
+        <PaginationBar lq={rdPager.lq} /> {/* v5.7 — unified pagination */}
         <div className="text-[11px] text-slate-500 border-t pt-2">{data.usage_note} · لا حذف — تعطيل فقط، والمعطل يبقى في السجلات القديمة ويختفي من الاختيارات الجديدة</div>
         {dlg && <ItemDialog listKey={sel} item={dlg.item} onClose={() => setDlg(null)} onDone={() => { setDlg(null); loadList(); loadReg() }} />}
       </CardContent></Card>

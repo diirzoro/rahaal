@@ -31,7 +31,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 // v3.87.5 — shared primitives + heavy screens extracted verbatim (structural move only)
-import { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_MAX_MB, DOC_MAX_FILE_BYTES, DOC_BATCH_MAX_MB, DOC_BATCH_MAX_BYTES, validateDocBatch, todayISO, api, AuthCtx, useAuth, Field, TopBar, ConfirmHost, askConfirm, useListQuery, PeriodFilterBar, PaginationBar, XScroll } from './shared'
+import { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_MAX_MB, DOC_MAX_FILE_BYTES, DOC_BATCH_MAX_MB, DOC_BATCH_MAX_BYTES, validateDocBatch, todayISO, api, AuthCtx, useAuth, Field, TopBar, ConfirmHost, askConfirm, useListQuery, PeriodFilterBar, PaginationBar, XScroll, useClientPager, filterByPeriod, usePeriodState } from './shared'
 // v4.9 — AdminApp shell removed: TenantApp is THE single authoritative dashboard (see App root)
 // v4.1 — MOVED AS-IS from the v3.91–3.97 admin shell into TenantApp «إدارة رحّال»
 // (transfer only — zero new sections, same components, same /api/admin/* endpoints):
@@ -610,6 +610,10 @@ function SuperAdminPanel({ embedded = false }) {
   }
   useEffect(() => { load() }, [])
   const pendingResets = resetReqs.filter(r => r.status === 'pending')
+  // v5.7 — unified pagination (global rule): main tenants table + installments follow-up
+  const saTenantsAll = (data?.tenants || []).filter(t => !embedded || (!t.is_platform_org && (!tq.trim() || `${t.name} ${t.slug || ''}`.includes(tq.trim()))))
+  const saPager = useClientPager(saTenantsAll)
+  const instPager = useClientPager(instRows)
   const rejectReset = async (r) => {
     if (!(await askConfirm({ title: 'رفض طلب استعادة كلمة المرور', desc: `رفض طلب ${r.email}؟`, icon: '🚫', variant: 'danger', confirmLabel: 'رفض الطلب' }))) return
     try { await api(`/admin/password-reset-requests/${r.id}`, { method: 'PATCH', body: { action: 'reject' } }); toast.success('تم الرفض'); load() } catch (e) { toast.error(e.message) }
@@ -708,7 +712,7 @@ function SuperAdminPanel({ embedded = false }) {
                   <TableHead className="text-center">إدارة</TableHead>
                 </TableRow></TableHeader>
                 <TableBody>
-                  {instRows.map(r => (
+                  {instPager.paged.map(r => (
                     <TableRow key={r.id} className={r.overdue ? 'bg-rose-50' : ''}>
                       <TableCell className="font-semibold text-sm">{r.name}</TableCell>
                       <TableCell className="text-xs">{r.plan_tier === 'silver' ? '🥈 سيلفر' : r.plan_tier === 'gold' ? '🥇 جولد' : r.plan_tier === 'enterprise' ? '🏢 إنتربرايز' : '—'}</TableCell>
@@ -729,6 +733,7 @@ function SuperAdminPanel({ embedded = false }) {
                   ))}
                 </TableBody>
               </Table>
+              <PaginationBar lq={instPager.lq} /> {/* v5.7 — unified pagination */}
             </CardContent>
           </Card>
         )}
@@ -757,7 +762,7 @@ function SuperAdminPanel({ embedded = false }) {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(data?.tenants || []).filter(t => !embedded || (!t.is_platform_org && (!tq.trim() || `${t.name} ${t.slug || ''}`.includes(tq.trim())))).map(t => {
+                {saPager.paged.map(t => {
                   const q = t.journal_quota || { used: 0, limit: 500 }
                   const pct = q.limit ? (q.used / q.limit) * 100 : 0
                   return (
@@ -816,6 +821,7 @@ function SuperAdminPanel({ embedded = false }) {
                 )}
               </TableBody>
             </Table>
+            <PaginationBar lq={saPager.lq} /> {/* v5.7 — unified pagination */}
           </CardContent>
         </Card>}
 
@@ -1453,6 +1459,7 @@ function PlatformSubscriptionsScreen() {
   const insById = {}
   for (const r of instRows) insById[r.id] = r
   const tenants = (data?.tenants || []).filter(t => !t.is_platform_org && (!q.trim() || `${t.name} ${t.slug || ''}`.includes(q.trim())))
+  const subsPager = useClientPager(tenants) // v5.7 — unified pagination (global rule)
   const trialCount = tenants.filter(t => (t.subscription || 'trial') === 'trial').length
   const paidCount = tenants.filter(t => t.subscription === 'paid' || t.activation_confirmed).length
   const overdueCount = instRows.filter(r => r.overdue).length
@@ -1492,7 +1499,7 @@ function PlatformSubscriptionsScreen() {
               <TableHead className="text-left">إجراءات</TableHead>
             </TableRow></TableHeader>
             <TableBody>
-              {tenants.map(t => {
+              {subsPager.paged.map(t => {
                 const qta = t.journal_quota || { used: 0, limit: 0 }
                 const ins = insById[t.id]
                 const isPaid = t.subscription === 'paid' || t.activation_confirmed
@@ -1541,6 +1548,7 @@ function PlatformSubscriptionsScreen() {
               {tenants.length === 0 && <TableRow><TableCell colSpan={7} className="text-center py-8 text-slate-400">لا توجد مكاتب</TableCell></TableRow>}
             </TableBody>
           </Table>
+          <PaginationBar lq={subsPager.lq} /> {/* v5.7 — unified pagination */}
         </CardContent>
       </Card>
       <InstallmentsDialog row={instTarget} onClose={() => setInstTarget(null)} onChanged={load} />
@@ -1596,6 +1604,7 @@ function ProgramSalesScreen() {
     .filter(r => (fPlan === 'all' || r.t.plan_tier === fPlan))
     .filter(r => (fStatus === 'all' || r.status === fStatus))
     .filter(r => !q.trim() || `${r.t.name} ${r.t.slug || ''}`.includes(q.trim()))
+  const salesPager = useClientPager(rows) // v5.7 — unified pagination (global rule)
   // v5.2 — sale approval goes EXCLUSIVELY through ActivateSubscriptionDialog (accounting-backed)
   const exportCSV = () => {
     const head = ['المكتب', 'الباقة', 'الحالة', 'السعر الأساسي', 'الخصم%', 'السعر النهائي (مرجعي)', 'سعر الاشتراك المسجل', 'العملة', 'طريقة الدفع', 'المدفوع', 'المتبقي', 'بداية التفعيل', 'انتهاء الاشتراك']
@@ -1631,7 +1640,7 @@ function ProgramSalesScreen() {
             <TableHead className="text-center">المدفوع / المتبقي</TableHead><TableHead>الدفع</TableHead><TableHead>البداية → الانتهاء</TableHead><TableHead className="text-left">إجراءات</TableHead>
           </TableRow></TableHeader>
           <TableBody>
-            {rows.map(({ t, p, base, final, ins, paidAmt, remaining, status, currency }) => {
+            {salesPager.paged.map(({ t, p, base, final, ins, paidAmt, remaining, status, currency }) => {
               const cur = currency === 'USD' ? '$' : `${currency} `
               return (
                 <TableRow key={t.id}>
@@ -1654,6 +1663,7 @@ function ProgramSalesScreen() {
             {rows.length === 0 && <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">لا نتائج</TableCell></TableRow>}
           </TableBody>
         </Table>
+        <PaginationBar lq={salesPager.lq} /> {/* v5.7 — unified pagination */}
       </CardContent></Card>
       <div className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2">✅ v5.2: اعتماد البيع مربوط بالمحاسبة بالكامل — التفعيل يُنشئ حساب المكتب في دفتر رحّال ويثبت قيد المبيعات، وتحصيل الأقساط يصدر سند قبض وقيداً تلقائياً. «المدفوع/المتبقي» أعلاه للعرض — المرجع المحاسبي هو كشف حساب المكتب (Office 360 ← كشف الحساب).</div>
       <EditTenantDialog tenant={editing} onOpenChange={v => { if (!v) setEditing(null) }} onSaved={() => { setEditing(null); load() }} />
@@ -1761,6 +1771,10 @@ function OrdersScreen({ salesOnly = false }) {
   }
   const stBadge = { new: 'bg-blue-100 text-blue-700', under_review: 'bg-indigo-100 text-indigo-700', needs_info: 'bg-purple-100 text-purple-700', awaiting_payment: 'bg-amber-100 text-amber-700', awaiting_approval: 'bg-orange-100 text-orange-700', approved: 'bg-emerald-100 text-emerald-700', rejected: 'bg-rose-100 text-rose-700', executed: 'bg-teal-100 text-teal-700', completed: 'bg-green-100 text-green-800', cancelled: 'bg-slate-200 text-slate-600' }
   const openCount = (rows || []).filter(o => ['new', 'under_review', 'needs_info', 'awaiting_payment', 'awaiting_approval'].includes(o.status)).length
+  // v5.7 — unified date filter + pagination (global rule)
+  const ordPf = usePeriodState()
+  const ordRows = filterByPeriod(rows || [], ordPf.applied, 'created_at')
+  const ordPager = useClientPager(ordRows)
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1781,12 +1795,13 @@ function OrdersScreen({ salesOnly = false }) {
         <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">مفتوحة</div><div className="text-xl font-black text-amber-600">{openCount}</div></CardContent></Card>
         <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">متأخرة</div><div className="text-xl font-black text-rose-600">{(rows || []).filter(o => o.late).length}</div></CardContent></Card>
       </div>
-      <Card><CardContent className="pt-4 overflow-x-auto">
+      <Card><CardContent className="pt-4 space-y-2">
+        <PeriodFilterBar lq={ordPf} compact /> {/* v5.7 — unified date filter */}
         <Table>
           <TableHeader><TableRow><TableHead>المرجع</TableHead><TableHead>النوع</TableHead><TableHead>المكتب</TableHead><TableHead>المبلغ</TableHead><TableHead>الحالة</TableHead><TableHead>الأولوية</TableHead><TableHead>المسؤول</TableHead><TableHead>الاستحقاق</TableHead><TableHead className="text-left">إجراءات</TableHead></TableRow></TableHeader>
           <TableBody>
             {rows === null ? <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">جاري التحميل...</TableCell></TableRow>
-              : rows.map(o => (
+              : ordPager.paged.map(o => (
                 <TableRow key={o.id} className={o.late ? 'bg-rose-50/60' : ''}>
                   <TableCell className="font-mono text-xs font-bold">{o.ref}</TableCell>
                   <TableCell className="text-xs">{o.type_label}<div className="text-[9px] text-slate-400">{o.category === 'sales' ? '🧾 مبيعات' : '🛠️ إداري'}{o.financial && ' · مالي'}</div></TableCell>
@@ -1816,6 +1831,7 @@ function OrdersScreen({ salesOnly = false }) {
             {rows?.length === 0 && <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">لا طلبات — أنشئ الأول</TableCell></TableRow>}
           </TableBody>
         </Table>
+        <PaginationBar lq={ordPager.lq} /> {/* v5.7 — unified pagination */}
       </CardContent></Card>
       {creating && <OrderCreateDialog types={types.types} tenants={tenants} salesOnly={salesOnly} onClose={() => setCreating(false)} onDone={() => { setCreating(false); load() }} />}
       {detail && (
@@ -1876,6 +1892,9 @@ function CommissionsLedger() {
   const [labels, setLabels] = useState({})
   const [rules, setRules] = useState([])
   const [salesOrders, setSalesOrders] = useState([])
+  // v5.7 — unified date filter + pagination (global rule)
+  const clPf = usePeriodState()
+  const clPager = useClientPager(filterByPeriod(rows || [], clPf.applied, 'created_at'))
   const load = () => {
     api('/admin/commissions-ledger').then(r => { setRows(r.rows || []); setLabels(r.status_labels || {}) }).catch(e => toast.error(e.message))
     api('/admin/commission-rules').then(r => setRules(r.rules || [])).catch(() => {})
@@ -1914,12 +1933,14 @@ function CommissionsLedger() {
         <Button size="sm" onClick={createComm}>➕ عمولة من بيع</Button>
       </CardHeader>
       <CardContent>
+        <PeriodFilterBar lq={clPf} compact /> {/* v5.7 — unified date filter */}
         {rows === null ? <div className="text-center text-slate-400 text-sm py-3">جاري التحميل...</div>
           : rows.length === 0 ? <div className="text-center text-slate-400 text-sm py-3">لا عمولات مسجلة — أنشئ الأولى من أمر بيع</div>
-            : <Table>
+            : <>
+            <Table>
               <TableHeader><TableRow><TableHead>الطلب</TableHead><TableHead>المكتب/الباقة</TableHead><TableHead>القاعدة (Snapshot)</TableHead><TableHead>المستفيد</TableHead><TableHead className="text-center">الأساس ← العمولة</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">إجراءات</TableHead></TableRow></TableHeader>
               <TableBody>
-                {rows.map(c => (
+                {clPager.paged.map(c => (
                   <TableRow key={c.id}>
                     <TableCell className="font-mono text-xs font-bold">{c.order_ref}</TableCell>
                     <TableCell className="text-xs">{c.tenant_name || '—'}<div className="text-[9px] text-slate-400">{c.plan_key || ''}</div></TableCell>
@@ -1939,7 +1960,9 @@ function CommissionsLedger() {
                   </TableRow>
                 ))}
               </TableBody>
-            </Table>}
+            </Table>
+            <PaginationBar lq={clPager.lq} /> {/* v5.7 — unified pagination */}
+            </>}
         <div className="text-[10px] text-slate-500 mt-2">المبلغ المعتمد/المدفوع لا يُعدل مباشرة — التصحيح بالعكس الموثق فقط · التكرار ممنوع بـUnique Index (طلب+قاعدة+مستفيد) · الدفع محجوب حتى اكتمال ربط سند الصرف</div>
       </CardContent>
     </Card>
@@ -2010,6 +2033,7 @@ function BoxesBanksHub() {
 // v4.4 — «توثيق المكاتب» tab (reuses the existing verification APIs — no new workflow)
 function OfficeVerificationsPanel() {
   const [rows, setRows] = useState(null)
+  const ovPager = useClientPager(rows || []) // v5.7 — unified pagination (global rule)
   const load = () => api('/admin/office-verifications').then(r => setRows(r.verifications || r.rows || r.requests || (Array.isArray(r) ? r : []))).catch(e => toast.error(e.message))
   useEffect(() => { load() }, [])
   const decide = async (r, decision) => {
@@ -2026,10 +2050,11 @@ function OfficeVerificationsPanel() {
       <CardContent>
         {rows === null ? <div className="text-center text-slate-400 text-sm py-4">جاري التحميل...</div>
           : rows.length === 0 ? <div className="text-center text-slate-400 text-sm py-4">لا طلبات توثيق</div>
-            : <Table>
+            : <>
+            <Table>
               <TableHeader><TableRow><TableHead>المكتب</TableHead><TableHead>المستندات</TableHead><TableHead>تاريخ التقديم</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">القرار</TableHead></TableRow></TableHeader>
               <TableBody>
-                {rows.map(r => (
+                {ovPager.paged.map(r => (
                   <TableRow key={r.tenant_id}>
                     <TableCell className="text-sm font-semibold">{r.office_name || r.tenant_id}</TableCell>
                     <TableCell className="text-xs">{(r.documents || []).length} مستند{r.reject_reason && <div className="text-[9px] text-rose-500">آخر رفض: {r.reject_reason}</div>}</TableCell>
@@ -2042,7 +2067,9 @@ function OfficeVerificationsPanel() {
                   </TableRow>
                 ))}
               </TableBody>
-            </Table>}
+            </Table>
+            <PaginationBar lq={ovPager.lq} /> {/* v5.7 — unified pagination */}
+            </>}
       </CardContent>
     </Card>
   )
@@ -2061,6 +2088,7 @@ function ResetRequestsPanel() {
   }
   const pending = (rows || []).filter(r => r.status === 'pending')
   const done = (rows || []).filter(r => r.status !== 'pending')
+  const rrPager = useClientPager([...pending, ...done]) // v5.7 — unified pagination (global rule)
   return (
     <div className="space-y-4">
       <Card className={pending.length ? 'border-orange-300' : ''}>
@@ -2068,10 +2096,11 @@ function ResetRequestsPanel() {
         <CardContent>
           {rows === null ? <div className="text-center text-slate-400 text-sm py-4">جاري التحميل...</div>
             : rows.length === 0 ? <div className="text-center text-slate-400 text-sm py-4">لا طلبات</div>
-              : <Table>
+              : <>
+              <Table>
                 <TableHeader><TableRow><TableHead>البريد</TableHead><TableHead>الاسم/المكتب</TableHead><TableHead>الهاتف</TableHead><TableHead>التاريخ</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">إجراءات</TableHead></TableRow></TableHeader>
                 <TableBody>
-                  {[...pending, ...done].map(r => (
+                  {rrPager.paged.map(r => (
                     <TableRow key={r.id} className={r.status === 'pending' ? 'bg-orange-50/50' : ''}>
                       <TableCell className="font-mono text-xs" dir="ltr">{r.email}</TableCell>
                       <TableCell className="text-xs">{r.user_name || '—'}<div className="text-[9px] text-slate-400">{r.tenant_name || ''}</div></TableCell>
@@ -2085,7 +2114,9 @@ function ResetRequestsPanel() {
                     </TableRow>
                   ))}
                 </TableBody>
-              </Table>}
+              </Table>
+              <PaginationBar lq={rrPager.lq} /> {/* v5.7 — unified pagination */}
+              </>}
         </CardContent>
       </Card>
       <AdminResetPasswordDialog req={target} onClose={() => setTarget(null)} onDone={load} />
@@ -5530,6 +5561,7 @@ function PartiesScreen({ kind }) {
     catch (e) { toast.error(e.message) }
   }
   const filtered = rows.filter(r => !q || r.name.includes(q) || (r.phone || '').includes(q))
+  const pager = useClientPager(filtered) // v5.7 — unified pagination (global rule)
   // Eligible parents: accounts of matching type (asset for clients, liability for suppliers) that are groups
   const parentOptions = accounts.filter(a => a.type === parentType && a.is_group)
   return (
@@ -5537,7 +5569,7 @@ function PartiesScreen({ kind }) {
       <TopBar title={cfg.title} subtitle={`إجمالي: ${rows.length}`}
         right={<div className="flex items-center gap-2"><div className="relative"><Search className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" /><Input placeholder="بحث..." value={q} onChange={e => setQ(e.target.value)} className="pr-9 w-64" /></div><Button onClick={() => { setEditing(null); setOpen(true) }} className={`gap-2 ${cfg.grad} text-white`}><Plus className="w-4 h-4" /> إضافة</Button></div>} />
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {filtered.map(r => (
+        {pager.paged.map(r => (
           <Card key={r.id} className="overflow-hidden hover:shadow-md transition-shadow">
             <div className={`h-1 ${cfg.grad}`} />
             <CardContent className="p-4">
@@ -5562,6 +5594,7 @@ function PartiesScreen({ kind }) {
         ))}
         {filtered.length === 0 && <div className="col-span-full text-center text-slate-400 py-10">لا توجد بيانات</div>}
       </div>
+      <PaginationBar lq={pager.lq} /> {/* v5.7 — unified pagination */}
       <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }}>
         <DialogContent dir="rtl" className="max-w-lg">
           <DialogHeader><DialogTitle>{editing ? `تعديل ${kind === 'clients' ? 'عميل' : 'مورد'}` : `إضافة ${kind === 'clients' ? 'عميل' : 'مورد'}`}</DialogTitle></DialogHeader>
@@ -6394,6 +6427,9 @@ function InterBranchScreen() {
   const [f, setF] = useState({ type: 'payment', counterparty: '', my_box_id: '', counterparty_box_id: '', amount: '', currency: 'YER', direction: 'out', description: '' })
   const newOp = () => setOpId((typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`)
   const isHQ = !user?.branch_id
+  // v5.7 — unified date filter + pagination (global rule, client-side over full list)
+  const ibPf = usePeriodState()
+  const ibPager = useClientPager(filterByPeriod(list, ibPf.applied, 'created_at'))
   const load = () => {
     api('/interbranch/counterparties').then(setCounterparties).catch(e => toast.error(e.message))
     api('/boxes').then(setMyBoxes).catch(() => {})
@@ -6531,12 +6567,14 @@ function InterBranchScreen() {
 
       <Card>
         <CardHeader><CardTitle className="text-sm">📜 سجل العمليات {!isHQ && <span className="text-[10px] font-normal text-slate-400">— عمليات نطاقك فقط</span>}</CardTitle></CardHeader>
-        <CardContent className="overflow-x-auto">
-          {list.length === 0 ? <div className="text-center text-slate-400 text-sm py-6">لا عمليات بينية بعد</div> : (
+        <CardContent className="space-y-2">
+          <PeriodFilterBar lq={ibPf} compact /> {/* v5.7 — unified date filter */}
+          {ibPager.total === 0 ? <div className="text-center text-slate-400 text-sm py-6">لا عمليات بينية بعد</div> : (
+            <>
             <Table>
               <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>من ← إلى</TableHead><TableHead className="text-center">المبلغ</TableHead><TableHead className="text-center">الحالة</TableHead><TableHead>بواسطة</TableHead></TableRow></TableHeader>
               <TableBody>
-                {list.map(t => (
+                {ibPager.paged.map(t => (
                   <TableRow key={t.id}>
                     <TableCell className="text-xs whitespace-nowrap">{fmtDate(t.created_at)}</TableCell>
                     <TableCell className="text-xs">{typeL(t.type)}</TableCell>
@@ -6548,6 +6586,8 @@ function InterBranchScreen() {
                 ))}
               </TableBody>
             </Table>
+            <PaginationBar lq={ibPager.lq} /> {/* v5.7 — unified pagination */}
+            </>
           )}
         </CardContent>
       </Card>
@@ -6585,6 +6625,9 @@ function QueryCenterScreen() {
   const [data, setData] = useState({ stats: {}, visas: [], tickets: [] })
   const [loading, setLoading] = useState(false)
   const [activeTab, setActiveTab] = useState('visas')
+  // v5.7 — unified pagination for both result grids (query has its own server-side date range)
+  const qcVisasPager = useClientPager(data.visas || [])
+  const qcTicketsPager = useClientPager(data.tickets || [])
 
   const runQuery = async () => {
     setLoading(true)
@@ -6747,13 +6790,13 @@ function QueryCenterScreen() {
           </div>
 
           {activeTab === 'visas' ? (
-            <div className="overflow-x-auto">
+            <div>
               <Table>
                 <TableHeader><TableRow><TableHead>#</TableHead><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>المستفيد</TableHead><TableHead>الجواز</TableHead><TableHead>العميل</TableHead><TableHead>المورد</TableHead><TableHead className="text-left">التكلفة</TableHead><TableHead className="text-left">المبيع</TableHead><TableHead className="text-left">العمولة</TableHead><TableHead>الدفع</TableHead></TableRow></TableHeader>
                 <TableBody>
-                  {(data.visas || []).map((v, i) => (
+                  {qcVisasPager.paged.map((v, i) => (
                     <TableRow key={v.id}>
-                      <TableCell className="text-xs text-slate-400">{i + 1}</TableCell>
+                      <TableCell className="text-xs text-slate-400">{(qcVisasPager.lq.page - 1) * qcVisasPager.lq.pageSize + i + 1}</TableCell>
                       <TableCell className="text-xs">{v.date}</TableCell>
                       <TableCell><Badge variant="outline" className="text-[10px]">{v.service_type}</Badge></TableCell>
                       <TableCell className="font-semibold">{v.beneficiary_name || v.passenger_name}</TableCell>
@@ -6769,15 +6812,16 @@ function QueryCenterScreen() {
                   {(data.visas || []).length === 0 && <TableRow><TableCell colSpan={11} className="text-center text-slate-400 py-6">لا توجد نتائج مطابقة</TableCell></TableRow>}
                 </TableBody>
               </Table>
+              <PaginationBar lq={qcVisasPager.lq} /> {/* v5.7 — unified pagination */}
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div>
               <Table>
                 <TableHeader><TableRow><TableHead>#</TableHead><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>المسافر</TableHead><TableHead>PNR</TableHead><TableHead>تاريخ السفر</TableHead><TableHead>العميل</TableHead><TableHead>المورد</TableHead><TableHead className="text-left">التكلفة</TableHead><TableHead className="text-left">المبيع</TableHead><TableHead className="text-left">العمولة</TableHead><TableHead>الدفع</TableHead></TableRow></TableHeader>
                 <TableBody>
-                  {(data.tickets || []).map((t, i) => (
+                  {qcTicketsPager.paged.map((t, i) => (
                     <TableRow key={t.id}>
-                      <TableCell className="text-xs text-slate-400">{i + 1}</TableCell>
+                      <TableCell className="text-xs text-slate-400">{(qcTicketsPager.lq.page - 1) * qcTicketsPager.lq.pageSize + i + 1}</TableCell>
                       <TableCell className="text-xs">{t.date}</TableCell>
                       <TableCell><Badge variant="outline" className="text-[10px]">{t.ticket_type || '—'}</Badge></TableCell>
                       <TableCell className="font-semibold">{t.passenger_name}</TableCell>
@@ -6794,6 +6838,7 @@ function QueryCenterScreen() {
                   {(data.tickets || []).length === 0 && <TableRow><TableCell colSpan={12} className="text-center text-slate-400 py-6">لا توجد نتائج مطابقة</TableCell></TableRow>}
                 </TableBody>
               </Table>
+              <PaginationBar lq={qcTicketsPager.lq} /> {/* v5.7 — unified pagination */}
             </div>
           )}
         </CardContent>
@@ -6814,6 +6859,7 @@ function VisaMonitorScreen() {
   const [importOpen, setImportOpen] = useState(false)
   const [countryDlgOpen, setCountryDlgOpen] = useState(false)
   const [exitRow, setExitRow] = useState(null)
+  const vmPager = useClientPager(rows) // v5.7 — unified pagination (global rule)
 
   const load = async () => {
     setLoading(true)
@@ -7007,11 +7053,11 @@ function VisaMonitorScreen() {
               <TableBody>
                 {loading && <TableRow><TableCell colSpan={18} className="text-center py-6"><Loader2 className="w-6 h-6 animate-spin inline" /></TableCell></TableRow>}
                 {!loading && rows.length === 0 && <TableRow><TableCell colSpan={18} className="text-center text-slate-400 py-6">لا توجد سجلات مطابقة</TableCell></TableRow>}
-                {!loading && rows.map((r, i) => {
+                {!loading && vmPager.paged.map((r, i) => {
                   const meta = MON_TRACK[r.track_status] || MON_TRACK.green
                   return (
                     <TableRow key={r.id} className={meta.row}>
-                      <TableCell className="text-xs text-slate-400">{i + 1}</TableCell>
+                      <TableCell className="text-xs text-slate-400">{(vmPager.lq.page - 1) * vmPager.lq.pageSize + i + 1}</TableCell>
                       <TableCell className="font-semibold text-xs">{r.traveler_name}</TableCell>
                       <TableCell className="text-xs font-mono font-bold">{r.passport_no}</TableCell>
                       <TableCell className="text-xs">{r.nationality || '—'}</TableCell>
@@ -7046,6 +7092,7 @@ function VisaMonitorScreen() {
               </TableBody>
             </Table>
           </div>
+          <div className="px-3"><PaginationBar lq={vmPager.lq} /></div> {/* v5.7 — unified pagination */}
         </CardContent>
       </Card>
 
@@ -7487,6 +7534,7 @@ function StatementReport() {
   const [from, setFrom] = useState(new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10))
   const [to, setTo] = useState(todayISO())
   const [scope, setScope] = useState('') // v5.4 — HQ scope
+  const stPager = useClientPager(data?.rows || []) // v5.7 — unified pagination (report keeps its own server-side period)
   useEffect(() => { api('/accounts/all').then(setAccounts).catch(() => {}) }, [])
   const selected = accounts.find(a => a.id === id)
   const list = accounts.filter(x => !q || x.name.includes(q) || (x.code || '').includes(q))
@@ -7765,10 +7813,11 @@ function StatementReport() {
       )}
 
       {data && data.currency_mode !== 'all_summary' && (
+        <>
         <Table>
           <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>البيان</TableHead><TableHead>مرجع</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
           <TableBody>
-            {(data.rows || []).map((r, i) => (
+            {stPager.paged.map((r, i) => (
               <TableRow key={i}>
                 <TableCell className="text-xs">{fmtDate(r.date)}</TableCell>
                 <TableCell className="text-xs">{r.description}</TableCell>
@@ -7782,6 +7831,8 @@ function StatementReport() {
             {(!data.rows || data.rows.length === 0) && <TableRow><TableCell colSpan={7} className="text-center text-slate-400 py-6">لا توجد حركات في هذا النطاق</TableCell></TableRow>}
           </TableBody>
         </Table>
+        <PaginationBar lq={stPager.lq} /> {/* v5.7 — unified pagination (totals stay computed on the FULL statement) */}
+        </>
       )}
     </CardContent></Card>
   )
@@ -7813,6 +7864,8 @@ function TrialBalanceReport() {
     }
     return [...g.values()]
   }, [data, mode])
+  const tbSumPager = useClientPager(mode === 'summary' ? (data?.rows || []) : []) // v5.7 — unified pagination
+  const tbGrpPager = useClientPager(mode === 'detailed' ? groups : [])            // v5.7 — unified pagination
   return (
     <Card><CardContent className="p-4">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
@@ -7834,13 +7887,17 @@ function TrialBalanceReport() {
       {data && (<>
         <div className={`grid gap-3 mb-4 ${shownCurrencies.length === 1 ? 'grid-cols-1 max-w-sm' : 'grid-cols-3'}`}>{shownCurrencies.map(c => (<Card key={c}><CardContent className="p-3"><div className="text-xs text-slate-500">{c}</div><div className="flex justify-between text-sm mt-1"><span>مدين:</span><span className="font-bold text-blue-700">{fmt(data.totals[c].d, c)}</span></div><div className="flex justify-between text-sm"><span>دائن:</span><span className="font-bold text-rose-700">{fmt(data.totals[c].c, c)}</span></div><div className="flex justify-between text-sm mt-1 pt-1 border-t"><span>الفرق:</span><span className={`font-bold ${Math.abs(data.totals[c].d - data.totals[c].c) < 0.01 ? 'text-emerald-600' : 'text-amber-600'}`}>{fmt(data.totals[c].d - data.totals[c].c, c)}</span></div></CardContent></Card>))}</div>
         {mode === 'summary' ? (
+          <>
           <Table><TableHeader><TableRow><TableHead>الكود</TableHead><TableHead>الحساب</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
-            <TableBody>{data.rows.map((r, i) => (<TableRow key={i}><TableCell className="font-mono text-xs">{r.code}</TableCell><TableCell className="font-bold">{r.name}</TableCell><TableCell>{r.currency}</TableCell><TableCell className="text-left text-blue-700">{fmt(r.debit, r.currency)}</TableCell><TableCell className="text-left text-rose-700">{fmt(r.credit, r.currency)}</TableCell><TableCell className={`text-left font-bold ${r.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(r.balance, r.currency)}</TableCell></TableRow>))}</TableBody>
+            <TableBody>{tbSumPager.paged.map((r, i) => (<TableRow key={i}><TableCell className="font-mono text-xs">{r.code}</TableCell><TableCell className="font-bold">{r.name}</TableCell><TableCell>{r.currency}</TableCell><TableCell className="text-left text-blue-700">{fmt(r.debit, r.currency)}</TableCell><TableCell className="text-left text-rose-700">{fmt(r.credit, r.currency)}</TableCell><TableCell className={`text-left font-bold ${r.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(r.balance, r.currency)}</TableCell></TableRow>))}</TableBody>
           </Table>
+          <PaginationBar lq={tbSumPager.lq} /> {/* v5.7 — unified pagination (totals from server, full set) */}
+          </>
         ) : (
+          <>
           <Table><TableHeader><TableRow><TableHead>الكود</TableHead><TableHead>الحساب / الطرف</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
             <TableBody>
-              {groups.map((g, gi) => (
+              {tbGrpPager.paged.map((g, gi) => (
                 <React.Fragment key={gi}>
                   <TableRow className="bg-slate-50">
                     <TableCell className="font-mono text-xs font-black">{g.code}</TableCell>
@@ -7864,6 +7921,8 @@ function TrialBalanceReport() {
               ))}
             </TableBody>
           </Table>
+          <PaginationBar lq={tbGrpPager.lq} /> {/* v5.7 — unified pagination (grouped accounts) */}
+          </>
         )}
       </>)}
     </CardContent></Card>
@@ -8491,6 +8550,7 @@ function AffiliateScreen() {
   const [editingPm, setEditingPm] = useState(null)
   const [cashoutOpen, setCashoutOpen] = useState(false)
   const [applyOpen, setApplyOpen] = useState(false)
+  const afPager = useClientPager(data?.withdrawals || []) // v5.7 — unified pagination
   const load = () => api('/affiliate').then(setData).catch(e => toast.error(e.message))
   useEffect(() => { load() }, [])
   const copyLink = async () => {
@@ -8649,7 +8709,7 @@ function AffiliateScreen() {
             <Table>
               <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>المبلغ</TableHead><TableHead>الطريقة</TableHead><TableHead>الحالة</TableHead><TableHead>ملاحظات</TableHead></TableRow></TableHeader>
               <TableBody>
-                {data.withdrawals.map(w => (
+                {afPager.paged.map(w => (
                   <TableRow key={w.id}>
                     <TableCell className="text-xs">{fmtDate(w.created_at)}</TableCell>
                     <TableCell className="font-bold">${(w.amount_usd || 0).toFixed(2)}</TableCell>
@@ -8666,6 +8726,7 @@ function AffiliateScreen() {
                 ))}
               </TableBody>
             </Table>
+            <PaginationBar lq={afPager.lq} /> {/* v5.7 — unified pagination */}
           </CardContent>
         </Card>
       )}
@@ -9208,7 +9269,7 @@ function PackageCompareDialog({ initialPeriod = 'all', onClose }) {
           ) : rows.length === 0 ? (
             <div className="text-center py-8 text-sm text-slate-400">لا توجد باكجات</div>
           ) : (
-            <div className="overflow-x-auto rounded-lg border">
+            <div className="table-scroll rounded-lg border">
               <table className="w-full text-sm">
                 <thead className="bg-slate-100 text-xs">
                   <tr>

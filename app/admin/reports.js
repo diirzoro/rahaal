@@ -16,7 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { toast } from 'sonner'
 import { RefreshCw, Lock, FileSpreadsheet, Printer, BarChart3, Ban } from 'lucide-react'
-import { api } from '../shared'
+import { api, useClientPager, PaginationBar } from '../shared'
 
 const dtt = (v) => (v ? new Date(v).toLocaleString('ar-EG') : '—')
 const isDateStr = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}/.test(v)
@@ -72,6 +72,7 @@ const AdminReportsCenter = () => {
 
   // main table extraction: prefer data.rows + data.columns
   const rows = data?.rows || []
+  const pager = useClientPager(rows)
   const columns = data?.columns
     ? data.columns.map(([k, l]) => ({ k, l }))
     : rows[0] ? Object.keys(rows[0]).filter(k => !['src', 'id'].includes(k) || rows[0].id).map(k => ({ k, l: k })) : []
@@ -180,13 +181,14 @@ const AdminReportsCenter = () => {
                         <Table>
                           <TableHeader><TableRow className="bg-slate-50">{columns.map(c => <TableHead key={c.k} className="text-right whitespace-nowrap text-[11px]">{c.l}</TableHead>)}</TableRow></TableHeader>
                           <TableBody>
-                            {rows.slice(0, 500).map((r, i) => (
+                            {pager.paged.map((r, i) => (
                               <TableRow key={i}>{columns.map(c => <TableCell key={c.k} className="text-[11px] max-w-[220px] truncate" title={String(cell(r[c.k]))}>{cell(r[c.k])}</TableCell>)}</TableRow>
                             ))}
                           </TableBody>
                         </Table>
                       </div>
-                      <div className="text-[10px] text-slate-400 mt-1">{rows.length} صف{rows.length > 500 ? ' — تُعرض أول 500 (التصدير يشمل الكل المحمّل)' : ''}</div>
+                      <PaginationBar lq={pager.lq} />
+                      <div className="text-[10px] text-slate-400 mt-1">{rows.length} صف (التصدير يشمل الكل المحمّل)</div>
                     </CardContent></Card>
                   ) : (
                     <Card><CardContent className="py-10 text-center text-slate-400 text-sm">لا صفوف — إن كانت البيانات غير متوفرة فهذا يُعرض كما هو، لا كصفر مضلل</CardContent></Card>
