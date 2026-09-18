@@ -12,7 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { toast } from 'sonner'
 import { Lock, RefreshCw, Activity, FileText } from 'lucide-react'
-import { api } from '../shared'
+import { api, useClientPager, PaginationBar } from '../shared'
 
 const n2 = (v) => (typeof v === 'number' ? v.toLocaleString('en-US') : v ?? '—')
 const dt = (v) => (v ? new Date(v).toLocaleDateString('ar-EG') : '—')
@@ -55,8 +55,10 @@ const AdminAccounting = () => {
 
   const d = data[tab]
   const ov = data.overview
+  const accPager = useClientPager(d?.rows || []) // v5.7 — unified pagination (per active tab list)
 
   const partyTable = (kind) => (
+    <>
     <Table>
       <TableHeader><TableRow>
         <TableHead>الاسم</TableHead><TableHead>المكتب</TableHead><TableHead className="text-center">كود</TableHead>
@@ -64,7 +66,7 @@ const AdminAccounting = () => {
         <TableHead>آخر حركة</TableHead><TableHead className="text-center">كشف</TableHead>
       </TableRow></TableHeader>
       <TableBody>
-        {(d?.rows || []).map(r => (
+        {accPager.paged.map(r => (
           <TableRow key={r.id}>
             <TableCell className="text-xs font-semibold">{r.name}{r.is_frozen ? ' 🧊' : ''}</TableCell>
             <TableCell className="text-xs">{r.tenant_name}</TableCell>
@@ -79,6 +81,8 @@ const AdminAccounting = () => {
         {d?.rows?.length === 0 && <TableRow><TableCell colSpan={8} className="text-center py-6 text-slate-400">لا نتائج</TableCell></TableRow>}
       </TableBody>
     </Table>
+    <PaginationBar lq={accPager.lq} /> {/* v5.7 — unified pagination */}
+    </>
   )
 
   return (
@@ -139,7 +143,7 @@ const AdminAccounting = () => {
           <Table>
             <TableHeader><TableRow><TableHead>الصندوق/البنك</TableHead><TableHead>المكتب</TableHead><TableHead className="text-center">النوع</TableHead><TableHead className="text-center">كود</TableHead><TableHead>الرصيد المخزن</TableHead><TableHead>داخل (قبض)</TableHead><TableHead>خارج (صرف)</TableHead><TableHead>آخر عملية</TableHead></TableRow></TableHeader>
             <TableBody>
-              {(d.rows || []).map(r => (
+              {accPager.paged.map(r => (
                 <TableRow key={r.id}>
                   <TableCell className="text-xs font-semibold">{r.name}</TableCell>
                   <TableCell className="text-xs">{r.tenant_name}</TableCell>
@@ -153,6 +157,7 @@ const AdminAccounting = () => {
               ))}
             </TableBody>
           </Table>
+          <PaginationBar lq={accPager.lq} /> {/* v5.7 — unified pagination */}
         </CardContent></Card>
       )}
 
@@ -161,7 +166,7 @@ const AdminAccounting = () => {
           <Table>
             <TableHeader><TableRow><TableHead>القيد</TableHead><TableHead>التاريخ</TableHead><TableHead>المكتب</TableHead><TableHead>البيان</TableHead><TableHead className="text-center">المرجع</TableHead><TableHead className="text-center">عملة</TableHead><TableHead className="text-center">مدين</TableHead><TableHead className="text-center">دائن</TableHead><TableHead className="text-center">فرق</TableHead><TableHead>منشئ</TableHead><TableHead></TableHead></TableRow></TableHeader>
             <TableBody>
-              {(d.rows || []).map(j => (
+              {accPager.paged.map(j => (
                 <TableRow key={j.id} className={Math.abs(j.diff) > 0.01 ? 'bg-rose-50' : ''}>
                   <TableCell className="text-[10px] font-mono" dir="ltr">{j.id.slice(0, 8)}</TableCell>
                   <TableCell className="text-xs">{dt(j.date)}</TableCell>
@@ -178,6 +183,7 @@ const AdminAccounting = () => {
               ))}
             </TableBody>
           </Table>
+          <PaginationBar lq={accPager.lq} /> {/* v5.7 — unified pagination */}
         </CardContent></Card>
       )}
 

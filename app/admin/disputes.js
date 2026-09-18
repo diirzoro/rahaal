@@ -18,7 +18,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { toast } from 'sonner'
 import { RefreshCw, Plus, Eye, Lock, Scale, Paperclip, Download, Trash2, Settings } from 'lucide-react'
-import { api } from '../shared'
+import { api, useClientPager, PaginationBar } from '../shared'
 
 const dtt = (v) => (v ? new Date(v).toLocaleString('ar-EG') : '—')
 const n2 = (v) => (typeof v === 'number' ? v.toLocaleString('en-US') : v ?? '—')
@@ -320,6 +320,7 @@ const AdminDisputesCenter = () => {
   const [cfg, setCfg] = useState(null)
   const [tenants, setTenants] = useState([])
   const [data, setData] = useState(null)
+  const dspPager = useClientPager(data?.rows || []) // v5.7 — unified pagination (global rule)
   const [f, setF] = useState({ tenant: '', status: '', priority: '', type: '', q: '', overdue: false })
   const [dlg, setDlg] = useState(null)
 
@@ -382,7 +383,7 @@ const AdminDisputesCenter = () => {
                 <TableBody>
                   {!data ? <TableRow><TableCell colSpan={10} className="text-center py-8 text-slate-400">جارِ التحميل...</TableCell></TableRow>
                     : data.rows.length === 0 ? <TableRow><TableCell colSpan={10} className="text-center py-8 text-slate-400">لا نزاعات مطابقة</TableCell></TableRow>
-                      : data.rows.map(r => (
+                      : dspPager.paged.map(r => (
                         <TableRow key={r.id} className={r.overdue ? 'bg-rose-50/40' : ''}>
                           <TableCell><div className="text-xs font-bold">{(cfg?.types || []).find(t => t.key === r.type)?.label || r.type}</div><div className="text-[10px] text-slate-400 font-mono">{r.id.slice(0, 8)}</div></TableCell>
                           <TableCell className="text-xs">{r.tenant_name}</TableCell>
@@ -399,6 +400,7 @@ const AdminDisputesCenter = () => {
                 </TableBody>
               </Table>
             </div>
+            <PaginationBar lq={dspPager.lq} /> {/* v5.7 — unified pagination */}
           </CardContent></Card>
         </>
       )}

@@ -20,6 +20,15 @@ Next.js 15 monolith + MongoDB. Arabic RTL ERP for travel offices: tickets, visas
 - Meraaj E2E 15/15 test (blocked on Meraaj team configuring temp secret)
 - Package Comparison feature (deferred by user)
 
+## v5.6 (completed) — Financial Hardening & Accounting UX consolidated round
+- P0 GATE PASSED: Double Balance Effect fix fully re-verified with evidence matrices (QA60 25/25, QA62 38/40→D/E 14/14, QA63 F1 10/10). NEW root cause found & fixed during gate: single DELETE + bulk-delete handlers used inline duplicated reversal MISSING partner commission-share reversal → unified both on central reverseTransactionEffects. v5.5.3: edit-lock release is ownership-bound by timestamp (stalled editor can't delete a takeover's lock).
+- Journal entries: server-side date filters (today/week/month/all/range, biz TZ UTC+3, week starts Saturday) + advanced search (description/client/supplier/debit_account/credit_account/amount × contains/not_contains/equals).
+- Trial balance: mode=summary|detailed + currency=YER|SAR|USD independent filter (no netting). FE toggles + grouped detailed view.
+- FX: same-account lock mode (normal exchange, counterpart auto-locked read-only) + explicit bilateral exception; editable Total with reverse effective-rate (total÷amount @6dp) — doc=JE=balances always same total; equity/COA accounts now first-class in FX account mode (FE sent code but BE looked up uuid — fixed both: resolveAccountRef accepts uuid-or-code + fail-fast leaf/active guard before side effects).
+- WhatsApp collection message on client/supplier cards: dynamic by NET balance direction only (never classification), respectful neutral Arabic, prefilled draft only.
+- Read-only historical drift detector: /app/scripts/detect_balance_drift_readonly.js (NO writes; local scan found 9 drifted party-currency pairs incl. partner-share signature). NO backfill executed (user constraint).
+- CONSTRAINTS: No deploy, no GitHub push, no migration/backfill — Taher handles deployment after review.
+
 ## v3.54 (completed) — Meraaj booking notification chime
 - playMeraajChime() module helper (Web Audio API, two-tone 880Hz→1174Hz sine chime, ~0.5s, no external file, cached AudioContext, silent fallback if autoplay blocked).
 - Poll logic refined with meraajInitRef: first poll after login → reminder toast only (NO sound); subsequent count INCREASE → toast + chime. Verified: audio API path ok, 0 console errors.
@@ -343,3 +352,20 @@ See /app/memory/test_credentials.md
 - Frontend: ActivateSubscriptionDialog (SSOT pricing display, editable account name, parent 1103 read-only, op_id idempotency) replaced ALL 3 confirm-payment buttons. InstallmentsDialog quota-based + box/bank required. Office 360: statement tab + owner WhatsApp/Call buttons. TenantApp Settings: owner branches tab (/tenant/branches, backend-driven limits).
 - Old installment offices left untouched (no bulk quota raise, no auto-unlimited). No migrations/backfills.
 - NEXT: user QA; then separate extended Enterprise branch-accounting QA (user-led; no design assumptions).
+
+## v5.3 Phase A — Branch Accounting Isolation (Safe Hardening) DONE
+- Branch scope from SESSION ONLY (users.branch_id → B, btf filter). Lists scoped: clients/suppliers/boxes/vouchers/JEs/tickets/visas/services + accounts/search picker (COA stays office-shared). Voucher POST 403 on cross-branch box/party. IDOR guards on unified/bulk/manual-JE edits. branch_id stamped (null=HQ) on ALL new financial docs via creators' opts.branchId. Reports branch-scoped (statement+party guard, trial-balance, income). /auth/me returns branch; Sidebar shows "الفرع الحالي" badge. Income-statement FIXED (services bucket was missing from UI details). limitLbl() shows "غير محدود" instead of 9999/null.
+- Security tests: 13/13 verified (10 explicit + 3 via server logs), QA53 data cleaned.
+- BLOCKED (approval needed): legacy NULL→HQ backfill policy; unique/compound indexes (tenant_id+branch_id); Inter-Branch engine (Phase B design proposed); Balance Sheet (gap analysis in report); packages module branch scoping.
+
+## v5.4 Phase B — Inter-Branch Accounting DONE (13/13 tests)
+- COA: group 1104 «جاري الفروع» + one jari leaf per scope (interbranch_scope idempotent link). Transfers = 2 balanced JEs via central gate (src book: Dr jari[dst]/Cr src box @branch_id=src; dst book: Dr dst box/Cr jari[src] @branch_id=dst). NO P&L lines; 1104 nets to 0/currency; residual = reconciliation exception. Types: receipt/payment/journal (direction). Safe picker DTO (name+code only). Opt-in RBAC mod_interbranch===true + per-op keys (in DEFAULT_STAFF_PERMISSIONS whitelist). Triple idempotency (op_id registry + JE keys + race guard); jePhase-safe compensation (uncertain → never auto-reverse). interbranch_transactions registry auditable. HQ report scope ?branch=<id>|hq|all (trial/income/statement/JEs/vouchers). Package bookings stamped+scoped; unified DELETE IDOR guard. UI: InterBranchScreen + BranchScopePicker in reports + perm group.
+- Fixed during testing: JE line field account→account_code; perm whitelist.
+- Deferred (approval): indexes proposal, Balance Sheet, clients/suppliers shared-identity model.
+
+## v5.5 — Double Balance Effect on EDIT — FIXED (3 root causes + edit mutex)
+- RC1 (v5.3 regression): inline // comment swallowed doc fields in all 5 creators (vouchers lost type+date → reversal took payment branch on receipts; tickets lost currency+date → edit threw; visas service_type; fx type). Restored with /* */ comments.
+- RC2 (pre-existing v3.x): payment voucher reverse/restore PARTY signs inverted → every payment edit/DELETE doubled supplier/client cached balance (THE production symptom: box correct, card doubled). Corrected to exact negation.
+- RC3: bulk-edit newBody dropped commission_partner_*/share fields → partner share silently deleted. Preserved.
+- v5.5.2 edit mutex: edit_locks collection, _id-unique lock doc (survives delete→recreate), insertOne acquire + 60s stale takeover + finally release; JE cleanup via deleteMany(ref_id) heals orphan duplicates. 10/10 concurrent stress PASSED.
+- HISTORICAL DATA (Test env, NOT touched per policy): docs created after v5.3 deploy miss the swallowed fields; parties whose payment vouchers were edited/deleted (any time since v3.x) carry doubled cached balances (e.g. the 5,178,972 card). Decision on historical correction pending user.

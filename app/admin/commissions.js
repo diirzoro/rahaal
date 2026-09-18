@@ -138,6 +138,9 @@ const AdminCommissionsCenter = () => {
   const [f, setF] = useState({ tenant: '', currency: '', status: '', kind: 'all', q: '', from: '', to: '' })
   const [rows, setRows] = useState(null)
   const [skip, setSkip] = useState(0)
+  // v5.7 — unified rows-per-page (same options + persisted key as the shared PaginationBar)
+  const [ps, setPs] = useState(() => { try { const v = parseInt(localStorage.getItem('rahaal_ps')); return [20, 50, 100, 200, 1000].includes(v) ? v : 50 } catch { return 50 } })
+  const setPageSize = (n) => { setPs(n); setSkip(0); try { localStorage.setItem('rahaal_ps', String(n)) } catch { } }
   const [rules, setRules] = useState(null)
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -149,7 +152,7 @@ const AdminCommissionsCenter = () => {
   const load = async () => {
     setLoading(true)
     try {
-      const o = { src, ...f, skip, limit: 50 }
+      const o = { src, ...f, skip, limit: ps }
       if (src !== 'partner') delete o.kind
       const qs = Object.entries(o).filter(([, v]) => v !== '' && v !== undefined && v !== 'all').map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&')
       const r = await api(`/admin/commissions/list?${qs}${o.kind === 'all' && src === 'partner' ? '&kind=all' : ''}`)
@@ -157,7 +160,7 @@ const AdminCommissionsCenter = () => {
     } catch (e) { toast.error(e.message) }
     setLoading(false)
   }
-  useEffect(() => { if (tab === 'list') load() }, [tab, src, skip])
+  useEffect(() => { if (tab === 'list') load() }, [tab, src, skip, ps])
 
   const Sel = ({ v, set, items, ph, w = 'w-32' }) => (
     <Select value={v || 'all'} onValueChange={x => set(x === 'all' ? '' : x)}>
@@ -279,9 +282,15 @@ const AdminCommissionsCenter = () => {
               </Table>
             </div>
             <div className="flex items-center justify-between mt-2 text-xs text-slate-500">
-              <Button size="sm" variant="outline" disabled={skip === 0} onClick={() => setSkip(Math.max(0, skip - 50))} className="gap-1"><ChevronRight className="w-3.5 h-3.5" /> السابق</Button>
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="outline" disabled={skip === 0} onClick={() => setSkip(Math.max(0, skip - ps))} className="gap-1"><ChevronRight className="w-3.5 h-3.5" /> السابق</Button>
+                <span className="text-[11px] font-bold">سجلات/صفحة:</span>
+                <select value={ps} onChange={e => setPageSize(parseInt(e.target.value))} className="h-7 text-xs border rounded-md px-1.5 bg-white font-bold">
+                  {[20, 50, 100, 200, 1000].map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
               <span>عرض من {skip + 1}</span>
-              <Button size="sm" variant="outline" disabled={(rows?.length || 0) < 50} onClick={() => setSkip(skip + 50)} className="gap-1">التالي <ChevronLeft className="w-3.5 h-3.5" /></Button>
+              <Button size="sm" variant="outline" disabled={(rows?.length || 0) < ps} onClick={() => setSkip(skip + ps)} className="gap-1">التالي <ChevronLeft className="w-3.5 h-3.5" /></Button>
             </div>
           </CardContent></Card>
         </div>

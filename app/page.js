@@ -31,7 +31,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 // v3.87.5 — shared primitives + heavy screens extracted verbatim (structural move only)
-import { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_MAX_MB, DOC_MAX_FILE_BYTES, DOC_BATCH_MAX_MB, DOC_BATCH_MAX_BYTES, validateDocBatch, todayISO, api, AuthCtx, useAuth, Field, TopBar, ConfirmHost, askConfirm } from './shared'
+import { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_MAX_MB, DOC_MAX_FILE_BYTES, DOC_BATCH_MAX_MB, DOC_BATCH_MAX_BYTES, validateDocBatch, todayISO, api, AuthCtx, useAuth, Field, TopBar, ConfirmHost, askConfirm, useListQuery, PeriodFilterBar, PaginationBar, XScroll, useClientPager, filterByPeriod, usePeriodState } from './shared'
 // v4.9 — AdminApp shell removed: TenantApp is THE single authoritative dashboard (see App root)
 // v4.1 — MOVED AS-IS from the v3.91–3.97 admin shell into TenantApp «إدارة رحّال»
 // (transfer only — zero new sections, same components, same /api/admin/* endpoints):
@@ -96,6 +96,9 @@ class ErrorBoundary extends React.Component {
 // ================================================================
 
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' }) : '—'
+// v5.3 — point 24: display-only "unlimited" label (null / 0 / legacy 9999-style caps).
+// Real enforcement is untouched — this is pure UI formatting.
+const limitLbl = (v) => (v === null || v === undefined || Number(v) === 0 || Number(v) >= 9999) ? 'غير محدود' : v
 // v3.77 — documents upload helpers (base64 transport, MIME whitelist mirrors the server)
 // v3.87 — semantic COA anchors (mirror of the backend COA map — single source per side)
 const COA_FE = { CASHBOXES: '1101', BANKS: '1102', CLIENTS: '1103', SUPPLIERS: '2101', CAPITAL: '3101', RETAINED_EARNINGS: '3102', OPENING_EQUITY: '3103' }
@@ -138,6 +141,28 @@ function openWhatsApp(phone, message = '') {
   window.open(url, '_blank', 'noopener,noreferrer')
   return true
 }
+// v5.6 — Dynamic, respectful collection (مطالبة) message for counterparty cards.
+// DECISION IS BASED ONLY ON THE NET BALANCE AND ITS DIRECTION — never on the
+// client/supplier classification (the same party can both buy from us and sell to us).
+// clients collection: balance > 0 ⇒ counterparty owes the office.
+// suppliers collection: balance < 0 ⇒ counterparty owes the office.
+// If the office owes THEM or balance is zero ⇒ NO payment demand is generated.
+// Neutral wording (السادة/ ... المحترمون) — the party may be a person, agency, office or company.
+// The message opens as a PREFILLED DRAFT only; the user reviews then sends manually.
+function waCollectionMessage(r, kind) {
+  const balances = r.balances || {}
+  const owedToUs = []
+  for (const [cur, v0] of Object.entries(balances)) {
+    const v = Number(v0) || 0
+    if (!v || !['USD', 'SAR', 'YER'].includes(cur)) continue
+    const owes = kind === 'clients' ? v > 0 : v < 0
+    if (owes) owedToUs.push(`${Math.abs(v).toLocaleString('en-US')} ${cur}`)
+  }
+  if (owedToUs.length === 0) {
+    return `السلام عليكم ورحمة الله وبركاته،\nالسادة/ ${r.name} المحترمون،\nنشكر لكم حسن تعاملكم معنا، ونسعد بخدمتكم دائماً.\nوتقبلوا خالص التحية والتقدير.`
+  }
+  return `السلام عليكم ورحمة الله وبركاته،\nالسادة/ ${r.name} المحترمون،\nنأمل منكم التكرم بتسوية الرصيد المستحق عليكم والبالغ ${owedToUs.join(' و ')}.\nشاكرين لكم حسن تعاونكم وتقبلوا خالص التحية والتقدير.`
+}
 // Smart templates for tickets / visas / services
 function tplTicket(t) {
   const name = t.passenger_name || t.client_name || 'العميل'
@@ -173,12 +198,8 @@ function RahaalLogo({ size = 'md', variant = 'dark' }) {
   return (
     <div className="inline-flex items-center gap-3">
       <div className="relative" style={{ width: s.box, height: s.box }}>
-        <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-[#1e3a8a] via-[#1e40af] to-[#0f1e4d] shadow-xl shadow-blue-900/40 flex items-center justify-center">
-          <svg viewBox="0 0 64 64" fill="none" style={{ width: s.box * 0.6, height: s.box * 0.6 }} xmlns="http://www.w3.org/2000/svg">
-            <path d="M8 40 L28 36 L40 20 L50 20 L44 34 L54 32 L58 40 L44 42 L38 50 L30 50 L34 42 L14 44 Z" fill="#f97316" stroke="#fff" strokeWidth="1.5" strokeLinejoin="round"/>
-            <circle cx="52" cy="16" r="3" fill="#f97316" />
-          </svg>
-        </div>
+        {/* v5.7 — official Rahaal brand asset (replaces the hand-drawn SVG) */}
+        <img src="/rahaal-icon.png" alt="شعار رحّال" className="absolute inset-0 w-full h-full rounded-2xl shadow-xl shadow-blue-900/40 object-cover" />
         <div className="absolute -bottom-1 -left-1 w-4 h-4 rounded-full bg-[#f97316] border-2 border-white shadow" />
       </div>
       <div className="text-right leading-none">
@@ -544,7 +565,7 @@ function RahaalAdminHome({ setTab }) {
                   <TableCell className="font-semibold text-sm">{t.name}<div className="text-[10px] text-slate-400 font-mono">{t.slug}</div></TableCell>
                   <TableCell><Badge variant="outline">{t.subscription || 'trial'} • {t.plan_tier || 'standard'}</Badge></TableCell>
                   <TableCell>{t.status === 'suspended' ? <Badge className="bg-rose-100 text-rose-700">⏸️ موقوف</Badge> : <Badge className="bg-emerald-100 text-emerald-700">✅ نشط</Badge>}</TableCell>
-                  <TableCell className="text-center text-sm">{t.users_count}/{t.max_users}</TableCell>
+                  <TableCell className="text-center text-sm">{t.users_count} / {limitLbl(t.max_users)}</TableCell>
                   <TableCell className="text-xs">{fmtDate(t.created_at)}</TableCell>
                 </TableRow>
               ))}
@@ -589,6 +610,10 @@ function SuperAdminPanel({ embedded = false }) {
   }
   useEffect(() => { load() }, [])
   const pendingResets = resetReqs.filter(r => r.status === 'pending')
+  // v5.7 — unified pagination (global rule): main tenants table + installments follow-up
+  const saTenantsAll = (data?.tenants || []).filter(t => !embedded || (!t.is_platform_org && (!tq.trim() || `${t.name} ${t.slug || ''}`.includes(tq.trim()))))
+  const saPager = useClientPager(saTenantsAll)
+  const instPager = useClientPager(instRows)
   const rejectReset = async (r) => {
     if (!(await askConfirm({ title: 'رفض طلب استعادة كلمة المرور', desc: `رفض طلب ${r.email}؟`, icon: '🚫', variant: 'danger', confirmLabel: 'رفض الطلب' }))) return
     try { await api(`/admin/password-reset-requests/${r.id}`, { method: 'PATCH', body: { action: 'reject' } }); toast.success('تم الرفض'); load() } catch (e) { toast.error(e.message) }
@@ -687,7 +712,7 @@ function SuperAdminPanel({ embedded = false }) {
                   <TableHead className="text-center">إدارة</TableHead>
                 </TableRow></TableHeader>
                 <TableBody>
-                  {instRows.map(r => (
+                  {instPager.paged.map(r => (
                     <TableRow key={r.id} className={r.overdue ? 'bg-rose-50' : ''}>
                       <TableCell className="font-semibold text-sm">{r.name}</TableCell>
                       <TableCell className="text-xs">{r.plan_tier === 'silver' ? '🥈 سيلفر' : r.plan_tier === 'gold' ? '🥇 جولد' : r.plan_tier === 'enterprise' ? '🏢 إنتربرايز' : '—'}</TableCell>
@@ -708,6 +733,7 @@ function SuperAdminPanel({ embedded = false }) {
                   ))}
                 </TableBody>
               </Table>
+              <PaginationBar lq={instPager.lq} /> {/* v5.7 — unified pagination */}
             </CardContent>
           </Card>
         )}
@@ -736,7 +762,7 @@ function SuperAdminPanel({ embedded = false }) {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(data?.tenants || []).filter(t => !embedded || (!t.is_platform_org && (!tq.trim() || `${t.name} ${t.slug || ''}`.includes(tq.trim())))).map(t => {
+                {saPager.paged.map(t => {
                   const q = t.journal_quota || { used: 0, limit: 500 }
                   const pct = q.limit ? (q.used / q.limit) * 100 : 0
                   return (
@@ -753,7 +779,7 @@ function SuperAdminPanel({ embedded = false }) {
                         {t.referred_by && <div className="text-[10px] text-slate-500 mt-0.5">مُحال بواسطة: <span className="font-mono">{t.referred_by_name || t.referred_by.slice(0,8)}...</span></div>}
                         {t.activation_confirmed && <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 text-[10px] mt-1">✅ دفع مؤكد</Badge>}
                       </TableCell>
-                      <TableCell className="text-center">{t.users_count}/{t.max_users}</TableCell>
+                      <TableCell className="text-center">{t.users_count} / {limitLbl(t.max_users)}</TableCell>
                       <TableCell className="text-center">
                         <div className="flex flex-col items-center gap-1">
                           <div className={`text-xs font-bold ${pct >= 100 ? 'text-rose-600' : pct >= 90 ? 'text-amber-600' : 'text-slate-700'}`}>{q.used} / {q.limit}</div>
@@ -795,6 +821,7 @@ function SuperAdminPanel({ embedded = false }) {
                 )}
               </TableBody>
             </Table>
+            <PaginationBar lq={saPager.lq} /> {/* v5.7 — unified pagination */}
           </CardContent>
         </Card>}
 
@@ -1432,6 +1459,7 @@ function PlatformSubscriptionsScreen() {
   const insById = {}
   for (const r of instRows) insById[r.id] = r
   const tenants = (data?.tenants || []).filter(t => !t.is_platform_org && (!q.trim() || `${t.name} ${t.slug || ''}`.includes(q.trim())))
+  const subsPager = useClientPager(tenants) // v5.7 — unified pagination (global rule)
   const trialCount = tenants.filter(t => (t.subscription || 'trial') === 'trial').length
   const paidCount = tenants.filter(t => t.subscription === 'paid' || t.activation_confirmed).length
   const overdueCount = instRows.filter(r => r.overdue).length
@@ -1471,7 +1499,7 @@ function PlatformSubscriptionsScreen() {
               <TableHead className="text-left">إجراءات</TableHead>
             </TableRow></TableHeader>
             <TableBody>
-              {tenants.map(t => {
+              {subsPager.paged.map(t => {
                 const qta = t.journal_quota || { used: 0, limit: 0 }
                 const ins = insById[t.id]
                 const isPaid = t.subscription === 'paid' || t.activation_confirmed
@@ -1520,6 +1548,7 @@ function PlatformSubscriptionsScreen() {
               {tenants.length === 0 && <TableRow><TableCell colSpan={7} className="text-center py-8 text-slate-400">لا توجد مكاتب</TableCell></TableRow>}
             </TableBody>
           </Table>
+          <PaginationBar lq={subsPager.lq} /> {/* v5.7 — unified pagination */}
         </CardContent>
       </Card>
       <InstallmentsDialog row={instTarget} onClose={() => setInstTarget(null)} onChanged={load} />
@@ -1575,6 +1604,7 @@ function ProgramSalesScreen() {
     .filter(r => (fPlan === 'all' || r.t.plan_tier === fPlan))
     .filter(r => (fStatus === 'all' || r.status === fStatus))
     .filter(r => !q.trim() || `${r.t.name} ${r.t.slug || ''}`.includes(q.trim()))
+  const salesPager = useClientPager(rows) // v5.7 — unified pagination (global rule)
   // v5.2 — sale approval goes EXCLUSIVELY through ActivateSubscriptionDialog (accounting-backed)
   const exportCSV = () => {
     const head = ['المكتب', 'الباقة', 'الحالة', 'السعر الأساسي', 'الخصم%', 'السعر النهائي (مرجعي)', 'سعر الاشتراك المسجل', 'العملة', 'طريقة الدفع', 'المدفوع', 'المتبقي', 'بداية التفعيل', 'انتهاء الاشتراك']
@@ -1610,7 +1640,7 @@ function ProgramSalesScreen() {
             <TableHead className="text-center">المدفوع / المتبقي</TableHead><TableHead>الدفع</TableHead><TableHead>البداية → الانتهاء</TableHead><TableHead className="text-left">إجراءات</TableHead>
           </TableRow></TableHeader>
           <TableBody>
-            {rows.map(({ t, p, base, final, ins, paidAmt, remaining, status, currency }) => {
+            {salesPager.paged.map(({ t, p, base, final, ins, paidAmt, remaining, status, currency }) => {
               const cur = currency === 'USD' ? '$' : `${currency} `
               return (
                 <TableRow key={t.id}>
@@ -1633,6 +1663,7 @@ function ProgramSalesScreen() {
             {rows.length === 0 && <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">لا نتائج</TableCell></TableRow>}
           </TableBody>
         </Table>
+        <PaginationBar lq={salesPager.lq} /> {/* v5.7 — unified pagination */}
       </CardContent></Card>
       <div className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded p-2">✅ v5.2: اعتماد البيع مربوط بالمحاسبة بالكامل — التفعيل يُنشئ حساب المكتب في دفتر رحّال ويثبت قيد المبيعات، وتحصيل الأقساط يصدر سند قبض وقيداً تلقائياً. «المدفوع/المتبقي» أعلاه للعرض — المرجع المحاسبي هو كشف حساب المكتب (Office 360 ← كشف الحساب).</div>
       <EditTenantDialog tenant={editing} onOpenChange={v => { if (!v) setEditing(null) }} onSaved={() => { setEditing(null); load() }} />
@@ -1740,6 +1771,10 @@ function OrdersScreen({ salesOnly = false }) {
   }
   const stBadge = { new: 'bg-blue-100 text-blue-700', under_review: 'bg-indigo-100 text-indigo-700', needs_info: 'bg-purple-100 text-purple-700', awaiting_payment: 'bg-amber-100 text-amber-700', awaiting_approval: 'bg-orange-100 text-orange-700', approved: 'bg-emerald-100 text-emerald-700', rejected: 'bg-rose-100 text-rose-700', executed: 'bg-teal-100 text-teal-700', completed: 'bg-green-100 text-green-800', cancelled: 'bg-slate-200 text-slate-600' }
   const openCount = (rows || []).filter(o => ['new', 'under_review', 'needs_info', 'awaiting_payment', 'awaiting_approval'].includes(o.status)).length
+  // v5.7 — unified date filter + pagination (global rule)
+  const ordPf = usePeriodState()
+  const ordRows = filterByPeriod(rows || [], ordPf.applied, 'created_at')
+  const ordPager = useClientPager(ordRows)
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1760,12 +1795,13 @@ function OrdersScreen({ salesOnly = false }) {
         <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">مفتوحة</div><div className="text-xl font-black text-amber-600">{openCount}</div></CardContent></Card>
         <Card><CardContent className="p-3 text-center"><div className="text-[11px] text-slate-500">متأخرة</div><div className="text-xl font-black text-rose-600">{(rows || []).filter(o => o.late).length}</div></CardContent></Card>
       </div>
-      <Card><CardContent className="pt-4 overflow-x-auto">
+      <Card><CardContent className="pt-4 space-y-2">
+        <PeriodFilterBar lq={ordPf} compact /> {/* v5.7 — unified date filter */}
         <Table>
           <TableHeader><TableRow><TableHead>المرجع</TableHead><TableHead>النوع</TableHead><TableHead>المكتب</TableHead><TableHead>المبلغ</TableHead><TableHead>الحالة</TableHead><TableHead>الأولوية</TableHead><TableHead>المسؤول</TableHead><TableHead>الاستحقاق</TableHead><TableHead className="text-left">إجراءات</TableHead></TableRow></TableHeader>
           <TableBody>
             {rows === null ? <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">جاري التحميل...</TableCell></TableRow>
-              : rows.map(o => (
+              : ordPager.paged.map(o => (
                 <TableRow key={o.id} className={o.late ? 'bg-rose-50/60' : ''}>
                   <TableCell className="font-mono text-xs font-bold">{o.ref}</TableCell>
                   <TableCell className="text-xs">{o.type_label}<div className="text-[9px] text-slate-400">{o.category === 'sales' ? '🧾 مبيعات' : '🛠️ إداري'}{o.financial && ' · مالي'}</div></TableCell>
@@ -1795,6 +1831,7 @@ function OrdersScreen({ salesOnly = false }) {
             {rows?.length === 0 && <TableRow><TableCell colSpan={9} className="text-center py-8 text-slate-400">لا طلبات — أنشئ الأول</TableCell></TableRow>}
           </TableBody>
         </Table>
+        <PaginationBar lq={ordPager.lq} /> {/* v5.7 — unified pagination */}
       </CardContent></Card>
       {creating && <OrderCreateDialog types={types.types} tenants={tenants} salesOnly={salesOnly} onClose={() => setCreating(false)} onDone={() => { setCreating(false); load() }} />}
       {detail && (
@@ -1855,6 +1892,9 @@ function CommissionsLedger() {
   const [labels, setLabels] = useState({})
   const [rules, setRules] = useState([])
   const [salesOrders, setSalesOrders] = useState([])
+  // v5.7 — unified date filter + pagination (global rule)
+  const clPf = usePeriodState()
+  const clPager = useClientPager(filterByPeriod(rows || [], clPf.applied, 'created_at'))
   const load = () => {
     api('/admin/commissions-ledger').then(r => { setRows(r.rows || []); setLabels(r.status_labels || {}) }).catch(e => toast.error(e.message))
     api('/admin/commission-rules').then(r => setRules(r.rules || [])).catch(() => {})
@@ -1893,12 +1933,14 @@ function CommissionsLedger() {
         <Button size="sm" onClick={createComm}>➕ عمولة من بيع</Button>
       </CardHeader>
       <CardContent>
+        <PeriodFilterBar lq={clPf} compact /> {/* v5.7 — unified date filter */}
         {rows === null ? <div className="text-center text-slate-400 text-sm py-3">جاري التحميل...</div>
           : rows.length === 0 ? <div className="text-center text-slate-400 text-sm py-3">لا عمولات مسجلة — أنشئ الأولى من أمر بيع</div>
-            : <Table>
+            : <>
+            <Table>
               <TableHeader><TableRow><TableHead>الطلب</TableHead><TableHead>المكتب/الباقة</TableHead><TableHead>القاعدة (Snapshot)</TableHead><TableHead>المستفيد</TableHead><TableHead className="text-center">الأساس ← العمولة</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">إجراءات</TableHead></TableRow></TableHeader>
               <TableBody>
-                {rows.map(c => (
+                {clPager.paged.map(c => (
                   <TableRow key={c.id}>
                     <TableCell className="font-mono text-xs font-bold">{c.order_ref}</TableCell>
                     <TableCell className="text-xs">{c.tenant_name || '—'}<div className="text-[9px] text-slate-400">{c.plan_key || ''}</div></TableCell>
@@ -1918,7 +1960,9 @@ function CommissionsLedger() {
                   </TableRow>
                 ))}
               </TableBody>
-            </Table>}
+            </Table>
+            <PaginationBar lq={clPager.lq} /> {/* v5.7 — unified pagination */}
+            </>}
         <div className="text-[10px] text-slate-500 mt-2">المبلغ المعتمد/المدفوع لا يُعدل مباشرة — التصحيح بالعكس الموثق فقط · التكرار ممنوع بـUnique Index (طلب+قاعدة+مستفيد) · الدفع محجوب حتى اكتمال ربط سند الصرف</div>
       </CardContent>
     </Card>
@@ -1989,6 +2033,7 @@ function BoxesBanksHub() {
 // v4.4 — «توثيق المكاتب» tab (reuses the existing verification APIs — no new workflow)
 function OfficeVerificationsPanel() {
   const [rows, setRows] = useState(null)
+  const ovPager = useClientPager(rows || []) // v5.7 — unified pagination (global rule)
   const load = () => api('/admin/office-verifications').then(r => setRows(r.verifications || r.rows || r.requests || (Array.isArray(r) ? r : []))).catch(e => toast.error(e.message))
   useEffect(() => { load() }, [])
   const decide = async (r, decision) => {
@@ -2005,10 +2050,11 @@ function OfficeVerificationsPanel() {
       <CardContent>
         {rows === null ? <div className="text-center text-slate-400 text-sm py-4">جاري التحميل...</div>
           : rows.length === 0 ? <div className="text-center text-slate-400 text-sm py-4">لا طلبات توثيق</div>
-            : <Table>
+            : <>
+            <Table>
               <TableHeader><TableRow><TableHead>المكتب</TableHead><TableHead>المستندات</TableHead><TableHead>تاريخ التقديم</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">القرار</TableHead></TableRow></TableHeader>
               <TableBody>
-                {rows.map(r => (
+                {ovPager.paged.map(r => (
                   <TableRow key={r.tenant_id}>
                     <TableCell className="text-sm font-semibold">{r.office_name || r.tenant_id}</TableCell>
                     <TableCell className="text-xs">{(r.documents || []).length} مستند{r.reject_reason && <div className="text-[9px] text-rose-500">آخر رفض: {r.reject_reason}</div>}</TableCell>
@@ -2021,7 +2067,9 @@ function OfficeVerificationsPanel() {
                   </TableRow>
                 ))}
               </TableBody>
-            </Table>}
+            </Table>
+            <PaginationBar lq={ovPager.lq} /> {/* v5.7 — unified pagination */}
+            </>}
       </CardContent>
     </Card>
   )
@@ -2040,6 +2088,7 @@ function ResetRequestsPanel() {
   }
   const pending = (rows || []).filter(r => r.status === 'pending')
   const done = (rows || []).filter(r => r.status !== 'pending')
+  const rrPager = useClientPager([...pending, ...done]) // v5.7 — unified pagination (global rule)
   return (
     <div className="space-y-4">
       <Card className={pending.length ? 'border-orange-300' : ''}>
@@ -2047,10 +2096,11 @@ function ResetRequestsPanel() {
         <CardContent>
           {rows === null ? <div className="text-center text-slate-400 text-sm py-4">جاري التحميل...</div>
             : rows.length === 0 ? <div className="text-center text-slate-400 text-sm py-4">لا طلبات</div>
-              : <Table>
+              : <>
+              <Table>
                 <TableHeader><TableRow><TableHead>البريد</TableHead><TableHead>الاسم/المكتب</TableHead><TableHead>الهاتف</TableHead><TableHead>التاريخ</TableHead><TableHead>الحالة</TableHead><TableHead className="text-left">إجراءات</TableHead></TableRow></TableHeader>
                 <TableBody>
-                  {[...pending, ...done].map(r => (
+                  {rrPager.paged.map(r => (
                     <TableRow key={r.id} className={r.status === 'pending' ? 'bg-orange-50/50' : ''}>
                       <TableCell className="font-mono text-xs" dir="ltr">{r.email}</TableCell>
                       <TableCell className="text-xs">{r.user_name || '—'}<div className="text-[9px] text-slate-400">{r.tenant_name || ''}</div></TableCell>
@@ -2064,7 +2114,9 @@ function ResetRequestsPanel() {
                     </TableRow>
                   ))}
                 </TableBody>
-              </Table>}
+              </Table>
+              <PaginationBar lq={rrPager.lq} /> {/* v5.7 — unified pagination */}
+              </>}
         </CardContent>
       </Card>
       <AdminResetPasswordDialog req={target} onClose={() => setTarget(null)} onDone={load} />
@@ -2296,6 +2348,9 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
   }, [open])
   const typeIcon = { client: '👤', supplier: '🏭', box: '💰', account: '📒' }
   const typeLabel = { client: 'عميل', supplier: 'مورد', box: 'صندوق', account: 'حساب' }
+  // v5.6 — Equity first-class: COA rows show their REAL account type (not a generic label)
+  const acctTypeLabel = { asset: 'أصول', liability: 'خصوم', equity: 'حقوق ملكية', revenue: 'إيراد', expense: 'مصروف' }
+  const rowTypeLabel = (r) => r.type === 'account' ? (acctTypeLabel[r.acct_type] || 'حساب') : (typeLabel[r.type] || '')
   const typeBadge = { client: 'bg-emerald-50 text-emerald-700 border-emerald-200', supplier: 'bg-rose-50 text-rose-700 border-rose-200', box: 'bg-blue-50 text-blue-700 border-blue-200', account: 'bg-purple-50 text-purple-700 border-purple-200' }
   const pick = (r) => { setSelected(r); onChange?.(r); setOpen(false); setQuery('') }
   const clear = (e) => { e.stopPropagation(); setSelected(null); onChange?.(null); setQuery('') }
@@ -2362,7 +2417,7 @@ function AccountAutocomplete({ type = 'all', value = null, onChange, placeholder
                 <span className="text-base shrink-0">{typeIcon[r.type] || '•'}</span>
                 <span className={`font-mono text-[11px] font-bold px-1.5 py-0.5 rounded border shrink-0 whitespace-nowrap ${typeBadge[r.type] || 'bg-slate-50 border-slate-200'}`}>{r.account_code}</span>
                 <span className="flex-1 truncate text-slate-800">{r.name}</span>
-                <span className="text-[10px] text-slate-400 shrink-0 whitespace-nowrap">{typeLabel[r.type] || ''}</span>
+                <span className="text-[10px] text-slate-400 shrink-0 whitespace-nowrap">{rowTypeLabel(r)}</span>
                 <span className="text-[10px] font-mono text-slate-500 shrink-0 whitespace-nowrap">
                   {Object.entries(r.balances || {}).filter(([, v]) => Number(v) !== 0).slice(0, 1).map(([c, v]) => `${c}:${Number(v).toLocaleString()}`).join('')}
                 </span>
@@ -2528,6 +2583,12 @@ function WaBtn({ phone, message = '', size = 'sm', label, iconOnly = false }) {
   )
 }
 
+// ================================================================
+// v5.7 — SHARED LIST CONTROLS moved to ./shared (useListQuery,
+// PeriodFilterBar, PaginationBar, XScroll) — imported at the top so
+// the SAME components serve page.js AND the admin/* screens.
+// ================================================================
+
 const NAV = [
   { id: 'dashboard', label: 'لوحة التحكم', icon: LayoutDashboard, color: 'from-blue-600 to-cyan-500' },
   { id: 'tickets',   label: 'حجز التذاكر', icon: Plane, color: 'from-sky-600 to-blue-500' },
@@ -2545,6 +2606,7 @@ const NAV = [
   { id: 'boxes',     label: 'الصناديق والبنوك', icon: Wallet, color: 'from-yellow-600 to-amber-500' },
   { id: 'chart',     label: 'الدليل المحاسبي', icon: BookOpenText, color: 'from-purple-600 to-fuchsia-500' },
   { id: 'journal',   label: 'قيود اليومية', icon: ReceiptText, color: 'from-slate-700 to-slate-500' },
+  { id: 'interbranch', label: 'التحويلات بين الفروع', icon: ArrowLeftRight, color: 'from-orange-600 to-amber-500' }, // v5.4
   { id: 'reports',   label: 'التقارير المالية', icon: BarChart3, color: 'from-cyan-600 to-blue-500' },
   { id: 'affiliate', label: 'التسويق بالعمولة', icon: User, color: 'from-emerald-600 to-teal-500' },
   // v3.99 — Batch 1: old Super Admin sections merged into the shared sidebar (platform SA only — see canModule)
@@ -2586,6 +2648,8 @@ const canModule = (user, tabId) => {
   // (the separate AdminApp shell was removed); every action stays server-gated per section
   // via adminGate/adminCan — this is UI visibility only.
   if (String(tabId).startsWith('platform-')) return user.role === 'super_admin' || user.role === 'admin_staff'
+  // v5.4 — inter-branch is an OPT-IN module: full accounting perms do NOT imply it
+  if (tabId === 'interbranch') return user.role === 'owner' || user.permissions?.mod_interbranch === true
   if (user.role === 'owner') return true
   // v3.98 — Phase 1: the platform SA manages his own company office settings
   // (currencies & rates live here). Staff still never see settings.
@@ -2603,7 +2667,7 @@ const SA_SIDEBAR_GROUPS = [
   },
   {
     id: 'grp-finance', label: 'المحاسبة والإدارة المالية', emoji: '💰',
-    items: ['fx', 'receipt', 'payment', 'clients', 'suppliers', 'boxes', 'chart', 'journal'],
+    items: ['fx', 'receipt', 'payment', 'clients', 'suppliers', 'boxes', 'chart', 'journal', 'interbranch'],
   },
   {
     id: 'grp-reports', label: 'التقارير', emoji: '📊',
@@ -2651,7 +2715,7 @@ const playMeraajChime = () => {
 }
 
 function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
-  const { tenant, settings, user } = useAuth()
+  const { tenant, settings, user, branch } = useAuth() // v5.3 — branch for the current-branch badge
   // v4.7 — SA collapsible groups: multiple groups may stay open; the group holding the
   // active tab opens automatically (without closing others). Pure visual state.
   const isPlatformSA = user?.role === 'super_admin'
@@ -2688,12 +2752,7 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
           {settings?.logo_base64 ? (
             <img src={settings.logo_base64} alt="logo" className="w-11 h-11 rounded-xl object-cover bg-white" />
           ) : (
-            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-[#1e40af] to-[#0f1e4d] flex items-center justify-center shadow-lg shadow-orange-500/20 border border-orange-400/40 shrink-0">
-              <svg viewBox="0 0 64 64" fill="none" className="w-7 h-7">
-                <path d="M8 40 L28 36 L40 20 L50 20 L44 34 L54 32 L58 40 L44 42 L38 50 L30 50 L34 42 L14 44 Z" fill="#f97316" />
-                <circle cx="52" cy="16" r="3" fill="#f97316" />
-              </svg>
-            </div>
+            <img src="/rahaal-icon.png" alt="شعار رحّال" className="w-11 h-11 rounded-xl object-cover shadow-lg shadow-orange-500/20 border border-orange-400/40 shrink-0" />
           )}
           <div className="min-w-0 flex-1">
             <div className="text-lg font-extrabold tracking-tight truncate">{settings?.agency_name || tenant?.name || 'رحّـــال'}</div>
@@ -2816,6 +2875,7 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
           <div className="flex-1 min-w-0">
             <div className="text-xs font-semibold truncate">{user.name}</div>
             <div className="text-[10px] text-slate-400 truncate">{user.role === 'owner' ? 'مالك المكتب' : user.role === 'super_admin' ? 'المشرف العام' : 'موظف'}</div>
+            {branch?.name && <div className="mt-0.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-bold truncate max-w-full">🏢 الفرع الحالي: {branch.name}</div>}
           </div>
         </div>
       </div>
@@ -3292,34 +3352,20 @@ function TicketsScreen() {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [selectedIds, setSelectedIds] = useState(new Set()) // v3.9.9 — multi-select
-  const [dateRange, setDateRange] = useState({ preset: 'month', from: '', to: '' }) // v3.9.9
+  const lq = useListQuery() // v5.7 — unified SERVER-SIDE date filter + pagination
   const [editing, setEditing] = useState(null)
   const [refundTarget, setRefundTarget] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
-      const [t, c, s, r, bx] = await Promise.all([api('/tickets'), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])])
-      setTickets(t); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
+      const [t, c, s, r, bx] = await Promise.all([api(`/tickets?${lq.qs()}`), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])])
+      lq.absorb(t, setTickets); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
     } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load() }, [])
-  // v3.9.9 — Date range computation from preset
-  const dateRangeBounds = useMemo(() => {
-    const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
-    if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
-    if (dateRange.preset === 'month') { const d = new Date(today.getFullYear(), today.getMonth(), 1); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
-    if (dateRange.preset === 'custom' && dateRange.from) {
-      const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date()
-      return { from: f, to: t }
-    }
-    return null // all
-  }, [dateRange])
-  const filteredByDate = useMemo(() => {
-    const safe = (tickets || []).filter(Boolean)
-    if (!dateRangeBounds) return safe
-    return safe.filter(t => { const d = new Date(t?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to })
-  }, [tickets, dateRangeBounds])
+  useEffect(() => { load() }, [lq.dep])
+  // v5.7 — date filtering moved SERVER-SIDE (shared periodFilterExpr) — rows arrive already filtered
+  const dateRangeBounds = lq.period !== 'all' ? true : null
+  const filteredByDate = useMemo(() => (tickets || []).filter(Boolean), [tickets])
   const filtered = applyFilter(filteredByDate, filter)
   const selected = filtered.find(t => t?.id === selectedId)
   const allSelected = filtered.length > 0 && filtered.every(t => selectedIds.has(t?.id))
@@ -3389,26 +3435,9 @@ function TicketsScreen() {
           <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
         </div>
       )}
-      {/* v3.9.9 — Date range presets + Bulk actions bar */}
+      {/* v5.7 — unified server-side date filter + Bulk actions bar */}
       <div className="flex flex-wrap items-center gap-2 p-3 bg-white border border-slate-200 rounded-lg">
-        <span className="text-xs font-bold text-slate-600 flex items-center gap-1">📅 عرض:</span>
-        {[
-          { k: 'today', l: 'اليوم' },
-          { k: 'week', l: 'آخر ٧ أيام' },
-          { k: 'month', l: 'هذا الشهر' },
-          { k: 'all', l: 'الكل' },
-          { k: 'custom', l: 'مخصص' },
-        ].map(p => (
-          <button key={p.k} onClick={() => setDateRange({ ...dateRange, preset: p.k })}
-            className={`px-3 py-1 rounded-md text-xs font-semibold border ${dateRange.preset === p.k ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}>{p.l}</button>
-        ))}
-        {dateRange.preset === 'custom' && (
-          <>
-            <input type="date" value={dateRange.from} onChange={e => setDateRange({ ...dateRange, from: e.target.value })} className="text-xs border rounded px-2 py-1" />
-            <span className="text-xs">إلى</span>
-            <input type="date" value={dateRange.to} onChange={e => setDateRange({ ...dateRange, to: e.target.value })} className="text-xs border rounded px-2 py-1" />
-          </>
-        )}
+        <PeriodFilterBar lq={lq} compact />
         {selectedIds.size > 0 && (
           <div className="mr-auto flex items-center gap-2">
             <span className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">✓ محدد: {selectedIds.size}</span>
@@ -3419,9 +3448,9 @@ function TicketsScreen() {
         )}
       </div>
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><Plane className="w-5 h-5 text-sky-600" /> سجل التذاكر ({filtered.length}{(filter || dateRangeBounds) ? ` من ${tickets.length}` : ''})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Plane className="w-5 h-5 text-sky-600" /> سجل التذاكر ({filtered.length}{(filter || dateRangeBounds) ? ` من ${lq.total}` : ''})</CardTitle></CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
+          <XScroll>
             <Table>
               <TableHeader><TableRow>
                 <TableHead className="w-10"><input type="checkbox" checked={allSelected} onChange={toggleAll} title="تحديد الكل" /></TableHead>
@@ -3462,7 +3491,8 @@ function TicketsScreen() {
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </XScroll>
+          <PaginationBar lq={lq} />
         </CardContent>
       </Card>
       <TicketDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }} clients={clients} suppliers={suppliers} rates={rates} record={editing}
@@ -4619,30 +4649,20 @@ function VisasScreen() {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [selectedIds, setSelectedIds] = useState(new Set())
-  const [dateRange, setDateRange] = useState({ preset: 'month', from: '', to: '' })
+  const lq = useListQuery() // v5.7 — unified SERVER-SIDE date filter + pagination
   const [editing, setEditing] = useState(null)
   const [refundTarget, setRefundTarget] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
-      const [v, c, s, r, bx] = await Promise.all([api('/visas'), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])])
-      setVisas(v); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
+      const [v, c, s, r, bx] = await Promise.all([api(`/visas?${lq.qs()}`), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])])
+      lq.absorb(v, setVisas); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
     } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load() }, [])
-  const dateRangeBounds = useMemo(() => {
-    const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
-    if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
-    if (dateRange.preset === 'month') { const d = new Date(today.getFullYear(), today.getMonth(), 1); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
-    if (dateRange.preset === 'custom' && dateRange.from) { const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date(); return { from: f, to: t } }
-    return null
-  }, [dateRange])
-  const filteredByDate = useMemo(() => {
-    const safe = (visas || []).filter(Boolean)
-    if (!dateRangeBounds) return safe
-    return safe.filter(v => { const d = new Date(v?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to })
-  }, [visas, dateRangeBounds])
+  useEffect(() => { load() }, [lq.dep])
+  // v5.7 — date filtering moved SERVER-SIDE (shared periodFilterExpr)
+  const dateRangeBounds = lq.period !== 'all' ? true : null
+  const filteredByDate = useMemo(() => (visas || []).filter(Boolean), [visas])
   const filtered = applyFilter(filteredByDate, filter)
   const selected = filtered.find(v => v?.id === selectedId)
   const allSelected = filtered.length > 0 && filtered.every(v => selectedIds.has(v?.id))
@@ -4708,20 +4728,9 @@ function VisasScreen() {
           <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
         </div>
       )}
-      {/* v3.9.9 — Date range + Bulk actions */}
+      {/* v5.7 — unified server-side date filter + Bulk actions */}
       <div className="flex flex-wrap items-center gap-2 p-3 bg-white border border-slate-200 rounded-lg">
-        <span className="text-xs font-bold text-slate-600 flex items-center gap-1">📅 عرض:</span>
-        {[{ k: 'today', l: 'اليوم' }, { k: 'week', l: 'آخر ٧ أيام' }, { k: 'month', l: 'هذا الشهر' }, { k: 'all', l: 'الكل' }, { k: 'custom', l: 'مخصص' }].map(p => (
-          <button key={p.k} onClick={() => setDateRange({ ...dateRange, preset: p.k })}
-            className={`px-3 py-1 rounded-md text-xs font-semibold border ${dateRange.preset === p.k ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}>{p.l}</button>
-        ))}
-        {dateRange.preset === 'custom' && (
-          <>
-            <input type="date" value={dateRange.from} onChange={e => setDateRange({ ...dateRange, from: e.target.value })} className="text-xs border rounded px-2 py-1" />
-            <span className="text-xs">إلى</span>
-            <input type="date" value={dateRange.to} onChange={e => setDateRange({ ...dateRange, to: e.target.value })} className="text-xs border rounded px-2 py-1" />
-          </>
-        )}
+        <PeriodFilterBar lq={lq} compact />
         {selectedIds.size > 0 && (
           <div className="mr-auto flex items-center gap-2">
             <span className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">✓ محدد: {selectedIds.size}</span>
@@ -4732,9 +4741,9 @@ function VisasScreen() {
         )}
       </div>
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><FileBadge2 className="w-5 h-5 text-emerald-600" /> سجل التأشيرات ({filtered.length}{(filter || dateRangeBounds) ? ` من ${visas.length}` : ''})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><FileBadge2 className="w-5 h-5 text-emerald-600" /> سجل التأشيرات ({filtered.length}{(filter || dateRangeBounds) ? ` من ${lq.total}` : ''})</CardTitle></CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
+          <XScroll>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -4769,7 +4778,8 @@ function VisasScreen() {
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </XScroll>
+          <PaginationBar lq={lq} />
         </CardContent>
       </Card>
       <VisaDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }} clients={clients} suppliers={suppliers} rates={rates} record={editing}
@@ -4955,28 +4965,22 @@ function ServicesScreen() {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [selectedIds, setSelectedIds] = useState(new Set()) // v3.9.11
-  const [dateRange, setDateRange] = useState({ preset: 'month', from: '', to: '' }) // v3.9.11
+  const lq = useListQuery() // v5.7 — unified SERVER-SIDE date filter + pagination
   const [editing, setEditing] = useState(null)
   const [refundTarget, setRefundTarget] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
       const [sv, st, c, s, r, bx] = await Promise.all([
-        api('/services'), api('/service-types'), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])
+        api(`/services?${lq.qs()}`), api('/service-types'), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])
       ])
-      setServices(sv); setServiceTypes(st); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
+      lq.absorb(sv, setServices); setServiceTypes(st); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
     } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load() }, [])
-  const dateRangeBounds = useMemo(() => {
-    const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
-    if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
-    if (dateRange.preset === 'month') { const d = new Date(today.getFullYear(), today.getMonth(), 1); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
-    if (dateRange.preset === 'custom' && dateRange.from) { const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date(); return { from: f, to: t } }
-    return null
-  }, [dateRange])
-  const filteredByDate = useMemo(() => { if (!dateRangeBounds) return (services || []).filter(Boolean); return (services || []).filter(Boolean).filter(v => { const d = new Date(v?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to }) }, [services, dateRangeBounds])
+  useEffect(() => { load() }, [lq.dep])
+  // v5.7 — date filtering moved SERVER-SIDE (shared periodFilterExpr)
+  const dateRangeBounds = lq.period !== 'all' ? true : null
+  const filteredByDate = useMemo(() => (services || []).filter(Boolean), [services])
   const filtered = applyFilter(filteredByDate, filter)
   const selected = filtered.find(v => v?.id === selectedId)
   const allSelected = filtered.length > 0 && filtered.every(v => selectedIds.has(v.id))
@@ -5038,20 +5042,9 @@ function ServicesScreen() {
           <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
         </div>
       )}
-      {/* v3.9.11 — Date range + Bulk actions */}
+      {/* v5.7 — unified server-side date filter + Bulk actions */}
       <div className="flex flex-wrap items-center gap-2 p-3 bg-white border border-slate-200 rounded-lg">
-        <span className="text-xs font-bold text-slate-600 flex items-center gap-1">📅 عرض:</span>
-        {[{ k: 'today', l: 'اليوم' }, { k: 'week', l: 'آخر ٧ أيام' }, { k: 'month', l: 'هذا الشهر' }, { k: 'all', l: 'الكل' }, { k: 'custom', l: 'مخصص' }].map(p => (
-          <button key={p.k} onClick={() => setDateRange({ ...dateRange, preset: p.k })}
-            className={`px-3 py-1 rounded-md text-xs font-semibold border ${dateRange.preset === p.k ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}>{p.l}</button>
-        ))}
-        {dateRange.preset === 'custom' && (
-          <>
-            <input type="date" value={dateRange.from} onChange={e => setDateRange({ ...dateRange, from: e.target.value })} className="text-xs border rounded px-2 py-1" />
-            <span className="text-xs">إلى</span>
-            <input type="date" value={dateRange.to} onChange={e => setDateRange({ ...dateRange, to: e.target.value })} className="text-xs border rounded px-2 py-1" />
-          </>
-        )}
+        <PeriodFilterBar lq={lq} compact />
         {selectedIds.size > 0 && (
           <div className="mr-auto flex items-center gap-2">
             <span className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">✓ محدد: {selectedIds.size}</span>
@@ -5062,9 +5055,9 @@ function ServicesScreen() {
         )}
       </div>
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><Briefcase className="w-5 h-5 text-orange-600" /> سجل الخدمات ({filtered.length}{(filter || dateRangeBounds) ? ` من ${services.length}` : ''})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Briefcase className="w-5 h-5 text-orange-600" /> سجل الخدمات ({filtered.length}{(filter || dateRangeBounds) ? ` من ${lq.total}` : ''})</CardTitle></CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
+          <XScroll>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -5099,7 +5092,8 @@ function ServicesScreen() {
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </XScroll>
+          <PaginationBar lq={lq} />
         </CardContent>
       </Card>
       <BulkEditDialog open={openBulkEdit} onOpenChange={setOpenBulkEdit} kind="services" ids={Array.from(selectedIds)} suppliers={suppliers} boxes={boxes} onDone={() => { load(); setOpenBulkEdit(false); setSelectedIds(new Set()) }} />
@@ -5347,13 +5341,14 @@ function VoucherScreen({ mode }) {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [editing, setEditing] = useState(null)
+  const lq = useListQuery() // v5.7 — unified SERVER-SIDE date filter + pagination
   const load = async () => {
     try {
-      const [v, c, s, b] = await Promise.all([api(`/vouchers?type=${mode}`), api('/clients'), api('/suppliers'), api('/boxes')])
-      setVouchers(v); setClients(c); setSuppliers(s); setBoxes(b)
+      const [v, c, s, b] = await Promise.all([api(`/vouchers?type=${mode}&${lq.qs()}`), api('/clients'), api('/suppliers'), api('/boxes')])
+      lq.absorb(v, setVouchers); setClients(c); setSuppliers(s); setBoxes(b)
     } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load(); setSelectedId(null); setFilter(null) }, [mode])
+  useEffect(() => { load(); setSelectedId(null); setFilter(null) }, [mode, lq.dep])
   const filtered = applyFilter(vouchers, filter)
   const selected = filtered.find(v => v.id === selectedId)
   const handleAdd = () => { setEditing(null); setOpen(true) }
@@ -5399,9 +5394,11 @@ function VoucherScreen({ mode }) {
           <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
         </div>
       )}
+      <PeriodFilterBar lq={lq} /> {/* v5.7 — unified server-side date filter */}
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><cfg.icon className="w-5 h-5" /> سجل السندات ({filtered.length}{filter ? ` من ${vouchers.length}` : ''})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><cfg.icon className="w-5 h-5" /> سجل السندات ({filtered.length}{filter ? ` من ${lq.total}` : ''})</CardTitle></CardHeader>
         <CardContent>
+          <XScroll>
           <Table>
             <TableHeader><TableRow><TableHead className="w-8"></TableHead><TableHead>التاريخ</TableHead><TableHead>{cfg.partyLabel}</TableHead><TableHead>البيان</TableHead><TableHead>الطريقة</TableHead><TableHead>الصندوق</TableHead><TableHead>العملة</TableHead><TableHead className="text-left">المبلغ</TableHead></TableRow></TableHeader>
             <TableBody>
@@ -5420,6 +5417,8 @@ function VoucherScreen({ mode }) {
               ))}
             </TableBody>
           </Table>
+          </XScroll>
+          <PaginationBar lq={lq} />
         </CardContent>
       </Card>
       <VoucherDialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }} mode={mode} clients={clients} suppliers={suppliers} boxes={boxes} record={editing}
@@ -5562,6 +5561,7 @@ function PartiesScreen({ kind }) {
     catch (e) { toast.error(e.message) }
   }
   const filtered = rows.filter(r => !q || r.name.includes(q) || (r.phone || '').includes(q))
+  const pager = useClientPager(filtered) // v5.7 — unified pagination (global rule)
   // Eligible parents: accounts of matching type (asset for clients, liability for suppliers) that are groups
   const parentOptions = accounts.filter(a => a.type === parentType && a.is_group)
   return (
@@ -5569,7 +5569,7 @@ function PartiesScreen({ kind }) {
       <TopBar title={cfg.title} subtitle={`إجمالي: ${rows.length}`}
         right={<div className="flex items-center gap-2"><div className="relative"><Search className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" /><Input placeholder="بحث..." value={q} onChange={e => setQ(e.target.value)} className="pr-9 w-64" /></div><Button onClick={() => { setEditing(null); setOpen(true) }} className={`gap-2 ${cfg.grad} text-white`}><Plus className="w-4 h-4" /> إضافة</Button></div>} />
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {filtered.map(r => (
+        {pager.paged.map(r => (
           <Card key={r.id} className="overflow-hidden hover:shadow-md transition-shadow">
             <div className={`h-1 ${cfg.grad}`} />
             <CardContent className="p-4">
@@ -5583,7 +5583,7 @@ function PartiesScreen({ kind }) {
                 <div className={`w-10 h-10 rounded-lg ${cfg.grad} flex items-center justify-center`}><cfg.icon className="w-5 h-5 text-white" /></div>
               </div>
               <div className="flex items-center gap-1 mt-2 flex-wrap">
-                <WaBtn phone={r.whatsapp || r.phone} message={`السلام عليكم ${r.name}،`} size="xs" iconOnly={false} label="واتساب" />
+                <WaBtn phone={r.whatsapp || r.phone} message={waCollectionMessage(r, kind)} size="xs" iconOnly={false} label="واتساب" />
                 <Button size="sm" variant="ghost" onClick={() => { setEditing(r); setOpen(true) }} className="h-6 px-2 text-xs gap-1"><Pencil className="w-3 h-3" /> تعديل</Button>
                 <Button size="sm" variant="ghost" onClick={() => del(r)} className="h-6 px-2 text-xs text-rose-600 gap-1"><Trash2 className="w-3 h-3" /> حذف</Button>
               </div>
@@ -5594,6 +5594,7 @@ function PartiesScreen({ kind }) {
         ))}
         {filtered.length === 0 && <div className="col-span-full text-center text-slate-400 py-10">لا توجد بيانات</div>}
       </div>
+      <PaginationBar lq={pager.lq} /> {/* v5.7 — unified pagination */}
       <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }}>
         <DialogContent dir="rtl" className="max-w-lg">
           <DialogHeader><DialogTitle>{editing ? `تعديل ${kind === 'clients' ? 'عميل' : 'مورد'}` : `إضافة ${kind === 'clients' ? 'عميل' : 'مورد'}`}</DialogTitle></DialogHeader>
@@ -6220,8 +6221,22 @@ function JournalScreen() {
   const [equityOpen, setEquityOpen] = useState(false)
   const [selectedId, setSelectedId] = useState(null)
   const [editing, setEditing] = useState(null)
-  const load = () => api('/journal-entries').then(setRows).catch(e => toast.error(e.message))
-  useEffect(() => { load() }, [])
+  // v5.7 — unified SERVER-SIDE date filter + pagination (shared useListQuery) + advanced search
+  const lq = useListQuery()
+  const [sField, setSField] = useState('description')    // description|client|supplier|debit_account|credit_account|amount
+  const [sOp, setSOp] = useState('contains')             // contains|not_contains|equals
+  const [sVal, setSVal] = useState('')
+  const [activeSearch, setActiveSearch] = useState(null) // applied search snapshot
+  const load = async (srch = activeSearch) => {
+    const extra = srch?.value ? `search_field=${srch.field}&search_op=${srch.op}&search_value=${encodeURIComponent(srch.value)}` : ''
+    try { const r = await api(`/journal-entries?${lq.qs(extra)}`); lq.absorb(r, setRows) } catch (e) { toast.error(e.message) }
+  }
+  useEffect(() => { load() }, [lq.dep, activeSearch])
+  const applySearch = () => {
+    if (!sVal.trim()) return toast.error('أدخل قيمة البحث')
+    lq.setPage(1); setActiveSearch({ field: sField, op: sOp, value: sVal.trim() })
+  }
+  const clearSearch = () => { setActiveSearch(null); setSVal(''); lq.setPage(1) }
   const selected = rows.find(je => je.id === selectedId)
   const isEditableJe = selected && (selected.ref_type === 'manual' || selected.ref_type === 'manual_dual')
   const isDeletableJe = selected && ['manual', 'manual_dual', 'opening', 'opening_close'].includes(selected.ref_type)
@@ -6287,10 +6302,41 @@ function JournalScreen() {
           <Button size="sm" onClick={() => setEquityOpen(true)} variant="outline" className="gap-1 border-indigo-300 text-indigo-700 hover:bg-indigo-50">⚖️ إقفال الأرصدة الافتتاحية (3103)</Button>
         </div>} />
       <ActionToolbar
-        addLabel="إضافة قيد يومي" onAdd={handleAdd} onRefresh={load}
+        addLabel="إضافة قيد يومي" onAdd={handleAdd} onRefresh={() => load()}
         onEdit={handleEdit} onDelete={handleDelete} onPrintTable={handlePrintTable}
-        selectedId={selectedId} count={rows.length}
+        selectedId={selectedId} count={lq.total || rows.length}
       />
+      {/* v5.7 — unified date filter (shared PeriodFilterBar) */}
+      <Card>
+        <CardContent className="p-3 space-y-3">
+          <PeriodFilterBar lq={lq} compact />
+          {/* v5.6 — advanced search (server-side operators) */}
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
+            <span className="text-xs font-black text-slate-600 shrink-0">🔎 بحث متقدم:</span>
+            <select value={sField} onChange={e => setSField(e.target.value)} className="h-8 text-xs border rounded-md px-2 bg-white font-bold">
+              <option value="description">الملاحظة / البيان</option>
+              <option value="client">اسم العميل</option>
+              <option value="supplier">اسم المورد</option>
+              <option value="debit_account">الحساب المدين</option>
+              <option value="credit_account">الحساب الدائن</option>
+              <option value="amount">المبلغ</option>
+            </select>
+            <select value={sOp} onChange={e => setSOp(e.target.value)} className="h-8 text-xs border rounded-md px-2 bg-white font-bold" disabled={sField === 'amount'}>
+              <option value="contains">يحتوي على</option>
+              <option value="not_contains">لا يحتوي على</option>
+              <option value="equals">يساوي</option>
+            </select>
+            <Input value={sVal} onChange={e => setSVal(e.target.value)} onKeyDown={e => e.key === 'Enter' && applySearch()} placeholder={sField === 'amount' ? 'مثال: 150' : 'قيمة البحث...'} className="h-8 w-52 text-xs" />
+            <Button size="sm" className="h-8 text-xs bg-blue-600 hover:bg-blue-700" onClick={applySearch}>بحث</Button>
+            {activeSearch && (
+              <Badge variant="outline" className="text-[11px] gap-1 border-blue-300 text-blue-700">
+                {activeSearch.value}
+                <button onClick={clearSearch} className="text-rose-500 hover:text-rose-700 font-black mr-1">✕</button>
+              </Badge>
+            )}
+          </div>
+        </CardContent>
+      </Card>
       <div className="space-y-3">
         {rows.map(je => {
           const totalDebit = (je.lines || []).reduce((s, l) => s + (l.debit || 0), 0)
@@ -6336,9 +6382,215 @@ function JournalScreen() {
         })}
         {rows.length === 0 && <div className="text-center text-slate-400 py-10">لا توجد قيود</div>}
       </div>
+      <PaginationBar lq={lq} /> {/* v5.7 — unified server-side pagination */}
       <ManualJournalDialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }} record={editing} onSaved={() => { load(); setEditing(null) }} />
       <OpeningJournalDialog open={openingOpen} onOpenChange={setOpeningOpen} onSaved={load} />
       <OpeningEquityDialog open={equityOpen} onOpenChange={setEquityOpen} onChanged={load} />
+    </div>
+  )
+}
+
+// v5.4 — HQ report-scope picker: «المركز | فرع محدد | كل الفروع (مجمع)».
+// Rendered ONLY for an owner NOT linked to a branch and only when branches exist.
+// Branch users never see it — the backend forces their own scope regardless.
+function BranchScopePicker({ value, onChange }) {
+  const { user } = useAuth()
+  const [branches, setBranches] = useState(null)
+  useEffect(() => {
+    if (user?.role !== 'owner' || user?.branch_id) { setBranches([]); return }
+    api('/tenant/branches').then(r => setBranches(r?.branches || [])).catch(() => setBranches([]))
+  }, [user])
+  if (!branches || branches.length === 0) return null
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)} className="h-9 rounded-md border border-slate-300 px-2 text-xs bg-white font-bold text-slate-700" title="نطاق التقرير">
+      <option value="">🏢 كل الفروع (مجمع)</option>
+      <option value="hq">🏠 المركز الرئيسي فقط</option>
+      {branches.map(b => <option key={b.id} value={b.id}>🏢 فرع: {b.name}</option>)}
+    </select>
+  )
+}
+
+// ============================================================================
+// v5.4 — INTER-BRANCH SCREEN (التحويلات بين الفروع)
+// Internal transfers only — NEVER revenue/expense. The counterparty account
+// picker shows NAMES + CODES only (backend-safe DTO): no balances, no history.
+// ============================================================================
+function InterBranchScreen() {
+  const { user, branch } = useAuth()
+  const [counterparties, setCounterparties] = useState([])
+  const [cpAccounts, setCpAccounts] = useState(null)
+  const [myBoxes, setMyBoxes] = useState([])
+  const [list, setList] = useState([])
+  const [recon, setRecon] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [opId, setOpId] = useState(() => (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`)
+  const [f, setF] = useState({ type: 'payment', counterparty: '', my_box_id: '', counterparty_box_id: '', amount: '', currency: 'YER', direction: 'out', description: '' })
+  const newOp = () => setOpId((typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`)
+  const isHQ = !user?.branch_id
+  // v5.7 — unified date filter + pagination (global rule, client-side over full list)
+  const ibPf = usePeriodState()
+  const ibPager = useClientPager(filterByPeriod(list, ibPf.applied, 'created_at'))
+  const load = () => {
+    api('/interbranch/counterparties').then(setCounterparties).catch(e => toast.error(e.message))
+    api('/boxes').then(setMyBoxes).catch(() => {})
+    api('/interbranch/transactions').then(setList).catch(() => {})
+    if (!user?.branch_id) api('/interbranch/reconciliation').then(setRecon).catch(() => {})
+  }
+  useEffect(() => { load() }, [])
+  useEffect(() => {
+    setCpAccounts(null); setF(v => ({ ...v, counterparty_box_id: '' }))
+    if (f.counterparty === '') return
+    api(`/interbranch/accounts?branch=${f.counterparty || 'hq'}`).then(setCpAccounts).catch(e => toast.error(e.message))
+  }, [f.counterparty])
+  const submit = async () => {
+    if (!f.counterparty && f.counterparty !== 'hq') return toast.error('اختر الفرع المقابل')
+    if (!f.my_box_id) return toast.error('اختر صندوقك/بنكك')
+    if (!f.counterparty_box_id) return toast.error('اختر حساب الطرف المقابل')
+    if (!(Number(f.amount) > 0)) return toast.error('أدخل مبلغاً صحيحاً')
+    try {
+      setBusy(true)
+      const r = await api('/interbranch/transactions', {
+        method: 'POST',
+        body: {
+          type: f.type, counterparty_branch_id: f.counterparty === 'hq' ? null : f.counterparty,
+          my_box_id: f.my_box_id, counterparty_box_id: f.counterparty_box_id,
+          amount: Number(f.amount), currency: f.currency, direction: f.direction,
+          description: f.description, op_id: opId,
+        },
+      })
+      if (r.duplicate) toast.info('ℹ️ العملية منفذة مسبقاً — لا ازدواج مالي')
+      else toast.success(`✅ نُفذت العملية بقيدين متوازنين (مصدر + وجهة) — رقم المرجع ${String(r.tx?.id || '').slice(0, 8)}`, { duration: 7000 })
+      newOp()
+      setF(v => ({ ...v, amount: '', description: '' }))
+      load()
+    } catch (e) { toast.error(e.message); newOp() } finally { setBusy(false) }
+  }
+  const typeL = (t) => t === 'receipt' ? '📥 قبض بين الفروع' : t === 'payment' ? '📤 صرف بين الفروع' : '📝 قيد بين الفروع'
+  const stBadge = (st) => st === 'posted' ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">مرحّلة</Badge>
+    : st === 'failed' ? <Badge className="bg-rose-100 text-rose-700 hover:bg-rose-100">فاشلة (بلا أثر)</Badge>
+    : st === 'uncertain' ? <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100">⚠️ غير مؤكدة</Badge>
+    : <Badge variant="outline">قيد التنفيذ</Badge>
+  return (
+    <div className="space-y-6">
+      <TopBar title="التحويلات بين الفروع" subtitle="تحويلات داخلية بين المركز والفروع — قيدان متوازنان أوتوماتيكياً، ليست إيراداً ولا مصروفاً" />
+      <Card>
+        <CardHeader><CardTitle className="text-base">🔀 عملية جديدة <span className="text-[10px] font-normal text-slate-400 mr-2">نطاقك الحالي: {branch?.name ? `🏢 ${branch.name}` : '🏠 المركز الرئيسي'}</span></CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Field label="نوع العملية *">
+              <Select value={f.type} onValueChange={v => setF({ ...f, type: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="payment">📤 سند صرف بين الفروع (يخرج من صندوقي)</SelectItem>
+                  <SelectItem value="receipt">📥 سند قبض بين الفروع (يدخل صندوقي)</SelectItem>
+                  <SelectItem value="journal">📝 قيد بين الفروع</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="الفرع المقابل *">
+              <Select value={f.counterparty || 'none'} onValueChange={v => setF({ ...f, counterparty: v === 'none' ? '' : v })}>
+                <SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">— اختر —</SelectItem>
+                  {counterparties.map(c => <SelectItem key={c.id || 'hq'} value={c.id || 'hq'}>{c.id ? `🏢 ${c.name}` : '🏠 المركز الرئيسي (HQ)'}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label={f.type === 'receipt' ? 'إلى صندوقي/بنكي *' : 'من صندوقي/بنكي *'}>
+              <Select value={f.my_box_id || 'none'} onValueChange={v => setF({ ...f, my_box_id: v === 'none' ? '' : v })}>
+                <SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">— اختر —</SelectItem>
+                  {myBoxes.map(bx => <SelectItem key={bx.id} value={bx.id}>{bx.type === 'bank' ? '🏦' : '💵'} {bx.name_ar}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="حساب الطرف المقابل *">
+              <Select value={f.counterparty_box_id || 'none'} onValueChange={v => setF({ ...f, counterparty_box_id: v === 'none' ? '' : v })} disabled={!cpAccounts}>
+                <SelectTrigger><SelectValue placeholder={f.counterparty ? (cpAccounts ? 'اختر (أسماء فقط)' : 'جارِ التحميل…') : 'اختر الفرع أولاً'} /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">— اختر —</SelectItem>
+                  {(cpAccounts?.accounts || []).map(a => <SelectItem key={a.id} value={a.id}>{a.type === 'bank' ? '🏦' : '💵'} {a.name_ar} <span className="font-mono text-[10px] text-slate-400">({a.account_code})</span></SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Field label="المبلغ *"><Input dir="ltr" type="number" min="0" step="0.01" value={f.amount} onChange={e => setF({ ...f, amount: e.target.value })} /></Field>
+            <Field label="العملة *">
+              <Select value={f.currency} onValueChange={v => setF({ ...f, currency: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c] || c}</SelectItem>)}</SelectContent>
+              </Select>
+            </Field>
+            {f.type === 'journal' && (
+              <Field label="اتجاه القيد *">
+                <Select value={f.direction} onValueChange={v => setF({ ...f, direction: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="out">📤 من نطاقي إلى المقابل</SelectItem>
+                    <SelectItem value="in">📥 من المقابل إلى نطاقي</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
+            <Field label="البيان"><Input value={f.description} onChange={e => setF({ ...f, description: e.target.value })} placeholder="وصف اختياري" /></Field>
+          </div>
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="text-[10px] text-slate-400">🔒 Idempotent: الضغط المزدوج أو إعادة الإرسال لا يكرر الأثر المالي أبداً · حسابات الطرف المقابل تظهر بالأسماء فقط بلا أرصدة</div>
+            <Button onClick={submit} disabled={busy} className="grad-brand text-white">{busy ? '⏳ جارِ الترحيل…' : '✅ تنفيذ العملية (قيدان متوازنان)'}</Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {isHQ && recon && (
+        <Card className={recon.matched ? 'border-emerald-200' : 'border-amber-300'}>
+          <CardHeader><CardTitle className="text-sm">⚖️ تسوية الجاري المجمعة (HQ) {recon.matched ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 mr-2">متطابقة — صافي صفر</Badge> : <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 mr-2">⚠️ فروقات</Badge>}</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              {recon.accounts.map(a => (
+                <div key={a.code} className="p-2 rounded-lg border bg-slate-50">
+                  <div className="text-xs font-bold text-slate-700">{a.name} <span className="font-mono text-[10px] text-slate-400">({a.code})</span></div>
+                  {Object.keys(a.balances).length === 0 ? <div className="text-[10px] text-slate-400">لا حركات</div>
+                    : Object.entries(a.balances).map(([cur, v]) => <div key={cur} className="text-[11px] flex justify-between"><span>{cur}</span><span className={`font-bold ${v > 0 ? 'text-blue-700' : v < 0 ? 'text-rose-600' : 'text-slate-500'}`} dir="ltr">{fmt(v, cur)}</span></div>)}
+                </div>
+              ))}
+            </div>
+            <div className="text-[11px] text-slate-600">صافي شجرة 1104 لكل عملة (يجب أن يساوي صفراً): {Object.entries(recon.net_by_currency || {}).map(([c, v]) => <Badge key={c} variant="outline" className={`mx-1 font-mono ${Math.abs(v) > 0.01 ? 'text-amber-700 border-amber-400' : 'text-emerald-700'}`}>{c}: {v}</Badge>)}</div>
+            {recon.exceptions?.length > 0 && recon.exceptions.map((x, i) => <div key={i} className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">⚠️ {x.currency}: فرق {x.residual} — {x.note}</div>)}
+            {recon.attention_transactions?.length > 0 && (
+              <div className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded p-2">🔍 عمليات تحتاج مراجعة: {recon.attention_transactions.map(t => `${String(t.id).slice(0, 8)} (${t.status})`).join(' · ')}</div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader><CardTitle className="text-sm">📜 سجل العمليات {!isHQ && <span className="text-[10px] font-normal text-slate-400">— عمليات نطاقك فقط</span>}</CardTitle></CardHeader>
+        <CardContent className="space-y-2">
+          <PeriodFilterBar lq={ibPf} compact /> {/* v5.7 — unified date filter */}
+          {ibPager.total === 0 ? <div className="text-center text-slate-400 text-sm py-6">لا عمليات بينية بعد</div> : (
+            <>
+            <Table>
+              <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>من ← إلى</TableHead><TableHead className="text-center">المبلغ</TableHead><TableHead className="text-center">الحالة</TableHead><TableHead>بواسطة</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {ibPager.paged.map(t => (
+                  <TableRow key={t.id}>
+                    <TableCell className="text-xs whitespace-nowrap">{fmtDate(t.created_at)}</TableCell>
+                    <TableCell className="text-xs">{typeL(t.type)}</TableCell>
+                    <TableCell className="text-xs"><b>{t.source_branch_name}</b> ({t.source_box?.name}) ← <b>{t.destination_branch_name}</b> ({t.destination_box?.name})</TableCell>
+                    <TableCell className="text-center text-xs font-black" dir="ltr">{fmt(t.amount, t.currency)}</TableCell>
+                    <TableCell className="text-center">{stBadge(t.status)}</TableCell>
+                    <TableCell className="text-[10px]" dir="ltr">{t.created_by}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            <PaginationBar lq={ibPager.lq} /> {/* v5.7 — unified pagination */}
+            </>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }
@@ -6373,6 +6625,9 @@ function QueryCenterScreen() {
   const [data, setData] = useState({ stats: {}, visas: [], tickets: [] })
   const [loading, setLoading] = useState(false)
   const [activeTab, setActiveTab] = useState('visas')
+  // v5.7 — unified pagination for both result grids (query has its own server-side date range)
+  const qcVisasPager = useClientPager(data.visas || [])
+  const qcTicketsPager = useClientPager(data.tickets || [])
 
   const runQuery = async () => {
     setLoading(true)
@@ -6535,13 +6790,13 @@ function QueryCenterScreen() {
           </div>
 
           {activeTab === 'visas' ? (
-            <div className="overflow-x-auto">
+            <div>
               <Table>
                 <TableHeader><TableRow><TableHead>#</TableHead><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>المستفيد</TableHead><TableHead>الجواز</TableHead><TableHead>العميل</TableHead><TableHead>المورد</TableHead><TableHead className="text-left">التكلفة</TableHead><TableHead className="text-left">المبيع</TableHead><TableHead className="text-left">العمولة</TableHead><TableHead>الدفع</TableHead></TableRow></TableHeader>
                 <TableBody>
-                  {(data.visas || []).map((v, i) => (
+                  {qcVisasPager.paged.map((v, i) => (
                     <TableRow key={v.id}>
-                      <TableCell className="text-xs text-slate-400">{i + 1}</TableCell>
+                      <TableCell className="text-xs text-slate-400">{(qcVisasPager.lq.page - 1) * qcVisasPager.lq.pageSize + i + 1}</TableCell>
                       <TableCell className="text-xs">{v.date}</TableCell>
                       <TableCell><Badge variant="outline" className="text-[10px]">{v.service_type}</Badge></TableCell>
                       <TableCell className="font-semibold">{v.beneficiary_name || v.passenger_name}</TableCell>
@@ -6557,15 +6812,16 @@ function QueryCenterScreen() {
                   {(data.visas || []).length === 0 && <TableRow><TableCell colSpan={11} className="text-center text-slate-400 py-6">لا توجد نتائج مطابقة</TableCell></TableRow>}
                 </TableBody>
               </Table>
+              <PaginationBar lq={qcVisasPager.lq} /> {/* v5.7 — unified pagination */}
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div>
               <Table>
                 <TableHeader><TableRow><TableHead>#</TableHead><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>المسافر</TableHead><TableHead>PNR</TableHead><TableHead>تاريخ السفر</TableHead><TableHead>العميل</TableHead><TableHead>المورد</TableHead><TableHead className="text-left">التكلفة</TableHead><TableHead className="text-left">المبيع</TableHead><TableHead className="text-left">العمولة</TableHead><TableHead>الدفع</TableHead></TableRow></TableHeader>
                 <TableBody>
-                  {(data.tickets || []).map((t, i) => (
+                  {qcTicketsPager.paged.map((t, i) => (
                     <TableRow key={t.id}>
-                      <TableCell className="text-xs text-slate-400">{i + 1}</TableCell>
+                      <TableCell className="text-xs text-slate-400">{(qcTicketsPager.lq.page - 1) * qcTicketsPager.lq.pageSize + i + 1}</TableCell>
                       <TableCell className="text-xs">{t.date}</TableCell>
                       <TableCell><Badge variant="outline" className="text-[10px]">{t.ticket_type || '—'}</Badge></TableCell>
                       <TableCell className="font-semibold">{t.passenger_name}</TableCell>
@@ -6582,6 +6838,7 @@ function QueryCenterScreen() {
                   {(data.tickets || []).length === 0 && <TableRow><TableCell colSpan={12} className="text-center text-slate-400 py-6">لا توجد نتائج مطابقة</TableCell></TableRow>}
                 </TableBody>
               </Table>
+              <PaginationBar lq={qcTicketsPager.lq} /> {/* v5.7 — unified pagination */}
             </div>
           )}
         </CardContent>
@@ -6602,6 +6859,7 @@ function VisaMonitorScreen() {
   const [importOpen, setImportOpen] = useState(false)
   const [countryDlgOpen, setCountryDlgOpen] = useState(false)
   const [exitRow, setExitRow] = useState(null)
+  const vmPager = useClientPager(rows) // v5.7 — unified pagination (global rule)
 
   const load = async () => {
     setLoading(true)
@@ -6795,11 +7053,11 @@ function VisaMonitorScreen() {
               <TableBody>
                 {loading && <TableRow><TableCell colSpan={18} className="text-center py-6"><Loader2 className="w-6 h-6 animate-spin inline" /></TableCell></TableRow>}
                 {!loading && rows.length === 0 && <TableRow><TableCell colSpan={18} className="text-center text-slate-400 py-6">لا توجد سجلات مطابقة</TableCell></TableRow>}
-                {!loading && rows.map((r, i) => {
+                {!loading && vmPager.paged.map((r, i) => {
                   const meta = MON_TRACK[r.track_status] || MON_TRACK.green
                   return (
                     <TableRow key={r.id} className={meta.row}>
-                      <TableCell className="text-xs text-slate-400">{i + 1}</TableCell>
+                      <TableCell className="text-xs text-slate-400">{(vmPager.lq.page - 1) * vmPager.lq.pageSize + i + 1}</TableCell>
                       <TableCell className="font-semibold text-xs">{r.traveler_name}</TableCell>
                       <TableCell className="text-xs font-mono font-bold">{r.passport_no}</TableCell>
                       <TableCell className="text-xs">{r.nationality || '—'}</TableCell>
@@ -6834,6 +7092,7 @@ function VisaMonitorScreen() {
               </TableBody>
             </Table>
           </div>
+          <div className="px-3"><PaginationBar lq={vmPager.lq} /></div> {/* v5.7 — unified pagination */}
         </CardContent>
       </Card>
 
@@ -7274,6 +7533,8 @@ function StatementReport() {
   const [month, setMonth] = useState(todayISO().slice(0, 7))
   const [from, setFrom] = useState(new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10))
   const [to, setTo] = useState(todayISO())
+  const [scope, setScope] = useState('') // v5.4 — HQ scope
+  const stPager = useClientPager(data?.rows || []) // v5.7 — unified pagination (report keeps its own server-side period)
   useEffect(() => { api('/accounts/all').then(setAccounts).catch(() => {}) }, [])
   const selected = accounts.find(a => a.id === id)
   const list = accounts.filter(x => !q || x.name.includes(q) || (x.code || '').includes(q))
@@ -7283,9 +7544,10 @@ function StatementReport() {
     if (period === 'day') p.set('day', day)
     if (period === 'month') p.set('month', month)
     if (period === 'range' || period === 'up_to_date') { p.set('from', from); p.set('to', to) }
+    if (scope) p.set('branch', scope) // v5.4 — HQ scope
     try { setData(await api(`/reports/statement?${p}`)) } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load() }, [id, currencyMode, period, day, month, from, to])
+  useEffect(() => { load() }, [id, currencyMode, period, day, month, from, to, scope])
 
   // v3.3 — Human-readable period text
   const periodLabel = () => {
@@ -7474,10 +7736,11 @@ function StatementReport() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <Card><CardContent className="p-3">
           <div className="text-xs font-bold text-slate-600 mb-2">عرض العملات</div>
-          <div className="flex flex-wrap gap-1">
+          <div className="flex flex-wrap gap-1 items-center">
             {[{v:'all_summary',l:'كافة العملات (إجمالي)'},{v:'all_detail',l:'كافة العملات (تفصيلي)'},{v:'YER',l:'ريال يمني'},{v:'SAR',l:'ريال سعودي'},{v:'USD',l:'دولار'}].map(o => (
               <button key={o.v} onClick={() => setCurrencyMode(o.v)} className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${currencyMode === o.v ? 'bg-blue-500 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300 hover:border-blue-400'}`}>{o.l}</button>
             ))}
+            <BranchScopePicker value={scope} onChange={setScope} />
           </div>
         </CardContent></Card>
         <Card><CardContent className="p-3">
@@ -7550,10 +7813,11 @@ function StatementReport() {
       )}
 
       {data && data.currency_mode !== 'all_summary' && (
+        <>
         <Table>
           <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>البيان</TableHead><TableHead>مرجع</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
           <TableBody>
-            {(data.rows || []).map((r, i) => (
+            {stPager.paged.map((r, i) => (
               <TableRow key={i}>
                 <TableCell className="text-xs">{fmtDate(r.date)}</TableCell>
                 <TableCell className="text-xs">{r.description}</TableCell>
@@ -7567,6 +7831,8 @@ function StatementReport() {
             {(!data.rows || data.rows.length === 0) && <TableRow><TableCell colSpan={7} className="text-center text-slate-400 py-6">لا توجد حركات في هذا النطاق</TableCell></TableRow>}
           </TableBody>
         </Table>
+        <PaginationBar lq={stPager.lq} /> {/* v5.7 — unified pagination (totals stay computed on the FULL statement) */}
+        </>
       )}
     </CardContent></Card>
   )
@@ -7574,14 +7840,90 @@ function StatementReport() {
 
 function TrialBalanceReport() {
   const [data, setData] = useState(null)
-  useEffect(() => { api('/reports/trial-balance').then(setData).catch(e => toast.error(e.message)) }, [])
+  const [scope, setScope] = useState('') // v5.4 — HQ: '' = all | 'hq' | branch id
+  const [mode, setMode] = useState('detailed')   // v5.6 — 'summary' | 'detailed'
+  const [ccy, setCcy] = useState('')             // v5.6 — '' = all | YER | SAR | USD
+  useEffect(() => {
+    const ps = []
+    if (scope) ps.push(`branch=${scope}`)
+    ps.push(`mode=${mode}`)
+    if (ccy) ps.push(`currency=${ccy}`)
+    api(`/reports/trial-balance?${ps.join('&')}`).then(setData).catch(e => toast.error(e.message))
+  }, [scope, mode, ccy])
+  const shownCurrencies = ccy ? [ccy] : CURRENCIES
+  // v5.6 — detailed mode: group party rows under their main account (code+currency)
+  const groups = useMemo(() => {
+    if (!data || mode !== 'detailed') return []
+    const g = new Map()
+    for (const r of data.rows) {
+      const k = `${r.code}|${r.currency}`
+      if (!g.has(k)) g.set(k, { code: r.code, name: r.name, currency: r.currency, debit: 0, credit: 0, parties: [] })
+      const grp = g.get(k)
+      grp.debit += r.debit; grp.credit += r.credit
+      grp.parties.push(r)
+    }
+    return [...g.values()]
+  }, [data, mode])
+  const tbSumPager = useClientPager(mode === 'summary' ? (data?.rows || []) : []) // v5.7 — unified pagination
+  const tbGrpPager = useClientPager(mode === 'detailed' ? groups : [])            // v5.7 — unified pagination
   return (
     <Card><CardContent className="p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* v5.6 — summary / detailed toggle */}
+          <div className="flex rounded-lg border border-slate-300 overflow-hidden">
+            <button onClick={() => setMode('summary')} className={`px-3 py-1.5 text-xs font-bold transition ${mode === 'summary' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>📊 إجمالي</button>
+            <button onClick={() => setMode('detailed')} className={`px-3 py-1.5 text-xs font-bold transition ${mode === 'detailed' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>📋 تفصيلي</button>
+          </div>
+          {/* v5.6 — per-currency trial balance (independent, no cross-currency netting) */}
+          <div className="flex rounded-lg border border-slate-300 overflow-hidden">
+            {[['', 'كل العملات'], ['YER', 'YER'], ['SAR', 'SAR'], ['USD', 'USD']].map(([k, lbl]) => (
+              <button key={k} onClick={() => setCcy(k)} className={`px-3 py-1.5 text-xs font-bold transition ${ccy === k ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>{lbl}</button>
+            ))}
+          </div>
+        </div>
+        <BranchScopePicker value={scope} onChange={setScope} />
+      </div>
       {data && (<>
-        <div className="grid grid-cols-3 gap-3 mb-4">{CURRENCIES.map(c => (<Card key={c}><CardContent className="p-3"><div className="text-xs text-slate-500">{c}</div><div className="flex justify-between text-sm mt-1"><span>مدين:</span><span className="font-bold text-blue-700">{fmt(data.totals[c].d, c)}</span></div><div className="flex justify-between text-sm"><span>دائن:</span><span className="font-bold text-rose-700">{fmt(data.totals[c].c, c)}</span></div><div className="flex justify-between text-sm mt-1 pt-1 border-t"><span>الفرق:</span><span className={`font-bold ${Math.abs(data.totals[c].d - data.totals[c].c) < 0.01 ? 'text-emerald-600' : 'text-amber-600'}`}>{fmt(data.totals[c].d - data.totals[c].c, c)}</span></div></CardContent></Card>))}</div>
-        <Table><TableHeader><TableRow><TableHead>الكود</TableHead><TableHead>الحساب</TableHead><TableHead>الطرف</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
-          <TableBody>{data.rows.map((r, i) => (<TableRow key={i}><TableCell className="font-mono text-xs">{r.code}</TableCell><TableCell>{r.name}</TableCell><TableCell className="text-xs">{r.party_name || '—'}</TableCell><TableCell>{r.currency}</TableCell><TableCell className="text-left text-blue-700">{fmt(r.debit, r.currency)}</TableCell><TableCell className="text-left text-rose-700">{fmt(r.credit, r.currency)}</TableCell><TableCell className={`text-left font-bold ${r.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(r.balance, r.currency)}</TableCell></TableRow>))}</TableBody>
-        </Table>
+        <div className={`grid gap-3 mb-4 ${shownCurrencies.length === 1 ? 'grid-cols-1 max-w-sm' : 'grid-cols-3'}`}>{shownCurrencies.map(c => (<Card key={c}><CardContent className="p-3"><div className="text-xs text-slate-500">{c}</div><div className="flex justify-between text-sm mt-1"><span>مدين:</span><span className="font-bold text-blue-700">{fmt(data.totals[c].d, c)}</span></div><div className="flex justify-between text-sm"><span>دائن:</span><span className="font-bold text-rose-700">{fmt(data.totals[c].c, c)}</span></div><div className="flex justify-between text-sm mt-1 pt-1 border-t"><span>الفرق:</span><span className={`font-bold ${Math.abs(data.totals[c].d - data.totals[c].c) < 0.01 ? 'text-emerald-600' : 'text-amber-600'}`}>{fmt(data.totals[c].d - data.totals[c].c, c)}</span></div></CardContent></Card>))}</div>
+        {mode === 'summary' ? (
+          <>
+          <Table><TableHeader><TableRow><TableHead>الكود</TableHead><TableHead>الحساب</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
+            <TableBody>{tbSumPager.paged.map((r, i) => (<TableRow key={i}><TableCell className="font-mono text-xs">{r.code}</TableCell><TableCell className="font-bold">{r.name}</TableCell><TableCell>{r.currency}</TableCell><TableCell className="text-left text-blue-700">{fmt(r.debit, r.currency)}</TableCell><TableCell className="text-left text-rose-700">{fmt(r.credit, r.currency)}</TableCell><TableCell className={`text-left font-bold ${r.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(r.balance, r.currency)}</TableCell></TableRow>))}</TableBody>
+          </Table>
+          <PaginationBar lq={tbSumPager.lq} /> {/* v5.7 — unified pagination (totals from server, full set) */}
+          </>
+        ) : (
+          <>
+          <Table><TableHeader><TableRow><TableHead>الكود</TableHead><TableHead>الحساب / الطرف</TableHead><TableHead>عملة</TableHead><TableHead className="text-left">مدين</TableHead><TableHead className="text-left">دائن</TableHead><TableHead className="text-left">الرصيد</TableHead></TableRow></TableHeader>
+            <TableBody>
+              {tbGrpPager.paged.map((g, gi) => (
+                <React.Fragment key={gi}>
+                  <TableRow className="bg-slate-50">
+                    <TableCell className="font-mono text-xs font-black">{g.code}</TableCell>
+                    <TableCell className="font-black text-slate-800">{g.name}</TableCell>
+                    <TableCell><Badge variant="outline" className="text-[10px]">{g.currency}</Badge></TableCell>
+                    <TableCell className="text-left font-bold text-blue-700">{fmt(g.debit, g.currency)}</TableCell>
+                    <TableCell className="text-left font-bold text-rose-700">{fmt(g.credit, g.currency)}</TableCell>
+                    <TableCell className={`text-left font-black ${g.debit - g.credit >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(g.debit - g.credit, g.currency)}</TableCell>
+                  </TableRow>
+                  {g.parties.length > 1 || (g.parties[0]?.party_name && g.parties[0].party_name !== g.name) ? g.parties.map((r, i) => (
+                    <TableRow key={i} className="text-slate-600">
+                      <TableCell></TableCell>
+                      <TableCell className="text-xs pr-8">↳ {r.party_name || r.name}</TableCell>
+                      <TableCell className="text-xs">{r.currency}</TableCell>
+                      <TableCell className="text-left text-xs text-blue-600">{fmt(r.debit, r.currency)}</TableCell>
+                      <TableCell className="text-left text-xs text-rose-600">{fmt(r.credit, r.currency)}</TableCell>
+                      <TableCell className={`text-left text-xs font-bold ${r.balance >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmt(r.balance, r.currency)}</TableCell>
+                    </TableRow>
+                  )) : null}
+                </React.Fragment>
+              ))}
+            </TableBody>
+          </Table>
+          <PaginationBar lq={tbGrpPager.lq} /> {/* v5.7 — unified pagination (grouped accounts) */}
+          </>
+        )}
       </>)}
     </CardContent></Card>
   )
@@ -7590,15 +7932,16 @@ function TrialBalanceReport() {
 function IncomeStatement() {
   const [from, setFrom] = useState(new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10))
   const [to, setTo] = useState(todayISO()); const [data, setData] = useState(null)
-  const load = async () => { try { setData(await api(`/reports/income-statement?from=${from}&to=${to}`)) } catch (e) { toast.error(e.message) } }
-  useEffect(() => { load() }, [from, to])
+  const [scope, setScope] = useState('') // v5.4 — HQ scope
+  const load = async () => { try { setData(await api(`/reports/income-statement?from=${from}&to=${to}${scope ? `&branch=${scope}` : ''}`)) } catch (e) { toast.error(e.message) } }
+  useEffect(() => { load() }, [from, to, scope])
   return (
     <Card><CardContent className="p-4">
-      <DateRange from={from} setFrom={setFrom} to={to} setTo={setTo} />
+      <div className="flex flex-wrap items-center gap-3"><DateRange from={from} setFrom={setFrom} to={to} setTo={setTo} /><BranchScopePicker value={scope} onChange={setScope} /></div>
       {data && (
         <div className="space-y-4">
           <div><div className="text-sm font-bold text-slate-700 mb-2">الإيرادات</div>
-            <div className="grid grid-cols-3 gap-2">{['tickets', 'visas', 'other'].map(k => (<Card key={k}><CardContent className="p-3"><div className="text-xs text-slate-500">{k === 'tickets' ? 'عمولات تذاكر' : k === 'visas' ? 'عمولات تأشيرات' : 'أخرى'}</div>{CURRENCIES.map(c => <div key={c} className="text-xs flex justify-between"><span>{c}</span><span className="font-bold text-emerald-600">{fmt(data.revenue[k][c], c)}</span></div>)}</CardContent></Card>))}</div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">{['tickets', 'visas', 'services', 'other'].map(k => (<Card key={k}><CardContent className="p-3"><div className="text-xs text-slate-500">{k === 'tickets' ? 'عمولات تذاكر' : k === 'visas' ? 'عمولات تأشيرات' : k === 'services' ? 'إيرادات خدمات' : 'أخرى'}</div>{CURRENCIES.map(c => <div key={c} className="text-xs flex justify-between"><span>{c}</span><span className="font-bold text-emerald-600">{fmt(data.revenue[k][c], c)}</span></div>)}</CardContent></Card>))}</div>
           </div>
           {(data.fx_gain_base ?? data.fx_gain_usd) !== undefined && (
             <Card className={`border-2 ${(data.fx_gain_base ?? data.fx_gain_usd) >= 0 ? 'border-emerald-200 bg-emerald-50/50' : 'border-rose-200 bg-rose-50/50'}`}>
@@ -7918,6 +8261,14 @@ const PERMISSION_GROUPS = [
     ]
   },
   {
+    title: '🔀 التحويلات بين الفروع (تفعيل صريح — لا تُمنح تلقائياً مع المحاسبة)', keys: [
+      { k: 'mod_interbranch', l: 'الوصول للتحويلات بين الفروع' },
+      { k: 'mod_interbranch_receipt', l: 'سند قبض بين الفروع' },
+      { k: 'mod_interbranch_payment', l: 'سند صرف بين الفروع' },
+      { k: 'mod_interbranch_journal', l: 'قيد بين الفروع' },
+    ]
+  },
+  {
     title: '💰 الأسعار والخصومات', keys: [
       { k: 'edit_price', l: 'تعديل السعر المعتمد للتذكرة/الخدمة' },
       { k: 'apply_discount', l: 'منح خصومات للعميل' },
@@ -8199,6 +8550,7 @@ function AffiliateScreen() {
   const [editingPm, setEditingPm] = useState(null)
   const [cashoutOpen, setCashoutOpen] = useState(false)
   const [applyOpen, setApplyOpen] = useState(false)
+  const afPager = useClientPager(data?.withdrawals || []) // v5.7 — unified pagination
   const load = () => api('/affiliate').then(setData).catch(e => toast.error(e.message))
   useEffect(() => { load() }, [])
   const copyLink = async () => {
@@ -8357,7 +8709,7 @@ function AffiliateScreen() {
             <Table>
               <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>المبلغ</TableHead><TableHead>الطريقة</TableHead><TableHead>الحالة</TableHead><TableHead>ملاحظات</TableHead></TableRow></TableHeader>
               <TableBody>
-                {data.withdrawals.map(w => (
+                {afPager.paged.map(w => (
                   <TableRow key={w.id}>
                     <TableCell className="text-xs">{fmtDate(w.created_at)}</TableCell>
                     <TableCell className="font-bold">${(w.amount_usd || 0).toFixed(2)}</TableCell>
@@ -8374,6 +8726,7 @@ function AffiliateScreen() {
                 ))}
               </TableBody>
             </Table>
+            <PaginationBar lq={afPager.lq} /> {/* v5.7 — unified pagination */}
           </CardContent>
         </Card>
       )}
@@ -8916,7 +9269,7 @@ function PackageCompareDialog({ initialPeriod = 'all', onClose }) {
           ) : rows.length === 0 ? (
             <div className="text-center py-8 text-sm text-slate-400">لا توجد باكجات</div>
           ) : (
-            <div className="overflow-x-auto rounded-lg border">
+            <div className="table-scroll rounded-lg border">
               <table className="w-full text-sm">
                 <thead className="bg-slate-100 text-xs">
                   <tr>
@@ -11659,7 +12012,7 @@ function OfficeSettings() {
 
         <TabsContent value="users" className="mt-4">
           <Card>
-            <CardHeader className="flex flex-row items-center justify-between"><CardTitle>المستخدمون ({users.length}/{tenant?.max_users || 2})</CardTitle></CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between"><CardTitle>المستخدمون ({users.length} / {limitLbl(tenant?.max_users ?? 2)})</CardTitle></CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end mb-4 p-3 bg-slate-50 rounded-lg">
                 <Field label="الاسم"><Input value={newUser.name} onChange={e => setNewUser({ ...newUser, name: e.target.value })} /></Field>
@@ -12263,6 +12616,7 @@ function TenantApp() {
         {tabAllowed && tab === 'boxes' && <ErrorBoundary tabName="الصناديق والبنوك">{user?.role === 'super_admin' ? <BoxesBanksHub /> : <BoxesScreen />}</ErrorBoundary>}
         {tabAllowed && tab === 'chart' && <ErrorBoundary tabName="الدليل المحاسبي"><ChartScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'journal' && <ErrorBoundary tabName="قيود اليومية"><JournalScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'interbranch' && <ErrorBoundary tabName="التحويلات بين الفروع"><InterBranchScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'reports' && <ErrorBoundary tabName="التقارير المالية"><ReportsScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'query' && <ErrorBoundary tabName="مركز الاستعلامات"><QueryCenterScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'visa-monitor' && <ErrorBoundary tabName="مراقبة التأشيرات"><VisaMonitorScreen /></ErrorBoundary>}
@@ -12466,13 +12820,14 @@ function FxScreen() {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [editing, setEditing] = useState(null)
+  const lq = useListQuery() // v5.7 — unified SERVER-SIDE date filter + pagination
   const load = async () => {
     try {
-      const [t, b] = await Promise.all([api('/fx'), api('/boxes')])
-      setTxs(t); setBoxes(b)
+      const [t, b] = await Promise.all([api(`/fx?${lq.qs()}`), api('/boxes')])
+      lq.absorb(t, setTxs); setBoxes(b)
     } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [lq.dep])
   const filtered = applyFilter(txs, filter)
   const selected = filtered.find(t => t.id === selectedId)
   const totalGain = filtered.reduce((s, t) => s + (t.fx_gain_usd || t.fx_gain_base || 0), 0)
@@ -12542,10 +12897,11 @@ function FxScreen() {
         <StatCard icon={Sparkles} label="آخر عملية" value={filtered[0] ? fmtDate(filtered[0].date) : '—'} grad="grad-brand" />
       </div>
 
+      <PeriodFilterBar lq={lq} /> {/* v5.7 — unified server-side date filter */}
       <Card>
         <CardHeader><CardTitle className="flex items-center gap-2"><ArrowLeftRight className="w-5 h-5 text-fuchsia-600" /> سجل عمليات الصرافة</CardTitle></CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
+          <XScroll>
             <Table>
               <TableHeader><TableRow>
                 <TableHead className="w-8"></TableHead>
@@ -12575,7 +12931,8 @@ function FxScreen() {
                 })}
               </TableBody>
             </Table>
-          </div>
+          </XScroll>
+          <PaginationBar lq={lq} /> {/* v5.7 — unified server-side pagination */}
         </CardContent>
       </Card>
 
@@ -12600,6 +12957,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
     : { title: 'بيع عملات', color: 'grad-rose', desc: 'يبيع المكتب عملة للزبون ويستلم مقابلها بعملة أخرى' }
   const emptyForm = {
     date: todayISO(), currency: 'USD', amount: '', exchange_rate: '',
+    counter_amount: '', // v5.6 — editable total (reverse-rate source of truth when edited)
     counter_currency: 'SAR', payment_method: 'cash',
     box_currency_id: '', box_counter_id: '',
     account_currency_id: '', account_counter_id: '',  // For 'account' mode; encoded as `${kind}:${id}`
@@ -12609,6 +12967,10 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [allAccounts, setAllAccounts] = useState([])
+  // v5.6 — SAME-ACCOUNT LOCK: normal exchange uses ONE account for BOTH sides (auto-locked
+  // counterpart). Explicit bilateral entries (two different accounts) are the exception mode.
+  const [entryMode, setEntryMode] = useState('same') // 'same' | 'bilateral'
+  const [sameSel, setSameSel] = useState(null)        // selected entity in same-account mode
   useEffect(() => {
     if (!open) return
     if (record) {
@@ -12616,6 +12978,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
         date: record.date ? new Date(record.date).toISOString().slice(0,10) : todayISO(),
         currency: record.currency || 'USD', amount: record.amount ?? '',
         exchange_rate: record.exchange_rate ?? '',
+        counter_amount: record.counter_amount ?? '',
         counter_currency: record.counter_currency || 'SAR',
         payment_method: record.payment_method || 'cash',
         box_currency_id: record.box_currency_id || '',
@@ -12627,8 +12990,20 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
         source_of_funds: record.source_of_funds || '', purpose: record.purpose || '',
         remarks: record.remarks || '',
       })
+      // v5.6 — detect mode from the stored refs: same id on both sides ⇒ normal (same-account)
+      const refA = record.currency_ref?.id || record.box_currency_id
+      const refB = record.counter_ref?.id || record.box_counter_id
+      if (refA && refA === refB) {
+        setEntryMode('same')
+        setSameSel({ id: refA, type: record.currency_ref?.kind || 'box', name: record.currency_ref?.name || record.box_currency_name || '', account_code: record.currency_ref?.code || '' })
+      } else {
+        setEntryMode('bilateral')
+        setSameSel(null)
+      }
     } else {
       setForm(emptyForm)
+      setEntryMode('same')
+      setSameSel(null)
     }
   }, [open, record])
   useEffect(() => {
@@ -12642,13 +13017,36 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
       api('/accounts/all').then(setAllAccounts).catch(() => {})
     }
   }, [open, form.payment_method])
-  const counter_amount = (Number(form.amount) || 0) * (Number(form.exchange_rate) || 0)
+  // v5.6 — LAST-EDITED-FIELD rule (no calculation loop): each handler recomputes ONLY the
+  // dependent field, never itself. amount/rate edits ⇒ total recalculated; total edit ⇒
+  // effective rate derived (total ÷ amount) at 6-dp precision.
+  const setAmount = (v) => setForm(f => {
+    const a = Number(v) || 0, r = Number(f.exchange_rate) || 0
+    return { ...f, amount: v, counter_amount: a > 0 && r > 0 ? +(a * r).toFixed(2) : f.counter_amount }
+  })
+  const setRate = (v) => setForm(f => {
+    const a = Number(f.amount) || 0, r = Number(v) || 0
+    return { ...f, exchange_rate: v, counter_amount: a > 0 && r > 0 ? +(a * r).toFixed(2) : f.counter_amount }
+  })
+  const setTotal = (v) => setForm(f => {
+    const a = Number(f.amount) || 0, t = Number(v) || 0
+    return { ...f, counter_amount: v, exchange_rate: a > 0 && t > 0 ? +(t / a).toFixed(6) : f.exchange_rate }
+  })
+  const counter_amount = Number(form.counter_amount) || ((Number(form.amount) || 0) * (Number(form.exchange_rate) || 0))
   const parseRef = (v) => { if (!v) return null; const [kind, id] = v.split(':'); return { kind, id } }
   const submit = async () => {
-    if (!form.amount || !form.exchange_rate) return toast.error('أدخل المبلغ وسعر الصرف')
+    if (!form.amount || !form.exchange_rate) return toast.error('أدخل المبلغ وسعر الصرف (أو القيمة الإجمالية)')
     if (form.currency === form.counter_currency) return toast.error('اختر عملتين مختلفتين')
     const body = { type, ...form }
-    if (form.payment_method === 'account') {
+    if (entryMode === 'same') {
+      // v5.6 — normal exchange: SAME account on both sides, counterpart auto-locked
+      if (!sameSel?.id) return toast.error('اختر الحساب (يُستخدم تلقائياً للطرفين)')
+      const kind = sameSel.type === 'account' ? 'account' : sameSel.type
+      body.currency_ref = { kind, id: sameSel.id }
+      body.counter_ref = { kind, id: sameSel.id }
+      body.payment_method = kind === 'box' ? 'cash' : 'account'
+      if (kind === 'box') { body.box_currency_id = sameSel.id; body.box_counter_id = sameSel.id }
+    } else if (form.payment_method === 'account') {
       if (!form.account_currency_id || !form.account_counter_id) return toast.error('اختر الحسابين للطرفين')
       body.currency_ref = parseRef(form.account_currency_id)
       body.counter_ref = parseRef(form.account_counter_id)
@@ -12659,7 +13057,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
       setSaving(true)
       if (isEdit) await api(`/fx/${record.id}`, { method: 'PUT', body })
       else await api('/fx', { method: 'POST', body })
-      onOpenChange(false); onSaved(); setForm(f => ({ ...f, amount: '', exchange_rate: '', customer_name: '', customer_phone: '', id_number: '', source_of_funds: '', purpose: '', remarks: '' }))
+      onOpenChange(false); onSaved(); setForm(f => ({ ...f, amount: '', exchange_rate: '', counter_amount: '', customer_name: '', customer_phone: '', id_number: '', source_of_funds: '', purpose: '', remarks: '' }))
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
   const isCash = form.payment_method === 'cash'
@@ -12677,7 +13075,22 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
           <DialogDescription>{isEdit ? 'سيتم عكس القيد المحاسبي القديم وإعادة الترحيل بالقيم الجديدة تلقائياً' : cfg.desc}</DialogDescription>
         </DialogHeader>
 
-        {/* Payment method selector */}
+        {/* v5.6 — Entry mode: normal (same account, locked counterpart) vs explicit bilateral */}
+        <div className="p-3 rounded-lg border border-slate-200 bg-slate-50">
+          <div className="text-xs font-bold text-slate-600 mb-2">نمط العملية</div>
+          <div className="flex gap-2 flex-wrap">
+            <button onClick={() => setEntryMode('same')} className={`px-4 py-2 rounded-lg text-sm font-bold border transition ${entryMode === 'same' ? 'bg-emerald-500 text-white border-emerald-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-emerald-400'}`}>🔁 صرافة عادية — حساب واحد للطرفين</button>
+            <button onClick={() => setEntryMode('bilateral')} className={`px-4 py-2 rounded-lg text-sm font-bold border transition ${entryMode === 'bilateral' ? 'bg-blue-500 text-white border-blue-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-blue-400'}`}>⚖️ قيد ثنائي — حسابان مختلفان</button>
+          </div>
+          {entryMode === 'same' ? (
+            <div className="text-[11px] text-emerald-700 mt-2">🔒 الطرف المقابل يتحدد تلقائياً بنفس الحساب المختار (صندوق، بنك، عميل، مورد، أو أي حساب ترحيل من الدليل) ولا يمكن استبداله</div>
+          ) : (
+            <div className="text-[11px] text-blue-700 mt-2">⚠️ النمط الثنائي الصريح فقط: يسمح بأن يكون حساب المدين مختلفاً عن حساب الدائن</div>
+          )}
+        </div>
+
+        {/* Payment method selector — bilateral mode only */}
+        {entryMode === 'bilateral' && (
         <div className="p-3 rounded-lg border border-slate-200 bg-slate-50">
           <div className="text-xs font-bold text-slate-600 mb-2">طريقة الدفع / التسوية</div>
           <div className="flex gap-2">
@@ -12685,23 +13098,37 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
             <button onClick={() => setForm({ ...form, payment_method: 'account' })} className={`px-4 py-2 rounded-lg text-sm font-bold border transition ${!isCash ? 'bg-blue-500 text-white border-blue-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-blue-400'}`}>📒 حساب (الدليل المحاسبي كامل)</button>
           </div>
           {!isCash && (
-            <div className="text-[11px] text-blue-700 mt-2">✨ يتم تسوية العملية على حسابات من الدليل المحاسبي (عملاء، موردين، مصروفات، إيرادات، أصول، خصوم...) دون تحريك نقدي</div>
+            <div className="text-[11px] text-blue-700 mt-2">✨ يتم تسوية العملية على حسابات من الدليل المحاسبي (عملاء، موردين، مصروفات، إيرادات، أصول، خصوم، حقوق ملكية...) دون تحريك نقدي</div>
           )}
         </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-2">
           <Field label="التاريخ"><DocDateInput value={form.date} onChange={v => setForm({ ...form, date: v })} /></Field>
           <Field label="العملة" required><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
-          <Field label="المبلغ" required><Input type="number" min="0" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
-          <Field label="سعر الصرف" required><Input type="number" min="0" step="0.0001" value={form.exchange_rate} onChange={e => setForm({ ...form, exchange_rate: e.target.value })} className="text-lg font-bold" /></Field>
+          <Field label="المبلغ" required><Input type="number" min="0" step="0.01" value={form.amount} onChange={e => setAmount(e.target.value)} className="text-lg font-bold" /></Field>
+          <Field label="سعر الصرف" required><Input type="number" min="0" step="0.000001" value={form.exchange_rate} onChange={e => setRate(e.target.value)} className="text-lg font-bold" /></Field>
 
           <Field label="المقابل بعملة" required><Select value={form.counter_currency} onValueChange={v => setForm({ ...form, counter_currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
-          <Field label="القيمة الإجمالية">
-            <div className={`px-3 py-2 rounded-md border text-lg font-extrabold bg-blue-50 border-blue-200 text-blue-700`}>
-              {fmt(counter_amount, form.counter_currency)}
-            </div>
+          <Field label="القيمة الإجمالية ✏️">
+            {/* v5.6 — editable total: editing it derives the effective rate (total ÷ amount) */}
+            <Input type="number" min="0" step="0.01" value={form.counter_amount === '' ? (counter_amount || '') : form.counter_amount} onChange={e => setTotal(e.target.value)} className="text-lg font-extrabold bg-blue-50 border-blue-200 text-blue-700" />
+            {Number(form.amount) > 0 && Number(form.counter_amount) > 0 && (
+              <div className="text-[10px] text-blue-600 mt-1 font-mono">السعر الفعلي: {(Number(form.counter_amount) / Number(form.amount)).toFixed(6)}</div>
+            )}
           </Field>
-          {isCash ? (
+          {entryMode === 'same' ? (
+            <>
+              <Field label={`الحساب (${form.currency} ⇄ ${form.counter_currency}) 🔍`} required>
+                <AccountAutocomplete type="all" value={sameSel?.id || null} onChange={setSameSel} placeholder="صندوق / بنك / عميل / مورد / حساب دليل..." />
+              </Field>
+              <Field label="الطرف المقابل 🔒">
+                <div className="px-3 py-2 rounded-md border-2 border-slate-200 bg-slate-100 text-sm font-bold text-slate-500 min-h-[38px] flex items-center gap-2 cursor-not-allowed select-none">
+                  🔒 {sameSel ? `${sameSel.account_code ? sameSel.account_code + ' — ' : ''}${sameSel.name} (نفس الحساب)` : 'يتحدد تلقائياً بنفس الحساب'}
+                </div>
+              </Field>
+            </>
+          ) : isCash ? (
             <>
               <Field label={`صندوق ${form.currency} 🔍`} required>
                 <AccountAutocomplete type="box" value={form.box_currency_id || null} onChange={(sel) => setForm({ ...form, box_currency_id: sel?.id || '' })} placeholder={`اختر صندوق ${form.currency}...`} />
@@ -12716,7 +13143,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
                 <AccountAutocomplete
                   type="all"
                   value={form.account_currency_id ? form.account_currency_id.split(':')[1] : null}
-                  onChange={(sel) => setForm({ ...form, account_currency_id: sel ? `${sel.type === 'account' ? 'account' : sel.type}:${sel.type === 'account' ? sel.account_code : sel.id}` : '' })}
+                  onChange={(sel) => setForm({ ...form, account_currency_id: sel ? `${sel.type}:${sel.id}` : '' })}
                   placeholder={`اختر حساب ${form.currency}...`}
                 />
               </Field>
@@ -12724,7 +13151,7 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
                 <AccountAutocomplete
                   type="all"
                   value={form.account_counter_id ? form.account_counter_id.split(':')[1] : null}
-                  onChange={(sel) => setForm({ ...form, account_counter_id: sel ? `${sel.type === 'account' ? 'account' : sel.type}:${sel.type === 'account' ? sel.account_code : sel.id}` : '' })}
+                  onChange={(sel) => setForm({ ...form, account_counter_id: sel ? `${sel.type}:${sel.id}` : '' })}
                   placeholder={`اختر حساب ${form.counter_currency}...`}
                 />
               </Field>
@@ -13001,7 +13428,7 @@ function LandingPage({ onLoginClick, onSignupClick }) {
       <header className="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-slate-200">
         <div className="max-w-7xl mx-auto px-4 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl grad-brand flex items-center justify-center text-white text-xl font-black shadow">ر</div>
+            <img src="/rahaal-icon.png" alt="شعار رحّال" className="w-10 h-10 rounded-xl object-cover shadow" />
             <div>
               <div className="font-extrabold text-slate-900">Rahaal <span className="text-blue-700">رحّال</span></div>
               <div className="text-[10px] text-slate-500 -mt-0.5">by Target Media</div>
@@ -13260,8 +13687,8 @@ function App() {
   const refreshMe = useCallback(async () => {
     try {
       const r = await api('/auth/me')
-      setAuth({ loading: false, user: r.user, tenant: r.tenant, settings: r.settings })
-    } catch { setAuth({ loading: false, user: null, tenant: null, settings: null }) }
+      setAuth({ loading: false, user: r.user, tenant: r.tenant, settings: r.settings, branch: r.branch || null }) // v5.3 — current-branch context
+    } catch { setAuth({ loading: false, user: null, tenant: null, settings: null, branch: null }) }
   }, [])
 
   useEffect(() => { refreshMe() }, [refreshMe])
@@ -13282,7 +13709,7 @@ function App() {
   }
   const logout = async () => {
     try { await api('/auth/logout', { method: 'POST' }) } catch {}
-    setAuth({ loading: false, user: null, tenant: null, settings: null })
+    setAuth({ loading: false, user: null, tenant: null, settings: null, branch: null })
     setPublicView('landing')
     toast.success('تم تسجيل الخروج')
   }

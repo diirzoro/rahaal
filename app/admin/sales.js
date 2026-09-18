@@ -29,13 +29,16 @@ const AdminSalesCenter = ({ initialTab = 'sales' }) => {
   const [f, setF] = useState({ type: 'all', tenant: '', q: '', status: '', currency: '', payment: '', from: '', to: '', missing_je: false, vtype: '' })
   const [rows, setRows] = useState(null)
   const [skip, setSkip] = useState(0)
+  // v5.7 — unified rows-per-page (same options + persisted key as the shared PaginationBar)
+  const [ps, setPs] = useState(() => { try { const v = parseInt(localStorage.getItem('rahaal_ps')); return [20, 50, 100, 200, 1000].includes(v) ? v : 50 } catch { return 50 } })
+  const setPageSize = (n) => { setPs(n); setSkip(0); try { localStorage.setItem('rahaal_ps', String(n)) } catch { } }
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
 
   useEffect(() => { api('/admin/tenants').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
 
   const qs = (extra = {}) => {
-    const o = { ...f, ...extra, skip, limit: 50 }
+    const o = { ...f, ...extra, skip, limit: ps }
     return Object.entries(o).filter(([, v]) => v !== '' && v !== false && v !== undefined).map(([k, v]) => `${k}=${encodeURIComponent(v === true ? '1' : v)}`).join('&')
   }
   const load = async () => {
@@ -46,7 +49,7 @@ const AdminSalesCenter = ({ initialTab = 'sales' }) => {
     } catch (e) { toast.error(e.message) }
     setLoading(false)
   }
-  useEffect(() => { load() }, [tab, skip])
+  useEffect(() => { load() }, [tab, skip, ps])
 
   const openDetail = async (r) => {
     try { setDetail({ loading: true }); setDetail(await api(`/admin/center/sales-detail?kind=${r.kind}&id=${r.id}`)) } catch (e) { toast.error(e.message); setDetail(null) }
@@ -153,9 +156,15 @@ const AdminSalesCenter = ({ initialTab = 'sales' }) => {
           </Table>
         )}
         <div className="flex items-center justify-between mt-3">
-          <Button size="sm" variant="outline" disabled={skip === 0} onClick={() => setSkip(Math.max(0, skip - 50))} className="gap-1"><ChevronRight className="w-4 h-4" /> السابق</Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" disabled={skip === 0} onClick={() => setSkip(Math.max(0, skip - ps))} className="gap-1"><ChevronRight className="w-4 h-4" /> السابق</Button>
+            <span className="text-[11px] font-bold text-slate-500">سجلات/صفحة:</span>
+            <select value={ps} onChange={e => setPageSize(parseInt(e.target.value))} className="h-7 text-xs border rounded-md px-1.5 bg-white font-bold">
+              {[20, 50, 100, 200, 1000].map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </div>
           <span className="text-xs text-slate-400">عرض {skip + 1} — {skip + (rows?.length || 0)}</span>
-          <Button size="sm" variant="outline" disabled={(rows?.length || 0) < 50} onClick={() => setSkip(skip + 50)} className="gap-1">التالي <ChevronLeft className="w-4 h-4" /></Button>
+          <Button size="sm" variant="outline" disabled={(rows?.length || 0) < ps} onClick={() => setSkip(skip + ps)} className="gap-1">التالي <ChevronLeft className="w-4 h-4" /></Button>
         </div>
       </CardContent></Card>
 

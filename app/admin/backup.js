@@ -17,7 +17,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { toast } from 'sonner'
 import { RefreshCw, Plus, Download, DatabaseBackup, RotateCcw, Lock, Eye, CheckCircle2, XCircle, ShieldAlert } from 'lucide-react'
-import { api } from '../shared'
+import { api, useClientPager, PaginationBar } from '../shared'
 
 const dtt = (v) => (v ? new Date(v).toLocaleString('ar-EG') : '—')
 const kb = (b) => (b == null ? '—' : b > 1048576 ? `${(b / 1048576).toFixed(1)}MB` : `${Math.round(b / 1024)}KB`)

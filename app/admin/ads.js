@@ -18,7 +18,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { toast } from 'sonner'
 import { RefreshCw, Plus, Pencil, Copy, Pause, Play, Ban, Trash2, Eye, Megaphone, Lock, FileSearch } from 'lucide-react'
-import { api } from '../shared'
+import { api, useClientPager, PaginationBar } from '../shared'
 
 const dtt = (v) => (v ? new Date(v).toLocaleString('ar-EG') : '—')
 const toLocal = (v) => { if (!v) return ''; const d = new Date(v); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}` }
@@ -241,6 +241,9 @@ const AdminAdsCenter = () => {
     try { await api(`/admin/announcements/${ad.id}`, { method: 'PUT', body: { ...patch, reason } }); toast.success(okMsg); load() } catch (e) { toast.error(e.message) }
   }
   const filtered = (rows || []).filter(r => !f.q || (r.title || '').toLowerCase().includes(f.q.toLowerCase()))
+  // v5.7 — unified pagination (global rule)
+  const adsPager = useClientPager(filtered)
+  const adsAuditPager = useClientPager(audit || [])
 
   return (
     <div className="space-y-3">
@@ -284,7 +287,7 @@ const AdminAdsCenter = () => {
                 <TableBody>
                   {rows === null ? <TableRow><TableCell colSpan={8} className="text-center py-8 text-slate-400">جارِ التحميل...</TableCell></TableRow>
                     : filtered.length === 0 ? <TableRow><TableCell colSpan={8} className="text-center py-8 text-slate-400">لا إعلانات</TableCell></TableRow>
-                      : filtered.map(r => (
+                      : adsPager.paged.map(r => (
                         <TableRow key={r.id} className={r.display_status === 'cancelled' ? 'opacity-50' : ''}>
                           <TableCell>
                             <div className="flex items-center gap-2">
@@ -313,6 +316,7 @@ const AdminAdsCenter = () => {
                 </TableBody>
               </Table>
             </div>
+            <PaginationBar lq={adsPager.lq} /> {/* v5.7 — unified pagination */}
             <div className="text-[10px] text-slate-400 mt-2">ℹ️ واجهة المكاتب الحالية تعرض Popup وBanner — الأنواع الجديدة (عرض/صيانة/تنبيه) تُسلَّم عبر نفس API وسيتم عرضها في واجهة المكاتب ضمن مرحلة لاحقة (موثق).</div>
           </CardContent></Card>
         </>
@@ -329,7 +333,7 @@ const AdminAdsCenter = () => {
               <TableBody>
                 {audit === null ? <TableRow><TableCell colSpan={5} className="text-center py-8 text-slate-400">جارِ التحميل...</TableCell></TableRow>
                   : audit.length === 0 ? <TableRow><TableCell colSpan={5} className="text-center py-8 text-slate-400">لا سجلات بعد</TableCell></TableRow>
-                    : audit.map((a, i) => (
+                    : adsAuditPager.paged.map((a, i) => (
                       <TableRow key={a.id || i}>
                         <TableCell className="text-xs whitespace-nowrap">{dtt(a.at)}</TableCell>
                         <TableCell className="text-xs" dir="ltr">{a.actor_email || '—'}</TableCell>
@@ -341,6 +345,7 @@ const AdminAdsCenter = () => {
               </TableBody>
             </Table>
           </div>
+          <PaginationBar lq={adsAuditPager.lq} /> {/* v5.7 — unified pagination */}
         </CardContent></Card>
       )}
 

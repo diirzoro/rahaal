@@ -19,7 +19,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { toast } from 'sonner'
 import { ShieldCheck, Users, FileSearch, Plus, Eye, Pencil, Trash2, Power, Lock, RefreshCw, Search } from 'lucide-react'
-import { api } from '../shared'
+import { api, useClientPager, PaginationBar } from '../shared'
 
 const dtt = (v) => (v ? new Date(v).toLocaleString('ar-EG') : '—')
 

@@ -19,7 +19,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { toast } from 'sonner'
 import { RefreshCw, Plus, Pencil, Power, Copy, Landmark, CreditCard, ReceiptText, Upload, Eye, ShieldAlert } from 'lucide-react'
-import { api } from '../shared'
+import { api, useClientPager, PaginationBar } from '../shared'
 
 const dtt = (v) => (v ? new Date(v).toLocaleString('ar-EG') : '—')
 const fld = (l, node) => <div><div className="text-xs font-bold text-slate-500 mb-1">{l}</div>{node}</div>
@@ -279,6 +279,9 @@ const AdminPayFinCenter = () => {
   const [methods, setMethods] = useState({ rows: [], types: [] })
   const [entities, setEntities] = useState({ rows: [], types: [] })
   const [orders, setOrders] = useState({ rows: [], statuses: {} })
+  // v5.7 — unified pagination (global rule)
+  const entPager = useClientPager(entities.rows)
+  const ordPager = useClientPager(orders.rows)
   const [overview, setOverview] = useState(null)
   const [tenants, setTenants] = useState([])
   const [ef, setEf] = useState({ type: 'all', status: 'all', q: '' })
@@ -348,7 +351,7 @@ const AdminPayFinCenter = () => {
           <Input placeholder="بحث..." className="max-w-xs" value={ef.q} onChange={e => setEf({ ...ef, q: e.target.value })} />
         </div>
         <Table><TableHeader><TableRow><TableHead className="text-right">الجهة</TableHead><TableHead className="text-right">النوع</TableHead><TableHead className="text-right">الموقع</TableHead><TableHead className="text-right">حسابات</TableHead><TableHead className="text-right">حالة</TableHead><TableHead className="text-right">—</TableHead></TableRow></TableHeader>
-          <TableBody>{entities.rows.map(en => (
+          <TableBody>{entPager.paged.map(en => (
             <TableRow key={en.id} className={en.active === false ? 'opacity-50' : ''}>
               <TableCell className="font-bold">{en.name_ar}<div className="text-[10px] text-slate-500" dir="ltr">{en.name_en || ''}</div></TableCell>
               <TableCell><Badge variant="outline">{entities.types.find(t => t.key === en.type)?.label || en.type}</Badge></TableCell>
@@ -364,6 +367,7 @@ const AdminPayFinCenter = () => {
             </TableRow>))}
             {!entities.rows.length && <TableRow><TableCell colSpan={6} className="text-center text-slate-400 py-8">لا جهات — {can('create') ? 'أضف أول جهة' : 'أرسل طلب إضافة وسيراجعه المخول'}</TableCell></TableRow>}
           </TableBody></Table>
+        <PaginationBar lq={entPager.lq} /> {/* v5.7 — unified pagination */}
       </CardContent></Card>}
 
       {tab === 'orders' && <Card><CardContent className="p-4 space-y-3">
@@ -381,7 +385,7 @@ const AdminPayFinCenter = () => {
           <label className="flex items-center gap-1"><input type="checkbox" checked={of.needs_review} onChange={e => setOf({ ...of, needs_review: e.target.checked })} />تنتظر المراجعة</label>
         </div>
         <Table><TableHeader><TableRow><TableHead className="text-right">المرجع</TableHead><TableHead className="text-right">المكتب / الدافع</TableHead><TableHead className="text-right">المبلغ</TableHead><TableHead className="text-right">الطريقة / الجهة</TableHead><TableHead className="text-right">إثباتات</TableHead><TableHead className="text-right">الحالة</TableHead><TableHead className="text-right">أنشئ</TableHead></TableRow></TableHeader>
-          <TableBody>{orders.rows.map(o => (
+          <TableBody>{ordPager.paged.map(o => (
             <TableRow key={o.id} className="cursor-pointer hover:bg-slate-50" onClick={() => setDlg({ type: 'orderDetail', id: o.id })}>
               <TableCell className="font-bold text-blue-700" dir="ltr">{o.ref_no}</TableCell>
               <TableCell className="text-xs">{o.tenant_name}<div className="text-[10px] text-slate-500">{o.payer_name || ''}</div></TableCell>
@@ -393,6 +397,7 @@ const AdminPayFinCenter = () => {
             </TableRow>))}
             {!orders.rows.length && <TableRow><TableCell colSpan={7} className="text-center text-slate-400 py-8">لا أوامر دفع مطابقة</TableCell></TableRow>}
           </TableBody></Table>
+        <PaginationBar lq={ordPager.lq} /> {/* v5.7 — unified pagination */}
         <div className="text-[11px] text-slate-500 border-t pt-2">🔒 لا يُضاف رصيد برفع إيصال · التأكيد بصلاحية Approve + Maker–Checker · التأكيد يسجل «بانتظار التنفيذ المالي» — الحركة عبر مسار السند/القيد القائم · الدفع الجزئي/الزائد نقطة قرار (تسجيل للمراجعة فقط) · لا تكامل بطاقات خارجي بهذه الدفعة</div>
       </CardContent></Card>}
 

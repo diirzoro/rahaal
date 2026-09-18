@@ -17,7 +17,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { toast } from 'sonner'
 import { RefreshCw, Plus, Pencil, MapPin, MoveRight, Info, Power } from 'lucide-react'
-import { api } from '../shared'
+import { api, useClientPager, PaginationBar } from '../shared'
 
 const LEVELS = [
   { key: 'country', label: 'الدولة' }, { key: 'governorate', label: 'المحافظة' },

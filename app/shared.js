@@ -168,4 +168,147 @@ function askConfirm(opts) {
 }
 
 
-export { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_MAX_MB, DOC_MAX_FILE_BYTES, DOC_BATCH_MAX_MB, DOC_BATCH_MAX_BYTES, validateDocBatch, todayISO, api, AuthCtx, useAuth, Field, TopBar, ConfirmDialog, ConfirmHost, askConfirm }
+// ================================================================
+// v5.7 — SHARED LIST CONTROLS (unified across ALL Rahaal screens)
+// One state bundle per screen: unified date filter + server-side pagination.
+// The SAME query-string contract is served by the shared backend helpers
+// (periodFilterExpr + respondList) — logic is never re-implemented per screen.
+function useListQuery() {
+  const [period, setPeriod] = useState('all')
+  const [rangeFrom, setRangeFrom] = useState('')
+  const [rangeTo, setRangeTo] = useState('')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSizeRaw] = useState(() => {
+    try { const v = parseInt(localStorage.getItem('rahaal_ps')); return [20, 50, 100, 200, 1000].includes(v) ? v : 50 } catch { return 50 }
+  })
+  const [total, setTotal] = useState(0)
+  const [stamp, setStamp] = useState(0)
+  const setPageSize = (n) => { setPageSizeRaw(n); setPage(1); try { localStorage.setItem('rahaal_ps', String(n)) } catch { } }
+  const applyPeriod = (p) => { setPeriod(p); setPage(1); if (p !== 'range') setStamp(s => s + 1) }
+  const applyRange = () => { if (!rangeFrom && !rangeTo) { toast.error('حدد تاريخ البداية أو النهاية'); return } setPage(1); setStamp(s => s + 1) }
+  const reload = () => setStamp(s => s + 1) // manual refresh / external triggers
+  const qs = (extra = '') => {
+    const parts = [`page=${page}`, `page_size=${pageSize}`]
+    if (period !== 'all') {
+      parts.push(`period=${period}`)
+      if (period === 'range') { if (rangeFrom) parts.push(`from=${rangeFrom}`); if (rangeTo) parts.push(`to=${rangeTo}`) }
+    }
+    if (extra) parts.push(extra)
+    return parts.join('&')
+  }
+  // absorbs BOTH shapes: legacy array or { rows, total } paged object
+  const absorb = (r, setRows) => { if (Array.isArray(r)) { setRows(r); setTotal(r.length) } else { setRows(r?.rows || []); setTotal(r?.total || 0) } }
+  const dep = `${page}|${pageSize}|${stamp}`
+  return { period, setPeriod, rangeFrom, setRangeFrom, rangeTo, setRangeTo, page, setPage, pageSize, setPageSize, total, setTotal, stamp, dep, qs, absorb, applyPeriod, applyRange, reload }
+}
+
+// v5.7 — unified date filter bar (same design/behavior first shipped in Journal v5.6)
+function PeriodFilterBar({ lq, compact = false }) {
+  return (
+    <div className={`flex flex-wrap items-center gap-2 ${compact ? '' : 'p-3 rounded-lg border border-slate-200 bg-white'}`}>
+      <span className="text-xs font-black text-slate-600 shrink-0">📅 الفترة:</span>
+      {[['today', 'اليوم'], ['week', 'هذا الأسبوع'], ['month', 'هذا الشهر'], ['all', 'كل الفترات'], ['range', 'فترة مخصصة']].map(([k, lbl]) => (
+        <button key={k} onClick={() => lq.applyPeriod(k)} className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${lq.period === k ? 'bg-blue-600 text-white border-blue-700 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-blue-400'}`}>{lbl}</button>
+      ))}
+      {lq.period === 'range' && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <Input type="date" value={lq.rangeFrom} onChange={e => lq.setRangeFrom(e.target.value)} className="h-8 w-36 text-xs" />
+          <span className="text-xs text-slate-400">→</span>
+          <Input type="date" value={lq.rangeTo} onChange={e => lq.setRangeTo(e.target.value)} className="h-8 w-36 text-xs" />
+          <Button size="sm" className="h-8 text-xs" onClick={lq.applyRange}>تطبيق</Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// v5.7 — unified pagination bar: page-size select (persisted) + prev/next + counts + displayed range
+function PaginationBar({ lq }) {
+  const pages = Math.max(1, Math.ceil((lq.total || 0) / lq.pageSize))
+  const from = lq.total ? (lq.page - 1) * lq.pageSize + 1 : 0
+  const to = Math.min(lq.total || 0, lq.page * lq.pageSize)
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 px-1 py-2">
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] font-bold text-slate-500">سجلات/صفحة:</span>
+        <select value={lq.pageSize} onChange={e => lq.setPageSize(parseInt(e.target.value))} className="h-7 text-xs border rounded-md px-1.5 bg-white font-bold">
+          {[20, 50, 100, 200, 1000].map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+        <span className="text-[11px] text-slate-400">عرض {from.toLocaleString('en-US')}–{to.toLocaleString('en-US')} من {Number(lq.total || 0).toLocaleString('en-US')}</span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <Button size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={lq.page <= 1} onClick={() => lq.setPage(p => Math.max(1, p - 1))}>‹ السابق</Button>
+        <span className="text-[11px] font-bold text-slate-600">صفحة {lq.page} من {pages}</span>
+        <Button size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={lq.page >= pages} onClick={() => lq.setPage(p => Math.min(pages, p + 1))}>التالي ›</Button>
+      </div>
+    </div>
+  )
+}
+
+// v5.7 — CLIENT-SIDE pager for lists whose endpoint returns the full (already-capped)
+// dataset. Same UX + SAME PaginationBar component — no per-screen re-implementation.
+// Usage: const pager = useClientPager(rows); pager.paged.map(...); <PaginationBar lq={pager.lq} />
+function useClientPager(rows) {
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSizeRaw] = useState(() => {
+    try { const v = parseInt(localStorage.getItem('rahaal_ps')); return [20, 50, 100, 200, 1000].includes(v) ? v : 50 } catch { return 50 }
+  })
+  const setPageSize = (n) => { setPageSizeRaw(n); setPage(1); try { localStorage.setItem('rahaal_ps', String(n)) } catch { } }
+  const list = Array.isArray(rows) ? rows : []
+  const total = list.length
+  const pages = Math.max(1, Math.ceil(total / pageSize))
+  const safePage = Math.min(page, pages)
+  const paged = list.slice((safePage - 1) * pageSize, safePage * pageSize)
+  return { paged, total, lq: { total, page: safePage, setPage, pageSize, setPageSize } }
+}
+
+// v5.7 — client-side period predicate matching the SAME business rules as the backend
+// periodFilterExpr (UTC+3 business TZ, week starts Saturday). Used with PeriodFilterBar
+// on dated lists whose endpoints return the full dataset to the client.
+// Usage: const [pf, setPf] = useState({period:'all', from:'', to:''}) + filterByPeriod(rows, pf, 'date')
+function periodBounds(pf) {
+  if (!pf || pf.period === 'all' || !pf.period) return null
+  const TZ = 3 * 3600 * 1000
+  const now = new Date(Date.now() + TZ)
+  const d0 = (d) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - TZ
+  let from = null, to = null
+  if (pf.period === 'today') { from = d0(now); to = from + 86400000 }
+  else if (pf.period === 'week') { const dow = (now.getUTCDay() + 1) % 7; from = d0(now) - dow * 86400000; to = from + 7 * 86400000 } // Saturday start
+  else if (pf.period === 'month') { from = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) - TZ; to = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1) - TZ }
+  else if (pf.period === 'range') {
+    if (pf.from) from = Date.parse(pf.from + 'T00:00:00Z') - TZ
+    if (pf.to) to = Date.parse(pf.to + 'T00:00:00Z') - TZ + 86400000
+  }
+  return { from, to }
+}
+function filterByPeriod(rows, pf, field = 'date') {
+  const b = periodBounds(pf)
+  if (!b) return rows || []
+  return (rows || []).filter(r => {
+    const v = r?.[field]; if (!v) return false
+    const t = new Date(v).getTime(); if (isNaN(t)) return false
+    if (b.from != null && t < b.from) return false
+    if (b.to != null && t >= b.to) return false
+    return true
+  })
+}
+// PeriodFilterBar-compatible adapter over plain {period,from,to} state (client-side lists)
+function usePeriodState() {
+  const [period, setPeriod] = useState('all')
+  const [rangeFrom, setRangeFrom] = useState('')
+  const [rangeTo, setRangeTo] = useState('')
+  const [applied, setApplied] = useState({ period: 'all', from: '', to: '' })
+  const applyPeriod = (p) => { setPeriod(p); if (p !== 'range') setApplied({ period: p, from: '', to: '' }) }
+  const applyRange = () => { if (!rangeFrom && !rangeTo) { toast.error('حدد تاريخ البداية أو النهاية'); return } setApplied({ period: 'range', from: rangeFrom, to: rangeTo }) }
+  return { period, rangeFrom, setRangeFrom, rangeTo, setRangeTo, applyPeriod, applyRange, applied }
+}
+
+// v5.7 — shared sticky-scroll table wrapper: the container owns BOTH scroll axes with a
+// capped height, so the horizontal scrollbar is ALWAYS reachable at the visible bottom of
+// the table area (no need to scroll past 200 rows first). Native overflow = RTL-safe,
+// no synchronized/dual scrollbar hacks. Sticky header keeps context while scrolling.
+function XScroll({ children, maxH = '72vh' }) {
+  return <div className="rahaal-xscroll" style={{ maxHeight: maxH }}>{children}</div>
+}
+
+export { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_MAX_MB, DOC_MAX_FILE_BYTES, DOC_BATCH_MAX_MB, DOC_BATCH_MAX_BYTES, validateDocBatch, todayISO, api, AuthCtx, useAuth, Field, TopBar, ConfirmDialog, ConfirmHost, askConfirm, useListQuery, PeriodFilterBar, PaginationBar, XScroll, useClientPager, filterByPeriod, usePeriodState }
