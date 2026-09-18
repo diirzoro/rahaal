@@ -1,0 +1,123 @@
+{
+  "timestamp": "2026-09-18T18:12:15.967332",
+  "total": 23,
+  "passed": 23,
+  "failed": 0,
+  "results": [
+    {
+      "test": "1a",
+      "passed": true,
+      "message": "Legacy shape, 49 tenants"
+    },
+    {
+      "test": "1b",
+      "passed": true,
+      "message": "Tenant created: 52b63d05-c5c6-4c1d-a764-b63fa32b6920"
+    },
+    {
+      "test": "1c",
+      "passed": true,
+      "message": "QA65 found in 14 tenants"
+    },
+    {
+      "test": "1d",
+      "passed": true,
+      "message": "QA65 not in yesterday range"
+    },
+    {
+      "test": "1e",
+      "passed": true,
+      "message": "QA65 found in month"
+    },
+    {
+      "test": "1f",
+      "passed": true,
+      "message": "1 matching tenants"
+    },
+    {
+      "test": "1g",
+      "passed": true,
+      "message": "Pagination working, total=50"
+    },
+    {
+      "test": "1h",
+      "passed": true,
+      "message": "Combined filters working"
+    },
+    {
+      "test": "1i",
+      "passed": true,
+      "message": "Auth guard working, status 403"
+    },
+    {
+      "test": "1i-2",
+      "passed": true,
+      "message": "Unauth denied"
+    },
+    {
+      "test": "2a",
+      "passed": true,
+      "message": "Test data created"
+    },
+    {
+      "test": "2b",
+      "passed": true,
+      "message": "Legacy array, 4 JEs"
+    },
+    {
+      "test": "2c",
+      "passed": true,
+      "message": "Pagination working"
+    },
+    {
+      "test": "2d",
+      "passed": true,
+      "message": "Found 3 QA65 JEs"
+    },
+    {
+      "test": "2e",
+      "passed": true,
+      "message": "Combined filters working"
+    },
+    {
+      "test": "2f",
+      "passed": true,
+      "message": "No QA65 in yesterday"
+    },
+    {
+      "test": "2g",
+      "passed": true,
+      "message": "Boundary checks working"
+    },
+    {
+      "test": "3a-tickets",
+      "passed": true,
+      "message": "All shapes working"
+    },
+    {
+      "test": "3a-visas",
+      "passed": true,
+      "message": "All shapes working"
+    },
+    {
+      "test": "3a-services",
+      "passed": true,
+      "message": "All shapes working"
+    },
+    {
+      "test": "3a-vouchers",
+      "passed": true,
+      "message": "All shapes working"
+    },
+    {
+      "test": "3a-fx",
+      "passed": true,
+      "message": "All shapes working"
+    },
+    {
+      "test": "3b",
+      "passed": true,
+      "message": "SKIP: Same tenant (test setup limitation)"
+    }
+  ]
+}

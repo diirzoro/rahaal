@@ -118,6 +118,23 @@ const dateRangeExpr = (field, fromDate, toDate) => {
   if (toDate) conds.push({ $lte: [{ $toDate: `$${field}` }, toDate] })
   return conds.length ? { $expr: conds.length === 1 ? conds[0] : { $and: conds } } : null
 }
+// v5.7 — SHARED server-side period filter (single source — same semantics everywhere):
+// period=today|week|month|all|range (+from/to YYYY-MM-DD). Business TZ UTC+3, week starts
+// Saturday. Returns a $expr date condition or null (period=all / absent).
+function periodFilterExpr(q, field = 'date') {
+  const period = String(q.period || 'all').toLowerCase()
+  const todayIso = bizTodayISO()
+  let fromD = null, toD = null
+  if (period === 'today') { fromD = bizDayStart(todayIso); toD = bizDayEnd(todayIso) }
+  else if (period === 'week') {
+    const nowBiz = new Date(Date.now() + 3 * 3600e3)
+    const sinceSat = (nowBiz.getUTCDay() + 1) % 7
+    fromD = bizDayStart(new Date(nowBiz.getTime() - sinceSat * 86400e3).toISOString().slice(0, 10))
+    toD = bizDayEnd(todayIso)
+  } else if (period === 'month') { fromD = bizDayStart(`${todayIso.slice(0, 7)}-01`); toD = bizDayEnd(todayIso) }
+  else if (period === 'range') { if (q.from) fromD = bizDayStart(q.from); if (q.to) toD = bizDayEnd(q.to) }
+  return dateRangeExpr(field, fromD, toD)
+}
 
 // ============================================================================
 // v5.1 — RAHAAL SUBSCRIPTION BILLING CORE (نقاط 3+4+5+6+7+9)
@@ -547,6 +564,19 @@ export async function OPTIONS() { return cors(new NextResponse(null, { status: 2
 const ok = (d, cookie) => cors(NextResponse.json(d), cookie ? { 'Set-Cookie': cookie } : {})
 const bad = (m, s = 400) => cors(NextResponse.json({ error: m }, { status: s }))
 const clean = (arr) => arr.map(({ _id, ...r }) => r)
+// v5.7 — SHARED list responder: BACKWARD COMPATIBLE pagination. Without ?page → legacy
+// array (capped 500, unchanged contract). With ?page → { rows, total, page, page_size }
+// computed IN MongoDB (skip/limit) — records are never bulk-loaded then hidden client-side.
+async function respondList(db, coll, filter, sort, q, cap = 500) {
+  if (q.page) {
+    const page = Math.max(1, parseInt(q.page) || 1)
+    const ps = Math.min(1000, Math.max(1, parseInt(q.page_size) || 50))
+    const total = await db.collection(coll).countDocuments(filter)
+    const rows = await db.collection(coll).find(filter).sort(sort).skip((page - 1) * ps).limit(ps).toArray()
+    return ok({ rows: clean(rows), total, page, page_size: ps })
+  }
+  return ok(clean(await db.collection(coll).find(filter).sort(sort).limit(cap).toArray()))
+}
 
 // ================= Session =================
 async function getSession(request, db) {
@@ -2755,7 +2785,9 @@ async function handleRoute(request, { params }) {
       }
 
       if (route === '/admin/tenants' && method === 'GET') {
-        const tenants = await db.collection('tenants').find({}).sort({ created_at: -1 }).toArray()
+        // v5.7 — unified date filter (created_at) — same periodFilterExpr contract as all lists
+        const drAdm = periodFilterExpr(q, 'created_at')
+        const tenants = await db.collection('tenants').find(drAdm || {}).sort({ created_at: -1 }).toArray()
         // Include user counts
         const users = await db.collection('users').find({ role: { $ne: 'super_admin' } }).toArray()
         const usersByTenant = {}
@@ -2769,9 +2801,22 @@ async function handleRoute(request, { params }) {
           db.collection('tickets').countDocuments(),
           db.collection('visas').countDocuments(),
         ])
+        // v5.7 — server-side search + pagination (backward compatible: without ?page the
+        // full legacy shape is returned unchanged)
+        let list = tenants.map(t => ({ ...t, _id: undefined, users_count: usersByTenant[t.id] || 0, owner: ownersByTenant[t.id] ? { ...ownersByTenant[t.id], phone: ownersByTenant[t.id].phone || t.owner_phone || null } : (t.owner_phone ? { name: null, email: null, phone: t.owner_phone, whatsapp: null } : null) }))
+        const qs = String(q.q || '').trim().toLowerCase()
+        if (qs) list = list.filter(t => (t.name || '').toLowerCase().includes(qs) || (t.owner?.name || '').toLowerCase().includes(qs) || (t.owner?.email || '').toLowerCase().includes(qs) || String(t.owner?.phone || '').includes(qs))
+        let pageInfo = {}
+        if (q.page) {
+          const page = Math.max(1, parseInt(q.page) || 1)
+          const ps = Math.min(1000, Math.max(1, parseInt(q.page_size) || 50))
+          pageInfo = { total: list.length, page, page_size: ps }
+          list = list.slice((page - 1) * ps, page * ps)
+        }
         return ok({
-          tenants: tenants.map(t => ({ ...t, _id: undefined, users_count: usersByTenant[t.id] || 0, owner: ownersByTenant[t.id] ? { ...ownersByTenant[t.id], phone: ownersByTenant[t.id].phone || t.owner_phone || null } : (t.owner_phone ? { name: null, email: null, phone: t.owner_phone, whatsapp: null } : null) })),
+          tenants: list,
           global_stats: { tenants: tenants.length, tickets: tCount, visas: vCount },
+          ...pageInfo,
         })
       }
 
@@ -7412,7 +7457,10 @@ async function handleRoute(request, { params }) {
       return ok({ voucher: result.doc, statement_id: stmt.id, settled_amount: amount, settled_currency: currency })
     }
 
-    if (route === '/tickets' && method === 'GET') return ok(clean(await db.collection('tickets').find(btf) /* v5.3 branch scope */.sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+    if (route === '/tickets' && method === 'GET') {
+      const drT = periodFilterExpr(q) // v5.7 — unified date filter
+      return respondList(db, 'tickets', drT ? { ...btf, ...drT } : btf /* v5.3 branch scope */, { date: -1, created_at: -1 }, q)
+    }
     if (route === '/tickets' && method === 'POST') {
       const b = await request.json()
       const result = await createTicket(db, T, b, { branchId: B }) // v5.3
@@ -7421,7 +7469,10 @@ async function handleRoute(request, { params }) {
     }
 
     // Visas
-    if (route === '/visas' && method === 'GET') return ok(clean(await db.collection('visas').find(btf) /* v5.3 branch scope */.sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+    if (route === '/visas' && method === 'GET') {
+      const drV = periodFilterExpr(q) // v5.7 — unified date filter
+      return respondList(db, 'visas', drV ? { ...btf, ...drV } : btf /* v5.3 branch scope */, { date: -1, created_at: -1 }, q)
+    }
     if (route === '/visas' && method === 'POST') {
       const b = await request.json()
       const result = await createVisa(db, T, b, { branchId: B }) // v5.3
@@ -7482,7 +7533,10 @@ async function handleRoute(request, { params }) {
       return ok({ success: true })
     }
 
-    if (route === '/services' && method === 'GET') return ok(clean(await db.collection('services').find(btf) /* v5.3 branch scope */.sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+    if (route === '/services' && method === 'GET') {
+      const drS = periodFilterExpr(q) // v5.7 — unified date filter
+      return respondList(db, 'services', drS ? { ...btf, ...drS } : btf /* v5.3 branch scope */, { date: -1, created_at: -1 }, q)
+    }
     if (route === '/services' && method === 'POST') {
       const b = await request.json()
       const result = await createService(db, T, b, { branchId: B }) // v5.3
@@ -7738,7 +7792,8 @@ async function handleRoute(request, { params }) {
     // Vouchers
     if (route === '/vouchers' && method === 'GET') {
       const filter = B ? { ...btf } : (q.branch ? { ...tf, branch_id: q.branch === 'hq' ? null : q.branch } : { ...tf }); if (q.type) filter.type = q.type // v5.3/v5.4 branch scope + HQ filter
-      return ok(clean(await db.collection('vouchers').find(filter).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+      const drVo = periodFilterExpr(q) // v5.7 — unified date filter
+      return respondList(db, 'vouchers', drVo ? { ...filter, ...drVo } : filter, { date: -1, created_at: -1 }, q)
     }
     if (route === '/vouchers' && method === 'POST') {
       const b = await request.json()
@@ -7769,24 +7824,11 @@ async function handleRoute(request, { params }) {
 
     // Journal entries
     if (route === '/journal-entries' && method === 'GET') {
-      // v5.6 — SERVER-SIDE date filters + advanced search. The list is capped at 500 docs,
-      // so filtering MUST happen in the MongoDB query itself (not by hiding rows client-side).
+      // v5.6/v5.7 — SERVER-SIDE date filter (shared periodFilterExpr) + advanced search +
+      // shared pagination. Filtering happens in the MongoDB query, never by hiding rows.
       const jq = B ? { ...btf } : (q.branch ? { ...tf, branch_id: q.branch === 'hq' ? null : q.branch } : { ...tf }) /* v5.3/v5.4 branch scope + HQ filter */
       const andConds = []
-      // ---- date filter: period=today|week|month|all|range (+from/to YYYY-MM-DD) ----
-      const period = String(q.period || 'all').toLowerCase()
-      const todayIso = bizTodayISO()
-      let fromD = null, toD = null
-      if (period === 'today') { fromD = bizDayStart(todayIso); toD = bizDayEnd(todayIso) }
-      else if (period === 'week') {
-        // business week starts Saturday (UTC+3 business timezone)
-        const nowBiz = new Date(Date.now() + 3 * 3600e3)
-        const sinceSat = (nowBiz.getUTCDay() + 1) % 7
-        fromD = bizDayStart(new Date(nowBiz.getTime() - sinceSat * 86400e3).toISOString().slice(0, 10))
-        toD = bizDayEnd(todayIso)
-      } else if (period === 'month') { fromD = bizDayStart(`${todayIso.slice(0, 7)}-01`); toD = bizDayEnd(todayIso) }
-      else if (period === 'range') { if (q.from) fromD = bizDayStart(q.from); if (q.to) toD = bizDayEnd(q.to) }
-      const drJe = dateRangeExpr('date', fromD, toD)
+      const drJe = periodFilterExpr(q)
       if (drJe) andConds.push(drJe)
       // ---- advanced search: search_field + search_op (contains|not_contains|equals) + search_value ----
       const sField = String(q.search_field || '').toLowerCase()
@@ -7810,7 +7852,7 @@ async function handleRoute(request, { params }) {
         }
       }
       const finalJq = andConds.length ? { ...jq, $and: andConds } : jq
-      return ok(clean(await db.collection('journal_entries').find(finalJq).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+      return respondList(db, 'journal_entries', finalJq, { date: -1, created_at: -1 }, q) // v5.7 — shared pagination
     }
 
     // v3.9.11 — Packages bulk operations
@@ -8194,7 +8236,8 @@ async function handleRoute(request, { params }) {
 
     // ============ Currency Exchange (Buy/Sell) ============
     if (route === '/fx' && method === 'GET') {
-      return ok(clean(await db.collection('currency_exchanges').find(tf).sort({ date: -1, created_at: -1 }).limit(500).toArray()))
+      const drFx = periodFilterExpr(q) // v5.7 — unified date filter
+      return respondList(db, 'currency_exchanges', drFx ? { ...tf, ...drFx } : tf, { date: -1, created_at: -1 }, q)
     }
     if (route === '/fx' && method === 'POST') {
       const b = await request.json()

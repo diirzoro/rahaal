@@ -31,7 +31,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 // v3.87.5 — shared primitives + heavy screens extracted verbatim (structural move only)
-import { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_MAX_MB, DOC_MAX_FILE_BYTES, DOC_BATCH_MAX_MB, DOC_BATCH_MAX_BYTES, validateDocBatch, todayISO, api, AuthCtx, useAuth, Field, TopBar, ConfirmHost, askConfirm } from './shared'
+import { CUR_SYMBOL, CUR_NAME, CURRENCIES, fmt, readFileB64, DOC_OK_TYPES, DOC_MAX_MB, DOC_MAX_FILE_BYTES, DOC_BATCH_MAX_MB, DOC_BATCH_MAX_BYTES, validateDocBatch, todayISO, api, AuthCtx, useAuth, Field, TopBar, ConfirmHost, askConfirm, useListQuery, PeriodFilterBar, PaginationBar, XScroll } from './shared'
 // v4.9 — AdminApp shell removed: TenantApp is THE single authoritative dashboard (see App root)
 // v4.1 — MOVED AS-IS from the v3.91–3.97 admin shell into TenantApp «إدارة رحّال»
 // (transfer only — zero new sections, same components, same /api/admin/* endpoints):
@@ -198,12 +198,8 @@ function RahaalLogo({ size = 'md', variant = 'dark' }) {
   return (
     <div className="inline-flex items-center gap-3">
       <div className="relative" style={{ width: s.box, height: s.box }}>
-        <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-[#1e3a8a] via-[#1e40af] to-[#0f1e4d] shadow-xl shadow-blue-900/40 flex items-center justify-center">
-          <svg viewBox="0 0 64 64" fill="none" style={{ width: s.box * 0.6, height: s.box * 0.6 }} xmlns="http://www.w3.org/2000/svg">
-            <path d="M8 40 L28 36 L40 20 L50 20 L44 34 L54 32 L58 40 L44 42 L38 50 L30 50 L34 42 L14 44 Z" fill="#f97316" stroke="#fff" strokeWidth="1.5" strokeLinejoin="round"/>
-            <circle cx="52" cy="16" r="3" fill="#f97316" />
-          </svg>
-        </div>
+        {/* v5.7 — official Rahaal brand asset (replaces the hand-drawn SVG) */}
+        <img src="/rahaal-icon.png" alt="شعار رحّال" className="absolute inset-0 w-full h-full rounded-2xl shadow-xl shadow-blue-900/40 object-cover" />
         <div className="absolute -bottom-1 -left-1 w-4 h-4 rounded-full bg-[#f97316] border-2 border-white shadow" />
       </div>
       <div className="text-right leading-none">
@@ -2556,6 +2552,12 @@ function WaBtn({ phone, message = '', size = 'sm', label, iconOnly = false }) {
   )
 }
 
+// ================================================================
+// v5.7 — SHARED LIST CONTROLS moved to ./shared (useListQuery,
+// PeriodFilterBar, PaginationBar, XScroll) — imported at the top so
+// the SAME components serve page.js AND the admin/* screens.
+// ================================================================
+
 const NAV = [
   { id: 'dashboard', label: 'لوحة التحكم', icon: LayoutDashboard, color: 'from-blue-600 to-cyan-500' },
   { id: 'tickets',   label: 'حجز التذاكر', icon: Plane, color: 'from-sky-600 to-blue-500' },
@@ -2719,12 +2721,7 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
           {settings?.logo_base64 ? (
             <img src={settings.logo_base64} alt="logo" className="w-11 h-11 rounded-xl object-cover bg-white" />
           ) : (
-            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-[#1e40af] to-[#0f1e4d] flex items-center justify-center shadow-lg shadow-orange-500/20 border border-orange-400/40 shrink-0">
-              <svg viewBox="0 0 64 64" fill="none" className="w-7 h-7">
-                <path d="M8 40 L28 36 L40 20 L50 20 L44 34 L54 32 L58 40 L44 42 L38 50 L30 50 L34 42 L14 44 Z" fill="#f97316" />
-                <circle cx="52" cy="16" r="3" fill="#f97316" />
-              </svg>
-            </div>
+            <img src="/rahaal-icon.png" alt="شعار رحّال" className="w-11 h-11 rounded-xl object-cover shadow-lg shadow-orange-500/20 border border-orange-400/40 shrink-0" />
           )}
           <div className="min-w-0 flex-1">
             <div className="text-lg font-extrabold tracking-tight truncate">{settings?.agency_name || tenant?.name || 'رحّـــال'}</div>
@@ -3324,34 +3321,20 @@ function TicketsScreen() {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [selectedIds, setSelectedIds] = useState(new Set()) // v3.9.9 — multi-select
-  const [dateRange, setDateRange] = useState({ preset: 'month', from: '', to: '' }) // v3.9.9
+  const lq = useListQuery() // v5.7 — unified SERVER-SIDE date filter + pagination
   const [editing, setEditing] = useState(null)
   const [refundTarget, setRefundTarget] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
-      const [t, c, s, r, bx] = await Promise.all([api('/tickets'), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])])
-      setTickets(t); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
+      const [t, c, s, r, bx] = await Promise.all([api(`/tickets?${lq.qs()}`), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])])
+      lq.absorb(t, setTickets); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
     } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load() }, [])
-  // v3.9.9 — Date range computation from preset
-  const dateRangeBounds = useMemo(() => {
-    const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
-    if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
-    if (dateRange.preset === 'month') { const d = new Date(today.getFullYear(), today.getMonth(), 1); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
-    if (dateRange.preset === 'custom' && dateRange.from) {
-      const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date()
-      return { from: f, to: t }
-    }
-    return null // all
-  }, [dateRange])
-  const filteredByDate = useMemo(() => {
-    const safe = (tickets || []).filter(Boolean)
-    if (!dateRangeBounds) return safe
-    return safe.filter(t => { const d = new Date(t?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to })
-  }, [tickets, dateRangeBounds])
+  useEffect(() => { load() }, [lq.dep])
+  // v5.7 — date filtering moved SERVER-SIDE (shared periodFilterExpr) — rows arrive already filtered
+  const dateRangeBounds = lq.period !== 'all' ? true : null
+  const filteredByDate = useMemo(() => (tickets || []).filter(Boolean), [tickets])
   const filtered = applyFilter(filteredByDate, filter)
   const selected = filtered.find(t => t?.id === selectedId)
   const allSelected = filtered.length > 0 && filtered.every(t => selectedIds.has(t?.id))
@@ -3421,26 +3404,9 @@ function TicketsScreen() {
           <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
         </div>
       )}
-      {/* v3.9.9 — Date range presets + Bulk actions bar */}
+      {/* v5.7 — unified server-side date filter + Bulk actions bar */}
       <div className="flex flex-wrap items-center gap-2 p-3 bg-white border border-slate-200 rounded-lg">
-        <span className="text-xs font-bold text-slate-600 flex items-center gap-1">📅 عرض:</span>
-        {[
-          { k: 'today', l: 'اليوم' },
-          { k: 'week', l: 'آخر ٧ أيام' },
-          { k: 'month', l: 'هذا الشهر' },
-          { k: 'all', l: 'الكل' },
-          { k: 'custom', l: 'مخصص' },
-        ].map(p => (
-          <button key={p.k} onClick={() => setDateRange({ ...dateRange, preset: p.k })}
-            className={`px-3 py-1 rounded-md text-xs font-semibold border ${dateRange.preset === p.k ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}>{p.l}</button>
-        ))}
-        {dateRange.preset === 'custom' && (
-          <>
-            <input type="date" value={dateRange.from} onChange={e => setDateRange({ ...dateRange, from: e.target.value })} className="text-xs border rounded px-2 py-1" />
-            <span className="text-xs">إلى</span>
-            <input type="date" value={dateRange.to} onChange={e => setDateRange({ ...dateRange, to: e.target.value })} className="text-xs border rounded px-2 py-1" />
-          </>
-        )}
+        <PeriodFilterBar lq={lq} compact />
         {selectedIds.size > 0 && (
           <div className="mr-auto flex items-center gap-2">
             <span className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">✓ محدد: {selectedIds.size}</span>
@@ -3451,9 +3417,9 @@ function TicketsScreen() {
         )}
       </div>
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><Plane className="w-5 h-5 text-sky-600" /> سجل التذاكر ({filtered.length}{(filter || dateRangeBounds) ? ` من ${tickets.length}` : ''})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Plane className="w-5 h-5 text-sky-600" /> سجل التذاكر ({filtered.length}{(filter || dateRangeBounds) ? ` من ${lq.total}` : ''})</CardTitle></CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
+          <XScroll>
             <Table>
               <TableHeader><TableRow>
                 <TableHead className="w-10"><input type="checkbox" checked={allSelected} onChange={toggleAll} title="تحديد الكل" /></TableHead>
@@ -3494,7 +3460,8 @@ function TicketsScreen() {
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </XScroll>
+          <PaginationBar lq={lq} />
         </CardContent>
       </Card>
       <TicketDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }} clients={clients} suppliers={suppliers} rates={rates} record={editing}
@@ -4651,30 +4618,20 @@ function VisasScreen() {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [selectedIds, setSelectedIds] = useState(new Set())
-  const [dateRange, setDateRange] = useState({ preset: 'month', from: '', to: '' })
+  const lq = useListQuery() // v5.7 — unified SERVER-SIDE date filter + pagination
   const [editing, setEditing] = useState(null)
   const [refundTarget, setRefundTarget] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
-      const [v, c, s, r, bx] = await Promise.all([api('/visas'), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])])
-      setVisas(v); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
+      const [v, c, s, r, bx] = await Promise.all([api(`/visas?${lq.qs()}`), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])])
+      lq.absorb(v, setVisas); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
     } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load() }, [])
-  const dateRangeBounds = useMemo(() => {
-    const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
-    if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
-    if (dateRange.preset === 'month') { const d = new Date(today.getFullYear(), today.getMonth(), 1); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
-    if (dateRange.preset === 'custom' && dateRange.from) { const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date(); return { from: f, to: t } }
-    return null
-  }, [dateRange])
-  const filteredByDate = useMemo(() => {
-    const safe = (visas || []).filter(Boolean)
-    if (!dateRangeBounds) return safe
-    return safe.filter(v => { const d = new Date(v?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to })
-  }, [visas, dateRangeBounds])
+  useEffect(() => { load() }, [lq.dep])
+  // v5.7 — date filtering moved SERVER-SIDE (shared periodFilterExpr)
+  const dateRangeBounds = lq.period !== 'all' ? true : null
+  const filteredByDate = useMemo(() => (visas || []).filter(Boolean), [visas])
   const filtered = applyFilter(filteredByDate, filter)
   const selected = filtered.find(v => v?.id === selectedId)
   const allSelected = filtered.length > 0 && filtered.every(v => selectedIds.has(v?.id))
@@ -4740,20 +4697,9 @@ function VisasScreen() {
           <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
         </div>
       )}
-      {/* v3.9.9 — Date range + Bulk actions */}
+      {/* v5.7 — unified server-side date filter + Bulk actions */}
       <div className="flex flex-wrap items-center gap-2 p-3 bg-white border border-slate-200 rounded-lg">
-        <span className="text-xs font-bold text-slate-600 flex items-center gap-1">📅 عرض:</span>
-        {[{ k: 'today', l: 'اليوم' }, { k: 'week', l: 'آخر ٧ أيام' }, { k: 'month', l: 'هذا الشهر' }, { k: 'all', l: 'الكل' }, { k: 'custom', l: 'مخصص' }].map(p => (
-          <button key={p.k} onClick={() => setDateRange({ ...dateRange, preset: p.k })}
-            className={`px-3 py-1 rounded-md text-xs font-semibold border ${dateRange.preset === p.k ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}>{p.l}</button>
-        ))}
-        {dateRange.preset === 'custom' && (
-          <>
-            <input type="date" value={dateRange.from} onChange={e => setDateRange({ ...dateRange, from: e.target.value })} className="text-xs border rounded px-2 py-1" />
-            <span className="text-xs">إلى</span>
-            <input type="date" value={dateRange.to} onChange={e => setDateRange({ ...dateRange, to: e.target.value })} className="text-xs border rounded px-2 py-1" />
-          </>
-        )}
+        <PeriodFilterBar lq={lq} compact />
         {selectedIds.size > 0 && (
           <div className="mr-auto flex items-center gap-2">
             <span className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">✓ محدد: {selectedIds.size}</span>
@@ -4764,9 +4710,9 @@ function VisasScreen() {
         )}
       </div>
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><FileBadge2 className="w-5 h-5 text-emerald-600" /> سجل التأشيرات ({filtered.length}{(filter || dateRangeBounds) ? ` من ${visas.length}` : ''})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><FileBadge2 className="w-5 h-5 text-emerald-600" /> سجل التأشيرات ({filtered.length}{(filter || dateRangeBounds) ? ` من ${lq.total}` : ''})</CardTitle></CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
+          <XScroll>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -4801,7 +4747,8 @@ function VisasScreen() {
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </XScroll>
+          <PaginationBar lq={lq} />
         </CardContent>
       </Card>
       <VisaDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }} clients={clients} suppliers={suppliers} rates={rates} record={editing}
@@ -4987,28 +4934,22 @@ function ServicesScreen() {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [selectedIds, setSelectedIds] = useState(new Set()) // v3.9.11
-  const [dateRange, setDateRange] = useState({ preset: 'month', from: '', to: '' }) // v3.9.11
+  const lq = useListQuery() // v5.7 — unified SERVER-SIDE date filter + pagination
   const [editing, setEditing] = useState(null)
   const [refundTarget, setRefundTarget] = useState(null)
   const [rates, setRates] = useState(null)
   const load = async () => {
     try {
       const [sv, st, c, s, r, bx] = await Promise.all([
-        api('/services'), api('/service-types'), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])
+        api(`/services?${lq.qs()}`), api('/service-types'), api('/clients'), api('/suppliers'), api('/rates'), api('/boxes').catch(() => [])
       ])
-      setServices(sv); setServiceTypes(st); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
+      lq.absorb(sv, setServices); setServiceTypes(st); setClients(c); setSuppliers(s); setRates(r.rates); setBoxes(bx)
     } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load() }, [])
-  const dateRangeBounds = useMemo(() => {
-    const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    if (dateRange.preset === 'today') return { from: today, to: new Date(today.getTime() + 86400000 - 1) }
-    if (dateRange.preset === 'week') { const d = new Date(today); d.setDate(d.getDate() - 6); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
-    if (dateRange.preset === 'month') { const d = new Date(today.getFullYear(), today.getMonth(), 1); return { from: d, to: new Date(today.getTime() + 86400000 - 1) } }
-    if (dateRange.preset === 'custom' && dateRange.from) { const f = new Date(dateRange.from); const t = dateRange.to ? new Date(dateRange.to + 'T23:59:59') : new Date(); return { from: f, to: t } }
-    return null
-  }, [dateRange])
-  const filteredByDate = useMemo(() => { if (!dateRangeBounds) return (services || []).filter(Boolean); return (services || []).filter(Boolean).filter(v => { const d = new Date(v?.date); return !isNaN(d) && d >= dateRangeBounds.from && d <= dateRangeBounds.to }) }, [services, dateRangeBounds])
+  useEffect(() => { load() }, [lq.dep])
+  // v5.7 — date filtering moved SERVER-SIDE (shared periodFilterExpr)
+  const dateRangeBounds = lq.period !== 'all' ? true : null
+  const filteredByDate = useMemo(() => (services || []).filter(Boolean), [services])
   const filtered = applyFilter(filteredByDate, filter)
   const selected = filtered.find(v => v?.id === selectedId)
   const allSelected = filtered.length > 0 && filtered.every(v => selectedIds.has(v.id))
@@ -5070,20 +5011,9 @@ function ServicesScreen() {
           <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
         </div>
       )}
-      {/* v3.9.11 — Date range + Bulk actions */}
+      {/* v5.7 — unified server-side date filter + Bulk actions */}
       <div className="flex flex-wrap items-center gap-2 p-3 bg-white border border-slate-200 rounded-lg">
-        <span className="text-xs font-bold text-slate-600 flex items-center gap-1">📅 عرض:</span>
-        {[{ k: 'today', l: 'اليوم' }, { k: 'week', l: 'آخر ٧ أيام' }, { k: 'month', l: 'هذا الشهر' }, { k: 'all', l: 'الكل' }, { k: 'custom', l: 'مخصص' }].map(p => (
-          <button key={p.k} onClick={() => setDateRange({ ...dateRange, preset: p.k })}
-            className={`px-3 py-1 rounded-md text-xs font-semibold border ${dateRange.preset === p.k ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}>{p.l}</button>
-        ))}
-        {dateRange.preset === 'custom' && (
-          <>
-            <input type="date" value={dateRange.from} onChange={e => setDateRange({ ...dateRange, from: e.target.value })} className="text-xs border rounded px-2 py-1" />
-            <span className="text-xs">إلى</span>
-            <input type="date" value={dateRange.to} onChange={e => setDateRange({ ...dateRange, to: e.target.value })} className="text-xs border rounded px-2 py-1" />
-          </>
-        )}
+        <PeriodFilterBar lq={lq} compact />
         {selectedIds.size > 0 && (
           <div className="mr-auto flex items-center gap-2">
             <span className="text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">✓ محدد: {selectedIds.size}</span>
@@ -5094,9 +5024,9 @@ function ServicesScreen() {
         )}
       </div>
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><Briefcase className="w-5 h-5 text-orange-600" /> سجل الخدمات ({filtered.length}{(filter || dateRangeBounds) ? ` من ${services.length}` : ''})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Briefcase className="w-5 h-5 text-orange-600" /> سجل الخدمات ({filtered.length}{(filter || dateRangeBounds) ? ` من ${lq.total}` : ''})</CardTitle></CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
+          <XScroll>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -5131,7 +5061,8 @@ function ServicesScreen() {
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </XScroll>
+          <PaginationBar lq={lq} />
         </CardContent>
       </Card>
       <BulkEditDialog open={openBulkEdit} onOpenChange={setOpenBulkEdit} kind="services" ids={Array.from(selectedIds)} suppliers={suppliers} boxes={boxes} onDone={() => { load(); setOpenBulkEdit(false); setSelectedIds(new Set()) }} />
@@ -5379,13 +5310,14 @@ function VoucherScreen({ mode }) {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [editing, setEditing] = useState(null)
+  const lq = useListQuery() // v5.7 — unified SERVER-SIDE date filter + pagination
   const load = async () => {
     try {
-      const [v, c, s, b] = await Promise.all([api(`/vouchers?type=${mode}`), api('/clients'), api('/suppliers'), api('/boxes')])
-      setVouchers(v); setClients(c); setSuppliers(s); setBoxes(b)
+      const [v, c, s, b] = await Promise.all([api(`/vouchers?type=${mode}&${lq.qs()}`), api('/clients'), api('/suppliers'), api('/boxes')])
+      lq.absorb(v, setVouchers); setClients(c); setSuppliers(s); setBoxes(b)
     } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load(); setSelectedId(null); setFilter(null) }, [mode])
+  useEffect(() => { load(); setSelectedId(null); setFilter(null) }, [mode, lq.dep])
   const filtered = applyFilter(vouchers, filter)
   const selected = filtered.find(v => v.id === selectedId)
   const handleAdd = () => { setEditing(null); setOpen(true) }
@@ -5431,9 +5363,11 @@ function VoucherScreen({ mode }) {
           <Button size="sm" variant="ghost" onClick={() => setFilter(null)} className="mr-auto text-rose-600">مسح</Button>
         </div>
       )}
+      <PeriodFilterBar lq={lq} /> {/* v5.7 — unified server-side date filter */}
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><cfg.icon className="w-5 h-5" /> سجل السندات ({filtered.length}{filter ? ` من ${vouchers.length}` : ''})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><cfg.icon className="w-5 h-5" /> سجل السندات ({filtered.length}{filter ? ` من ${lq.total}` : ''})</CardTitle></CardHeader>
         <CardContent>
+          <XScroll>
           <Table>
             <TableHeader><TableRow><TableHead className="w-8"></TableHead><TableHead>التاريخ</TableHead><TableHead>{cfg.partyLabel}</TableHead><TableHead>البيان</TableHead><TableHead>الطريقة</TableHead><TableHead>الصندوق</TableHead><TableHead>العملة</TableHead><TableHead className="text-left">المبلغ</TableHead></TableRow></TableHeader>
             <TableBody>
@@ -5452,6 +5386,8 @@ function VoucherScreen({ mode }) {
               ))}
             </TableBody>
           </Table>
+          </XScroll>
+          <PaginationBar lq={lq} />
         </CardContent>
       </Card>
       <VoucherDialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }} mode={mode} clients={clients} suppliers={suppliers} boxes={boxes} record={editing}
@@ -6252,33 +6188,22 @@ function JournalScreen() {
   const [equityOpen, setEquityOpen] = useState(false)
   const [selectedId, setSelectedId] = useState(null)
   const [editing, setEditing] = useState(null)
-  // v5.6 — server-side date filter + advanced search state
-  const [period, setPeriod] = useState('all')            // today|week|month|all|range
-  const [rangeFrom, setRangeFrom] = useState('')
-  const [rangeTo, setRangeTo] = useState('')
+  // v5.7 — unified SERVER-SIDE date filter + pagination (shared useListQuery) + advanced search
+  const lq = useListQuery()
   const [sField, setSField] = useState('description')    // description|client|supplier|debit_account|credit_account|amount
   const [sOp, setSOp] = useState('contains')             // contains|not_contains|equals
   const [sVal, setSVal] = useState('')
   const [activeSearch, setActiveSearch] = useState(null) // applied search snapshot
-  const buildQuery = (p = period, srch = activeSearch) => {
-    const parts = []
-    if (p && p !== 'all') {
-      parts.push(`period=${p}`)
-      if (p === 'range') { if (rangeFrom) parts.push(`from=${rangeFrom}`); if (rangeTo) parts.push(`to=${rangeTo}`) }
-    }
-    if (srch?.value) parts.push(`search_field=${srch.field}&search_op=${srch.op}&search_value=${encodeURIComponent(srch.value)}`)
-    return parts.length ? `?${parts.join('&')}` : ''
+  const load = async (srch = activeSearch) => {
+    const extra = srch?.value ? `search_field=${srch.field}&search_op=${srch.op}&search_value=${encodeURIComponent(srch.value)}` : ''
+    try { const r = await api(`/journal-entries?${lq.qs(extra)}`); lq.absorb(r, setRows) } catch (e) { toast.error(e.message) }
   }
-  const load = (p = period, srch = activeSearch) => api(`/journal-entries${buildQuery(p, srch)}`).then(setRows).catch(e => toast.error(e.message))
-  useEffect(() => { load() }, [])
-  const applyPeriod = (p) => { setPeriod(p); if (p !== 'range') load(p, activeSearch) }
-  const applyRange = () => { if (!rangeFrom && !rangeTo) return toast.error('حدد تاريخ البداية أو النهاية'); load('range', activeSearch) }
+  useEffect(() => { load() }, [lq.dep, activeSearch])
   const applySearch = () => {
     if (!sVal.trim()) return toast.error('أدخل قيمة البحث')
-    const srch = { field: sField, op: sOp, value: sVal.trim() }
-    setActiveSearch(srch); load(period, srch)
+    lq.setPage(1); setActiveSearch({ field: sField, op: sOp, value: sVal.trim() })
   }
-  const clearSearch = () => { setActiveSearch(null); setSVal(''); load(period, null) }
+  const clearSearch = () => { setActiveSearch(null); setSVal(''); lq.setPage(1) }
   const selected = rows.find(je => je.id === selectedId)
   const isEditableJe = selected && (selected.ref_type === 'manual' || selected.ref_type === 'manual_dual')
   const isDeletableJe = selected && ['manual', 'manual_dual', 'opening', 'opening_close'].includes(selected.ref_type)
@@ -6346,25 +6271,12 @@ function JournalScreen() {
       <ActionToolbar
         addLabel="إضافة قيد يومي" onAdd={handleAdd} onRefresh={() => load()}
         onEdit={handleEdit} onDelete={handleDelete} onPrintTable={handlePrintTable}
-        selectedId={selectedId} count={rows.length}
+        selectedId={selectedId} count={lq.total || rows.length}
       />
-      {/* v5.6 — date filters (server-side) */}
+      {/* v5.7 — unified date filter (shared PeriodFilterBar) */}
       <Card>
         <CardContent className="p-3 space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-black text-slate-600 shrink-0">📅 الفترة:</span>
-            {[['today', 'اليوم'], ['week', 'هذا الأسبوع'], ['month', 'هذا الشهر'], ['all', 'كل الفترات'], ['range', 'فترة مخصصة']].map(([k, lbl]) => (
-              <button key={k} onClick={() => applyPeriod(k)} className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${period === k ? 'bg-blue-600 text-white border-blue-700 shadow' : 'bg-white text-slate-600 border-slate-300 hover:border-blue-400'}`}>{lbl}</button>
-            ))}
-            {period === 'range' && (
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <Input type="date" value={rangeFrom} onChange={e => setRangeFrom(e.target.value)} className="h-8 w-36 text-xs" />
-                <span className="text-xs text-slate-400">→</span>
-                <Input type="date" value={rangeTo} onChange={e => setRangeTo(e.target.value)} className="h-8 w-36 text-xs" />
-                <Button size="sm" className="h-8 text-xs" onClick={applyRange}>تطبيق</Button>
-              </div>
-            )}
-          </div>
+          <PeriodFilterBar lq={lq} compact />
           {/* v5.6 — advanced search (server-side operators) */}
           <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
             <span className="text-xs font-black text-slate-600 shrink-0">🔎 بحث متقدم:</span>
@@ -6437,6 +6349,7 @@ function JournalScreen() {
         })}
         {rows.length === 0 && <div className="text-center text-slate-400 py-10">لا توجد قيود</div>}
       </div>
+      <PaginationBar lq={lq} /> {/* v5.7 — unified server-side pagination */}
       <ManualJournalDialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setEditing(null) }} record={editing} onSaved={() => { load(); setEditing(null) }} />
       <OpeningJournalDialog open={openingOpen} onOpenChange={setOpeningOpen} onSaved={load} />
       <OpeningEquityDialog open={equityOpen} onOpenChange={setEquityOpen} onChanged={load} />
@@ -12846,13 +12759,14 @@ function FxScreen() {
   const [filter, setFilter] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [editing, setEditing] = useState(null)
+  const lq = useListQuery() // v5.7 — unified SERVER-SIDE date filter + pagination
   const load = async () => {
     try {
-      const [t, b] = await Promise.all([api('/fx'), api('/boxes')])
-      setTxs(t); setBoxes(b)
+      const [t, b] = await Promise.all([api(`/fx?${lq.qs()}`), api('/boxes')])
+      lq.absorb(t, setTxs); setBoxes(b)
     } catch (e) { toast.error(e.message) }
   }
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [lq.dep])
   const filtered = applyFilter(txs, filter)
   const selected = filtered.find(t => t.id === selectedId)
   const totalGain = filtered.reduce((s, t) => s + (t.fx_gain_usd || t.fx_gain_base || 0), 0)
@@ -12922,10 +12836,11 @@ function FxScreen() {
         <StatCard icon={Sparkles} label="آخر عملية" value={filtered[0] ? fmtDate(filtered[0].date) : '—'} grad="grad-brand" />
       </div>
 
+      <PeriodFilterBar lq={lq} /> {/* v5.7 — unified server-side date filter */}
       <Card>
         <CardHeader><CardTitle className="flex items-center gap-2"><ArrowLeftRight className="w-5 h-5 text-fuchsia-600" /> سجل عمليات الصرافة</CardTitle></CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
+          <XScroll>
             <Table>
               <TableHeader><TableRow>
                 <TableHead className="w-8"></TableHead>
@@ -12955,7 +12870,8 @@ function FxScreen() {
                 })}
               </TableBody>
             </Table>
-          </div>
+          </XScroll>
+          <PaginationBar lq={lq} /> {/* v5.7 — unified server-side pagination */}
         </CardContent>
       </Card>
 
@@ -13451,7 +13367,7 @@ function LandingPage({ onLoginClick, onSignupClick }) {
       <header className="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-slate-200">
         <div className="max-w-7xl mx-auto px-4 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl grad-brand flex items-center justify-center text-white text-xl font-black shadow">ر</div>
+            <img src="/rahaal-icon.png" alt="شعار رحّال" className="w-10 h-10 rounded-xl object-cover shadow" />
             <div>
               <div className="font-extrabold text-slate-900">Rahaal <span className="text-blue-700">رحّال</span></div>
               <div className="text-[10px] text-slate-500 -mt-0.5">by Target Media</div>

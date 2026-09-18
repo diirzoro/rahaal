@@ -222,3 +222,25 @@ input, select, textarea, button {
     min-height: 44px;
   }
 }
+
+/* v5.7 — Shared sticky-scroll tables (XScroll wrapper):
+   the wrapper owns BOTH scroll axes with a capped height so the horizontal scrollbar is
+   always reachable at the visible bottom of the table area (RTL-safe, native overflow).
+   The inner shadcn table wrapper's own overflow is neutralized so scrolling isn't nested. */
+.rahaal-xscroll {
+  overflow: auto;
+  position: relative;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.rahaal-xscroll > div {
+  overflow: visible !important;
+}
+.rahaal-xscroll thead {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.rahaal-xscroll thead th {
+  background: #f8fafc;
+}

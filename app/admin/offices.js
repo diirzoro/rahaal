@@ -17,12 +17,44 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { toast } from 'sonner'
-import { Building2, ArrowRight, RefreshCw, Lock, Eye, Users, Ticket, FileBadge2, Briefcase, Package, Receipt, Calculator, Wallet, CreditCard, ListTree } from 'lucide-react'
-import { api, askConfirm } from '../shared'
+import { Building2, ArrowRight, RefreshCw, Lock, Eye, Users, Ticket, FileBadge2, Briefcase, Package, Receipt, Calculator, Wallet, CreditCard, ListTree, Phone, Mail, MessageCircle } from 'lucide-react'
+import { api, askConfirm, useListQuery, PeriodFilterBar, PaginationBar, XScroll } from '../shared'
 
 const n2 = (v) => (typeof v === 'number' ? v.toLocaleString('en-US') : v ?? '—')
 const dt = (v) => (v ? new Date(v).toLocaleDateString('ar-EG') : '—')
 const dtt = (v) => (v ? new Date(v).toLocaleString('ar-EG') : '—')
+
+// v5.7 — SUPER ADMIN office contact actions (WhatsApp / Call / Email).
+// Reads the SAME owner contact object already returned by /admin/tenants
+// (phone + whatsapp separately + signup fallback) — no new endpoints.
+const normTel = (p) => String(p || '').trim().replace(/[^\d+]/g, '').replace(/^00/, '+')
+const ContactActions = ({ owner, size = 'sm' }) => {
+  const wa = String(owner?.whatsapp || '').replace(/\D/g, '')
+  const tel = normTel(owner?.phone || owner?.whatsapp)
+  const email = String(owner?.email || '').trim()
+  const base = `inline-flex items-center gap-1 rounded-md font-bold transition shadow-sm ${size === 'xs' ? 'h-6 px-2 text-[10px]' : 'h-7 px-2.5 text-xs'}`
+  const off = 'bg-slate-100 text-slate-400 cursor-not-allowed'
+  const act = (e, ok, run, msg) => { e.stopPropagation(); if (!ok) return toast.error(msg); run() }
+  return (
+    <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+      <button type="button" title={wa ? `واتساب: ${owner?.whatsapp}` : 'لا يوجد رقم واتساب مسجل'}
+        onClick={e => act(e, wa, () => window.open(`https://wa.me/${wa}`, '_blank'), 'لا يوجد رقم واتساب مسجل لهذا المكتب')}
+        className={`${base} ${wa ? 'bg-[#25D366] hover:bg-[#128C7E] text-white' : off}`}>
+        <MessageCircle className="w-3 h-3" /> واتساب
+      </button>
+      <button type="button" title={tel ? `اتصال: ${tel}` : 'لا يوجد رقم هاتف مسجل'}
+        onClick={e => act(e, tel, () => { window.location.href = `tel:${tel}` }, 'لا يوجد رقم هاتف مسجل لهذا المكتب')}
+        className={`${base} ${tel ? 'bg-blue-600 hover:bg-blue-700 text-white' : off}`}>
+        <Phone className="w-3 h-3" /> اتصال
+      </button>
+      <button type="button" title={email ? `إيميل: ${email}` : 'لا يوجد بريد مسجل'}
+        onClick={e => act(e, email, () => { window.location.href = `mailto:${email}` }, 'لا يوجد بريد إلكتروني مسجل لهذا المكتب')}
+        className={`${base} ${email ? 'bg-slate-700 hover:bg-slate-800 text-white' : off}`}>
+        <Mail className="w-3 h-3" /> إيميل
+      </button>
+    </div>
+  )
+}
 
 // Render a { CUR: amount } map — or an explicit dash when empty (never fake zeros)
 const CurMap = ({ map }) => {
@@ -343,6 +375,8 @@ export const Office360 = ({ office, onBack }) => {
           </div>
           <StatusBadge status={office.status} />
         </div>
+        {/* v5.7 — Super Admin contact actions (WhatsApp / Call / Email) */}
+        <ContactActions owner={office.owner || ov?.owner} />
         <Badge variant="outline" className="gap-1 text-amber-700 border-amber-300 bg-amber-50"><Lock className="w-3 h-3" /> قراءة فقط — لا تعديل قيود/أرصدة/سندات</Badge>
         <Button size="sm" variant="outline" className="text-purple-600 border-purple-300" onClick={impersonate}>🎭 دخول كـ (الآلية القائمة)</Button>
       </div>
@@ -560,29 +594,38 @@ const OfficesSection = () => {
   const [data, setData] = useState(null)
   const [q, setQ] = useState('')
   const [selected, setSelected] = useState(null)
-  const load = async () => { try { setData(await api('/admin/tenants')) } catch (e) { toast.error(e.message) } }
-  useEffect(() => { load() }, [])
+  const lq = useListQuery() // v5.7 — unified SERVER-SIDE date filter + pagination + search
+  const load = async () => {
+    try {
+      const r = await api(`/admin/tenants?${lq.qs(q.trim() ? `q=${encodeURIComponent(q.trim())}` : '')}`)
+      setData(r); lq.setTotal(r?.total ?? (r?.tenants || []).length)
+    } catch (e) { toast.error(e.message) }
+  }
+  useEffect(() => { load() }, [lq.dep])
+  const doSearch = () => { lq.setPage(1); lq.reload() }
 
   if (selected) return <Office360 office={selected} onBack={() => setSelected(null)} />
 
-  const tenants = (data?.tenants || []).filter(t =>
-    !q || (t.name || '').includes(q) || (t.owner?.name || '').includes(q) || (t.owner?.email || '').includes(q)
-  )
+  const tenants = data?.tenants || []
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
-        <Input value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 بحث بالاسم / المالك / البريد…" className="max-w-xs bg-white" />
-        <Badge variant="outline">{tenants.length} مكتب</Badge>
-        <Button size="sm" variant="outline" onClick={load} className="gap-1 h-8"><RefreshCw className="w-3.5 h-3.5" /> تحديث</Button>
+        <Input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && doSearch()} placeholder="🔍 بحث بالاسم / المالك / البريد…" className="max-w-xs bg-white" />
+        <Button size="sm" onClick={doSearch} className="h-8 bg-blue-600 hover:bg-blue-700 text-white text-xs">بحث</Button>
+        <Badge variant="outline">{n2(lq.total)} مكتب</Badge>
+        <Button size="sm" variant="outline" onClick={() => lq.reload()} className="gap-1 h-8"><RefreshCw className="w-3.5 h-3.5" /> تحديث</Button>
         <div className="text-[10px] text-slate-400 mr-auto">إدارة الحالة/الباقات/الاستعادة ما تزال في اللوحة الكلاسيكية (مرحلة انتقالية)</div>
       </div>
+      <PeriodFilterBar lq={lq} /> {/* v5.7 — unified date filter (تاريخ الإنشاء) */}
       <Card>
-        <CardContent className="pt-4 overflow-x-auto">
-          <Table>
+        <CardContent className="pt-4">
+          <XScroll>
+            <Table>
             <TableHeader><TableRow>
               <TableHead>المكتب</TableHead>
               <TableHead>المالك</TableHead>
+              <TableHead className="text-center">التواصل</TableHead>
               <TableHead className="text-center">الحالة</TableHead>
               <TableHead className="text-center">الباقة</TableHead>
               <TableHead className="text-center">الاشتراك</TableHead>
@@ -592,7 +635,7 @@ const OfficesSection = () => {
               <TableHead className="text-center">عرض</TableHead>
             </TableRow></TableHeader>
             <TableBody>
-              {!data && <TableRow><TableCell colSpan={9} className="text-center text-slate-400 py-8">جارِ التحميل…</TableCell></TableRow>}
+              {!data && <TableRow><TableCell colSpan={10} className="text-center text-slate-400 py-8">جارِ التحميل…</TableCell></TableRow>}
               {data && tenants.map(t => (
                 <TableRow key={t.id} className="hover:bg-slate-50">
                   <TableCell className="font-bold">{t.name}</TableCell>
@@ -600,6 +643,7 @@ const OfficesSection = () => {
                     <div>{t.owner?.name || '—'}</div>
                     <div className="text-slate-400" dir="ltr">{t.owner?.email || '—'}{t.owner?.phone ? ` · ${t.owner.phone}` : ''}</div>
                   </TableCell>
+                  <TableCell className="text-center"><ContactActions owner={t.owner} size="xs" /></TableCell>
                   <TableCell className="text-center"><StatusBadge status={t.status} /></TableCell>
                   <TableCell className="text-center text-xs">{t.plan_tier || '—'}</TableCell>
                   <TableCell className="text-center text-xs">{t.subscription || '—'}</TableCell>
@@ -611,9 +655,11 @@ const OfficesSection = () => {
                   </TableCell>
                 </TableRow>
               ))}
-              {data && tenants.length === 0 && <TableRow><TableCell colSpan={9} className="text-center text-slate-400 py-8">لا نتائج</TableCell></TableRow>}
+              {data && tenants.length === 0 && <TableRow><TableCell colSpan={10} className="text-center text-slate-400 py-8">لا نتائج</TableCell></TableRow>}
             </TableBody>
-          </Table>
+            </Table>
+          </XScroll>
+          <PaginationBar lq={lq} /> {/* v5.7 — unified server-side pagination */}
         </CardContent>
       </Card>
     </div>
