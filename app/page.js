@@ -4056,7 +4056,7 @@ function buildUnifiedVoucherHTML({ settings, tenant, title, docNo, dateStr, rows
   const nameAr = escHtml(settings?.agency_name || tenant?.name || 'مكتب السفريات')
   const nameEn = settings?.agency_name_en ? escHtml(settings.agency_name_en) : ''
   const logo = settings?.logo_base64
-    ? `<img src="${settings.logo_base64}" style="height:72px;max-width:160px;object-fit:contain" />`
+    ? `<img src="${settings.logo_base64}" style="height:72px;max-width:160px;object-fit:contain" onerror="this.style.display='none'" />`
     : `<div style="width:66px;height:66px;background:${color};border-radius:14px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:26px;margin:auto">${escHtml((settings?.agency_name || tenant?.name || 'ر')[0])}</div>`
   const filled = (rows || []).filter(r => r && r[1] !== undefined && r[1] !== null && String(r[1]).trim() !== '' && String(r[1]).trim() !== '—')
   const fr = (l, v, ltr = false) => `<div class="fr"><span class="fl">${escHtml(l)}</span><span class="fv"${ltr ? ' dir="ltr"' : ''}>${escHtml(String(v))}</span></div>`
