@@ -62,12 +62,21 @@ const CURRENCIES = ['USD', 'SAR', 'YER']
 const DEFAULT_RATES = { USD: 1554, SAR: 410, YER: 1 }
 const BASE_CURRENCY = 'YER'
 // Helper: convert amount to base (YER)
+// v5.8 — FX-001 ROOT-CAUSE FIX: the BASE currency converts at EXACTLY 1 BY DEFINITION
+// (1 YER = 1 YER), regardless of whatever a legacy/corrupt tenant rate table stores
+// (old USD-base schemes left YER.transfer ≈ 0.0038 in some tenant_settings docs).
+// Without this pin, a base-denominated journal line (e.g. the 4104 FX-difference line,
+// whose amount is ALREADY a base figure) got multiplied by the stored YER factor AGAIN
+// during central validation — a double conversion that made mathematically-balanced
+// exchanges fail the balance gate (مدين ≠ دائن).
 function toBase(amount, currency, rates) {
+  if (currency === BASE_CURRENCY) return Number(amount) || 0
   const r = rates?.[currency]
   const rate = (r && typeof r === 'object') ? (Number(r.transfer) || 1) : (Number(r) || 1)
   return (Number(amount) || 0) * rate
 }
 function getTransferRate(rates, cur) {
+  if (cur === BASE_CURRENCY) return 1 // v5.8 — FX-001: base is base, by definition
   const r = rates?.[cur]
   if (r && typeof r === 'object') return Number(r.transfer) || 1
   return Number(r) || 1
@@ -6598,6 +6607,13 @@ async function handleRoute(request, { params }) {
           if (seq[i][1] < seq[i - 1][1]) return bad(`أسعار ${ccy} غير متسقة: ${seq[i - 1][0]} (${seq[i - 1][1]}) أكبر من ${seq[i][0]} (${seq[i][1]}) — الترتيب الصحيح: أدنى ≤ شراء ≤ تحويل ≤ بيع ≤ أعلى`)
         }
       }
+      // v5.8 — FX-001 recurrence guard: the BASE currency is the unit of account —
+      // its transfer rate is 1 BY DEFINITION and can never be stored otherwise
+      // (a legacy USD-base table with YER≈0.0038 is exactly what broke exchange journals).
+      const brBase = (body.rates || {})[BASE_CURRENCY]
+      if (brBase && typeof brBase === 'object' && brBase.transfer !== undefined && Number(brBase.transfer) !== 1) {
+        return bad(`عملة الأساس ${BASE_CURRENCY} سعر تحويلها ثابت = 1 بالتعريف — لا يمكن حفظ (${brBase.transfer}). قَوِّم أسعار العملات الأخرى مقابل ${BASE_CURRENCY}`)
+      }
       await db.collection('tenant_settings').updateOne(tf, { $set: { rates: body.rates, updated_at: new Date() } }, { upsert: true })
       return ok({ success: true })
     }
@@ -10136,14 +10152,18 @@ async function createFx(db, T, b, opts = {}) {
   const fxBoundsErr = (() => {
     const r1 = rates[b.currency] || {}, r2 = rates[b.counter_currency] || {}
     if (b.counter_currency === BASE_CURRENCY) {
-      const mn = Number(r1.min) || 0, mx = Number(r1.max) || 0
+      const mn = Number(r1.min) || 0, mx = Number(r1.max) || 0, t1 = Number(r1.transfer) || 0
       if (mn > 0 && rate < mn) return `سعر الصرف ${rate} أقل من الحد الأدنى المسجل (${mn}) لعملة ${b.currency}`
       if (mx > 0 && rate > mx) return `سعر الصرف ${rate} أعلى من الحد الأعلى المسجل (${mx}) لعملة ${b.currency}`
+      // v5.8 — FX-001: NO registered min/max ⇒ fall back to reference transfer ±10% so a
+      // legacy/corrupt reference table can never turn the 4104 line into a balancing plug
+      if (!(mn > 0) && !(mx > 0) && t1 > 0 && Math.abs(rate - t1) / t1 > FX_TOLERANCE) return `سعر الصرف ${rate} منحرف أكثر من ${FX_TOLERANCE * 100}% عن سعر التحويل المرجعي (${t1}) لعملة ${b.currency} — لا توجد حدود (أدنى/أعلى) مسجلة لهذه العملة`
     } else if (b.currency === BASE_CURRENCY) {
       const inv = rate > 0 ? 1 / rate : 0
-      const mn = Number(r2.min) || 0, mx = Number(r2.max) || 0
+      const mn = Number(r2.min) || 0, mx = Number(r2.max) || 0, t2 = Number(r2.transfer) || 0
       if (mn > 0 && inv < mn) return `السعر الضمني ${inv.toFixed(4)} أقل من الحد الأدنى المسجل (${mn}) لعملة ${b.counter_currency}`
       if (mx > 0 && inv > mx) return `السعر الضمني ${inv.toFixed(4)} أعلى من الحد الأعلى المسجل (${mx}) لعملة ${b.counter_currency}`
+      if (!(mn > 0) && !(mx > 0) && t2 > 0 && inv > 0 && Math.abs(inv - t2) / t2 > FX_TOLERANCE) return `السعر الضمني ${inv.toFixed(4)} منحرف أكثر من ${FX_TOLERANCE * 100}% عن سعر التحويل المرجعي (${t2}) لعملة ${b.counter_currency} — لا توجد حدود (أدنى/أعلى) مسجلة لهذه العملة`
     } else {
       const t1 = Number(r1.transfer) || 0, t2 = Number(r2.transfer) || 0
       if (t1 > 0 && t2 > 0) {
@@ -10189,18 +10209,10 @@ async function createFx(db, T, b, opts = {}) {
     const payBal = Number(payBox?.balances?.[fxPayCcy]) || 0
     if (payBal - fxPayAmt < -0.005) return { error: `رصيد الصندوق "${fxPayRef.name}" بعملة ${fxPayCcy} (${payBal.toLocaleString()}) لا يكفي لدفع ${fxPayAmt.toLocaleString()} — لا يُسمح برصيد صندوق سالب في الصرافة` }
   }
-  await db.collection('currency_exchanges').insertOne(doc)
-  // Balance updates — only for accounts that track balances (client/supplier/box); COA accounts skip.
-  // Buy: office receives `amount currency` (debit refCur), pays `counter_amount counter_currency` (credit refCounter)
-  // Sell: opposite
-  const debitAmtCur = b.type === 'buy' ? amount : -amount
-  const debitAmtCounter = b.type === 'buy' ? -counter_amount : counter_amount
-  if (accCur.updateBalance) {
-    await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, b.currency, debitAmtCur * accCur.debitSign)
-  }
-  if (accCounter.updateBalance) {
-    await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, b.counter_currency, debitAmtCounter * accCounter.debitSign)
-  }
+  // v5.8 — FX-002 ATOMICITY: journal lines are built and DRY-RUN through the central gate
+  // (enforceJournalInvariants) BEFORE the exchange doc is inserted or any balance moves.
+  // Previously a gate rejection (e.g. unbalanced) happened AFTER insert+balance updates,
+  // leaving an orphan exchange doc with NO journal and drifted box balances.
   const lines = []
   if (b.type === 'buy') {
     lines.push({ account_code: accCur.code, account_name: accCur.name, party_type: accCur.kind, party_id: accCur.id, party_name: accCur.name, currency: b.currency, debit: amount, credit: 0 })
@@ -10209,6 +10221,9 @@ async function createFx(db, T, b, opts = {}) {
     lines.push({ account_code: accCounter.code, account_name: accCounter.name, party_type: accCounter.kind, party_id: accCounter.id, party_name: accCounter.name, currency: b.counter_currency, debit: counter_amount, credit: 0 })
     lines.push({ account_code: accCur.code, account_name: accCur.name, party_type: accCur.kind, party_id: accCur.id, party_name: accCur.name, currency: b.currency, debit: 0, credit: amount })
   }
+  // The 4104 FX-difference line carries the ACTUAL economic difference between the dealt
+  // rate and the office reference rates — it is NEVER a plug: with a sane reference table
+  // the two trade legs already valuate symmetrically and this line is the true P&L only.
   if (Math.abs(fx_gain_base) > 0.005) {
     if (fx_gain_base > 0) {
       lines.push({ account_code: COA.FX_PNL, account_name: 'أرباح فروق العملات', party_type: 'revenue', party_id: null, party_name: 'أرباح فروق العملات', currency: BASE_CURRENCY, debit: 0, credit: +fx_gain_base.toFixed(2) })
@@ -10216,12 +10231,46 @@ async function createFx(db, T, b, opts = {}) {
       lines.push({ account_code: COA.FX_PNL, account_name: 'خسائر فروق العملات', party_type: 'revenue', party_id: null, party_name: 'خسائر فروق العملات', currency: BASE_CURRENCY, debit: +Math.abs(fx_gain_base).toFixed(2), credit: 0 })
     }
   }
-  await createJournalEntry(db, T, {
-    date: doc.date,
-    description: `${opts.existingId ? 'تعديل ' : ''}${b.type === 'buy' ? 'شراء عملة' : 'بيع عملة'} — ${amount} ${b.currency} @ ${rate} ${b.counter_currency}${doc.customer_name ? ' — ' + doc.customer_name : ''}${payment_method === 'account' ? ' [حساب]' : ''}`,
-    ref_type: b.type === 'buy' ? 'fx_buy' : 'fx_sell',
-    ref_id: doc.id, currency: 'MULTI', lines,
-  }, { skipQuota: !!opts.skipQuota, branchId: opts.branchId ?? null })
+  try {
+    await enforceJournalInvariants(db, T, { date: doc.date, currency: 'MULTI', lines })
+  } catch (gateErr) {
+    return { error: gateErr.message } // fail-fast — ZERO side effects (no doc, no balances)
+  }
+  await db.collection('currency_exchanges').insertOne(doc)
+  // Balance updates — only for accounts that track balances (client/supplier/box); COA accounts skip.
+  // Buy: office receives `amount currency` (debit refCur), pays `counter_amount counter_currency` (credit refCounter)
+  // Sell: opposite
+  const debitAmtCur = b.type === 'buy' ? amount : -amount
+  const debitAmtCounter = b.type === 'buy' ? -counter_amount : counter_amount
+  const appliedFx = [] // v5.8 — FX-002: track applied effects for exact compensation
+  if (accCur.updateBalance) {
+    await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, b.currency, debitAmtCur * accCur.debitSign)
+    appliedFx.push({ col: accCur.collection, pid: accCur.id, cur: b.currency, delta: debitAmtCur * accCur.debitSign })
+  }
+  if (accCounter.updateBalance) {
+    await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, b.counter_currency, debitAmtCounter * accCounter.debitSign)
+    appliedFx.push({ col: accCounter.collection, pid: accCounter.id, cur: b.counter_currency, delta: debitAmtCounter * accCounter.debitSign })
+  }
+  try {
+    await createJournalEntry(db, T, {
+      date: doc.date,
+      description: `${opts.existingId ? 'تعديل ' : ''}${b.type === 'buy' ? 'شراء عملة' : 'بيع عملة'} — ${amount} ${b.currency} @ ${rate} ${b.counter_currency}${doc.customer_name ? ' — ' + doc.customer_name : ''}${payment_method === 'account' ? ' [حساب]' : ''}`,
+      ref_type: b.type === 'buy' ? 'fx_buy' : 'fx_sell',
+      ref_id: doc.id, currency: 'MULTI', lines,
+    }, { skipQuota: !!opts.skipQuota, branchId: opts.branchId ?? null })
+  } catch (jeErr) {
+    // v5.8 — FX-002: residual gate/insert failure (true race — lines already dry-run clean).
+    // commit_uncertain ⇒ journal MAY be saved: compensating would corrupt the books — surface loudly.
+    if (jeErr.jePhase === 'commit_uncertain') throw jeErr
+    try {
+      for (const a of [...appliedFx].reverse()) await updateBalance(db, a.col, { id: a.pid, tenant_id: T }, a.cur, -a.delta)
+      await db.collection('currency_exchanges').deleteOne({ id: doc.id, tenant_id: T })
+    } catch (compErr) {
+      console.error('[FX-002] CRITICAL: compensation failed for exchange', doc.id, compErr)
+      throw new Error(`${jeErr.message} — ثم فشل التعويض التلقائي: يلزم فحص يدوي فوري للعملية ${doc.id}`)
+    }
+    return { error: `${jeErr.message} — لم يُحفظ أي أثر مالي (تم التراجع الكامل)` }
+  }
   const { _id, ...rest } = doc; return { doc: rest }
 }
 
