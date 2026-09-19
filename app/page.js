@@ -8296,7 +8296,7 @@ function ExtensionTab() {
                 <div className="text-xs opacity-90 mt-1">يسحب بيانات التذاكر والتأشيرات تلقائياً من صفحات شركات الطيران والتأشيرات إلى نظام رحّال ERP بضغطة زر واحدة.</div>
               </div>
             </div>
-            <a href="/rahal-extension.zip" download className="bg-white text-blue-700 hover:bg-blue-50 font-bold px-4 py-2 rounded-lg text-sm flex items-center gap-2 shrink-0">
+            <a href="/api/extension/download" download="rahal-extension.zip" className="bg-white text-blue-700 hover:bg-blue-50 font-bold px-4 py-2 rounded-lg text-sm flex items-center gap-2 shrink-0">
               <Upload className="w-4 h-4 rotate-180" /> تحميل الإضافة (.zip)
             </a>
           </div>

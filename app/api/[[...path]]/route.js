@@ -1507,6 +1507,28 @@ async function handleRoute(request, { params }) {
     // Health
     if (route === '/' || route === '/root') return ok({ ok: true, app: 'Rahaal ERP', version: '3.88.4' }) // v3.88.4 — U-007: version unified with release line
 
+    // ============ EXTENSION PACKAGE DOWNLOAD (public, no auth — the zip has NO secrets) ============
+    // v5.9.2 — ROOT-CAUSE FIX of the 404 on Test: `.gitignore` excluded **/*.zip so the static
+    // public/rahal-extension.zip never reached deployed builds. The zip is now git-tracked
+    // (negation rule) AND served through this explicit API route as a deploy-proof path.
+    if (route === '/extension/download' && method === 'GET') {
+      try {
+        const { readFileSync } = await import('fs')
+        const { join } = await import('path')
+        const buf = readFileSync(join(process.cwd(), 'public', 'rahal-extension.zip'))
+        return new NextResponse(buf, {
+          headers: {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': 'attachment; filename="rahal-extension.zip"',
+            'Content-Length': String(buf.length),
+            'Cache-Control': 'no-store',
+          },
+        })
+      } catch (e) {
+        return bad('حزمة الإضافة غير متوفرة على هذا الخادم — أبلغ الدعم', 404)
+      }
+    }
+
     // ============ HEALTH CHECK (public, no auth — for uptime monitors) ============
     if (route === '/health' && method === 'GET') {
       try {
