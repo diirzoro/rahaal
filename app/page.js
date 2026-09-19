@@ -5679,7 +5679,6 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
   const list = form.party_type === 'client' ? clients : form.party_type === 'supplier' ? suppliers : []
   const submit = async () => {
     if (!form.amount) return toast.error('أدخل المبلغ')
-    if (form.method === 'شيك' && !form.check_no.trim()) return toast.error('أدخل رقم الشيك') // v5.9
     if (form.party_type === 'expense' && !form.coa_account_code) return toast.error('اختر حساب المصروف من دليل الحسابات — أو أضفه من نفس الحقل')
     if (form.party_type === 'revenue' && !form.coa_account_code) return toast.error('اختر حساب الإيراد من دليل الحسابات — أو أضفه من نفس الحقل')
     if (!['expense', 'revenue'].includes(form.party_type) && !form.party_id) return toast.error('اختر الطرف')
@@ -5737,27 +5736,19 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
           </div>
           <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c] || c}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="المبلغ" required><Input type="number" step="0.01" min="0" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
-          {/* v5.9 — structured method (كان نص حر) + حقول الشيك الشرطية */}
+          {/* v5.9.1 — طريقة القبض/الصرف (خيار الشيك أُلغي من الإدخال؛ السندات التاريخية المسجلة كشيك تبقى قابلة للعرض والطباعة) */}
           <Field label={mode === 'receipt' ? 'طريقة القبض' : 'طريقة الصرف'}>
-            <Select value={['نقدي', 'حوالة', 'شيك', 'بنكي'].includes(form.method) ? form.method : (form.method ? '_custom' : 'نقدي')} onValueChange={v => setForm({ ...form, method: v === '_custom' ? form.method : v })}>
+            <Select value={['نقدي', 'حوالة', 'بنكي'].includes(form.method) ? form.method : (form.method ? '_custom' : 'نقدي')} onValueChange={v => setForm({ ...form, method: v === '_custom' ? form.method : v })}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="نقدي">💵 نقدي</SelectItem>
                 <SelectItem value="حوالة">💸 حوالة</SelectItem>
-                <SelectItem value="شيك">🏷️ شيك</SelectItem>
                 <SelectItem value="بنكي">🏦 تحويل بنكي</SelectItem>
-                {form.method && !['نقدي', 'حوالة', 'شيك', 'بنكي'].includes(form.method) && <SelectItem value="_custom">{form.method}</SelectItem>}
+                {form.method && !['نقدي', 'حوالة', 'بنكي'].includes(form.method) && <SelectItem value="_custom">{form.method}</SelectItem>}
               </SelectContent>
             </Select>
           </Field>
           <Field label="المناولة / اسم المستلم أو المسلّم"><Input value={form.handler_name} onChange={e => setForm({ ...form, handler_name: e.target.value })} placeholder="اختياري — من استلم/سلّم فعلياً" /></Field>
-          {form.method === 'شيك' && (
-            <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-3 gap-3 p-3 rounded-lg border border-amber-200 bg-amber-50/50">
-              <Field label="رقم الشيك" required><Input dir="ltr" value={form.check_no} onChange={e => setForm({ ...form, check_no: e.target.value })} /></Field>
-              <Field label="البنك المسحوب عليه"><Input value={form.check_bank} onChange={e => setForm({ ...form, check_bank: e.target.value })} /></Field>
-              <Field label="تاريخ الشيك"><Input type="date" value={form.check_date} onChange={e => setForm({ ...form, check_date: e.target.value })} /></Field>
-            </div>
-          )}
           <div className="md:col-span-2"><Field label="البيان / الغرض"><Textarea rows={2} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></Field></div>
           <div className="md:col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} placeholder="اختياري" /></Field></div>
         </div>
