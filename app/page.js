@@ -3997,7 +3997,205 @@ function openPrint(html) {
   setTimeout(() => { w.focus(); w.print() }, 400)
 }
 
-function printVoucher({ kind, record, settings, tenant }) {
+// ================================================================
+// v5.9 — UNIFIED PROFESSIONAL VOUCHER PRINT SYSTEM (A4 / RTL / Preview)
+// One template for: receipt / payment / debit-credit journal notices /
+// inter-branch vouchers. All data comes from Tenant/Office/Branch/User/
+// Voucher documents — nothing hardcoded.
+// ================================================================
+const AR_ONES = ['', 'واحد', 'اثنان', 'ثلاثة', 'أربعة', 'خمسة', 'ستة', 'سبعة', 'ثمانية', 'تسعة', 'عشرة', 'أحد عشر', 'اثنا عشر', 'ثلاثة عشر', 'أربعة عشر', 'خمسة عشر', 'ستة عشر', 'سبعة عشر', 'ثمانية عشر', 'تسعة عشر']
+const AR_TENS = ['', '', 'عشرون', 'ثلاثون', 'أربعون', 'خمسون', 'ستون', 'سبعون', 'ثمانون', 'تسعون']
+const AR_HUNDREDS = ['', 'مائة', 'مائتان', 'ثلاثمائة', 'أربعمائة', 'خمسمائة', 'ستمائة', 'سبعمائة', 'ثمانمائة', 'تسعمائة']
+function ar3ToWords(n) {
+  const parts = []
+  const h = Math.floor(n / 100), rest = n % 100
+  if (h) parts.push(AR_HUNDREDS[h])
+  if (rest) {
+    if (rest < 20) parts.push(AR_ONES[rest])
+    else { const o = rest % 10, t = Math.floor(rest / 10); parts.push(o ? `${AR_ONES[o]} و${AR_TENS[t]}` : AR_TENS[t]) }
+  }
+  return parts.join(' و')
+}
+function numToArabicWords(input) {
+  let n = Math.floor(Math.abs(Number(input) || 0))
+  if (n === 0) return 'صفر'
+  const groups = []
+  while (n > 0 && groups.length < 5) { groups.push(n % 1000); n = Math.floor(n / 1000) }
+  const scales = [null, ['ألف', 'ألفان', 'آلاف'], ['مليون', 'مليونان', 'ملايين'], ['مليار', 'ملياران', 'مليارات'], ['تريليون', 'تريليونان', 'تريليونات']]
+  const out = []
+  for (let i = groups.length - 1; i >= 0; i--) {
+    const g = groups[i]
+    if (!g) continue
+    if (i === 0) { out.push(ar3ToWords(g)); continue }
+    const [one, two, many] = scales[i]
+    if (g === 1) out.push(one)
+    else if (g === 2) out.push(two)
+    else if (g >= 3 && g <= 10) out.push(`${ar3ToWords(g)} ${many}`)
+    else out.push(`${ar3ToWords(g)} ${one}`)
+  }
+  return out.join(' و')
+}
+const CUR_WORDS = { YER: ['ريال يمني', 'فلس'], SAR: ['ريال سعودي', 'هللة'], USD: ['دولار أمريكي', 'سنت'] }
+function amountInWords(amount, currency) {
+  const a = Math.abs(Number(amount) || 0)
+  const whole = Math.floor(a)
+  const frac = Math.round((a - whole) * 100)
+  const [unit, sub] = CUR_WORDS[currency] || [currency || '', '']
+  let s = `${numToArabicWords(whole)} ${unit}`
+  if (frac > 0 && sub) s += ` و${numToArabicWords(frac)} ${sub}`
+  return `${s} فقط لا غير`
+}
+// Preview window — NO auto-print: user reviews then presses the print button.
+function openPrintPreview(html) {
+  const w = window.open('', '_blank', 'width=920,height=1100')
+  if (!w) return toast.error('السماح للنوافذ المنبثقة مطلوب للمعاينة والطباعة')
+  w.document.open(); w.document.write(html); w.document.close(); w.focus()
+}
+function buildUnifiedVoucherHTML({ settings, tenant, title, docNo, dateStr, rows = [], amount, currency, amountWords, amountsMulti = null, description, notes, parties = null, branchName, userName, signatures = ['المحاسب', 'المستلم / المسلّم'], thanks = true }) {
+  const color = settings?.primary_color || '#1e3a8a'
+  const nameAr = escHtml(settings?.agency_name || tenant?.name || 'مكتب السفريات')
+  const nameEn = settings?.agency_name_en ? escHtml(settings.agency_name_en) : ''
+  const logo = settings?.logo_base64
+    ? `<img src="${settings.logo_base64}" style="height:72px;max-width:160px;object-fit:contain" />`
+    : `<div style="width:66px;height:66px;background:${color};border-radius:14px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:26px;margin:auto">${escHtml((settings?.agency_name || tenant?.name || 'ر')[0])}</div>`
+  const filled = (rows || []).filter(r => r && r[1] !== undefined && r[1] !== null && String(r[1]).trim() !== '' && String(r[1]).trim() !== '—')
+  const fr = (l, v, ltr = false) => `<div class="fr"><span class="fl">${escHtml(l)}</span><span class="fv"${ltr ? ' dir="ltr"' : ''}>${escHtml(String(v))}</span></div>`
+  const partyCard = (p, idx) => `
+    <div class="party">
+      <div class="party-h" style="background:${idx === 0 ? '#fff1f2' : '#ecfdf5'};color:${idx === 0 ? '#be123c' : '#047857'};border-color:${idx === 0 ? '#fecdd3' : '#a7f3d0'}">${idx === 0 ? '① الطرف الأول — المصدر (قُيّد عليه / خُصم)' : '② الطرف الثاني — الوجهة (قُيّد له / أُضيف)'}</div>
+      ${fr('الفرع', p.branch)}${fr('الحساب', p.account)}${fr('رقم الحساب', p.code, true)}${fr('العملة', p.currency)}
+      <div class="fr"><span class="fl">المبلغ</span><span class="fv" dir="ltr" style="font-weight:900;color:${idx === 0 ? '#be123c' : '#047857'}">${escHtml(String(p.amount))}</span></div>
+    </div>`
+  return `<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>${escHtml(title)} ${escHtml(docNo || '')}</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap');
+*{box-sizing:border-box;font-family:'Cairo',sans-serif;margin:0;padding:0}
+@page{size:A4;margin:10mm}
+body{color:#0f172a;background:#f1f5f9;padding:16px}
+.sheet{max-width:820px;margin:auto;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:22px 26px;box-shadow:0 8px 24px rgba(0,0,0,.06)}
+.hd{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;border-bottom:4px solid ${color};padding-bottom:12px}
+.hd-ar{flex:1;text-align:right}.hd-en{flex:1;text-align:left}
+.hd-logo{flex:0 0 170px;text-align:center}
+.hd h2{color:${color};font-size:17px;font-weight:900;line-height:1.3}
+.meta{font-size:10.5px;color:#475569;line-height:1.7;margin-top:3px}
+.bar{display:flex;align-items:stretch;gap:8px;margin:14px 0}
+.bar > div{border:1.5px solid ${color}44;border-radius:10px;padding:7px 12px;font-size:11px;color:#475569;text-align:center;min-width:130px}
+.bar b{display:block;font-size:13px;color:#0f172a;margin-top:2px}
+.bar-title{flex:1;background:${color};color:#fff !important;font-size:19px !important;font-weight:900;display:flex;align-items:center;justify-content:center;border:none !important}
+.body-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 22px;margin:6px 0}
+.fr{display:flex;justify-content:space-between;gap:10px;padding:6px 10px;border-bottom:1px dashed #e2e8f0;font-size:12.5px}
+.fl{color:#64748b;font-weight:700;white-space:nowrap}.fv{font-weight:700;text-align:left}
+.amt{display:flex;align-items:stretch;gap:10px;margin:14px 0}
+.amt-n{flex:0 0 240px;background:${color}0d;border:2px solid ${color};border-radius:12px;text-align:center;padding:12px;font-size:24px;font-weight:900;color:${color};direction:ltr;display:flex;align-items:center;justify-content:center}
+.amt-w{flex:1;background:#fffbeb;border:1.5px dashed #f59e0b;border-radius:12px;padding:10px 14px;font-size:13px;font-weight:800;color:#78350f;display:flex;align-items:center}
+.desc{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 14px;font-size:12.5px;margin:8px 0}
+.desc b{color:${color}}
+.parties{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0}
+.party{border:1.5px solid #e2e8f0;border-radius:12px;overflow:hidden}
+.party-h{padding:8px 12px;font-size:12.5px;font-weight:900;border-bottom:1.5px solid}
+.meta-strip{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;margin-top:18px;padding:8px 12px;background:#f8fafc;border-radius:8px;font-size:10.5px;color:#475569}
+.sigs{display:grid;grid-template-columns:repeat(${Math.max(2, (signatures || []).length)},1fr);gap:22px;margin-top:44px;text-align:center;font-size:12px;color:#475569}
+.sigs div{border-top:1.5px solid #94a3b8;padding-top:6px;font-weight:700}
+.thanks{text-align:center;margin-top:18px;font-size:12px;font-weight:800;color:${color}}
+.pfoot{text-align:center;font-size:9.5px;color:#94a3b8;margin-top:10px;padding-top:8px;border-top:1px dashed #cbd5e1}
+.actions{position:sticky;top:0;z-index:10;display:flex;gap:10px;justify-content:center;padding:10px;background:#0f172acc;backdrop-filter:blur(4px);border-radius:0 0 12px 12px;margin:-16px -16px 14px}
+.actions button{border:0;border-radius:8px;padding:9px 26px;font-weight:900;font-size:14px;cursor:pointer;font-family:'Cairo'}
+.a-print{background:#059669;color:#fff}.a-close{background:#e2e8f0;color:#0f172a}
+@media print{body{background:#fff;padding:0}.sheet{border:none;box-shadow:none;border-radius:0;max-width:100%;padding:0}.actions{display:none !important}}
+</style></head><body>
+<div class="actions"><button class="a-print" onclick="window.print()">🖨️ طباعة</button><button class="a-close" onclick="window.close()">إغلاق</button></div>
+<div class="sheet">
+  <div class="hd">
+    <div class="hd-ar">
+      <h2>${nameAr}</h2>
+      <div class="meta">
+        ${settings?.address ? `📍 ${escHtml(settings.address)}<br/>` : ''}
+        ${settings?.commercial_id ? `س.ت: ${escHtml(settings.commercial_id)}` : ''}${settings?.tax_id ? ` • ضريبي: ${escHtml(settings.tax_id)}` : ''}
+      </div>
+    </div>
+    <div class="hd-logo">${logo}</div>
+    <div class="hd-en" dir="ltr">
+      ${nameEn ? `<h2>${nameEn}</h2>` : `<h2 style="opacity:.55">${nameAr}</h2>`}
+      <div class="meta">
+        ${settings?.address_en ? `📍 ${escHtml(settings.address_en)}<br/>` : ''}
+        ${settings?.phone ? `📞 ${escHtml(settings.phone)}<br/>` : ''}
+        ${settings?.email ? `✉ ${escHtml(settings.email)}` : ''}
+      </div>
+    </div>
+  </div>
+  ${settings?.header ? `<div style="text-align:center;padding:7px;background:#f1f5f9;border-radius:8px;margin-top:10px;font-size:12px;font-weight:700">${escHtml(settings.header)}</div>` : ''}
+  <div class="bar">
+    <div>رقم السند<b dir="ltr">${escHtml(docNo || '—')}</b></div>
+    <div class="bar-title">${escHtml(title)}</div>
+    <div>التاريخ<b>${escHtml(dateStr || '')}</b></div>
+  </div>
+  ${filled.length ? `<div class="body-grid">${filled.map(([l, v, ltr]) => fr(l, v, ltr)).join('')}</div>` : ''}
+  ${parties ? `<div class="parties">${partyCard(parties.first, 0)}${partyCard(parties.second, 1)}</div>` : ''}
+  ${amount !== undefined && amount !== null ? `<div class="amt"><div class="amt-n">${escHtml(fmt(amount, currency))}</div><div class="amt-w">${escHtml(amountWords || amountInWords(amount, currency))}</div></div>` : ''}
+  ${amountsMulti && amountsMulti.length ? `<div class="amt" style="flex-direction:column">${amountsMulti.map(m => `<div class="amt-w" style="justify-content:space-between"><span dir="ltr" style="font-weight:900;color:${color}">${escHtml(m.display)}</span><span>${escHtml(m.words)}</span></div>`).join('')}</div>` : ''}
+  ${description ? `<div class="desc"><b>البيان:</b> ${escHtml(description)}</div>` : ''}
+  ${notes ? `<div class="desc"><b>ملاحظات:</b> ${escHtml(notes)}</div>` : ''}
+  <div class="meta-strip">
+    <span>🏢 الفرع: <b>${escHtml(branchName || 'المركز الرئيسي')}</b></span>
+    <span>👤 المستخدم: <b dir="ltr">${escHtml(userName || '—')}</b></span>
+    <span>🖨️ طُبع: <b>${new Date().toLocaleString('ar-EG')}</b></span>
+  </div>
+  <div class="sigs">${(signatures || []).map(s => `<div>${escHtml(s)}</div>`).join('')}</div>
+  ${thanks ? `<div class="thanks">شكراً لتعاملكم معنا 🌹</div>` : ''}
+  ${settings?.footer ? `<div style="text-align:center;font-size:11px;color:#64748b;margin-top:8px">${escHtml(settings.footer)}</div>` : ''}
+  <div class="pfoot">Powered by <b>Target Media ERP</b> • Rahaal SaaS © 2025</div>
+</div>
+</body></html>`
+}
+// إشعار مدين / دائن لسند القيد — يعرض أسطر الاتجاه المطلوب فقط
+function printJournalNotice({ je, side, settings, tenant, branchName, userName }) {
+  const isDebit = side === 'debit'
+  const lines = (je.lines || []).filter(l => (isDebit ? Number(l.debit) : Number(l.credit)) > 0)
+  if (!lines.length) return toast.error(`لا توجد أسطر ${isDebit ? 'مدينة' : 'دائنة'} في هذا القيد`)
+  const rows = []
+  lines.forEach((l, i) => {
+    const cur = l.currency || je.currency
+    const amt = isDebit ? l.debit : l.credit
+    rows.push([`الحساب ${lines.length > 1 ? i + 1 : ''}`, `${l.account_name || ''} (${l.account_code})`])
+    if (l.party_name) rows.push(['الطرف', l.party_name])
+    rows.push(['المبلغ / العملة', `${fmt(amt, cur)}`, true])
+  })
+  const byCur = {}
+  lines.forEach(l => { const c = l.currency || je.currency; byCur[c] = (byCur[c] || 0) + (isDebit ? Number(l.debit) : Number(l.credit)) })
+  const curs = Object.keys(byCur)
+  const single = curs.length === 1 && curs[0] !== 'MULTI'
+  openPrintPreview(buildUnifiedVoucherHTML({
+    settings, tenant,
+    title: isDebit ? 'سند قيد — إشعار مدين' : 'سند قيد — إشعار دائن',
+    docNo: je.no || String(je.id || '').slice(0, 8).toUpperCase(),
+    dateStr: fmtDate(je.date), rows,
+    amount: single ? byCur[curs[0]] : undefined,
+    currency: single ? curs[0] : undefined,
+    amountsMulti: single ? null : curs.map(c => ({ display: fmt(byCur[c], c), words: amountInWords(byCur[c], c) })),
+    description: je.description, branchName, userName: userName || je.created_by,
+    signatures: ['المحاسب', 'المدير المالي', isDebit ? 'توقيع الطرف المدين' : 'توقيع الطرف الدائن'],
+  }))
+}
+// سند بين الفروع — قالب الطرفين (المصدر/الوجهة)
+function printInterbranchVoucher({ tx, settings, tenant, userName }) {
+  const title = tx.type === 'receipt' ? 'سند قبض بين الفروع' : tx.type === 'payment' ? 'سند صرف بين الفروع' : 'سند قيد بين الفروع'
+  openPrintPreview(buildUnifiedVoucherHTML({
+    settings, tenant, title,
+    docNo: tx.no || String(tx.id || '').slice(0, 8).toUpperCase(),
+    dateStr: fmtDate(tx.date || tx.created_at),
+    rows: [['رقم المرجع الداخلي', String(tx.id || '').slice(0, 8), true], ['الحالة', tx.status === 'posted' ? 'مرحّلة (قيدان متوازنان)' : tx.status]],
+    parties: {
+      first: { branch: tx.source_branch_name, account: tx.source_box?.name || '—', code: tx.source_box?.account_code || '—', currency: tx.currency, amount: fmt(tx.amount, tx.currency) },
+      second: { branch: tx.destination_branch_name, account: tx.destination_box?.name || '—', code: tx.destination_box?.account_code || '—', currency: tx.currency, amount: fmt(tx.amount, tx.currency) },
+    },
+    amount: tx.amount, currency: tx.currency,
+    description: tx.description, notes: tx.notes,
+    branchName: tx.source_branch_name, userName: userName || tx.created_by,
+    signatures: ['توقيع الطرف الأول (المصدر)', 'توقيع الطرف الثاني (الوجهة)'],
+  }))
+}
+
+function printVoucher({ kind, record, settings, tenant, branchName, userName }) {
   const titleMap = {
     ticket: 'سند/فاتورة حجز تذكرة',
     visa: 'سند/فاتورة تأشيرة/خدمة',
@@ -4146,15 +4344,30 @@ function printVoucher({ kind, record, settings, tenant }) {
       <tbody><tr><td>${escHtml(record.service_type)}</td><td style="text-align:left">${fmt(record.cost, record.currency)}</td><td style="text-align:left">${fmt(record.sale_price, record.currency)}</td><td style="text-align:left"><b>${fmt(record.commission, record.currency)}</b></td></tr></tbody></table>
       <div class="big">المبلغ المستحق: ${fmt(record.sale_price, record.currency)}</div>`
   } else if (kind === 'receipt' || kind === 'payment') {
-    content = `<div class="title">${title} — ${escHtml(record.party_name)}</div>
-      <div class="info-grid">
-        <div><b>التاريخ:</b> ${fmtDate(record.date)}</div>
-        <div><b>${kind === 'receipt' ? 'المستلم من' : 'المدفوع إلى'}:</b> ${escHtml(record.party_name)}</div>
-        <div><b>الطريقة:</b> ${escHtml(record.method)}</div>
-        <div><b>الصندوق/البنك:</b> ${escHtml(record.box_name)}</div>
-      </div>
-      ${record.description ? `<p style="padding:12px;background:#f8fafc;border-radius:6px"><b>البيان:</b> ${escHtml(record.description)}</p>` : ''}
-      <div class="big">${kind === 'receipt' ? 'مبلغ القبض' : 'مبلغ الصرف'}: ${fmt(record.amount, record.currency)}</div>`
+    // v5.9 — unified professional template (A4/RTL/preview) with amount-in-words
+    const r = record
+    const isR = kind === 'receipt'
+    const rows = [
+      [isR ? 'المستلم من' : 'المدفوع إلى', r.party_name],
+      ['رقم/كود الحساب', r.coa_account_code || '', true],
+      [isR ? 'طريقة القبض' : 'طريقة الصرف', r.method],
+      ['الصندوق / البنك', r.box_name],
+      ['رقم الشيك', r.check_no, true],
+      ['بنك الشيك', r.check_bank],
+      ['تاريخ الشيك', r.check_date ? fmtDate(r.check_date) : ''],
+      ['المناولة / المستلم', r.handler_name],
+      ['أنشأه', r.created_by, true],
+    ]
+    openPrintPreview(buildUnifiedVoucherHTML({
+      settings, tenant, title,
+      docNo: r.no || String(r.id || '').slice(0, 8).toUpperCase(),
+      dateStr: fmtDate(r.date), rows,
+      amount: r.amount, currency: r.currency,
+      description: r.description, notes: r.notes,
+      branchName, userName,
+      signatures: ['المحاسب', 'أمين الصندوق', isR ? 'توقيع الدافع' : 'توقيع المستلم'],
+    }))
+    return
   } else if (kind === 'fx') {
     content = `<div class="title">${title} — ${record.type === 'buy' ? 'شراء عملة' : 'بيع عملة'}</div>
       <div class="info-grid">
@@ -5328,7 +5541,7 @@ function ServiceTypesDialog({ open, onOpenChange, onChanged }) {
 // VOUCHER + PARTIES + BOXES + CHART + JOURNAL + REPORTS (same as v1)
 // ================================================================
 function VoucherScreen({ mode }) {
-  const { settings, tenant } = useAuth()
+  const { settings, tenant, user, branch } = useAuth()
   const cfg = mode === 'receipt'
     ? { title: 'سند قبض', subtitle: 'المستلم من العميل / المورد', icon: ArrowDownLeft, grad: 'grad-green', partyLabel: 'المستلم من', defaultParty: 'client' }
     : { title: 'سند صرف', subtitle: 'المدفوع إلى المورد / مصروفات', icon: ArrowUpRight, grad: 'grad-rose', partyLabel: 'المدفوع إلى', defaultParty: 'supplier' }
@@ -5361,7 +5574,7 @@ function VoucherScreen({ mode }) {
   }
   const handlePrintVoucher = () => {
     if (!selected) return toast.error('اختر سنداً أولاً')
-    printVoucher({ kind: mode, record: selected, settings, tenant })
+    printVoucher({ kind: mode, record: selected, settings, tenant, branchName: branch?.name || 'المركز الرئيسي', userName: user?.email })
   }
   const handlePrintTable = () => {
     const totals = { amount: 0 }
@@ -5400,12 +5613,13 @@ function VoucherScreen({ mode }) {
         <CardContent>
           <XScroll>
           <Table>
-            <TableHeader><TableRow><TableHead className="w-8"></TableHead><TableHead>التاريخ</TableHead><TableHead>{cfg.partyLabel}</TableHead><TableHead>البيان</TableHead><TableHead>الطريقة</TableHead><TableHead>الصندوق</TableHead><TableHead>العملة</TableHead><TableHead className="text-left">المبلغ</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead className="w-8"></TableHead><TableHead>رقم السند</TableHead><TableHead>التاريخ</TableHead><TableHead>{cfg.partyLabel}</TableHead><TableHead>البيان</TableHead><TableHead>الطريقة</TableHead><TableHead>الصندوق</TableHead><TableHead>العملة</TableHead><TableHead className="text-left">المبلغ</TableHead></TableRow></TableHeader>
             <TableBody>
-              {filtered.length === 0 && <TableRow><TableCell colSpan={8} className="text-center text-slate-400 py-8">لا توجد سندات</TableCell></TableRow>}
+              {filtered.length === 0 && <TableRow><TableCell colSpan={9} className="text-center text-slate-400 py-8">لا توجد سندات</TableCell></TableRow>}
               {filtered.map(v => (
                 <TableRow key={v.id} className={selectedId === v.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={() => setSelectedId(v.id === selectedId ? null : v.id)}>
                   <TableCell><input type="radio" checked={selectedId === v.id} onChange={() => setSelectedId(v.id)} /></TableCell>
+                  <TableCell className="font-mono text-[11px] text-slate-500" dir="ltr">{v.no || String(v.id || '').slice(0, 8)}</TableCell>
                   <TableCell className="text-xs">{fmtDate(v.date)}</TableCell>
                   <TableCell className="font-semibold">{v.party_name}</TableCell>
                   <TableCell className="text-xs">{v.description || '—'}</TableCell>
@@ -5439,7 +5653,7 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
   const { user } = useAuth() // v3.9.16 — Fix "user is not defined" — used in box Select disabled state
   const isEdit = !!record
   const defaultParty = mode === 'receipt' ? 'client' : 'supplier'
-  const emptyForm = { date: todayISO(), currency: 'USD', amount: '', party_type: defaultParty, party_id: '', party_name: '', box_id: '', method: '', description: '' }
+  const emptyForm = { date: todayISO(), currency: 'USD', amount: '', party_type: defaultParty, party_id: '', party_name: '', box_id: '', method: 'نقدي', description: '', handler_name: '', notes: '', check_no: '', check_bank: '', check_date: '' }
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   useEffect(() => {
@@ -5452,7 +5666,9 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
         party_type: record.party_type || defaultParty,
         party_id: record.party_id || '', party_name: record.party_name || '',
         coa_account_code: record.coa_account_code || '', // v3.79 — real expense/revenue account
-        box_id: record.box_id || '', method: record.method || '', description: record.description || '',
+        box_id: record.box_id || '', method: record.method || 'نقدي', description: record.description || '',
+        handler_name: record.handler_name || '', notes: record.notes || '', // v5.9
+        check_no: record.check_no || '', check_bank: record.check_bank || '', check_date: record.check_date || '', // v5.9
       })
     } else {
       setForm({ ...emptyForm, party_type: defaultParty })
@@ -5463,6 +5679,7 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
   const list = form.party_type === 'client' ? clients : form.party_type === 'supplier' ? suppliers : []
   const submit = async () => {
     if (!form.amount) return toast.error('أدخل المبلغ')
+    if (form.method === 'شيك' && !form.check_no.trim()) return toast.error('أدخل رقم الشيك') // v5.9
     if (form.party_type === 'expense' && !form.coa_account_code) return toast.error('اختر حساب المصروف من دليل الحسابات — أو أضفه من نفس الحقل')
     if (form.party_type === 'revenue' && !form.coa_account_code) return toast.error('اختر حساب الإيراد من دليل الحسابات — أو أضفه من نفس الحقل')
     if (!['expense', 'revenue'].includes(form.party_type) && !form.party_id) return toast.error('اختر الطرف')
@@ -5518,10 +5735,31 @@ function VoucherDialog({ open, onOpenChange, mode, clients, suppliers, boxes, on
               />
             </Field>
           </div>
-          <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent></Select></Field>
+          <Field label="العملة"><Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c} — {CUR_NAME[c] || c}</SelectItem>)}</SelectContent></Select></Field>
           <Field label="المبلغ" required><Input type="number" step="0.01" min="0" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="text-lg font-bold" /></Field>
-          <Field label="طريقة الدفع"><Input value={form.method} onChange={e => setForm({ ...form, method: e.target.value })} placeholder="نقدي / حوالة" /></Field>
-          <div className="md:col-span-2"><Field label="البيان"><Textarea rows={2} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></Field></div>
+          {/* v5.9 — structured method (كان نص حر) + حقول الشيك الشرطية */}
+          <Field label={mode === 'receipt' ? 'طريقة القبض' : 'طريقة الصرف'}>
+            <Select value={['نقدي', 'حوالة', 'شيك', 'بنكي'].includes(form.method) ? form.method : (form.method ? '_custom' : 'نقدي')} onValueChange={v => setForm({ ...form, method: v === '_custom' ? form.method : v })}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="نقدي">💵 نقدي</SelectItem>
+                <SelectItem value="حوالة">💸 حوالة</SelectItem>
+                <SelectItem value="شيك">🏷️ شيك</SelectItem>
+                <SelectItem value="بنكي">🏦 تحويل بنكي</SelectItem>
+                {form.method && !['نقدي', 'حوالة', 'شيك', 'بنكي'].includes(form.method) && <SelectItem value="_custom">{form.method}</SelectItem>}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="المناولة / اسم المستلم أو المسلّم"><Input value={form.handler_name} onChange={e => setForm({ ...form, handler_name: e.target.value })} placeholder="اختياري — من استلم/سلّم فعلياً" /></Field>
+          {form.method === 'شيك' && (
+            <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-3 gap-3 p-3 rounded-lg border border-amber-200 bg-amber-50/50">
+              <Field label="رقم الشيك" required><Input dir="ltr" value={form.check_no} onChange={e => setForm({ ...form, check_no: e.target.value })} /></Field>
+              <Field label="البنك المسحوب عليه"><Input value={form.check_bank} onChange={e => setForm({ ...form, check_bank: e.target.value })} /></Field>
+              <Field label="تاريخ الشيك"><Input type="date" value={form.check_date} onChange={e => setForm({ ...form, check_date: e.target.value })} /></Field>
+            </div>
+          )}
+          <div className="md:col-span-2"><Field label="البيان / الغرض"><Textarea rows={2} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></Field></div>
+          <div className="md:col-span-2"><Field label="ملاحظات"><Textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} placeholder="اختياري" /></Field></div>
         </div>
         <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>إلغاء</Button><Button onClick={submit} disabled={saving} className={mode === 'receipt' ? 'grad-green text-white' : 'grad-rose text-white'}>{saving ? <Loader2 className="w-4 h-4 animate-spin" /> : (isEdit ? '💾 حفظ التعديل' : 'حفظ')}</Button></DialogFooter>
       </DialogContent>
@@ -6214,7 +6452,7 @@ function OpeningEquityDialog({ open, onOpenChange, onChanged }) {
 }
 
 function JournalScreen() {
-  const { settings, tenant } = useAuth()
+  const { settings, tenant, user, branch } = useAuth()
   const [rows, setRows] = useState([])
   const [open, setOpen] = useState(false)
   const [openingOpen, setOpeningOpen] = useState(false)
@@ -6354,8 +6592,16 @@ function JournalScreen() {
                       <div className="text-xs text-slate-500">{fmtDate(je.date)} • {JE_REF_LABEL[je.ref_type] || je.ref_type} • {isMulti ? 'متعدد العملات' : je.currency}{editable && <Badge variant="outline" className="mr-2 text-emerald-600 border-emerald-300">قابل للتعديل</Badge>}{(je.ref_type === 'opening' || je.ref_type === 'opening_close') && <Badge variant="outline" className="mr-2 text-amber-600 border-amber-300">{JE_REF_LABEL[je.ref_type]}</Badge>}</div>
                     </div>
                   </div>
-                  {!isMulti && <Badge variant="secondary" className="text-sm font-bold">{fmt(totalDebit, je.currency)}</Badge>}
-                  {isMulti && <Badge className="bg-fuchsia-100 text-fuchsia-700 hover:bg-fuchsia-100">قيد متعدد العملات</Badge>}
+                  <div className="flex items-center gap-2">
+                    {isSelected && (
+                      <span className="flex gap-1" onClick={e => e.stopPropagation()}>
+                        <Button size="sm" variant="outline" className="h-7 px-2 text-[11px] gap-1 border-blue-300 text-blue-700" title="طباعة إشعار مدين (معاينة)" onClick={() => printJournalNotice({ je, side: 'debit', settings, tenant, branchName: branch?.name || 'المركز الرئيسي', userName: user?.email })}>🖨️ إشعار مدين</Button>
+                        <Button size="sm" variant="outline" className="h-7 px-2 text-[11px] gap-1 border-rose-300 text-rose-700" title="طباعة إشعار دائن (معاينة)" onClick={() => printJournalNotice({ je, side: 'credit', settings, tenant, branchName: branch?.name || 'المركز الرئيسي', userName: user?.email })}>🖨️ إشعار دائن</Button>
+                      </span>
+                    )}
+                    {!isMulti && <Badge variant="secondary" className="text-sm font-bold">{fmt(totalDebit, je.currency)}</Badge>}
+                    {isMulti && <Badge className="bg-fuchsia-100 text-fuchsia-700 hover:bg-fuchsia-100">قيد متعدد العملات</Badge>}
+                  </div>
                 </div>
               </CardHeader>
               <CardContent className="p-0">
@@ -6415,8 +6661,48 @@ function BranchScopePicker({ value, onChange }) {
 // Internal transfers only — NEVER revenue/expense. The counterparty account
 // picker shows NAMES + CODES only (backend-safe DTO): no balances, no history.
 // ============================================================================
+// v5.9 — searchable branch-scoped account picker (name OR code), unified for both sides.
+// Options come from backend branch-isolated DTOs — this is UX filtering ONLY; the server
+// re-validates scope ownership on POST (backend-enforced isolation).
+function IbAccountPicker({ options, value, onChange, placeholder, disabled }) {
+  const [q, setQ] = useState('')
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useEffect(() => {
+    const onClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [])
+  const sel = (options || []).find(o => o.value === value)
+  const term = q.trim().toLowerCase()
+  const filtered = (options || []).filter(o => !term || (o.label || '').toLowerCase().includes(term) || String(o.code || '').includes(term)).slice(0, 40)
+  return (
+    <div className="relative" ref={ref}>
+      <Input
+        value={open ? q : (sel ? `${sel.label} (${sel.code})` : '')}
+        onFocus={() => { if (disabled) return; setQ(''); setOpen(true) }}
+        onChange={e => { setQ(e.target.value); setOpen(true) }}
+        placeholder={placeholder}
+        disabled={disabled}
+      />
+      {open && !disabled && (
+        <div className="absolute z-50 top-full right-0 left-0 mt-1 bg-white border rounded-lg shadow-2xl max-h-64 overflow-y-auto">
+          {filtered.length === 0 && <div className="p-3 text-xs text-slate-400 text-center">لا نتائج — ابحث بالاسم أو رقم الحساب</div>}
+          {filtered.map(o => (
+            <button key={o.value} type="button" onClick={() => { onChange(o); setOpen(false); setQ('') }}
+              className={`w-full text-right p-2.5 hover:bg-blue-50 border-b border-slate-100 text-sm flex items-center justify-between gap-2 ${o.value === value ? 'bg-blue-100 font-bold' : ''}`}>
+              <span>{o.icon} {o.label}{o.groupLabel ? <span className="text-[9px] text-slate-400 mr-1">· {o.groupLabel}</span> : null}</span>
+              <span className="font-mono text-[10px] text-slate-400" dir="ltr">{o.code}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function InterBranchScreen() {
-  const { user, branch } = useAuth()
+  const { user, branch, settings, tenant } = useAuth()
   const [counterparties, setCounterparties] = useState([])
   const [cpAccounts, setCpAccounts] = useState(null)
   const [myBoxes, setMyBoxes] = useState([])
@@ -6424,9 +6710,10 @@ function InterBranchScreen() {
   const [recon, setRecon] = useState(null)
   const [busy, setBusy] = useState(false)
   const [opId, setOpId] = useState(() => (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`)
-  const [f, setF] = useState({ type: 'payment', counterparty: '', my_box_id: '', counterparty_box_id: '', amount: '', currency: 'YER', direction: 'out', description: '' })
+  const [f, setF] = useState({ type: 'payment', counterparty: '', my_kind: 'box', my_id: '', cp_kind: 'box', cp_id: '', amount: '', currency: 'YER', direction: 'out', description: '', notes: '', date: todayISO() })
   const newOp = () => setOpId((typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`)
   const isHQ = !user?.branch_id
+  const isJournal = f.type === 'journal'
   // v5.7 — unified date filter + pagination (global rule, client-side over full list)
   const ibPf = usePeriodState()
   const ibPager = useClientPager(filterByPeriod(list, ibPf.applied, 'created_at'))
@@ -6438,14 +6725,25 @@ function InterBranchScreen() {
   }
   useEffect(() => { load() }, [])
   useEffect(() => {
-    setCpAccounts(null); setF(v => ({ ...v, counterparty_box_id: '' }))
+    setCpAccounts(null); setF(v => ({ ...v, cp_id: '', cp_kind: 'box' }))
     if (f.counterparty === '') return
-    api(`/interbranch/accounts?branch=${f.counterparty || 'hq'}`).then(setCpAccounts).catch(e => toast.error(e.message))
-  }, [f.counterparty])
+    api(`/interbranch/accounts?branch=${f.counterparty || 'hq'}&type=${f.type}`).then(setCpAccounts).catch(e => toast.error(e.message))
+  }, [f.counterparty, f.type])
+  // v5.9 — picker options: my side = my boxes (+ unified COA leaves for JOURNAL type);
+  // counterparty side = THEIR branch boxes only (backend-isolated DTO) + unified COA for journal.
+  const coaOpts = (cpAccounts?.coa_accounts || []).map(a => ({ value: `account:${a.id}`, kind: 'account', id: a.id, label: a.name_ar, code: a.account_code, icon: '📒', groupLabel: 'دليل الحسابات (موحّد)' }))
+  const myOpts = [
+    ...myBoxes.map(bx => ({ value: `box:${bx.id}`, kind: 'box', id: bx.id, label: bx.name_ar, code: bx.account_code || '', icon: bx.type === 'bank' ? '🏦' : '💵', groupLabel: branch?.name || 'المركز الرئيسي' })),
+    ...(isJournal ? coaOpts : []),
+  ]
+  const cpOpts = [
+    ...((cpAccounts?.accounts || []).map(a => ({ value: `box:${a.id}`, kind: 'box', id: a.id, label: a.name_ar, code: a.account_code || '', icon: a.type === 'bank' ? '🏦' : '💵', groupLabel: cpAccounts?.scope?.name || '' }))),
+    ...(isJournal ? coaOpts : []),
+  ]
   const submit = async () => {
     if (!f.counterparty && f.counterparty !== 'hq') return toast.error('اختر الفرع المقابل')
-    if (!f.my_box_id) return toast.error('اختر صندوقك/بنكك')
-    if (!f.counterparty_box_id) return toast.error('اختر حساب الطرف المقابل')
+    if (!f.my_id) return toast.error(isJournal ? 'اختر حسابك (صندوق أو حساب من الدليل)' : 'اختر صندوقك/بنكك')
+    if (!f.cp_id) return toast.error('اختر حساب الطرف المقابل')
     if (!(Number(f.amount) > 0)) return toast.error('أدخل مبلغاً صحيحاً')
     try {
       setBusy(true)
@@ -6453,15 +6751,18 @@ function InterBranchScreen() {
         method: 'POST',
         body: {
           type: f.type, counterparty_branch_id: f.counterparty === 'hq' ? null : f.counterparty,
-          my_box_id: f.my_box_id, counterparty_box_id: f.counterparty_box_id,
+          my_box_id: f.my_kind === 'box' ? f.my_id : undefined,
+          counterparty_box_id: f.cp_kind === 'box' ? f.cp_id : undefined,
+          my_ref: { kind: f.my_kind, id: f.my_id },            // v5.9 — box | account (journal)
+          counterparty_ref: { kind: f.cp_kind, id: f.cp_id },  // v5.9
           amount: Number(f.amount), currency: f.currency, direction: f.direction,
-          description: f.description, op_id: opId,
+          description: f.description, notes: f.notes, date: f.date, op_id: opId,
         },
       })
       if (r.duplicate) toast.info('ℹ️ العملية منفذة مسبقاً — لا ازدواج مالي')
-      else toast.success(`✅ نُفذت العملية بقيدين متوازنين (مصدر + وجهة) — رقم المرجع ${String(r.tx?.id || '').slice(0, 8)}`, { duration: 7000 })
+      else toast.success(`✅ نُفذت العملية بقيدين متوازنين — رقم السند ${r.tx?.no || String(r.tx?.id || '').slice(0, 8)}`, { duration: 7000 })
       newOp()
-      setF(v => ({ ...v, amount: '', description: '' }))
+      setF(v => ({ ...v, amount: '', description: '', notes: '' }))
       load()
     } catch (e) { toast.error(e.message); newOp() } finally { setBusy(false) }
   }
@@ -6496,26 +6797,26 @@ function InterBranchScreen() {
                 </SelectContent>
               </Select>
             </Field>
-            <Field label={f.type === 'receipt' ? 'إلى صندوقي/بنكي *' : 'من صندوقي/بنكي *'}>
-              <Select value={f.my_box_id || 'none'} onValueChange={v => setF({ ...f, my_box_id: v === 'none' ? '' : v })}>
-                <SelectTrigger><SelectValue placeholder="اختر" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">— اختر —</SelectItem>
-                  {myBoxes.map(bx => <SelectItem key={bx.id} value={bx.id}>{bx.type === 'bank' ? '🏦' : '💵'} {bx.name_ar}</SelectItem>)}
-                </SelectContent>
-              </Select>
+            <Field label={isJournal ? 'حسابي (فرعي: صندوق أو حساب دليل) *' : (f.type === 'receipt' ? 'إلى صندوقي/بنكي *' : 'من صندوقي/بنكي *')}>
+              <IbAccountPicker
+                options={myOpts}
+                value={f.my_id ? `${f.my_kind}:${f.my_id}` : ''}
+                onChange={o => setF({ ...f, my_kind: o.kind, my_id: o.id })}
+                placeholder="🔍 ابحث بالاسم أو رقم الحساب..."
+              />
             </Field>
-            <Field label="حساب الطرف المقابل *">
-              <Select value={f.counterparty_box_id || 'none'} onValueChange={v => setF({ ...f, counterparty_box_id: v === 'none' ? '' : v })} disabled={!cpAccounts}>
-                <SelectTrigger><SelectValue placeholder={f.counterparty ? (cpAccounts ? 'اختر (أسماء فقط)' : 'جارِ التحميل…') : 'اختر الفرع أولاً'} /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">— اختر —</SelectItem>
-                  {(cpAccounts?.accounts || []).map(a => <SelectItem key={a.id} value={a.id}>{a.type === 'bank' ? '🏦' : '💵'} {a.name_ar} <span className="font-mono text-[10px] text-slate-400">({a.account_code})</span></SelectItem>)}
-                </SelectContent>
-              </Select>
+            <Field label="حساب الطرف المقابل (فرعه أولاً ثم الحساب) *">
+              <IbAccountPicker
+                options={cpOpts}
+                value={f.cp_id ? `${f.cp_kind}:${f.cp_id}` : ''}
+                onChange={o => setF({ ...f, cp_kind: o.kind, cp_id: o.id })}
+                placeholder={f.counterparty ? (cpAccounts ? '🔍 ابحث بالاسم أو رقم الحساب...' : 'جارِ التحميل…') : 'اختر الفرع المقابل أولاً'}
+                disabled={!cpAccounts}
+              />
             </Field>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Field label="التاريخ *"><DocDateInput value={f.date} onChange={v => setF({ ...f, date: v })} /></Field>
             <Field label="المبلغ *"><Input dir="ltr" type="number" min="0" step="0.01" value={f.amount} onChange={e => setF({ ...f, amount: e.target.value })} /></Field>
             <Field label="العملة *">
               <Select value={f.currency} onValueChange={v => setF({ ...f, currency: v })}>
@@ -6535,6 +6836,7 @@ function InterBranchScreen() {
               </Field>
             )}
             <Field label="البيان"><Input value={f.description} onChange={e => setF({ ...f, description: e.target.value })} placeholder="وصف اختياري" /></Field>
+            <Field label="ملاحظات"><Input value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} placeholder="اختياري" /></Field>
           </div>
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="text-[10px] text-slate-400">🔒 Idempotent: الضغط المزدوج أو إعادة الإرسال لا يكرر الأثر المالي أبداً · حسابات الطرف المقابل تظهر بالأسماء فقط بلا أرصدة</div>
@@ -6572,16 +6874,18 @@ function InterBranchScreen() {
           {ibPager.total === 0 ? <div className="text-center text-slate-400 text-sm py-6">لا عمليات بينية بعد</div> : (
             <>
             <Table>
-              <TableHeader><TableRow><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>من ← إلى</TableHead><TableHead className="text-center">المبلغ</TableHead><TableHead className="text-center">الحالة</TableHead><TableHead>بواسطة</TableHead></TableRow></TableHeader>
+              <TableHeader><TableRow><TableHead>رقم السند</TableHead><TableHead>التاريخ</TableHead><TableHead>النوع</TableHead><TableHead>من ← إلى</TableHead><TableHead className="text-center">المبلغ</TableHead><TableHead className="text-center">الحالة</TableHead><TableHead>بواسطة</TableHead><TableHead></TableHead></TableRow></TableHeader>
               <TableBody>
                 {ibPager.paged.map(t => (
                   <TableRow key={t.id}>
-                    <TableCell className="text-xs whitespace-nowrap">{fmtDate(t.created_at)}</TableCell>
+                    <TableCell className="font-mono text-[11px] text-slate-500" dir="ltr">{t.no || String(t.id || '').slice(0, 8)}</TableCell>
+                    <TableCell className="text-xs whitespace-nowrap">{fmtDate(t.date || t.created_at)}</TableCell>
                     <TableCell className="text-xs">{typeL(t.type)}</TableCell>
                     <TableCell className="text-xs"><b>{t.source_branch_name}</b> ({t.source_box?.name}) ← <b>{t.destination_branch_name}</b> ({t.destination_box?.name})</TableCell>
                     <TableCell className="text-center text-xs font-black" dir="ltr">{fmt(t.amount, t.currency)}</TableCell>
                     <TableCell className="text-center">{stBadge(t.status)}</TableCell>
                     <TableCell className="text-[10px]" dir="ltr">{t.created_by}</TableCell>
+                    <TableCell><Button size="sm" variant="outline" className="h-7 px-2 gap-1" title="طباعة السند (معاينة)" onClick={() => printInterbranchVoucher({ tx: t, settings, tenant, userName: user?.email })}>🖨️</Button></TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -11900,8 +12204,12 @@ function TenantBranchesCard() {
 function OfficeSettings() {
   const { settings, refreshMe, user, tenant } = useAuth()
   const [f, setF] = useState({
-    agency_name: '', logo_base64: '', header: '', footer: '', tax_id: '', commercial_id: '',
-    phone: '', address: '', email: '', primary_color: '#1e3a8a', rates: { USD: 1, SAR: 0.267, YER: 0.0038 },
+    agency_name: '', agency_name_en: '', logo_base64: '', header: '', footer: '', tax_id: '', commercial_id: '',
+    phone: '', address: '', address_en: '', email: '', primary_color: '#1e3a8a',
+    // v5.9 — FX-001: defaults are YER-BASE (1 unit = X YER). The old USD-base defaults
+    // (USD:1, SAR:0.267, YER:0.0038) were the contamination vector that corrupted
+    // production reference tables and broke exchange journal balancing.
+    rates: { USD: 1554, SAR: 410, YER: 1 },
   })
   const [saving, setSaving] = useState(false)
   const [users, setUsers] = useState([])
@@ -11995,11 +12303,13 @@ function OfficeSettings() {
               <CardHeader><CardTitle className="text-base">بيانات المكتب</CardTitle></CardHeader>
               <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <Field label="اسم المكتب التجاري"><Input value={f.agency_name} onChange={e => setF({ ...f, agency_name: e.target.value })} placeholder={tenant?.name} /></Field>
+                <Field label="اسم المكتب بالإنجليزية (للطباعة)"><Input dir="ltr" value={f.agency_name_en || ''} onChange={e => setF({ ...f, agency_name_en: e.target.value })} placeholder="Office Name (EN)" /></Field>
                 <Field label="البريد الإلكتروني"><Input dir="ltr" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} /></Field>
                 <Field label="الهاتف"><Input value={f.phone} onChange={e => setF({ ...f, phone: e.target.value })} /></Field>
                 <Field label="السجل التجاري"><Input value={f.commercial_id} onChange={e => setF({ ...f, commercial_id: e.target.value })} /></Field>
                 <Field label="الرقم الضريبي"><Input value={f.tax_id} onChange={e => setF({ ...f, tax_id: e.target.value })} /></Field>
                 <div className="md:col-span-2"><Field label="العنوان"><Input value={f.address} onChange={e => setF({ ...f, address: e.target.value })} /></Field></div>
+                <div className="md:col-span-2"><Field label="العنوان بالإنجليزية (اختياري — للطباعة)"><Input dir="ltr" value={f.address_en || ''} onChange={e => setF({ ...f, address_en: e.target.value })} placeholder="Address (EN)" /></Field></div>
                 <div className="md:col-span-2"><Field label="نص رأس الفواتير"><Textarea rows={2} value={f.header} onChange={e => setF({ ...f, header: e.target.value })} placeholder="بسم الله الرحمن الرحيم / شعار / وصف قصير" /></Field></div>
                 <div className="md:col-span-2"><Field label="نص تذييل الفواتير"><Textarea rows={2} value={f.footer} onChange={e => setF({ ...f, footer: e.target.value })} placeholder="شكراً لتعاملكم معنا" /></Field></div>
               </CardContent>

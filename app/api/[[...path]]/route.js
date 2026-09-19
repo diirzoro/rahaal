@@ -101,6 +101,19 @@ const COA = {
 const OPENING_EQUITY_NAME = 'تسوية الأرصدة الافتتاحية'
 // v3.87 — numeric rounding helper (2 decimals)
 const round2n = (n) => Math.round((Number(n) || 0) * 100) / 100
+// v5.9 — AUTO VOUCHER NUMBERING: atomic per-tenant per-type counter (tenant_settings.doc_seq).
+// Sequence gaps on failed attempts are acceptable; numbers are NEVER reused, and edits
+// PRESERVE the original number (opts.preserveNo through the unified edit engine).
+async function nextDocNo(db, T, key, prefix) {
+  const r = await db.collection('tenant_settings').findOneAndUpdate(
+    { tenant_id: T },
+    { $inc: { [`doc_seq.${key}`]: 1 } },
+    { upsert: true, returnDocument: 'after' }
+  )
+  const after = (r && r.doc_seq) ? r : (r && r.value) ? r.value : null
+  const n = Number(after?.doc_seq?.[key]) || 1
+  return `${prefix}-${String(n).padStart(6, '0')}`
+}
 // v3.88.5 — F-007/F-008 STRICT (review round): every posting must reach the FINAL postable
 // (leaf) account. NO silent Group fallback: a legacy party that was never linked to a leaf
 // account throws a clear, coded error BEFORE any write — a new financial entry can never
@@ -1212,12 +1225,31 @@ async function postInterbranchTransaction(db, T, actor, b) {
   if (cp.id && cp.status !== 'active') return { error: 'الفرع المقابل موقوف — لا يمكن التحويل إليه' }
   if ((cp.id || null) === (myScope.id || null)) return { error: 'لا يمكن إجراء عملية بينية مع نفس النطاق' }
 
-  // ---- Boxes: mine inside MY scope, counterparty's inside THEIR scope (server-verified) ----
-  const myBox = await db.collection('boxes').findOne({ id: String(b.my_box_id || ''), tenant_id: T, branch_id: myScope.id })
-  if (!myBox) return { error: '🚫 الصندوق/البنك المختار ليس ضمن نطاقك' }
-  const cpBox = await db.collection('boxes').findOne({ id: String(b.counterparty_box_id || ''), tenant_id: T, branch_id: cp.id })
-  if (!cpBox) return { error: '🚫 حساب الطرف المقابل غير موجود ضمن نطاق الفرع المقابل' }
-  if (!myBox.account_code || !cpBox.account_code) return { error: 'حساب غير مربوط بالدليل (account_code مفقود) — مراجعة مطلوبة' }
+  // ---- Sides: mine inside MY scope, counterparty's inside THEIR scope (server-verified) ----
+  // v5.9 — JOURNAL type may use a COA leaf account (office-unified chart) on either side;
+  // receipt/payment stay strictly box↔box. Boxes are ALWAYS branch-isolated server-side.
+  const myRef = (b.my_ref && b.my_ref.kind) ? b.my_ref : { kind: 'box', id: b.my_box_id }
+  const cpRef = (b.counterparty_ref && b.counterparty_ref.kind) ? b.counterparty_ref : { kind: 'box', id: b.counterparty_box_id }
+  const resolveIbSide = async (ref, scope, isMine) => {
+    if (ref.kind === 'account') {
+      if (type !== 'journal') return { error: 'الحسابات المحاسبية متاحة في «قيد بين الفروع» فقط — القبض والصرف يكونان بين الصناديق/البنوك' }
+      const a = await db.collection('accounts').findOne({ tenant_id: T, $or: [{ id: String(ref.id || '') }, { code: String(ref.id || '') }] })
+      if (!a) return { error: `الحساب المحاسبي غير موجود (${isMine ? 'طرفك' : 'الطرف المقابل'})` }
+      if (a.is_group) return { error: `الحساب «${a.name_ar || a.name}» (${a.code}) حساب مجموعة — اختر حساباً تفصيلياً نهائياً` }
+      if (isInactiveAccount(a)) return { error: `الحساب «${a.name_ar || a.name}» (${a.code}) غير نشط — لا يقبل ترحيلاً جديداً` }
+      if (a.interbranch_scope !== undefined) return { error: 'حسابات جاري الفروع (1104) تُدار تلقائياً — لا تُختار يدوياً' }
+      return { acct: { kind: 'account', id: a.id, name_ar: a.name_ar || a.name, account_code: a.code } }
+    }
+    const box = await db.collection('boxes').findOne({ id: String(ref.id || ''), tenant_id: T, branch_id: scope.id })
+    if (!box) return { error: isMine ? '🚫 الصندوق/البنك المختار ليس ضمن نطاقك' : '🚫 حساب الطرف المقابل غير موجود ضمن نطاق الفرع المقابل' }
+    if (!box.account_code) return { error: 'حساب غير مربوط بالدليل (account_code مفقود) — مراجعة مطلوبة' }
+    return { acct: { kind: 'box', id: box.id, name_ar: box.name_ar, account_code: box.account_code } }
+  }
+  const mySide = await resolveIbSide(myRef, myScope, true)
+  if (mySide.error) return { error: mySide.error }
+  const cpSide = await resolveIbSide(cpRef, cp, false)
+  if (cpSide.error) return { error: cpSide.error }
+  const myBox = mySide.acct, cpBox = cpSide.acct
 
   // Direction: payment = money leaves MY box → counterparty. receipt = money arrives INTO my box.
   // journal = generic transfer entry with explicit direction (default: out).
@@ -1236,16 +1268,20 @@ async function postInterbranchTransaction(db, T, actor, b) {
   const typeLabel = type === 'receipt' ? 'سند قبض بين الفروع' : type === 'payment' ? 'سند صرف بين الفروع' : 'قيد بين الفروع'
   const desc = `${typeLabel}: ${src.scope.name} ← ${dst.scope.name}${b.description ? ' — ' + String(b.description).slice(0, 300) : ''}`
   const date = b.date ? new Date(b.date) : new Date()
+  const txNo = await nextDocNo(db, T, 'interbranch', 'IB') // v5.9 — auto voucher number
 
   // ---- Audit-complete transaction registry doc (status machine: pending → posted | failed | uncertain) ----
   const tx = {
     id: txId, interbranch_transaction_id: txId, tenant_id: T, op_id: opId, type, status: 'pending',
+    no: txNo, // v5.9
     source_branch_id: src.scope.id, source_branch_name: src.scope.name,
     destination_branch_id: dst.scope.id, destination_branch_name: dst.scope.name,
-    source_box: { id: src.box.id, name: src.box.name_ar, account_code: src.box.account_code },
-    destination_box: { id: dst.box.id, name: dst.box.name_ar, account_code: dst.box.account_code },
+    source_box: { id: src.box.id, name: src.box.name_ar, account_code: src.box.account_code, kind: src.box.kind },
+    destination_box: { id: dst.box.id, name: dst.box.name_ar, account_code: dst.box.account_code, kind: dst.box.kind },
     jari_accounts: { source_scope: jariSrc.code, destination_scope: jariDst.code },
     amount, currency, description: String(b.description || '').slice(0, 500),
+    notes: String(b.notes || '').slice(0, 500), // v5.9
+    date, // v5.9 — explicit voucher date (was created_at only)
     created_by: actor.email, actor_user_id: actor.userId, actor_branch_id: actor.branchId ?? null,
     je_ids: [], created_at: new Date(),
   }
@@ -1258,12 +1294,19 @@ async function postInterbranchTransaction(db, T, actor, b) {
   }
 
   // ---- Balanced journals (each side balanced INSIDE its own branch dimension) ----
+  // v5.9 — party fields only for BOX sides (cached balance tracking); COA account sides
+  // post on the account code directly (ledger is the source of truth, no cached balance).
+  const sideLine = (acct, field) => ({
+    account_code: acct.account_code,
+    ...(acct.kind === 'box' ? { party_type: 'box', party_id: acct.id, party_name: acct.name_ar } : {}),
+    debit: field === 'debit' ? amount : 0, credit: field === 'credit' ? amount : 0,
+  })
   const linesSrc = [
     { account_code: jariDst.code, debit: amount, credit: 0 },
-    { account_code: src.box.account_code, party_type: 'box', party_id: src.box.id, party_name: src.box.name_ar, debit: 0, credit: amount },
+    sideLine(src.box, 'credit'),
   ]
   const linesDst = [
-    { account_code: dst.box.account_code, party_type: 'box', party_id: dst.box.id, party_name: dst.box.name_ar, debit: amount, credit: 0 },
+    sideLine(dst.box, 'debit'),
     { account_code: jariSrc.code, debit: 0, credit: amount },
   ]
 
@@ -1303,10 +1346,11 @@ async function postInterbranchTransaction(db, T, actor, b) {
   }
 
   // ---- Denormalized box balances (ledger already committed = source of truth) ----
+  // v5.9 — cached balance updates apply to BOX sides only (COA account sides have none)
   let balanceFlag = null
   try {
-    await updateBalance(db, 'boxes', { id: src.box.id, tenant_id: T }, currency, -amount)
-    await updateBalance(db, 'boxes', { id: dst.box.id, tenant_id: T }, currency, +amount)
+    if (src.box.kind === 'box') await updateBalance(db, 'boxes', { id: src.box.id, tenant_id: T }, currency, -amount)
+    if (dst.box.kind === 'box') await updateBalance(db, 'boxes', { id: dst.box.id, tenant_id: T }, currency, +amount)
   } catch (balErr) {
     balanceFlag = String(balErr?.message || balErr).slice(0, 300)
     try { await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'interbranch_balance_update_failed', tx_id: txId, error: balanceFlag, at: new Date() }) } catch { }
@@ -3154,7 +3198,14 @@ async function handleRoute(request, { params }) {
     if (route === '/tenant/settings' && method === 'PUT') {
       if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح', 403)
       const b = await request.json()
-      const allowed = ['agency_name', 'logo_base64', 'header', 'footer', 'tax_id', 'commercial_id', 'phone', 'address', 'email', 'primary_color', 'rates', 'pair_usd_sar']
+      const allowed = ['agency_name', 'agency_name_en', 'logo_base64', 'header', 'footer', 'tax_id', 'commercial_id', 'phone', 'address', 'address_en', 'email', 'primary_color', 'rates', 'pair_usd_sar']
+      // v5.9 — FX-001 recurrence guard (2nd vector): this endpoint also writes rates —
+      // the BASE currency transfer is 1 BY DEFINITION and can never be stored otherwise.
+      const brBaseTS = (b.rates || {})[BASE_CURRENCY]
+      if (brBaseTS !== undefined) {
+        const tVal = (brBaseTS && typeof brBaseTS === 'object') ? Number(brBaseTS.transfer) : Number(brBaseTS)
+        if (Number.isFinite(tVal) && tVal !== 1) return bad(`عملة الأساس ${BASE_CURRENCY} سعر تحويلها ثابت = 1 بالتعريف — لا يمكن حفظ (${tVal}). قَوِّم أسعار العملات الأخرى مقابل ${BASE_CURRENCY}`)
+      }
       const upd = { updated_at: new Date() }
       for (const k of allowed) if (b[k] !== undefined) upd[k] = b[k]
       await db.collection('tenant_settings').updateOne(tf, { $set: upd }, { upsert: true })
@@ -4838,7 +4889,18 @@ async function handleRoute(request, { params }) {
           .find({ tenant_id: T, branch_id: scope.id, active: { $ne: false } })
           .project({ _id: 0, id: 1, name_ar: 1, account_code: 1, type: 1 })
           .sort({ created_at: 1 }).toArray()
-        return ok({ scope: { id: scope.id, name: scope.name }, accounts: rows })
+        // v5.9 — JOURNAL type additionally exposes the office-UNIFIED chart of accounts
+        // (active LEAF accounts only, jari 1104 excluded — managed automatically).
+        // Boxes above stay strictly branch-isolated; COA is office-level by design.
+        let coa = []
+        if (q.type === 'journal') {
+          const all = await db.collection('accounts')
+            .find({ tenant_id: T, is_group: { $ne: true }, interbranch_scope: { $exists: false } })
+            .project({ _id: 0, id: 1, name_ar: 1, code: 1, type: 1, inactive: 1, is_active: 1, active: 1, archived: 1 })
+            .sort({ code: 1 }).toArray()
+          coa = all.filter(a => !isInactiveAccount(a)).map(a => ({ id: a.id, name_ar: a.name_ar, account_code: a.code, kind: 'account', acct_type: a.type }))
+        }
+        return ok({ scope: { id: scope.id, name: scope.name }, accounts: rows, coa_accounts: coa })
       }
 
       if (route === '/interbranch/transactions' && method === 'GET') {
@@ -7833,7 +7895,7 @@ async function handleRoute(request, { params }) {
           if (!ptChk) return bad('🚫 غير مصرح — الطرف المختار خارج نطاق فرعك', 403)
         }
       }
-      const result = await createVoucher(db, T, b, { branchId: B }) // v5.3
+      const result = await createVoucher(db, T, b, { branchId: B, actor: sess.user.email }) // v5.3 + v5.9 created_by
       if (result.error) return bad(result.error)
       return ok(result.doc)
     }
@@ -8112,12 +8174,12 @@ async function handleRoute(request, { params }) {
         await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
         // Step 4: Re-create with same id + skip quota (edit doesn't count against limit)
         let result
-        const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at, branchId: oldDoc.branch_id ?? null } // v5.3 — preserve origin branch
+        const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at, branchId: oldDoc.branch_id ?? null, preserveNo: oldDoc.no } // v5.3 — preserve origin branch · v5.9 — preserve voucher number
         try {
           if (kind === 'tickets') result = await createTicket(db, T, b, opts)
           else if (kind === 'visas') result = await createVisa(db, T, b, opts)
           else if (kind === 'services') result = await createService(db, T, b, opts)
-          else if (kind === 'vouchers') result = await createVoucher(db, T, { ...b, type: b.type || oldDoc.type }, opts)
+          else if (kind === 'vouchers') result = await createVoucher(db, T, { ...b, type: b.type || oldDoc.type, created_by: oldDoc.created_by || '' }, opts)
           else if (kind === 'fx') result = await createFx(db, T, { ...b, type: b.type || oldDoc.type }, opts)
         } catch (createErr) {
           // v3.88.5 — F-020: thrown errors (e.g. PARTY_NO_LEAF_ACCOUNT) take the SAME restore path
@@ -10031,8 +10093,17 @@ async function createVoucher(db, T, b, opts = {}) {
     coa_account_code: coaAccount?.code || null, coa_account_name: coaAccount?.name_ar || null, // v3.79
     method: b.method || (box.type === 'cash' ? 'صندوق' : 'بنك'),
     description: b.description || '', created_at: opts.createdAt || new Date(),
+    // v5.9 — voucher form upgrade: handler / notes / cheque details (all optional, additive)
+    handler_name: String(b.handler_name || '').slice(0, 120),
+    notes: String(b.notes || '').slice(0, 500),
+    check_no: String(b.check_no || '').slice(0, 60),
+    check_bank: String(b.check_bank || '').slice(0, 120),
+    check_date: b.check_date || '',
+    created_by: b.created_by || opts.actor || '',
     ...(opts.existingId ? { updated_at: new Date() } : {}),
   }
+  // v5.9 — auto voucher number (RV-/PV-): edits preserve the ORIGINAL number
+  doc.no = opts.preserveNo || await nextDocNo(db, T, b.type, b.type === 'receipt' ? 'RV' : 'PV')
   // v3.88.5 — F-007 STRICT: resolve LEAF accounts BEFORE the first write (zero side-effects)
   const boxLeafV = partyLeafCode(box)
   const partyLeafV = partyDoc ? partyLeafCode(partyDoc) : null
