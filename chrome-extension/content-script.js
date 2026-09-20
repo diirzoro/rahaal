@@ -97,6 +97,11 @@
     w.querySelector('#rw-cancel').addEventListener('click', close);
     w.querySelector('#rw-close').addEventListener('click', close);
     w.querySelector('#rw-confirm').addEventListener('click', async () => {
+      // v1.4.1 — SEND GUARD (defense in depth): a wrong/incomplete parse never reaches Rahaal
+      if (window.RahalParsers && window.RahalParsers.validateForSend) {
+        const vGate = window.RahalParsers.validateForSend(payload);
+        if (!vGate.ok) { alert('⛔ قراءة التذكرة غير مكتملة — لن يتم الإرسال إلى رحّال:\n• ' + vGate.errors.join('\n• ')); return; }
+      }
       const clientId = w.querySelector('#rw-client').value;
       const supplierId = w.querySelector('#rw-supplier').value;
       if (!clientId || !supplierId) { alert('اختر العميل والمورد'); return; }

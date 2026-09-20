@@ -1,4 +1,4 @@
-// Rahaal Extension — Popup v1.4.0 (HTML + PDF + Trial Quota Counter)
+// Rahaal Extension — Popup v1.4.1 (HTML + PDF + Trial Quota Counter)
 const el = (id) => document.getElementById(id);
 let currentPdfPayload = null;
 let quotaState = null; // { plan, used, limit, remaining, unlimited }
@@ -147,14 +147,18 @@ async function scanPdf(tab) {
     data.source_url = tab.url;
     currentPdfPayload = data;
     const t = data.traveler || {}; const bk = data.booking || {}; const fn = data.financial || {};
+    // v1.4.1 — SEND GUARD: incomplete/label-polluted reads BLOCK the confirm button entirely
+    const vPdf = window.RahalParsers.validateForSend(data);
     el('detected-info').innerHTML = `
       <div class="row"><span class="k">النوع</span><span class="v">${bk.doc_type} <span style="background:#dbeafe;color:#1e40af;padding:1px 5px;border-radius:4px;font-size:9px">${data._parser}</span></span></div>
-      <div class="row"><span class="k">المسافر</span><span class="v">${t.name_en || t.name_ar || '—'}</span></div>
+      <div class="row"><span class="k">المسافر</span><span class="v">${t.name_en || t.name_ar || '⚠️ غير مقروء'}</span></div>
+      <div class="row"><span class="k">رقم التذكرة</span><span class="v">${bk.ticket_no || '—'}</span></div>
       <div class="row"><span class="k">الجواز</span><span class="v">${t.passport_no || '—'}</span></div>
-      <div class="row"><span class="k">PNR/رقم</span><span class="v">${bk.pnr || bk.ticket_no || bk.visa_no || '—'}</span></div>
-      <div class="row"><span class="k">المبلغ</span><span class="v">${fn.amount || 0} ${fn.currency || '—'}</span></div>
+      <div class="row"><span class="k">PNR</span><span class="v">${bk.pnr || bk.visa_no || '—'}</span></div>
+      <div class="row"><span class="k">المبلغ</span><span class="v">${(fn.amount ?? null) !== null ? fn.amount : '⚠️ غير مقروء'} ${fn.currency || '—'}</span></div>
+      ${vPdf.ok ? '' : `<div style="background:#fee2e2;color:#991b1b;border-radius:6px;padding:6px 8px;margin-top:6px;font-size:11px;line-height:1.7">⛔ قراءة التذكرة غير مكتملة — لن يتم الإرسال إلى رحّال:<br>• ${vPdf.errors.join('<br>• ')}</div>`}
     `;
-    el('btn-open-widget').classList.remove('hidden');
+    el('btn-open-widget').classList.toggle('hidden', !vPdf.ok);
     el('btn-open-widget').textContent = '🚀 تأكيد وحفظ في رحّال';
   } catch (e) {
     el('detected-info').innerHTML = `<div class="detected-empty" style="color:#dc2626">❌ ${e.message}</div>`;
@@ -179,15 +183,19 @@ async function scanHtml(tab) {
       return;
     }
     const t = result.traveler || {}; const bk = result.booking || {}; const fn = result.financial || {};
+    // v1.4.1 — SEND GUARD: incomplete/label-polluted reads BLOCK the send button entirely
+    const vAl = window.RahalParsers.validateForSend(result);
     el('detected-info').innerHTML = `
       <div class="row"><span class="k">النوع</span><span class="v">${bk.doc_type} <span style="background:#dbeafe;color:#1e40af;padding:1px 5px;border-radius:4px;font-size:9px">${result._parser || 'auto'}</span></span></div>
-      <div class="row"><span class="k">المسافر</span><span class="v">${t.name_en || t.name_ar || '—'}</span></div>
+      <div class="row"><span class="k">المسافر</span><span class="v">${t.name_en || t.name_ar || '⚠️ غير مقروء'}</span></div>
+      <div class="row"><span class="k">رقم التذكرة</span><span class="v">${bk.ticket_no || '—'}</span></div>
       <div class="row"><span class="k">الجواز</span><span class="v">${t.passport_no || '—'}</span></div>
-      <div class="row"><span class="k">PNR/رقم</span><span class="v">${bk.pnr || bk.ticket_no || bk.visa_no || '—'}</span></div>
-      <div class="row"><span class="k">المبلغ</span><span class="v">${fn.amount || 0} ${fn.currency || '—'}</span></div>
+      <div class="row"><span class="k">PNR</span><span class="v">${bk.pnr || bk.visa_no || '—'}</span></div>
+      <div class="row"><span class="k">المبلغ</span><span class="v">${(fn.amount ?? null) !== null ? fn.amount : '⚠️ غير مقروء'} ${fn.currency || '—'}</span></div>
+      ${vAl.ok ? '' : `<div style="background:#fee2e2;color:#991b1b;border-radius:6px;padding:6px 8px;margin-top:6px;font-size:11px;line-height:1.7">⛔ قراءة التذكرة غير مكتملة — لن يتم الإرسال إلى رحّال:<br>• ${vAl.errors.join('<br>• ')}</div>`}
     `;
     window.__RAHAL_LAST_SCRAPE__ = result;
-    el('btn-open-widget').classList.remove('hidden');
+    el('btn-open-widget').classList.toggle('hidden', !vAl.ok);
     el('btn-open-widget').textContent = '🚀 سحب إلى رحّال (فتح نافذة تأكيد)';
   } catch (e) {
     el('detected-info').innerHTML = `<div class="detected-empty">خطأ: ${e.message}</div>`;
@@ -221,6 +229,9 @@ async function openPdfConfirmForm() {
   el('pdf-payment').addEventListener('change', (e) => { el('pdf-box-wrapper').style.display = e.target.value === 'cash' ? 'block' : 'none'; });
   el('pdf-cancel').addEventListener('click', () => { showReady(); });
   el('pdf-confirm').addEventListener('click', async () => {
+    // v1.4.1 — SEND GUARD (defense in depth): re-validate right before ingest
+    const vGate = window.RahalParsers.validateForSend(currentPdfPayload);
+    if (!vGate.ok) { el('pdf-status').className = 'status err'; el('pdf-status').textContent = '⛔ قراءة التذكرة غير مكتملة: ' + vGate.errors.join(' · '); return; }
     const clientId = el('pdf-client').value; const supplierId = el('pdf-supplier').value;
     if (!clientId || !supplierId) { alert('اختر العميل والمورد'); return; }
     const payment = el('pdf-payment').value;
