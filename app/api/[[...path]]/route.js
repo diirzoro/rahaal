@@ -1210,6 +1210,9 @@ async function postInterbranchTransaction(db, T, actor, b) {
   if (!/^[A-Z]{3,5}$/.test(currency)) return { error: 'العملة غير صحيحة' }
   const opId = String(b.op_id || '').trim()
   if (!opId) return { error: 'op_id مطلوب (Idempotency)' }
+  // v5.9.2 — no future-dated inter-branch operations (verified BEFORE any write:
+  // no counter increment, no jari ensure, no registry doc, no journal)
+  if (b.date && isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ العملية بين الفروع)` }
 
   // ---- Idempotency L1: the transaction registry (double click / retry / re-send) ----
   const prev = await db.collection('interbranch_transactions').findOne({ tenant_id: T, op_id: opId })
@@ -1317,6 +1320,20 @@ async function postInterbranchTransaction(db, T, actor, b) {
       { date, description: `${desc} — طرف المصدر`, ref_type: 'interbranch', ref_id: txId, currency, lines: linesSrc },
       { branchId: src.scope.id, idempotencyKey: `ib:${opId}:src`, actor: actor.email, source: 'interbranch' })
   } catch (e1) {
+    // v5.9.2 — an UNCERTAIN source commit means the journal MAY exist: recording the tx as
+    // "failed / no financial effect" would be a false statement. Document it as uncertain
+    // with everything a reviewer needs (idempotency key locates the JE if it was saved).
+    if (e1?.jePhase === 'commit_uncertain') {
+      await db.collection('interbranch_transactions').updateOne({ id: txId, tenant_id: T }, {
+        $set: {
+          status: 'uncertain', je_ids: [],
+          source_je_idempotency_key: `ib:${opId}:src`,
+          error: 'قيد طرف المصدر بحالة غير مؤكدة (انقطاع أثناء الكتابة) — قد يكون القيد محفوظاً: راجع اليومية بمفتاح العملية قبل أي إعادة',
+          failed_at: new Date(),
+        },
+      })
+      return { error: 'قيد طرف المصدر بحالة غير مؤكدة (انقطاع أثناء الكتابة) — سُجلت العملية للمراجعة، لا تُعِد الإرسال بمعرف جديد قبل مراجعة شاشة التسوية واليومية' }
+    }
     await db.collection('interbranch_transactions').updateOne({ id: txId, tenant_id: T }, { $set: { status: 'failed', error: String(e1?.message || e1).slice(0, 400), failed_at: new Date() } })
     return { error: `فشل قيد طرف المصدر — لا أثر مالي إطلاقاً: ${e1?.message || e1}` }
   }
@@ -1347,15 +1364,40 @@ async function postInterbranchTransaction(db, T, actor, b) {
 
   // ---- Denormalized box balances (ledger already committed = source of truth) ----
   // v5.9 — cached balance updates apply to BOX sides only (COA account sides have none)
-  let balanceFlag = null
+  // v5.9.2 — PARTIAL-UPDATE FIX: the tx is marked `posted` ONLY after BOTH sides completed.
+  // On failure the applied deltas are reversed (exact compensation, reverse order); the tx
+  // is documented as `uncertain` (journals ARE committed — ledger remains correct; the
+  // cached balances need review/recompute). If compensation itself fails, that is flagged too.
+  const appliedBal = []
   try {
-    if (src.box.kind === 'box') await updateBalance(db, 'boxes', { id: src.box.id, tenant_id: T }, currency, -amount)
-    if (dst.box.kind === 'box') await updateBalance(db, 'boxes', { id: dst.box.id, tenant_id: T }, currency, +amount)
+    if (src.box.kind === 'box') {
+      await updateBalance(db, 'boxes', { id: src.box.id, tenant_id: T }, currency, -amount)
+      appliedBal.push({ id: src.box.id, delta: -amount })
+    }
+    if (dst.box.kind === 'box') {
+      await updateBalance(db, 'boxes', { id: dst.box.id, tenant_id: T }, currency, +amount)
+      appliedBal.push({ id: dst.box.id, delta: +amount })
+    }
   } catch (balErr) {
-    balanceFlag = String(balErr?.message || balErr).slice(0, 300)
-    try { await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'interbranch_balance_update_failed', tx_id: txId, error: balanceFlag, at: new Date() }) } catch { }
+    const balMsg = String(balErr?.message || balErr).slice(0, 300)
+    let compensation = 'compensated'
+    try {
+      for (const a of [...appliedBal].reverse()) await updateBalance(db, 'boxes', { id: a.id, tenant_id: T }, currency, -a.delta)
+    } catch (compErr) {
+      compensation = 'compensation_failed: ' + String(compErr?.message || compErr).slice(0, 200)
+    }
+    try { await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'interbranch_balance_update_failed', tx_id: txId, error: balMsg, compensation, at: new Date() }) } catch { }
+    await db.collection('interbranch_transactions').updateOne({ id: txId, tenant_id: T }, {
+      $set: {
+        status: 'uncertain', je_ids: [je1.id, je2.id],
+        balance_flag: balMsg, balance_compensation: compensation,
+        error: 'القيدان مرحّلان (الدفاتر صحيحة) لكن تحديث أرصدة الصناديق المخزنة لم يكتمل — مراجعة/إعادة احتساب مطلوبة',
+        failed_at: new Date(),
+      },
+    })
+    return { error: 'رُحّل القيدان بنجاح لكن تعذر إكمال تحديث أرصدة الصناديق المخزنة — سُجلت العملية بحالة غير مؤكدة للمراجعة (لا تُعِد الإرسال؛ راجع شاشة التسوية)' }
   }
-  await db.collection('interbranch_transactions').updateOne({ id: txId, tenant_id: T }, { $set: { status: 'posted', je_ids: [je1.id, je2.id], posted_at: new Date(), ...(balanceFlag ? { balance_flag: balanceFlag } : {}) } })
+  await db.collection('interbranch_transactions').updateOne({ id: txId, tenant_id: T }, { $set: { status: 'posted', je_ids: [je1.id, je2.id], posted_at: new Date() } })
   return { tx: { ...tx, status: 'posted', je_ids: [je1.id, je2.id] }, journals: { source: je1.id, destination: je2.id } }
 }
 
@@ -3223,10 +3265,12 @@ async function handleRoute(request, { params }) {
       const allowed = ['agency_name', 'agency_name_en', 'logo_base64', 'header', 'footer', 'tax_id', 'commercial_id', 'phone', 'address', 'address_en', 'email', 'primary_color', 'rates', 'pair_usd_sar']
       // v5.9 — FX-001 recurrence guard (2nd vector): this endpoint also writes rates —
       // the BASE currency transfer is 1 BY DEFINITION and can never be stored otherwise.
-      const brBaseTS = (b.rates || {})[BASE_CURRENCY]
-      if (brBaseTS !== undefined) {
+      // v5.9.2 — HARDENED: when the base currency key is SENT, any missing / non-numeric /
+      // ≠1 value is rejected, whether the value is an object ({transfer}) or a plain number.
+      if (b.rates !== undefined && Object.prototype.hasOwnProperty.call(b.rates || {}, BASE_CURRENCY)) {
+        const brBaseTS = b.rates[BASE_CURRENCY]
         const tVal = (brBaseTS && typeof brBaseTS === 'object') ? Number(brBaseTS.transfer) : Number(brBaseTS)
-        if (Number.isFinite(tVal) && tVal !== 1) return bad(`عملة الأساس ${BASE_CURRENCY} سعر تحويلها ثابت = 1 بالتعريف — لا يمكن حفظ (${tVal}). قَوِّم أسعار العملات الأخرى مقابل ${BASE_CURRENCY}`)
+        if (!Number.isFinite(tVal) || tVal !== 1) return bad(`عملة الأساس ${BASE_CURRENCY} سعر تحويلها ثابت = 1 بالتعريف — القيمة المرسلة غير مقبولة (${brBaseTS && typeof brBaseTS === 'object' ? brBaseTS.transfer : brBaseTS}). قَوِّم أسعار العملات الأخرى مقابل ${BASE_CURRENCY}`)
       }
       const upd = { updated_at: new Date() }
       for (const k of allowed) if (b[k] !== undefined) upd[k] = b[k]
@@ -6694,9 +6738,14 @@ async function handleRoute(request, { params }) {
       // v5.8 — FX-001 recurrence guard: the BASE currency is the unit of account —
       // its transfer rate is 1 BY DEFINITION and can never be stored otherwise
       // (a legacy USD-base table with YER≈0.0038 is exactly what broke exchange journals).
-      const brBase = (body.rates || {})[BASE_CURRENCY]
-      if (brBase && typeof brBase === 'object' && brBase.transfer !== undefined && Number(brBase.transfer) !== 1) {
-        return bad(`عملة الأساس ${BASE_CURRENCY} سعر تحويلها ثابت = 1 بالتعريف — لا يمكن حفظ (${brBase.transfer}). قَوِّم أسعار العملات الأخرى مقابل ${BASE_CURRENCY}`)
+      // v5.9.2 — HARDENED: when the base currency key is SENT, any missing / non-numeric /
+      // ≠1 value is rejected, whether the value is an object ({transfer}) or a plain number.
+      if (Object.prototype.hasOwnProperty.call(body.rates || {}, BASE_CURRENCY)) {
+        const brBase = body.rates[BASE_CURRENCY]
+        const tV = (brBase && typeof brBase === 'object') ? Number(brBase.transfer) : Number(brBase)
+        if (!Number.isFinite(tV) || tV !== 1) {
+          return bad(`عملة الأساس ${BASE_CURRENCY} سعر تحويلها ثابت = 1 بالتعريف — القيمة المرسلة غير مقبولة (${brBase && typeof brBase === 'object' ? brBase.transfer : brBase}). قَوِّم أسعار العملات الأخرى مقابل ${BASE_CURRENCY}`)
+        }
       }
       await db.collection('tenant_settings').updateOne(tf, { $set: { rates: body.rates, updated_at: new Date() } }, { upsert: true })
       return ok({ success: true })
@@ -8343,7 +8392,7 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       const result = await createFx(db, T, b, { branchId: B }) // v5.3
       if (result.error) return bad(result.error)
-      return ok(result.doc)
+      return ok(result.duplicate ? { ...result.doc, duplicate: true } : result.doc) // v5.9.2 — idempotent replay signalled
     }
 
     // ================= v3.87 — OPENING BALANCE ENTRIES =================
@@ -10193,6 +10242,16 @@ async function resolveAccountRef(db, T, ref) {
 }
 
 async function createFx(db, T, b, opts = {}) {
+  // v5.9.2 — FX IDEMPOTENCY: a client-supplied op_id makes creation retry-safe after a
+  // dropped response. Same key ⇒ return the already-saved exchange, NEVER create a second.
+  if (!opts.existingId && b.op_id) {
+    const prevFx = await db.collection('currency_exchanges').findOne({ tenant_id: T, op_id: String(b.op_id) })
+    if (prevFx) {
+      if (prevFx.je_status === 'uncertain') return { error: 'محاولة سابقة بنفس المعرف بحالة غير مؤكدة — راجع قيود اليومية قبل أي إعادة (لا يعاد استخدام المعرف)' }
+      const { _id, ...restPrev } = prevFx
+      return { doc: restPrev, duplicate: true }
+    }
+  }
   if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ عملية الصرافة)` } // v3.80
   // v4.5 — FAIL-FAST before box/party balance side effects (Priority 13)
   const perrFx = await assertOpenPeriod(db, T, b.date)
@@ -10329,6 +10388,10 @@ async function createFx(db, T, b, opts = {}) {
   } catch (gateErr) {
     return { error: gateErr.message } // fail-fast — ZERO side effects (no doc, no balances)
   }
+  // v5.9.2 — FX FULL ATOMICITY: doc insert + BOTH balance updates + journal creation are one
+  // protected sequence. Any balance failure compensates exactly what was applied and removes
+  // the doc (ZERO partial financial state). op_id is stored for retry-safe idempotency.
+  doc.op_id = b.op_id ? String(b.op_id) : null
   await db.collection('currency_exchanges').insertOne(doc)
   // Balance updates — only for accounts that track balances (client/supplier/box); COA accounts skip.
   // Buy: office receives `amount currency` (debit refCur), pays `counter_amount counter_currency` (credit refCounter)
@@ -10336,13 +10399,30 @@ async function createFx(db, T, b, opts = {}) {
   const debitAmtCur = b.type === 'buy' ? amount : -amount
   const debitAmtCounter = b.type === 'buy' ? -counter_amount : counter_amount
   const appliedFx = [] // v5.8 — FX-002: track applied effects for exact compensation
-  if (accCur.updateBalance) {
-    await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, b.currency, debitAmtCur * accCur.debitSign)
-    appliedFx.push({ col: accCur.collection, pid: accCur.id, cur: b.currency, delta: debitAmtCur * accCur.debitSign })
+  const fxMarkUncertain = async (reason) => {
+    try {
+      await db.collection('currency_exchanges').updateOne({ id: doc.id, tenant_id: T }, { $set: { je_status: 'uncertain', je_error: String(reason).slice(0, 400), uncertain_at: new Date() } })
+    } catch (mErr) { console.error('[FX-002] failed to flag uncertain', doc.id, mErr) }
   }
-  if (accCounter.updateBalance) {
-    await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, b.counter_currency, debitAmtCounter * accCounter.debitSign)
-    appliedFx.push({ col: accCounter.collection, pid: accCounter.id, cur: b.counter_currency, delta: debitAmtCounter * accCounter.debitSign })
+  try {
+    if (accCur.updateBalance) {
+      await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, b.currency, debitAmtCur * accCur.debitSign)
+      appliedFx.push({ col: accCur.collection, pid: accCur.id, cur: b.currency, delta: debitAmtCur * accCur.debitSign })
+    }
+    if (accCounter.updateBalance) {
+      await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, b.counter_currency, debitAmtCounter * accCounter.debitSign)
+      appliedFx.push({ col: accCounter.collection, pid: accCounter.id, cur: b.counter_currency, delta: debitAmtCounter * accCounter.debitSign })
+    }
+  } catch (balErr) {
+    // one side may have applied and the other failed → reverse applied deltas + remove doc
+    try {
+      for (const a of [...appliedFx].reverse()) await updateBalance(db, a.col, { id: a.pid, tenant_id: T }, a.cur, -a.delta)
+      await db.collection('currency_exchanges').deleteOne({ id: doc.id, tenant_id: T })
+    } catch (compErr) {
+      await fxMarkUncertain(`فشل تحديث رصيد ثم فشل التعويض: ${String(compErr?.message || compErr).slice(0, 200)}`)
+      throw new Error(`تعذر تحديث الأرصدة وتعذر التعويض التلقائي — العملية ${doc.id} مسجلة بحالة غير مؤكدة: مراجعة يدوية فورية`)
+    }
+    return { error: `تعذر تحديث الأرصدة — تم التراجع الكامل (لا أثر مالي): ${String(balErr?.message || balErr)}` }
   }
   try {
     await createJournalEntry(db, T, {
@@ -10353,14 +10433,19 @@ async function createFx(db, T, b, opts = {}) {
     }, { skipQuota: !!opts.skipQuota, branchId: opts.branchId ?? null })
   } catch (jeErr) {
     // v5.8 — FX-002: residual gate/insert failure (true race — lines already dry-run clean).
-    // commit_uncertain ⇒ journal MAY be saved: compensating would corrupt the books — surface loudly.
-    if (jeErr.jePhase === 'commit_uncertain') throw jeErr
+    // v5.9.2 — commit_uncertain ⇒ journal MAY be saved: compensating would corrupt the books.
+    // The exchange is DOCUMENTED as uncertain (reviewable) instead of a blind 500.
+    if (jeErr.jePhase === 'commit_uncertain') {
+      await fxMarkUncertain(jeErr.message)
+      return { error: 'قيد الصرافة بحالة غير مؤكدة (انقطاع أثناء الكتابة) — سُجلت العملية للمراجعة: راجع اليومية قبل أي إعادة، ولا تعِد الإرسال إلا بنفس معرف العملية' }
+    }
     try {
       for (const a of [...appliedFx].reverse()) await updateBalance(db, a.col, { id: a.pid, tenant_id: T }, a.cur, -a.delta)
       await db.collection('currency_exchanges').deleteOne({ id: doc.id, tenant_id: T })
     } catch (compErr) {
       console.error('[FX-002] CRITICAL: compensation failed for exchange', doc.id, compErr)
-      throw new Error(`${jeErr.message} — ثم فشل التعويض التلقائي: يلزم فحص يدوي فوري للعملية ${doc.id}`)
+      await fxMarkUncertain(`${jeErr.message} — ثم فشل التعويض: ${String(compErr?.message || compErr).slice(0, 200)}`)
+      throw new Error(`${jeErr.message} — ثم فشل التعويض التلقائي: العملية ${doc.id} مسجلة بحالة غير مؤكدة، يلزم فحص يدوي فوري`)
     }
     return { error: `${jeErr.message} — لم يُحفظ أي أثر مالي (تم التراجع الكامل)` }
   }

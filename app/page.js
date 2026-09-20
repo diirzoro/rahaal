@@ -6706,8 +6706,9 @@ function InterBranchScreen() {
   const isHQ = !user?.branch_id
   const isJournal = f.type === 'journal'
   // v5.7 — unified date filter + pagination (global rule, client-side over full list)
+  // v5.9.2 — the period filter follows the VOUCHER date (falls back to created_at for legacy rows)
   const ibPf = usePeriodState()
-  const ibPager = useClientPager(filterByPeriod(list, ibPf.applied, 'created_at'))
+  const ibPager = useClientPager(filterByPeriod(list.map(t => ({ ...t, date: t.date || t.created_at })), ibPf.applied, 'date'))
   const load = () => {
     api('/interbranch/counterparties').then(setCounterparties).catch(e => toast.error(e.message))
     api('/boxes').then(setMyBoxes).catch(() => {})
@@ -6752,10 +6753,14 @@ function InterBranchScreen() {
       })
       if (r.duplicate) toast.info('ℹ️ العملية منفذة مسبقاً — لا ازدواج مالي')
       else toast.success(`✅ نُفذت العملية بقيدين متوازنين — رقم السند ${r.tx?.no || String(r.tx?.id || '').slice(0, 8)}`, { duration: 7000 })
-      newOp()
+      newOp() // v5.9.2 — a NEW idempotency key ONLY after confirmed success or duplicate
       setF(v => ({ ...v, amount: '', description: '', notes: '' }))
       load()
-    } catch (e) { toast.error(e.message); newOp() } finally { setBusy(false) }
+    } catch (e) {
+      // v5.9.2 — NEVER rotate op_id on failure/ambiguous response: the SAME key makes the
+      // retry safe (posted ⇒ duplicate; recorded-failed ⇒ the backend explains what to do).
+      toast.error(e.message)
+    } finally { setBusy(false) }
   }
   const typeL = (t) => t === 'receipt' ? '📥 قبض بين الفروع' : t === 'payment' ? '📤 صرف بين الفروع' : '📝 قيد بين الفروع'
   const stBadge = (st) => st === 'posted' ? <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">مرحّلة</Badge>
@@ -13253,6 +13258,9 @@ function FxScreen() {
 
 function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
   const isEdit = !!record
+  // v5.9.2 — FX idempotency key: kept across failures/ambiguous responses; rotated ONLY
+  // after a confirmed success (same rule as inter-branch — retry with the same key is safe).
+  const [fxOpId, setFxOpId] = useState(() => (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`)
   const cfg = type === 'buy'
     ? { title: 'شراء عملات', color: 'grad-green', desc: 'يشتري المكتب عملة من الزبون ويدفع مقابلها بعملة أخرى' }
     : { title: 'بيع عملات', color: 'grad-rose', desc: 'يبيع المكتب عملة للزبون ويستلم مقابلها بعملة أخرى' }
@@ -13357,9 +13365,14 @@ function FxDialog({ open, onOpenChange, type, boxes, onSaved, record }) {
     try {
       setSaving(true)
       if (isEdit) await api(`/fx/${record.id}`, { method: 'PUT', body })
-      else await api('/fx', { method: 'POST', body })
+      else {
+        body.op_id = fxOpId // v5.9.2 — retry-safe creation
+        const rFx = await api('/fx', { method: 'POST', body })
+        if (rFx?.duplicate) toast.info('ℹ️ العملية منفذة مسبقاً — لا ازدواج مالي')
+        setFxOpId((typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`) // rotate ONLY after confirmed outcome
+      }
       onOpenChange(false); onSaved(); setForm(f => ({ ...f, amount: '', exchange_rate: '', counter_amount: '', customer_name: '', customer_phone: '', id_number: '', source_of_funds: '', purpose: '', remarks: '' }))
-    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) } // key kept on failure — same-key retry is safe
   }
   const isCash = form.payment_method === 'cash'
   // For "cash" mode: only cash boxes and banks (kind='box') from allAccounts, or fallback to boxes prop
