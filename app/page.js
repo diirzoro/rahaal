@@ -3932,9 +3932,28 @@ function QuickAddDialog({ open, onOpenChange, kind, onSaved, initialName }) {
 // ================================================================
 function escHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])) }
 
+// ================================================================
+// v5.9.5 — UNIFIED RAHAAL PRINT IDENTITY (Shared Print Template):
+// ONE centered Rahaal brand header on EVERY printable document (vouchers,
+// notices, statements, tables, reports). The OFFICE logo is intentionally
+// NOT mixed in at this stage (planned as a later, separate addition).
+// ================================================================
+function rahaalPrintBrandHTML() {
+  const org = (typeof window !== 'undefined' && window.location?.origin) || ''
+  return `<div class="rahaal-brand" style="text-align:center;margin:0 0 10px">
+  <img src="${org}/rahaal-logo-dark.png" alt="رحّال — Rahaal" style="height:46px;border-radius:9px" onerror="this.style.display='none'" />
+  <div style="font-size:9.5px;color:#94a3b8;font-weight:700;letter-spacing:.4px;margin-top:3px">نظام رحّال لإدارة مكاتب السفر والسياحة — Rahaal ERP</div>
+</div>`
+}
+// shared preview actions bar (hidden on paper) — unified preview-first behavior
+function rahaalPrintActionsHTML() {
+  return `<div class="pactions no-print" style="position:sticky;top:0;z-index:10;display:flex;gap:10px;justify-content:center;padding:10px;background:#0f172acc;backdrop-filter:blur(4px);margin:-24px -24px 14px">
+  <button onclick="window.print()" style="border:0;border-radius:8px;padding:9px 26px;font-weight:900;font-size:14px;cursor:pointer;background:#059669;color:#fff;font-family:'Cairo',sans-serif">🖨️ طباعة</button>
+  <button onclick="window.close()" style="border:0;border-radius:8px;padding:9px 26px;font-weight:900;font-size:14px;cursor:pointer;background:#e2e8f0;color:#0f172a;font-family:'Cairo',sans-serif">إغلاق</button>
+</div>`
+}
 function buildPrintHead(settings, tenant, title) {
   const color = settings?.primary_color || '#1e3a8a'
-  const logo = settings?.logo_base64 ? `<img src="${settings.logo_base64}" style="height:64px;object-fit:contain;" />` : `<div style="width:64px;height:64px;background:${color};border-radius:12px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:22px;">${(settings?.agency_name || tenant?.name || 'R')[0]}</div>`
   return `<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>${escHtml(title)}</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
@@ -3960,11 +3979,15 @@ td{padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:right}
 .badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700}
 .badge-cash{background:#d1fae5;color:#065f46}
 .badge-credit{background:#fef3c7;color:#92400e}
-@media print{body{padding:12px}@page{margin:12mm}}
+thead{display:table-header-group}
+tr{page-break-inside:avoid}
+.no-print{}
+@media print{body{padding:12px}@page{size:A4;margin:12mm}.no-print,.pactions{display:none !important}}
 </style></head><body>
+${rahaalPrintActionsHTML()}
+${rahaalPrintBrandHTML()}
 <div class="brand">
   <div style="display:flex;gap:14px;align-items:center">
-    ${logo}
     <div>
       <h1>${escHtml(settings?.agency_name || tenant?.name || 'مكتب السفريات')}</h1>
       <div class="meta">
@@ -3991,10 +4014,12 @@ ${settings?.footer ? `<div style="text-align:center;font-size:12px;color:#64748b
 </body></html>`
 }
 function openPrint(html) {
-  const w = window.open('', '_blank', 'width=900,height=1100')
+  const w = window.open('', '_blank', 'width=920,height=1100')
   if (!w) return toast.error('السماح للنوافذ المنبثقة مطلوب للطباعة')
   w.document.write(html); w.document.close()
-  setTimeout(() => { w.focus(); w.print() }, 400)
+  // v5.9.5 — PREVIEW-FIRST (unified behavior): the window shows the final layout with a
+  // print button — no forced auto-print dialog on open.
+  setTimeout(() => { w.focus() }, 150)
 }
 
 // ================================================================
@@ -4073,9 +4098,8 @@ function buildUnifiedVoucherHTML({ settings, tenant, title, docNo, dateStr, rows
   const color = settings?.primary_color || '#1e3a8a'
   const nameAr = escHtml(settings?.agency_name || tenant?.name || 'مكتب السفريات')
   const nameEn = settings?.agency_name_en ? escHtml(settings.agency_name_en) : ''
-  const logo = settings?.logo_base64
-    ? `<img src="${settings.logo_base64}" style="height:72px;max-width:160px;object-fit:contain" onerror="this.style.display='none'" />`
-    : `<div style="width:66px;height:66px;background:${color};border-radius:14px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:26px;margin:auto">${escHtml((settings?.agency_name || tenant?.name || 'ر')[0])}</div>`
+  // v5.9.5 — unified identity: the CENTERED slot carries the RAHAAL brand (office logo
+  // integration is deferred by decision — لا نخلطه الآن)
   const filled = (rows || []).filter(r => r && r[1] !== undefined && r[1] !== null && String(r[1]).trim() !== '' && String(r[1]).trim() !== '—')
   const fr = (l, v, ltr = false) => `<div class="fr"><span class="fl">${escHtml(l)}</span><span class="fv"${ltr ? ' dir="ltr"' : ''}>${escHtml(String(v))}</span></div>`
   const partyCard = (p, idx) => `
@@ -4119,6 +4143,8 @@ body{color:#0f172a;background:#f1f5f9;padding:16px}
 .actions{position:sticky;top:0;z-index:10;display:flex;gap:10px;justify-content:center;padding:10px;background:#0f172acc;backdrop-filter:blur(4px);border-radius:0 0 12px 12px;margin:-16px -16px 14px}
 .actions button{border:0;border-radius:8px;padding:9px 26px;font-weight:900;font-size:14px;cursor:pointer;font-family:'Cairo'}
 .a-print{background:#059669;color:#fff}.a-close{background:#e2e8f0;color:#0f172a}
+thead{display:table-header-group}
+tr,.fr,.party{page-break-inside:avoid}
 @media print{body{background:#fff;padding:0}.sheet{border:none;box-shadow:none;border-radius:0;max-width:100%;padding:0}.actions{display:none !important}}
 </style></head><body>
 <div class="actions"><button class="a-print" onclick="window.print()">🖨️ طباعة</button><button class="a-close" onclick="window.close()">إغلاق</button></div>
@@ -4131,7 +4157,7 @@ body{color:#0f172a;background:#f1f5f9;padding:16px}
         ${settings?.commercial_id ? `س.ت: ${escHtml(settings.commercial_id)}` : ''}${settings?.tax_id ? ` • ضريبي: ${escHtml(settings.tax_id)}` : ''}
       </div>
     </div>
-    <div class="hd-logo">${logo}</div>
+    <div class="hd-logo">${rahaalPrintBrandHTML()}</div>
     <div class="hd-en" dir="ltr">
       ${nameEn ? `<h2>${nameEn}</h2>` : `<h2 style="opacity:.55">${nameAr}</h2>`}
       <div class="meta">
@@ -4519,6 +4545,7 @@ function RefundDialog({ open, onOpenChange, record, refType, onSaved }) {
 .foot{padding:16px 28px;background:#f8fafc;font-size:11px;color:#64748b;text-align:center}
 @media print{.actions{display:none}}
 </style></head><body><div class="doc">
+${rahaalPrintBrandHTML()}
 <div class="hdr"><h1>🔄 سند استرداد (Credit Note)</h1><div style="text-align:left"><div style="font-size:14px;font-weight:800">${escHtml(tenant?.name || 'مكتب رحّال')}</div><div style="font-size:11px;opacity:.9">${dateStr}</div></div></div>
 <div class="sec"><div class="grid">
 <div class="row"><b>العميل:</b><span>${escHtml(record.client_name)}</span></div>
@@ -7253,6 +7280,7 @@ function VisaMonitorScreen() {
         .tr-yellow td{background:#fefce8}.tr-red td{background:#fef2f2}.tr-overstay td{background:#e2e8f0}.tr-departed td{color:#94a3b8}
         @media print{@page{size:A4 landscape;margin:8mm}}
       </style></head><body>
+      ${rahaalPrintBrandHTML()}
       <h1>🛃 تقرير مراقبة التأشيرات</h1>
       <div class="sub">تاريخ التقرير: ${new Date().toLocaleDateString('ar-EG')} — عدد السجلات: ${rows.length}</div>
       <table><thead><tr>${heads.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>
@@ -7952,6 +7980,7 @@ function StatementReport() {
 </style>
 </head><body>
 <div class="doc">
+  ${rahaalPrintBrandHTML()}
   <div class="hdr">
     <h1>📊 كشف حساب</h1>
     <div class="off"><div class="n">${escHtml(off)}</div><div class="p">${escHtml(offPhone)}${offAddr ? ' • ' + escHtml(offAddr) : ''}</div></div>
@@ -9798,6 +9827,7 @@ function PartnerStatementDialog({ open, onOpenChange }) {
         .foot{margin-top:24px; font-size:11px; color:#94a3b8; display:flex; justify-content:space-between}
         @media print{ .noprint{display:none} }
       </style></head><body>
+      ${rahaalPrintBrandHTML()}
       <div style="display:flex; justify-content:space-between; align-items:start">
         <div>
           <h1>🤝 كشف حساب عمولات الشريك</h1>
@@ -9813,7 +9843,7 @@ function PartnerStatementDialog({ open, onOpenChange }) {
       </table>
       <div class="totals"><div class="totals-h">الإجماليات حسب العملة</div>${totalsHtml}</div>
       <div class="foot"><span>توقيع المكتب: ______________</span><span>توقيع الشريك: ______________</span></div>
-      <script>window.onload=()=>window.print()</script>
+      <div class="noprint" style="text-align:center;margin-top:14px"><button onclick="window.print()" style="border:0;border-radius:8px;padding:9px 26px;font-weight:900;font-size:14px;cursor:pointer;background:#059669;color:#fff">🖨️ طباعة</button> <button onclick="window.close()" style="border:0;border-radius:8px;padding:9px 26px;font-weight:900;font-size:14px;cursor:pointer;background:#e2e8f0;color:#0f172a">إغلاق</button></div>
       </body></html>`)
     w.document.close()
   }
@@ -11216,6 +11246,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
         th{background:#f1f5f9}
         @media print{@page{size:A4;margin:10mm}}
       </style></head><body>
+      ${rahaalPrintBrandHTML()}
       <h1>🛏️ كشف التسكين — ${pkg.name}</h1>
       <div class="sub">التاريخ: ${new Date().toLocaleDateString('ar-EG')} • إجمالي المسجلين: ${regs.length} • أنواع الغرف: ${Object.keys(groups).length}${pkg.start_date ? ' • البرنامج: ' + String(pkg.start_date).slice(0, 10) + (pkg.end_date ? ' → ' + String(pkg.end_date).slice(0, 10) : '') : ''}</div>
       ${sections}
@@ -12245,7 +12276,10 @@ function OfficeSettings() {
   const save = async () => {
     try {
       setSaving(true)
-      await api('/tenant/settings', { method: 'PUT', body: f })
+      // v5.9.5 — the base currency is pinned to 1 inside the payload itself: the backend
+      // validator rejects anything else, and a legacy table self-heals on this explicit save
+      const payload = f?.rates ? { ...f, rates: { ...f.rates, YER: { transfer: 1, buy: 1, sell: 1, min: 1, max: 1, remarks: 'العملة الأساسية' } } } : f
+      await api('/tenant/settings', { method: 'PUT', body: payload })
       toast.success('تم حفظ الإعدادات')
       refreshMe()
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
@@ -12418,7 +12452,11 @@ function OfficeSettings() {
                 <TableBody>
                   {CURRENCIES.map(c => {
                     const r = f.rates?.[c] || {}
-                    const rObj = typeof r === 'object' ? r : { transfer: r, buy: r, sell: r, min: r, max: r, remarks: '' }
+                    // v5.9.5 — the BASE currency row is PINNED to 1 (read-only by definition):
+                    // even a legacy corrupted table can never display or save YER ≠ 1
+                    const rObj = c === 'YER'
+                      ? { transfer: 1, buy: 1, sell: 1, min: 1, max: 1, remarks: 'العملة الأساسية' }
+                      : (typeof r === 'object' ? r : { transfer: r, buy: r, sell: r, min: r, max: r, remarks: '' })
                     const upd = (k, v) => setF({ ...f, rates: { ...f.rates, [c]: { ...rObj, [k]: v === '' ? '' : Number(v) } } })
                     return (
                       <TableRow key={c}>

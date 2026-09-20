@@ -71,15 +71,43 @@ const BASE_CURRENCY = 'YER'
 // exchanges fail the balance gate (مدين ≠ دائن).
 function toBase(amount, currency, rates) {
   if (currency === BASE_CURRENCY) return Number(amount) || 0
-  const r = rates?.[currency]
-  const rate = (r && typeof r === 'object') ? (Number(r.transfer) || 1) : (Number(r) || 1)
-  return (Number(amount) || 0) * rate
+  // v5.9.5 — single source of truth: the SAME canonical rate the display uses
+  return (Number(amount) || 0) * getTransferRate(rates, currency)
 }
 function getTransferRate(rates, cur) {
   if (cur === BASE_CURRENCY) return 1 // v5.8 — FX-001: base is base, by definition
   const r = rates?.[cur]
-  if (r && typeof r === 'object') return Number(r.transfer) || 1
-  return Number(r) || 1
+  const raw = (r && typeof r === 'object') ? (Number(r.transfer) || 1) : (Number(r) || 1)
+  // v5.9.5 — LEGACY FOREIGN-BASE TABLE (root cause of the inverted rates screen): an old
+  // USD-base table (YER.transfer ≈ 0.0038, USD = 1) is re-expressed in the canonical
+  // «1 unit = X YER» direction by dividing by the stored base factor. Code-level only —
+  // stored documents are NEVER mutated (no backfill).
+  const bRef = rates?.[BASE_CURRENCY]
+  const baseT = (bRef && typeof bRef === 'object') ? Number(bRef.transfer) : Number(bRef)
+  if (Number.isFinite(baseT) && baseT > 0 && baseT !== 1) return raw / baseT
+  return raw
+}
+// v5.9.5 — legacy-table detection + READ-TIME normalizer (NO data write / NO backfill):
+// the tenant persists the corrected table only via an explicit Save, which the strict
+// validator (validateRatesInput) then locks to the canonical YER-base direction.
+function isLegacyBaseTable(rates) {
+  const b = rates?.[BASE_CURRENCY]
+  const t = (b && typeof b === 'object') ? Number(b.transfer) : Number(b)
+  return Number.isFinite(t) && t > 0 && t !== 1
+}
+function normalizeRatesView(rates) {
+  if (!rates || typeof rates !== 'object' || !isLegacyBaseTable(rates)) return rates
+  const bRaw = rates[BASE_CURRENCY]
+  const baseT = (bRaw && typeof bRaw === 'object') ? Number(bRaw.transfer) : Number(bRaw)
+  const conv = (v) => { const n = Number(v); return (Number.isFinite(n) && n > 0) ? Math.round((n / baseT) * 10000) / 10000 : 0 }
+  const out = {}
+  for (const [ccy, r] of Object.entries(rates)) {
+    if (ccy === BASE_CURRENCY) { out[ccy] = { transfer: 1, buy: 1, sell: 1, min: 1, max: 1, remarks: 'العملة الأساسية' }; continue }
+    if (typeof r === 'number') { out[ccy] = conv(r); continue }
+    if (!r || typeof r !== 'object') { out[ccy] = r; continue }
+    out[ccy] = { ...r, transfer: conv(r.transfer), buy: conv(r.buy), sell: conv(r.sell), min: conv(r.min), max: conv(r.max) }
+  }
+  return out
 }
 // v5.9.4 — UNIFIED STRICT RATES VALIDATOR (PR#24): the SINGLE gate for PUT /tenant/settings
 // and POST /rates — neither path can bypass it. Rules:
@@ -2464,7 +2492,7 @@ async function handleRoute(request, { params }) {
         user: sanitizeUser(sess.user),
         branch: myBranch,
         tenant: sess.tenant ? { ...sanitizeTenant(sess.tenant), journal_quota: quota } : null,
-        settings: tenantSettings ? { ...tenantSettings, _id: undefined } : null,
+        settings: tenantSettings ? { ...tenantSettings, _id: undefined, rates: normalizeRatesView(tenantSettings.rates) } : null, // v5.9.5 — canonical rates view
         impersonation: !!sess.impersonation,
         impersonated_by: sess.impersonation ? sess.impersonated_by_email : null,
       })
@@ -5246,7 +5274,11 @@ async function handleRoute(request, { params }) {
     // Rates (per-tenant)
     if (route === '/rates' && method === 'GET') {
       const s = await db.collection('tenant_settings').findOne(tf)
-      return ok({ rates: s?.rates || DEFAULT_RATES, updated_at: s?.updated_at })
+      // v5.9.5 — READ-TIME normalization of legacy foreign-base tables (display consistency;
+      // stored data untouched). legacy_normalized flags the screen that a Save will persist
+      // the corrected canonical direction.
+      const legacyTbl = isLegacyBaseTable(s?.rates)
+      return ok({ rates: normalizeRatesView(s?.rates) || DEFAULT_RATES, ...(legacyTbl ? { legacy_normalized: true } : {}), updated_at: s?.updated_at })
     }
 
     // ============ REFERRALS ============
