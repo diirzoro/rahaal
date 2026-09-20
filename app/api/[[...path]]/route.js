@@ -81,6 +81,39 @@ function getTransferRate(rates, cur) {
   if (r && typeof r === 'object') return Number(r.transfer) || 1
   return Number(r) || 1
 }
+// v5.9.4 — UNIFIED STRICT RATES VALIDATOR (PR#24): the SINGLE gate for PUT /tenant/settings
+// and POST /rates — neither path can bypass it. Rules:
+//   • rates must be a plain object { CCY: number | { transfer, buy, sell, min, max } }
+//   • the BASE currency must be PRESENT, numeric and EXACTLY 1 (all its values)
+//   • every transfer rate must be a FINITE POSITIVE number — null/string/boolean/NaN/
+//     Infinity/zero/malformed are rejected
+//   • optional bounds (buy/sell/min/max): absent/0 = «not set» (existing data semantic,
+//     no migration); any PROVIDED non-zero value must be a finite positive NUMBER.
+// Returns an error string, or null when valid.
+function validateRatesInput(rates) {
+  if (!rates || typeof rates !== 'object' || Array.isArray(rates)) return 'أسعار الصرف يجب أن تكون كائناً صالحاً { عملة: { transfer, ... } }'
+  if (!Object.prototype.hasOwnProperty.call(rates, BASE_CURRENCY)) return `عملة الأساس ${BASE_CURRENCY} مطلوبة في جدول الأسعار وقيمتها ثابتة = 1 بالتعريف`
+  const posNum = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0
+  for (const [ccy, r] of Object.entries(rates)) {
+    if (!/^[A-Z]{3,5}$/.test(String(ccy))) return `رمز عملة غير صالح في جدول الأسعار: ${String(ccy).slice(0, 10)}`
+    const isBase = ccy === BASE_CURRENCY
+    if (typeof r === 'number') {
+      if (!Number.isFinite(r) || r <= 0) return `سعر ${ccy} غير صالح (${r}) — رقم موجب منتهٍ فقط (لا null/نص/منطقي/NaN/لا نهائي/صفر)`
+      if (isBase && r !== 1) return `عملة الأساس ${BASE_CURRENCY} سعرها ثابت = 1 بالتعريف (القيمة المرسلة ${r})`
+      continue
+    }
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return `قيمة أسعار ${ccy} غير صالحة (${r === null ? 'null' : typeof r}) — المطلوب رقم موجب أو كائن { transfer, buy, sell, min, max }`
+    if (!posNum(r.transfer)) return `سعر التحويل لعملة ${ccy} غير صالح (${r.transfer}) — رقم موجب منتهٍ فقط (لا null/نص/منطقي/NaN/لا نهائي/صفر)`
+    if (isBase && r.transfer !== 1) return `عملة الأساس ${BASE_CURRENCY} سعر تحويلها ثابت = 1 بالتعريف (القيمة المرسلة ${r.transfer})`
+    for (const k of ['buy', 'sell', 'min', 'max']) {
+      const v = r[k]
+      if (v === undefined || v === null || v === '' || v === 0) continue // «not set» — existing semantic, no migration
+      if (!posNum(v)) return `قيمة «${k}» لعملة ${ccy} غير صالحة (${v}) — رقم موجب منتهٍ فقط`
+      if (isBase && v !== 1) return `عملة الأساس ${BASE_CURRENCY} كل قيمها ثابتة = 1 بالتعريف`
+    }
+  }
+  return null
+}
 const emptyBalances = () => ({ USD: 0, SAR: 0, YER: 0 })
 const SESSION_DAYS = 14
 
@@ -1187,12 +1220,22 @@ async function ensureInterbranchParentGroup(db, T) {
   const parent11 = await db.collection('accounts').findOne({ tenant_id: T, code: COA.CURRENT_ASSETS })
   if (!parent11) throw new Error('مجموعة الأصول المتداولة (11) غير موجودة في الدليل')
   const doc = {
+    // v5.9.4 — ATOMIC creation (PR#24): deterministic _id makes the insert a real lock —
+    // two concurrent callers can never create two 1104 groups; the loser re-fetches.
+    _id: `acct:${T}:ib_parent:${INTERBRANCH_PARENT_CODE}`,
     id: uuidv4(), tenant_id: T, code: INTERBRANCH_PARENT_CODE, name_ar: 'جاري الفروع (تحويلات داخلية)',
     type: 'asset', parent: COA.CURRENT_ASSETS, is_group: true, is_system: true,
     notes: 'v5.4 — تحويلات داخلية بين المركز والفروع: ليست إيراداً ولا مصروفاً، وتتصفّر مجمعةً عند اكتمال أطراف كل عملية',
     created_at: new Date(),
   }
-  await db.collection('accounts').insertOne(doc)
+  try {
+    await db.collection('accounts').insertOne(doc)
+  } catch (insErr) {
+    if (insErr?.code !== 11000) throw insErr
+    const won = await db.collection('accounts').findOne({ tenant_id: T, code: INTERBRANCH_PARENT_CODE })
+    if (won) { if (!won.is_group) throw new Error(`الكود ${INTERBRANCH_PARENT_CODE} مستخدم لحساب غير مجموعة — مراجعة يدوية مطلوبة`); return won }
+    throw insErr
+  }
   return doc
 }
 
@@ -1204,12 +1247,24 @@ async function ensureJariAccount(db, T, scopeBranchId /* null = HQ */, scopeName
   await ensureInterbranchParentGroup(db, T)
   const info = await generateSubAccountCode(db, T, INTERBRANCH_PARENT_CODE)
   const doc = {
+    // v5.9.4 — ATOMIC creation (PR#24): deterministic _id per tenant+scope — the old
+    // findOne→insertOne window could mint TWO jari accounts for the same scope in parallel.
+    // Exactly ONE canonical account per tenant+interbranch_scope survives; the loser
+    // re-fetches the winner (a burned code number in the counter is harmless).
+    _id: `acct:${T}:jari:${scopeKey}`,
     id: uuidv4(), tenant_id: T, code: info.account_code, name_ar: `جاري — ${scopeName}`,
     type: 'asset', parent: INTERBRANCH_PARENT_CODE, is_group: false, is_system: true,
     interbranch_scope: scopeKey,
     notes: 'v5.4 — حساب جاري داخلي (Internal Transfer)', created_at: new Date(),
   }
-  await db.collection('accounts').insertOne(doc)
+  try {
+    await db.collection('accounts').insertOne(doc)
+  } catch (insErr) {
+    if (insErr?.code !== 11000) throw insErr
+    const won = await db.collection('accounts').findOne({ tenant_id: T, interbranch_scope: scopeKey })
+    if (won) return won
+    throw insErr
+  }
   return doc
 }
 
@@ -1246,14 +1301,10 @@ async function postInterbranchTransaction(db, T, actor, b) {
     return { error: `توجد عملية سابقة بنفس المعرف حالتها «${prev.status}» — راجعها ثم أنشئ عملية جديدة (لا يعاد استخدام op_id)` }
   }
   if (!claimed) {
-    // claim held with no registry doc yet → truly in-flight now, or a crashed pre-insert
-    // attempt (stale >120s → atomic takeover bound to the observed timestamp)
-    const curCl = await db.collection('op_claims').findOne({ _id: claimId })
-    if (curCl?.at && Date.now() - new Date(curCl.at).getTime() > 120000) {
-      const take = await db.collection('op_claims').updateOne({ _id: claimId, at: curCl.at }, { $set: { at: claimAt } })
-      if (take.matchedCount === 1) claimed = true
-    }
-    if (!claimed) return { error: 'عملية متزامنة بنفس المعرف قيد التنفيذ الآن — لن تُنشأ عملية مكررة؛ أعد التحميل وتحقق من السجل' }
+    // v5.9.4 — NO auto-takeover on FINANCIAL claims (split-brain guard): a stalled original
+    // writer could resume AFTER a takeover and post a second pair of journals in parallel.
+    // The op_id stays reserved — review the registry, then create a NEW op with a NEW op_id.
+    return { error: 'معرف العملية محجوز لمحاولة سابقة/متزامنة لم تُسجَّل نتيجتها — لا استيلاء تلقائياً على الأقفال المالية: راجع سجل العمليات ثم أنشئ عملية جديدة بمعرف جديد' }
   }
   const result = await postInterbranchTransactionInner(db, T, actor, b)
   // zero-side-effect failure (validation — provably NO registry doc) → free the key so a
@@ -1297,6 +1348,10 @@ async function postInterbranchTransactionInner(db, T, actor, b) {
       if (!a) return { error: `الحساب المحاسبي غير موجود (${isMine ? 'طرفك' : 'الطرف المقابل'})` }
       if (a.is_group) return { error: `الحساب «${a.name_ar || a.name}» (${a.code}) حساب مجموعة — اختر حساباً تفصيلياً نهائياً` }
       if (isInactiveAccount(a)) return { error: `الحساب «${a.name_ar || a.name}» (${a.code}) غير نشط — لا يقبل ترحيلاً جديداً` }
+      // v5.9.4 — BALANCE-SHEET accounts ONLY (asset/liability/equity): an internal transfer
+      // must have ZERO effect on the income statement — revenue/expense are rejected here
+      // (backend enforcement; the picker filter is UX only).
+      if (!['asset', 'liability', 'equity'].includes(a.type)) return { error: `الحساب «${a.name_ar || a.name}» (${a.code}) من نوع ${a.type === 'revenue' ? 'إيرادات' : a.type === 'expense' ? 'مصروفات' : a.type} — التحويل الداخلي يقتصر على حسابات الميزانية (أصول/خصوم/حقوق ملكية) ولا يمس قائمة الدخل` }
       if (a.interbranch_scope !== undefined) return { error: 'حسابات جاري الفروع (1104) تُدار تلقائياً — لا تُختار يدوياً' }
       return { acct: { kind: 'account', id: a.id, name_ar: a.name_ar || a.name, account_code: a.code } }
     }
@@ -1484,6 +1539,11 @@ async function reverseTransactionEffects(db, T, kind, doc) {
       if (doc.party_type === 'client') await updateBalance(db, 'clients', { id: doc.party_id, tenant_id: T }, doc.currency, -doc.amount)
     }
   } else if (kind === 'fx') {
+    // v5.9.4 — an exchange whose posting never completed (pending/uncertain) has an UNKNOWN
+    // applied effect — a blind full reversal would corrupt the cached balances. Block loudly.
+    if (doc.je_status && doc.je_status !== 'posted') {
+      throw new Error(`عملية الصرافة ${doc.id} بحالة «${doc.je_status}» غير مكتملة — لا يجوز عكس أثرها تلقائياً: مراجعة يدوية مطلوبة`)
+    }
     // Use stored refs (falls back to box_currency_id for pre-v2.6 records)
     const refCur = doc.currency_ref || { kind: 'box', id: doc.box_currency_id }
     const refCounter = doc.counter_ref || { kind: 'box', id: doc.box_counter_id }
@@ -3306,6 +3366,40 @@ async function handleRoute(request, { params }) {
     const btf = B ? { ...tf, branch_id: B } : tf
     // IDOR guard for single-document access by a branch user
     const inBranch = (doc) => !B || (!!doc && doc.branch_id === B)
+    // ========================================================================
+    // v5.9.4 — CENTRAL BRANCH-SCOPE GUARDS (PR#24 one-pass): scope derives from
+    // the SESSION only — branch_id / resource IDs in the body are NEVER trusted.
+    // Legacy docs without branch_id belong to HQ (no backfill) → untouchable by
+    // branch users. Guards return an error string (null = allowed).
+    // ========================================================================
+    const assertBoxScope = async (boxId) => {
+      if (!boxId) return null
+      const bx = await db.collection('boxes').findOne({ id: String(boxId), tenant_id: T }, { projection: { id: 1, branch_id: 1 } })
+      if (!bx) return 'الصندوق/البنك غير موجود'
+      if (B && (bx.branch_id || null) !== B) return '🚫 غير مصرح — الصندوق يخص نطاقاً آخر (فرع/مركز)'
+      const abScope = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
+      if (sess.user.role !== 'owner' && abScope.length > 0 && !abScope.includes(String(boxId))) return '🚫 غير مصرح — هذا الصندوق خارج قائمة الصناديق المسموحة لك'
+      return null
+    }
+    const assertPartyScope = async (colName, partyId) => {
+      if (!partyId) return null
+      const p = await db.collection(colName).findOne({ id: String(partyId), tenant_id: T }, { projection: { id: 1, branch_id: 1 } })
+      if (!p) return colName === 'clients' ? 'العميل غير موجود' : colName === 'suppliers' ? 'المورد غير موجود' : 'الطرف غير موجود'
+      if (B && (p.branch_id || null) !== B) return '🚫 غير مصرح — هذا الطرف يخص نطاقاً آخر (فرع/مركز)'
+      return null
+    }
+    // one call covering a transactional body (box/client/supplier ids) — used by tickets/visas/services/vouchers
+    const assertTxScope = async (b) => {
+      if (!b || typeof b !== 'object') return null
+      let gErr = await assertBoxScope(b.box_id)
+      if (gErr) return gErr
+      gErr = await assertPartyScope('clients', b.client_id); if (gErr) return gErr
+      gErr = await assertPartyScope('suppliers', b.supplier_id); if (gErr) return gErr
+      if (b.party_type === 'client' && b.party_id) { gErr = await assertPartyScope('clients', b.party_id); if (gErr) return gErr }
+      if (b.party_type === 'supplier' && b.party_id) { gErr = await assertPartyScope('suppliers', b.party_id); if (gErr) return gErr }
+      if (b.commission_partner_id) { gErr = await assertPartyScope(b.commission_partner_type === 'supplier' ? 'suppliers' : 'clients', b.commission_partner_id); if (gErr) return gErr }
+      return null
+    }
 
     // Tenant Settings
     if (route === '/tenant/settings' && method === 'GET') {
@@ -3316,14 +3410,11 @@ async function handleRoute(request, { params }) {
       if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح', 403)
       const b = await request.json()
       const allowed = ['agency_name', 'agency_name_en', 'logo_base64', 'header', 'footer', 'tax_id', 'commercial_id', 'phone', 'address', 'address_en', 'email', 'primary_color', 'rates', 'pair_usd_sar']
-      // v5.9 — FX-001 recurrence guard (2nd vector): this endpoint also writes rates —
-      // the BASE currency transfer is 1 BY DEFINITION and can never be stored otherwise.
-      // v5.9.2 — HARDENED: when the base currency key is SENT, any missing / non-numeric /
-      // ≠1 value is rejected, whether the value is an object ({transfer}) or a plain number.
-      if (b.rates !== undefined && Object.prototype.hasOwnProperty.call(b.rates || {}, BASE_CURRENCY)) {
-        const brBaseTS = b.rates[BASE_CURRENCY]
-        const tVal = (brBaseTS && typeof brBaseTS === 'object') ? Number(brBaseTS.transfer) : Number(brBaseTS)
-        if (!Number.isFinite(tVal) || tVal !== 1) return bad(`عملة الأساس ${BASE_CURRENCY} سعر تحويلها ثابت = 1 بالتعريف — القيمة المرسلة غير مقبولة (${brBaseTS && typeof brBaseTS === 'object' ? brBaseTS.transfer : brBaseTS}). قَوِّم أسعار العملات الأخرى مقابل ${BASE_CURRENCY}`)
+      // v5.9.4 — the settings path can NEVER bypass the unified strict rates validator
+      // (same single gate as POST /rates): object shape + base=1 + finite positive numbers.
+      if (b.rates !== undefined) {
+        const vErrS = validateRatesInput(b.rates)
+        if (vErrS) return bad(vErrS)
       }
       const upd = { updated_at: new Date() }
       for (const k of allowed) if (b[k] !== undefined) upd[k] = b[k]
@@ -4987,7 +5078,9 @@ async function handleRoute(request, { params }) {
         if (sess.user.role === 'owner') return true
         const p = sess.user.permissions || {}
         if (p.mod_interbranch !== true) return false
-        return op ? p[`mod_interbranch_${op}`] !== false : true
+        // v5.9.4 — EXPLICIT allow only (PR#24): absence of the per-operation key is DENY.
+        // A limited user gets exactly the operations granted explicitly — nothing implicit.
+        return op ? p[`mod_interbranch_${op}`] === true : true
       }
       if (!ibAllowed(null)) return bad('🚫 لا تملك صلاحية «التحويلات بين الفروع» — تُمنح صراحةً من مالك المكتب', 403)
 
@@ -5013,8 +5106,12 @@ async function handleRoute(request, { params }) {
         // Boxes above stay strictly branch-isolated; COA is office-level by design.
         let coa = []
         if (q.type === 'journal') {
+          // v5.9.4 — the JOURNAL picker requires the EXPLICIT inter-branch journal permission
+          // (module access alone is not enough), and exposes BALANCE-SHEET accounts ONLY:
+          // revenue/expense are rejected — an internal transfer must have ZERO income effect.
+          if (!ibAllowed('journal')) return bad('🚫 لا تملك صلاحية «قيد بين الفروع» — تُمنح صراحةً من مالك المكتب', 403)
           const all = await db.collection('accounts')
-            .find({ tenant_id: T, is_group: { $ne: true }, interbranch_scope: { $exists: false } })
+            .find({ tenant_id: T, is_group: { $ne: true }, interbranch_scope: { $exists: false }, type: { $in: ['asset', 'liability', 'equity'] } })
             .project({ _id: 0, id: 1, name_ar: 1, code: 1, type: 1, inactive: 1, is_active: 1, active: 1, archived: 1 })
             .sort({ code: 1 }).toArray()
           coa = all.filter(a => !isInactiveAccount(a)).map(a => ({ id: a.id, name_ar: a.name_ar, account_code: a.code, kind: 'account', acct_type: a.type }))
@@ -5543,6 +5640,7 @@ async function handleRoute(request, { params }) {
           travel_mode: docType === 'bus' ? 'land' : 'air',
           exchange_rate: Number(b.exchange_rate) || 1,
         }
+        const gInT = await assertTxScope(payload); if (gInT) return bad(gInT, 403) // v5.9.4 — box/party scope
         const r = await createTicket(db, T, payload, { branchId: B }) // v5.3
         if (r.error) return bad(r.error)
         let usageOut = { plan: 'paid', unlimited: true, used: 0, limit: -1, remaining: -1 }
@@ -5575,6 +5673,7 @@ async function handleRoute(request, { params }) {
           // Preserve source metadata as attachment_url hint
           attachment_url: b.source_url || '',
         }
+        const gInV = await assertTxScope(payload); if (gInV) return bad(gInV, 403) // v5.9.4 — box/party scope
         const r = await createVisa(db, T, payload, { branchId: B }) // v5.3
         if (r.error) return bad(r.error)
         let usageOut = { plan: 'paid', unlimited: true, used: 0, limit: -1, remaining: -1 }
@@ -5592,7 +5691,7 @@ async function handleRoute(request, { params }) {
     if (route === '/packages' && method === 'GET') {
       // v3.28 — Soft archive: archived packages are hidden by default; ?archived=1 lists ONLY archived
       const wantArchived = q.archived === '1' || q.archived === 'true'
-      const pkgFilter = { ...tf, ...(wantArchived ? { archived: true } : { archived: { $ne: true } }) }
+      const pkgFilter = { ...btf, /* v5.9.4 — branch scope (was tenant-wide) */ ...(wantArchived ? { archived: true } : { archived: { $ne: true } }) }
       const list = await db.collection('packages').find(pkgFilter).sort({ created_at: -1 }).toArray()
       // v3.52 — pending Meraaj bookings must be VISIBLE immediately (not hidden until approval)
       const pendingAgg = await db.collection('meraaj_inbound_bookings').aggregate([
@@ -5610,6 +5709,15 @@ async function handleRoute(request, { params }) {
         return { ...p, _id: undefined, components_count: comps, bookings_count: books, meraaj_pending_seats: pendingMap[p.id]?.seats || 0, meraaj_pending_count: pendingMap[p.id]?.count || 0 }
       }))
       return ok(enriched)
+    }
+    // v5.9.4 — CENTRAL PACKAGES BRANCH GATE (PR#24): every /packages/:id* route below
+    // resolves the package ONCE and rejects cross-branch access for branch users.
+    // Legacy packages without branch_id belong to HQ (no backfill). Marketplace (meraaj)
+    // integration endpoints live elsewhere and expose their own safe DTO only.
+    const pkgGateMatch = route.match(/^\/packages\/([^/]+)/)
+    if (pkgGateMatch && !['comparison', 'bulk-delete', 'bulk-close'].includes(pkgGateMatch[1])) {
+      const pkgGate = await db.collection('packages').findOne({ id: pkgGateMatch[1], tenant_id: T }, { projection: { id: 1, branch_id: 1 } })
+      if (pkgGate && !inBranch(pkgGate)) return bad('🚫 غير مصرح — هذا الباكج يخص نطاقاً آخر (فرع/مركز)', 403)
     }
     // v3.52 — Package-scoped inbound Meraaj bookings (visible from the registrants tab without mod_meraaj)
     const pkgInboundMatch = route.match(/^\/packages\/([^/]+)\/inbound-bookings$/)
@@ -5715,7 +5823,7 @@ async function handleRoute(request, { params }) {
       // v3.20 — Dual pricing mode: 'direct' (room+age matrix, B2B) | 'components' (assembled from components)
       const pricingMode = ['direct', 'components'].includes(b.pricing_mode) ? b.pricing_mode : (roomPricing.length > 0 ? 'direct' : 'components')
       const doc = {
-        id: uuidv4(), tenant_id: T, name: String(b.name), package_type: b.package_type,
+        id: uuidv4(), tenant_id: T, branch_id: B, /* v5.9.4 — branch stamp (null = HQ) */ name: String(b.name), package_type: b.package_type,
         currency: CURRENCIES.includes(b.currency) ? b.currency : 'SAR',
         start_date: b.start_date ? new Date(b.start_date) : null,
         end_date: b.end_date ? new Date(b.end_date) : null,
@@ -6044,6 +6152,7 @@ async function handleRoute(request, { params }) {
         start_date: bodyDup.start_date ? new Date(bodyDup.start_date) : (src.start_date || null),
         end_date: bodyDup.end_date ? new Date(bodyDup.end_date) : (src.end_date || null),
         duplicated_from: src.id,
+        branch_id: B, // v5.9.4 — the copy belongs to the duplicating user's scope (never inherits)
         created_at: new Date(),
       }
       delete newPkg.updated_at
@@ -6460,6 +6569,7 @@ async function handleRoute(request, { params }) {
           return bad('🚫 غير مصرح — هذا الصندوق خارج الصناديق المسموحة لك', 403)
         }
       }
+      const gBk = await assertTxScope(b); if (gBk) return bad(gBk, 403) // v5.9.4 — client/box branch scope
       // v3.15 — Registrants dynamic list: [{name, passport_no, age, visa_no, room_type}]
       const registrants = (Array.isArray(b.registrants) ? b.registrants : [])
         .filter(r => r && String(r.name || '').trim())
@@ -6680,7 +6790,9 @@ async function handleRoute(request, { params }) {
       const kind = b.kind || 'clients'   // 'clients' | 'suppliers'
       const period = b.period || 'month' // 'month' | 'all'
       const officeName = sess.tenant?.name || 'مكتب رحّال'
-      const parties = await db.collection(kind).find({ tenant_id: T }).sort({ name: 1 }).toArray()
+      // v5.9.4 — BRANCH SCOPE (was tenant-wide leak): branch user generates statements for
+      // HIS branch parties only, and recent lines derive from HIS branch journals only.
+      const parties = await db.collection(kind).find(btf).sort({ name: 1 }).toArray()
       const now = new Date()
       const results = []
       for (const p of parties) {
@@ -6691,7 +6803,7 @@ async function handleRoute(request, { params }) {
         if (!hasBalance) continue
         // Get last 5 transactions from journal entries
         const recentLines = await db.collection('journal_entries').aggregate([
-          { $match: { tenant_id: T, [kind === 'clients' ? 'lines.party_type' : 'lines.party_type']: kind === 'clients' ? 'client' : 'supplier' } },
+          { $match: { tenant_id: T, ...(B ? { branch_id: B } : {}), [kind === 'clients' ? 'lines.party_type' : 'lines.party_type']: kind === 'clients' ? 'client' : 'supplier' } }, // v5.9.4 — branch scope
           { $sort: { date: -1 } }, { $limit: 100 },
           { $unwind: '$lines' },
           { $match: { 'lines.party_id': p.id } },
@@ -6727,12 +6839,16 @@ async function handleRoute(request, { params }) {
 
     // ============ UNIFIED CHART OF ACCOUNTS (for FX 'account' mode + Statement) ============
     if (route === '/accounts/all' && method === 'GET') {
-      const [clients, suppliers, boxes, coa] = await Promise.all([
-        db.collection('clients').find(tf).sort({ name: 1 }).toArray(),
-        db.collection('suppliers').find(tf).sort({ name: 1 }).toArray(),
-        db.collection('boxes').find(tf).sort({ name_ar: 1 }).toArray(),
+      // v5.9.4 — balance-carrying refs (clients/suppliers/boxes) are BRANCH-SCOPED for a
+      // branch user (was tenant-wide balances leak); the COA itself is office-unified.
+      const [clients, suppliers, boxesAll, coa] = await Promise.all([
+        db.collection('clients').find(btf).sort({ name: 1 }).toArray(),
+        db.collection('suppliers').find(btf).sort({ name: 1 }).toArray(),
+        db.collection('boxes').find(btf).sort({ name_ar: 1 }).toArray(),
         db.collection('accounts').find(tf).sort({ code: 1 }).toArray(),
       ])
+      const abAll = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
+      const boxes = (sess.user.role !== 'owner' && abAll.length > 0) ? boxesAll.filter(x => abAll.includes(x.id)) : boxesAll
       const list = [
         ...clients.map(c => ({ kind: 'client', id: c.id, code: COA.CLIENTS, name: c.name, group: 'العملاء', balances: c.balances })),
         ...suppliers.map(s => ({ kind: 'supplier', id: s.id, code: COA.SUPPLIERS, name: s.name, group: 'الموردون', balances: s.balances })),
@@ -6777,6 +6893,9 @@ async function handleRoute(request, { params }) {
     }
     if (route === '/rates' && method === 'POST') {
       const body = await request.json()
+      // v5.9.4 — UNIFIED strict validator (single gate — same one PUT /tenant/settings uses)
+      const vErr = validateRatesInput(body.rates)
+      if (vErr) return bad(vErr)
       // v3.88.4 — F-003: coherent bounds per currency — min ≤ buy ≤ transfer ≤ sell ≤ max.
       // Inverted bounds are rejected instead of silently stored.
       for (const [ccy, r] of Object.entries(body.rates || {})) {
@@ -6786,18 +6905,6 @@ async function handleRoute(request, { params }) {
         const seq = named.filter(([, v]) => Number.isFinite(v) && v > 0)
         for (let i = 1; i < seq.length; i++) {
           if (seq[i][1] < seq[i - 1][1]) return bad(`أسعار ${ccy} غير متسقة: ${seq[i - 1][0]} (${seq[i - 1][1]}) أكبر من ${seq[i][0]} (${seq[i][1]}) — الترتيب الصحيح: أدنى ≤ شراء ≤ تحويل ≤ بيع ≤ أعلى`)
-        }
-      }
-      // v5.8 — FX-001 recurrence guard: the BASE currency is the unit of account —
-      // its transfer rate is 1 BY DEFINITION and can never be stored otherwise
-      // (a legacy USD-base table with YER≈0.0038 is exactly what broke exchange journals).
-      // v5.9.2 — HARDENED: when the base currency key is SENT, any missing / non-numeric /
-      // ≠1 value is rejected, whether the value is an object ({transfer}) or a plain number.
-      if (Object.prototype.hasOwnProperty.call(body.rates || {}, BASE_CURRENCY)) {
-        const brBase = body.rates[BASE_CURRENCY]
-        const tV = (brBase && typeof brBase === 'object') ? Number(brBase.transfer) : Number(brBase)
-        if (!Number.isFinite(tV) || tV !== 1) {
-          return bad(`عملة الأساس ${BASE_CURRENCY} سعر تحويلها ثابت = 1 بالتعريف — القيمة المرسلة غير مقبولة (${brBase && typeof brBase === 'object' ? brBase.transfer : brBase}). قَوِّم أسعار العملات الأخرى مقابل ${BASE_CURRENCY}`)
         }
       }
       await db.collection('tenant_settings').updateOne(tf, { $set: { rates: body.rates, updated_at: new Date() } }, { upsert: true })
@@ -6828,6 +6935,9 @@ async function handleRoute(request, { params }) {
     const clientIdMatch = route.match(/^\/clients\/([^/]+)$/)
     if (clientIdMatch && method === 'PUT') {
       const b = await request.json()
+      const cScope = await db.collection('clients').findOne({ id: clientIdMatch[1], tenant_id: T })
+      if (!cScope) return bad('العميل غير موجود', 404)
+      if (!inBranch(cScope)) return bad('🚫 غير مصرح — هذا العميل يخص نطاقاً آخر (فرع/مركز)', 403) // v5.9.4 — IDOR guard
       if (b.credit_limit !== undefined && Number(b.credit_limit) < 0) return bad('سقف الائتمان لا يقبل قيمة سالبة') // v3.88.4 — F-005
       const upd = {}
       for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes', 'parent_code', 'credit_limit', 'credit_currency', 'is_frozen']) if (b[k] !== undefined) upd[k] = k === 'credit_limit' ? (Number(b[k]) || 0) : k === 'is_frozen' ? !!b[k] : b[k]
@@ -6842,6 +6952,9 @@ async function handleRoute(request, { params }) {
     if (clientIdMatch && method === 'DELETE') {
       // Only delete if no transactions
       const cid = clientIdMatch[1]
+      const cDel = await db.collection('clients').findOne({ id: cid, tenant_id: T })
+      if (!cDel) return bad('العميل غير موجود', 404)
+      if (!inBranch(cDel)) return bad('🚫 غير مصرح — هذا العميل يخص نطاقاً آخر (فرع/مركز)', 403) // v5.9.4 — IDOR guard
       const hasTx = await db.collection('tickets').findOne({ tenant_id: T, client_id: cid })
         || await db.collection('visas').findOne({ tenant_id: T, client_id: cid })
         || await db.collection('services').findOne({ tenant_id: T, client_id: cid })
@@ -6866,6 +6979,9 @@ async function handleRoute(request, { params }) {
     const supIdMatch = route.match(/^\/suppliers\/([^/]+)$/)
     if (supIdMatch && method === 'PUT') {
       const b = await request.json()
+      const sScope = await db.collection('suppliers').findOne({ id: supIdMatch[1], tenant_id: T })
+      if (!sScope) return bad('المورد غير موجود', 404)
+      if (!inBranch(sScope)) return bad('🚫 غير مصرح — هذا المورد يخص نطاقاً آخر (فرع/مركز)', 403) // v5.9.4 — IDOR guard
       const upd = {}
       for (const k of ['name', 'phone', 'whatsapp', 'address', 'email', 'notes', 'parent_code']) if (b[k] !== undefined) upd[k] = b[k]
       await db.collection('suppliers').updateOne({ id: supIdMatch[1], tenant_id: T }, { $set: upd })
@@ -6878,6 +6994,9 @@ async function handleRoute(request, { params }) {
     }
     if (supIdMatch && method === 'DELETE') {
       const sid = supIdMatch[1]
+      const sDel = await db.collection('suppliers').findOne({ id: sid, tenant_id: T })
+      if (!sDel) return bad('المورد غير موجود', 404)
+      if (!inBranch(sDel)) return bad('🚫 غير مصرح — هذا المورد يخص نطاقاً آخر (فرع/مركز)', 403) // v5.9.4 — IDOR guard
       const hasTx = await db.collection('tickets').findOne({ tenant_id: T, supplier_id: sid })
         || await db.collection('visas').findOne({ tenant_id: T, supplier_id: sid })
         || await db.collection('services').findOne({ tenant_id: T, supplier_id: sid })
@@ -7644,13 +7763,14 @@ async function handleRoute(request, { params }) {
       const amount = b.amount !== undefined ? Number(b.amount) : dueForCur
       if (!(amount > 0)) return bad('المبلغ يجب أن يكون أكبر من صفر')
       if (amount > dueForCur + 0.01) return bad(`المبلغ يتجاوز مستحقات الكشف (${dueForCur} ${currency})`)
+      const gSt = await assertBoxScope(b.box_id); if (gSt) return bad(gSt, 403) // v5.9.4 — box scope
       const result = await createVoucher(db, T, {
         type: 'payment',
         party_type: stmt.partner_type, party_id: stmt.partner_id,
         box_id: b.box_id, currency, amount,
         date: b.date || undefined,
         description: `تسوية عمولات شريك — ${stmt.partner_name} (كشف ${stmt.from ? new Date(stmt.from).toLocaleDateString('en-GB') : 'البداية'} ← ${stmt.to ? new Date(stmt.to).toLocaleDateString('en-GB') : 'اليوم'})${b.notes ? ` — ${String(b.notes).slice(0, 120)}` : ''}`,
-      })
+      }, { actor: sess.user.email }) // v5.9.4 — creator from session
       if (result.error) return bad(result.error)
       await db.collection('partner_statements').updateOne(
         { id: stmt.id, tenant_id: T },
@@ -7665,6 +7785,7 @@ async function handleRoute(request, { params }) {
     }
     if (route === '/tickets' && method === 'POST') {
       const b = await request.json()
+      const gTk = await assertTxScope(b); if (gTk) return bad(gTk, 403) // v5.9.4 — box/party scope from session
       const result = await createTicket(db, T, b, { branchId: B }) // v5.3
       if (result.error) return bad(result.error)
       return ok(result.doc)
@@ -7677,6 +7798,7 @@ async function handleRoute(request, { params }) {
     }
     if (route === '/visas' && method === 'POST') {
       const b = await request.json()
+      const gVs = await assertTxScope(b); if (gVs) return bad(gVs, 403) // v5.9.4 — box/party scope from session
       const result = await createVisa(db, T, b, { branchId: B }) // v5.3
       if (result.error) return bad(result.error)
       return ok(result.doc)
@@ -7688,6 +7810,7 @@ async function handleRoute(request, { params }) {
       const visaId = markExitedMatch[1]
       const v = await db.collection('visas').findOne({ id: visaId, tenant_id: T })
       if (!v) return bad('التأشيرة غير موجودة', 404)
+      if (!inBranch(v)) return bad('🚫 غير مصرح — هذه التأشيرة تخص نطاقاً آخر (فرع/مركز)', 403) // v5.9.4 — IDOR guard
       await db.collection('visas').updateOne(
         { id: visaId, tenant_id: T },
         { $set: { is_exited: true, exited_at: new Date(), exited_by: sess.user.email } }
@@ -7699,6 +7822,9 @@ async function handleRoute(request, { params }) {
     const unmarkExitedMatch = route.match(/^\/visas\/([^/]+)\/unmark-exited$/)
     if (unmarkExitedMatch && method === 'POST') {
       const visaId = unmarkExitedMatch[1]
+      const vU = await db.collection('visas').findOne({ id: visaId, tenant_id: T }) // v5.9.4 — IDOR guard
+      if (!vU) return bad('التأشيرة غير موجودة', 404)
+      if (!inBranch(vU)) return bad('🚫 غير مصرح — هذه التأشيرة تخص نطاقاً آخر (فرع/مركز)', 403)
       await db.collection('visas').updateOne(
         { id: visaId, tenant_id: T },
         { $set: { is_exited: false }, $unset: { exited_at: '', exited_by: '' } }
@@ -7741,6 +7867,7 @@ async function handleRoute(request, { params }) {
     }
     if (route === '/services' && method === 'POST') {
       const b = await request.json()
+      const gSv = await assertTxScope(b); if (gSv) return bad(gSv, 403) // v5.9.4 — box/party scope from session
       const result = await createService(db, T, b, { branchId: B }) // v5.3
       if (result.error) return bad(result.error)
       return ok(result.doc)
@@ -7864,7 +7991,7 @@ async function handleRoute(request, { params }) {
         const payload = box
           ? { ...r, client_id: null, client_name: nameTrim, supplier_id: sup.id, payment_method: 'cash', box_id: box.id }
           : { ...r, client_id: cli.id, supplier_id: sup.id, payment_method: r.payment_method === 'cash' ? 'cash' : 'credit' }
-        const result = await createTicket(db, T, payload, { branchId: B }) // v5.3
+        const result = { ...(await (async () => { const gIm = await assertTxScope(payload); if (gIm) return { error: gIm }; return await createTicket(db, T, payload, { branchId: B }) })()) } // v5.3 · v5.9.4 per-row scope
         if (result.error) { failed++; errors.push({ row: r.__row, errors: [result.error] }) } else created++
       }
       return ok({ created, skipped, failed, errors })
@@ -7985,7 +8112,7 @@ async function handleRoute(request, { params }) {
         const payload = box
           ? { ...r, client_id: null, client_name: nameTrim, supplier_id: sup.id, payment_method: 'cash', box_id: box.id }
           : { ...r, client_id: cli.id, supplier_id: sup.id, payment_method: r.payment_method === 'cash' ? 'cash' : 'credit' }
-        const result = await createVisa(db, T, payload, { branchId: B }) // v5.3
+        const result = { ...(await (async () => { const gIm = await assertTxScope(payload); if (gIm) return { error: gIm }; return await createVisa(db, T, payload, { branchId: B }) })()) } // v5.3 · v5.9.4 per-row scope
         if (result.error) { failed++; errors.push({ row: r.__row, errors: [result.error] }) } else created++
       }
       return ok({ created, skipped, failed, errors })
@@ -8006,6 +8133,7 @@ async function handleRoute(request, { params }) {
           return bad('🚫 غير مصرح — هذا الصندوق خارج الصناديق المسموحة لك', 403)
         }
       }
+      const gVo = await assertTxScope(b); if (gVo) return bad(gVo, 403) // v5.9.4 — box/party branch scope
       // v5.3 — BRANCH ISOLATION: box + party must belong to the actor's branch scope.
       // IDs from the request body are NEVER trusted — verified against btf (session-derived).
       if (B) {
@@ -8068,6 +8196,7 @@ async function handleRoute(request, { params }) {
         try {
           const pkg = await db.collection('packages').findOne({ id, tenant_id: T })
           if (!pkg) { failed++; errors.push({ id, error: 'غير موجود' }); continue }
+          if (!inBranch(pkg)) { failed++; errors.push({ id, error: '🚫 الباكج يخص نطاقاً آخر (فرع/مركز)' }); continue } // v5.9.4 — IDOR guard
           // Prevent delete if bookings exist
           const bookingsCount = await db.collection('package_bookings').countDocuments({ package_id: id, tenant_id: T, status: { $ne: 'cancelled' } }) // v3.74
           if (bookingsCount > 0) { failed++; errors.push({ id, error: `يوجد ${bookingsCount} حجز مرتبط — أزلها أولاً` }); continue }
@@ -8088,8 +8217,8 @@ async function handleRoute(request, { params }) {
       if (ids.length === 0) return bad('لم يتم اختيار أي باكج')
       const status = body.status === 'open' ? 'open' : 'closed'
       // v3.30 — capture Meraaj-shared packages BEFORE the bulk status change for marketplace sync
-      const affectedShared = await db.collection('packages').find({ id: { $in: ids }, tenant_id: T, 'meraaj.shared': true }).toArray()
-      const r = await db.collection('packages').updateMany({ id: { $in: ids }, tenant_id: T }, { $set: { status, updated_at: new Date() } })
+      const affectedShared = await db.collection('packages').find({ id: { $in: ids }, ...btf, 'meraaj.shared': true }).toArray() // v5.9.4 — branch scope
+      const r = await db.collection('packages').updateMany({ id: { $in: ids }, ...btf }, { $set: { status, updated_at: new Date() } }) // v5.9.4 — branch scope
       try {
         for (const p of affectedShared) {
           if (status === 'closed') {
@@ -8119,6 +8248,9 @@ async function handleRoute(request, { params }) {
         try {
           const doc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
           if (!doc) { failed++; errors.push({ id: docId, error: 'غير موجود' }); continue }
+          if (!inBranch(doc)) { failed++; errors.push({ id: docId, error: '🚫 السجل يخص نطاقاً آخر (فرع/مركز)' }); continue } // v5.9.4 — IDOR guard (was missing in bulk delete)
+          // v5.9.4 — an FX row whose posting never completed is read-only (review-first)
+          if (kind === 'fx' && doc.je_status && doc.je_status !== 'posted') { failed++; errors.push({ id: docId, error: `عملية صرافة بحالة «${doc.je_status}» غير مكتملة — لا تُحذف قبل المراجعة اليدوية` }); continue }
           const je = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
           // v4.6 — RAH-ACC: per-row closed year/period guard (bulk delete must not rewrite closed books)
           const perrBD = await assertOpenPeriod(db, T, je?.date || doc.date)
@@ -8234,6 +8366,11 @@ async function handleRoute(request, { params }) {
       const doc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
       if (!doc) return bad('العنصر غير موجود', 404)
       if (!inBranch(doc)) return bad('🚫 غير مصرح — هذا السجل يخص نطاقاً آخر (فرع/مركز)', 403) // v5.4 — IDOR guard
+      // v5.9.4 — an FX row whose posting never completed (pending/uncertain) is READ-ONLY:
+      // its applied effect is unknown — deletion/reversal before manual review is forbidden.
+      if (kind === 'fx' && doc.je_status && doc.je_status !== 'posted') {
+        return bad(`عملية الصرافة بحالة «${doc.je_status}» غير مكتملة — لا تُحذف ولا تُعدل قبل المراجعة اليدوية (شاشة التسوية)`, 409)
+      }
       // Reverse balance updates & delete linked journal entry
       const je = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
       // v4.6 — RAH-ACC: a document whose journal lives inside a closed year/period must not
@@ -8267,43 +8404,73 @@ async function handleRoute(request, { params }) {
       // and is ALWAYS released in finally — success, validation failure, or restore.
       const lockId = `edit:${T}:${coll}:${docId}`
       const nowMs = Date.now()
+      // v5.9.4 — FENCING TOKEN (PR#24 split-brain): every writer owns a unique token stored on
+      // the lock doc. Ownership is re-verified before EVERY financial phase (reverse / re-post /
+      // restore) — a stalled editor whose lock was taken over is fenced out mid-flight instead
+      // of writing in parallel with the new owner.
+      const lockToken = uuidv4()
       try {
-        await db.collection('edit_locks').insertOne({ _id: lockId, at: new Date(nowMs) })
+        await db.collection('edit_locks').insertOne({ _id: lockId, at: new Date(nowMs), owner: lockToken })
       } catch {
         const curLk = await db.collection('edit_locks').findOne({ _id: lockId })
         if (curLk?.at && new Date(curLk.at).getTime() > nowMs - 60000) {
           return bad('⚠️ عملية تعديل أخرى قيد التنفيذ لنفس السجل — انتظر لحظة ثم أعد المحاولة (لا تكرار للأثر المالي)', 409)
         }
-        // stale lock (crashed editor) — atomic takeover bound to the observed timestamp
-        const takeLk = await db.collection('edit_locks').updateOne({ _id: lockId, at: curLk?.at ?? null }, { $set: { at: new Date(nowMs) } })
+        // stale lock (crashed editor) — atomic takeover bound to the observed timestamp + new owner token
+        const takeLk = await db.collection('edit_locks').updateOne({ _id: lockId, at: curLk?.at ?? null }, { $set: { at: new Date(nowMs), owner: lockToken } })
         if (takeLk.matchedCount === 0) return bad('⚠️ عملية تعديل أخرى قيد التنفيذ لنفس السجل — أعد المحاولة', 409)
+      }
+      // conditional ownership check — MUST pass before every destructive/financial step
+      const assertLockOwned = async () => {
+        const own = await db.collection('edit_locks').findOne({ _id: lockId, owner: lockToken }, { projection: { _id: 1 } })
+        return !!own
       }
       try {
         // Fresh reads INSIDE the lock (never a pre-claim snapshot)
         const oldDoc = await db.collection(coll).findOne({ id: docId, tenant_id: T })
         if (!oldDoc) return bad('السجل غير موجود', 404)
         if (!inBranch(oldDoc)) return bad('🚫 غير مصرح — هذا السجل يخص نطاقاً آخر (فرع/مركز)', 403) // v5.3 — IDOR guard
+        // v5.9.4 — an FX row whose posting never completed (pending/uncertain) is READ-ONLY
+        if (kind === 'fx' && oldDoc.je_status && oldDoc.je_status !== 'posted') {
+          return bad(`عملية الصرافة بحالة «${oldDoc.je_status}» غير مكتملة — لا تُعدل ولا تُحذف قبل المراجعة اليدوية (شاشة التسوية)`, 409)
+        }
+        // v5.9.4 — branch scope + allow-list on ALL body-supplied box/party ids (session-derived)
+        if (kind === 'fx') {
+          const fxEditBoxIds = [
+            ...(b.payment_method !== 'account' ? [b.box_currency_id, b.box_counter_id] : []),
+            ...(b.currency_ref?.kind === 'box' ? [b.currency_ref.id] : []),
+            ...(b.counter_ref?.kind === 'box' ? [b.counter_ref.id] : []),
+          ].filter(Boolean)
+          for (const bid of fxEditBoxIds) { const gErr = await assertBoxScope(bid); if (gErr) return bad(gErr, 403) }
+        } else {
+          const gTx = await assertTxScope(b)
+          if (gTx) return bad(gTx, 403)
+        }
         const oldJe = await db.collection('journal_entries').findOne({ ref_id: docId, tenant_id: T })
         // v4.6 — RAH-ACC: closed year/period guard on the ORIGINAL side BEFORE any destructive
         // step (same "both sides" rule as manual-journal edits in v4.5) — editing a document
         // whose journal is inside a closed period silently rewrites closed books.
         const perrUP = await assertOpenPeriod(db, T, oldJe?.date || oldDoc.date)
         if (perrUP) return bad(`السجل الأصلي داخل فترة/سنة مقفلة — لا يمكن تعديله: ${perrUP}`)
-        // Step 1: Reverse balance effects of the old record
+        // Step 1: Reverse balance effects of the old record — fenced (ownership verified)
+        if (!(await assertLockOwned())) return bad('⚠️ فقد هذا الطلب ملكية قفل التعديل (استؤنف متأخراً) — لم يُنفذ أي أثر مالي: أعد المحاولة', 409)
         await reverseTransactionEffects(db, T, kind, oldDoc)
         // Step 2: Delete old JE(s) — deleteMany also HEALS any orphan duplicate journal left
         // by the pre-fix race (same ref_id) so the ledger converges back to exactly one JE.
         await db.collection('journal_entries').deleteMany({ ref_id: docId, tenant_id: T })
         // Step 3: Delete the old record so we can re-insert with same id
         await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
-        // Step 4: Re-create with same id + skip quota (edit doesn't count against limit)
+        // Step 4: Re-create with same id + skip quota (edit doesn't count against limit) — fenced
         let result
-        const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at, branchId: oldDoc.branch_id ?? null, preserveNo: oldDoc.no, preserveOpId: oldDoc.op_id ?? null } // v5.3 — preserve origin branch · v5.9 — preserve voucher number · v5.9.3 — preserve fx op_id
+        const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at, branchId: oldDoc.branch_id ?? null, preserveNo: oldDoc.no, preserveOpId: oldDoc.op_id ?? null, scopeB: B } // v5.3 — preserve origin branch · v5.9 — voucher number · v5.9.3 — fx op_id · v5.9.4 — session scope
         try {
-          if (kind === 'tickets') result = await createTicket(db, T, b, opts)
+          if (!(await assertLockOwned())) {
+            result = { error: 'فقد هذا الطلب ملكية قفل التعديل بعد عكس الأثر القديم — أُعيدت الحالة الأصلية' }
+          }
+          else if (kind === 'tickets') result = await createTicket(db, T, b, opts)
           else if (kind === 'visas') result = await createVisa(db, T, b, opts)
           else if (kind === 'services') result = await createService(db, T, b, opts)
-          else if (kind === 'vouchers') result = await createVoucher(db, T, { ...b, type: b.type || oldDoc.type, created_by: oldDoc.created_by || '' }, opts)
+          else if (kind === 'vouchers') result = await createVoucher(db, T, { ...b, type: b.type || oldDoc.type }, { ...opts, actor: oldDoc.created_by || '' }) // v5.9.4 — original creator preserved via opts (never body)
           else if (kind === 'fx') result = await createFx(db, T, { ...b, type: b.type || oldDoc.type }, opts)
         } catch (createErr) {
           // v3.88.5 — F-020: thrown errors (e.g. PARTY_NO_LEAF_ACCOUNT) take the SAME restore path
@@ -8330,6 +8497,10 @@ async function handleRoute(request, { params }) {
           // doc with the same id); order is doc → JE → balances, and ANY restore failure aborts
           // with a loud 500 — balances can never be restored while the doc/JE restore failed.
           try {
+            if (!(await assertLockOwned())) {
+              console.error(`[F-020] CRITICAL: lost lock ownership before restore for ${kind}/${docId}`)
+              return bad(`فشل التعديل (${result.error}) وفقد الطلب ملكية القفل قبل الاستعادة — لا تُعد المحاولة؛ يلزم فحص يدوي فوري للسجل ${docId}`, 500)
+            }
             await db.collection(coll).replaceOne({ id: docId, tenant_id: T }, oldDoc, { upsert: true })
             if (oldJe) await db.collection('journal_entries').replaceOne({ id: oldJe.id, tenant_id: T }, oldJe, { upsert: true })
             await restoreTransactionEffects(db, T, kind, oldDoc)
@@ -8341,16 +8512,22 @@ async function handleRoute(request, { params }) {
         }
         return ok(result.doc)
       } finally {
-        // v5.5.3 — OWNERSHIP-BOUND release: delete ONLY the lock WE own (matching our timestamp).
-        // Without this, a stalled editor (>60s) finishing late would delete the lock of the editor
-        // that legitimately took over — letting a THIRD editor enter mid-window (double processing).
-        try { await db.collection('edit_locks').deleteOne({ _id: lockId, at: new Date(nowMs) }) } catch { }
+        // v5.9.4 — OWNER-TOKEN release (stronger than the v5.5.3 timestamp match): delete ONLY
+        // the lock THIS request owns — a fenced-out stalled editor can never release the lock
+        // of the writer that legitimately took over.
+        try { await db.collection('edit_locks').deleteOne({ _id: lockId, owner: lockToken }) } catch { }
       }
     }
 
     // Manual Journal Voucher (single-currency or dual)
     if (route === '/journal-entries' && method === 'POST') {
       const b = await request.json()
+      // v5.9.4 — branch scope on every line-level party (box/client/supplier) — session-derived
+      for (const ln of (Array.isArray(b.lines) ? b.lines : [])) {
+        if (!ln || !ln.party_id) continue
+        if (ln.party_type === 'box') { const gLn = await assertBoxScope(ln.party_id); if (gLn) return bad(gLn, 403) }
+        else if (ln.party_type === 'client' || ln.party_type === 'supplier') { const gLn = await assertPartyScope(ln.party_type === 'client' ? 'clients' : 'suppliers', ln.party_id); if (gLn) return bad(gLn, 403) }
+      }
       const result = await createManualJournal(db, T, b, { branchId: B }) // v5.3
       if (result.error) {
         // v4.8.2 — PR#18 (final point): the explicit unsafe state from createManualJournal
@@ -8454,12 +8631,35 @@ async function handleRoute(request, { params }) {
     // ============ Currency Exchange (Buy/Sell) ============
     if (route === '/fx' && method === 'GET') {
       const drFx = periodFilterExpr(q) // v5.7 — unified date filter
-      return respondList(db, 'currency_exchanges', drFx ? { ...tf, ...drFx } : tf, { date: -1, created_at: -1 }, q)
+      // v5.9.4 — BRANCH SCOPE (was tenant-wide leak): branch users see ONLY their branch
+      return respondList(db, 'currency_exchanges', drFx ? { ...btf, ...drFx } : btf, { date: -1, created_at: -1 }, q)
     }
     if (route === '/fx' && method === 'POST') {
       const b = await request.json()
-      const result = await createFx(db, T, b, { branchId: B }) // v5.3
-      if (result.error) return bad(result.error)
+      // v5.9.4 — backend box scope + allow-list guard (session-derived; body IDs never trusted)
+      const fxBoxIds = [
+        ...(b.payment_method !== 'account' ? [b.box_currency_id, b.box_counter_id] : []),
+        ...(b.currency_ref?.kind === 'box' ? [b.currency_ref.id] : []),
+        ...(b.counter_ref?.kind === 'box' ? [b.counter_ref.id] : []),
+      ].filter(Boolean)
+      for (const bid of fxBoxIds) { const gErr = await assertBoxScope(bid); if (gErr) return bad(gErr, 403) }
+      let result
+      try {
+        result = await createFx(db, T, b, { branchId: B, scopeB: B }) // v5.3 · v5.9.4 scoped refs
+      } catch (fxThrown) {
+        // v5.9.4 — thrown uncertain states (compensation failure) keep unsafe_state/no_retry too
+        if (fxThrown?.unsafe_state) {
+          return cors(NextResponse.json({ error: `⛔ ${fxThrown.message}`, unsafe_state: fxThrown.unsafe_state, no_retry: true }, { status: 500 }))
+        }
+        throw fxThrown
+      }
+      if (result.error) {
+        // v5.9.4 — unsafe_state/no_retry are NEVER dropped: blind client retry is forbidden
+        if (result.unsafe_state) {
+          return cors(NextResponse.json({ error: `⛔ ${result.error}`, unsafe_state: result.unsafe_state, no_retry: true }, { status: 500 }))
+        }
+        return bad(result.error)
+      }
       return ok(result.duplicate ? { ...result.doc, duplicate: true } : result.doc) // v5.9.2 — idempotent replay signalled
     }
 
@@ -8485,6 +8685,9 @@ async function handleRoute(request, { params }) {
       const kind = String(b.party_type || 'account')
       if (kind === 'box' || kind === 'client' || kind === 'supplier') {
         const col = kind === 'box' ? 'boxes' : kind === 'client' ? 'clients' : 'suppliers'
+        // v5.9.4 — branch scope + box allow-list on the opening target (session-derived)
+        const gOp = kind === 'box' ? await assertBoxScope(b.party_id) : await assertPartyScope(col, b.party_id)
+        if (gOp) return bad(gOp, 403)
         const party = await db.collection(col).findOne({ id: String(b.party_id || ''), tenant_id: T })
         if (!party) return bad(kind === 'box' ? 'الصندوق غير موجود' : kind === 'client' ? 'العميل غير موجود' : 'المورد غير موجود')
         accountCode = party.account_code || null
@@ -8507,7 +8710,7 @@ async function handleRoute(request, { params }) {
       const targetLine = { account_code: accountCode, account_name: accountName, party_type: partyType, party_id: partyId, party_name: accountName, debit: side === 'debit' ? amount : 0, credit: side === 'credit' ? amount : 0 }
       const equityLine = { account_code: COA.OPENING_EQUITY, account_name: OPENING_EQUITY_NAME, debit: side === 'credit' ? amount : 0, credit: side === 'debit' ? amount : 0 }
       const je = {
-        id: uuidv4(), tenant_id: T, date: bizDayStart(date), currency, ref_type: 'opening', ref_id: null, // v3.88.4 — F-017: Date-typed (was string)
+        id: uuidv4(), tenant_id: T, branch_id: B, /* v5.9.4 — branch dimension on opening entries */ date: bizDayStart(date), currency, ref_type: 'opening', ref_id: null, // v3.88.4 — F-017: Date-typed (was string)
         description: `قيد افتتاحي — ${accountName}${b.note ? ' — ' + String(b.note).slice(0, 300) : ''}`,
         lines: [targetLine, equityLine], created_by: sess.user.email, created_at: new Date(),
       }
@@ -8638,11 +8841,13 @@ async function handleRoute(request, { params }) {
 
     // Dashboard
     if (route === '/dashboard' && method === 'GET') {
-      return ok(await computeDashboard(db, T))
+      // v5.9.4 — branch user: OWN branch only; HQ may pick ?branch=<id>|hq or omit (all)
+      const dashScope = B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null)
+      return ok(await computeDashboard(db, T, dashScope))
     }
 
     // Reports
-    if (route === '/reports/profits' && method === 'GET') return ok(await reportProfits(db, T, q))
+    if (route === '/reports/profits' && method === 'GET') return ok(await reportProfits(db, T, { ...q, _branch_id: B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) })) // v5.9.4 — branch scope
     if (route === '/reports/statement' && method === 'GET') {
       // v5.3 — branch user: (1) party must be inside his branch scope (2) rows/summary
       // derive ONLY from his branch's journals. HQ (B=null) keeps full-office behavior.
@@ -8669,6 +8874,10 @@ async function handleRoute(request, { params }) {
       const minQty = Number(q.min_qty) || 0            // count filter
       const searchText = (q.search || '').toString().trim().toLowerCase()
       const baseFilter = { tenant_id: T }
+      // v5.9.4 — BRANCH SCOPE (was tenant-wide leak): branch user sees ONLY his branch;
+      // HQ may pick ?branch=<id>|hq explicitly or omit for office-wide.
+      if (B) baseFilter.branch_id = B
+      else if (q.branch) baseFilter.branch_id = q.branch === 'hq' ? null : q.branch
       if (from) baseFilter.date = { ...(baseFilter.date || {}), $gte: from }
       if (to) baseFilter.date = { ...(baseFilter.date || {}), $lte: to }
       if (clientId) baseFilter.client_id = clientId
@@ -9178,7 +9387,7 @@ async function approveMeraajInboundBooking(db, T, inbound, actor = null) {
     if (Object.keys(rooms_summary).length === 0) rooms_summary = null
   }
   const bookingDoc = {
-    id: uuidv4(), tenant_id: T, package_id: pkg.id,
+    id: uuidv4(), tenant_id: T, branch_id: pkg.branch_id ?? null, /* v5.9.4 — inherits the package's scope */ package_id: pkg.id,
     client_id: cli.id, pilgrim_name: clientName,
     pax_count: totalPax, pax_adults: adults, pax_children: children, pax_infants: infants,
     pax_billed: paxBilled, pax_seats: paxBilled,
@@ -10238,7 +10447,7 @@ async function createVoucher(db, T, b, opts = {}) {
     check_no: String(b.check_no || '').slice(0, 60),
     check_bank: String(b.check_bank || '').slice(0, 120),
     check_date: b.check_date || '',
-    created_by: b.created_by || opts.actor || '',
+    created_by: opts.actor || '', // v5.9.4 — SESSION-ONLY identity: b.created_by (body) is never trusted
     ...(opts.existingId ? { updated_at: new Date() } : {}),
   }
   // v5.9 — auto voucher number (RV-/PV-): edits preserve the ORIGINAL number
@@ -10283,18 +10492,25 @@ async function createVoucher(db, T, b, opts = {}) {
   const { _id, ...rest } = doc; return { doc: rest }
 }
 
-async function resolveAccountRef(db, T, ref) {
+async function resolveAccountRef(db, T, ref, scopeB = null) {
+  // v5.9.4 — scopeB (SESSION branch) enforces branch isolation on balance-tracked refs:
+  // a cross-branch box/client/supplier resolves to null (indistinguishable from not-found —
+  // existence is never leaked). COA accounts are office-unified (ledger-only, no cached balance).
+  const inScope = (d) => !scopeB || (d && (d.branch_id || null) === scopeB)
   if (!ref || !ref.id) return null
   if (ref.kind === 'client') {
     const d = await db.collection('clients').findOne({ id: ref.id, tenant_id: T })
+    if (d && !inScope(d)) return null
     return d ? { kind: 'client', id: d.id, name: d.name, code: partyLeafCode(d, COA.CLIENTS), updateBalance: true, collection: 'clients', debitSign: +1 } : null
   }
   if (ref.kind === 'supplier') {
     const d = await db.collection('suppliers').findOne({ id: ref.id, tenant_id: T })
+    if (d && !inScope(d)) return null
     return d ? { kind: 'supplier', id: d.id, name: d.name, code: partyLeafCode(d, COA.SUPPLIERS), updateBalance: true, collection: 'suppliers', debitSign: -1 } : null
   }
   if (ref.kind === 'box') {
     const d = await db.collection('boxes').findOne({ id: ref.id, tenant_id: T })
+    if (d && !inScope(d)) return null
     return d ? { kind: 'box', id: d.id, name: d.name_ar, code: partyLeafCode(d, d.type === 'cash' ? COA.CASHBOXES : COA.BANKS), updateBalance: true, collection: 'boxes', debitSign: +1 } : null
   }
   if (ref.kind === 'account') {
@@ -10338,14 +10554,10 @@ async function createFx(db, T, b, opts = {}) {
     return { error: `محاولة سابقة بنفس المعرف حالتها «${prevFx.je_status || 'pending'}» غير مكتملة — راجع اليومية قبل أي إعادة (لا يُعاد استخدام المعرف)` }
   }
   if (!claimed) {
-    // claim held with no doc yet → truly in-flight now, or a crashed pre-insert attempt
-    // (stale >120s → atomic takeover bound to the observed timestamp)
-    const curCl = await db.collection('op_claims').findOne({ _id: claimId })
-    if (curCl?.at && Date.now() - new Date(curCl.at).getTime() > 120000) {
-      const take = await db.collection('op_claims').updateOne({ _id: claimId, at: curCl.at }, { $set: { at: claimAt } })
-      if (take.matchedCount === 1) claimed = true
-    }
-    if (!claimed) return { error: 'عملية متزامنة بنفس المعرف قيد التنفيذ الآن — لن تُنشأ عملية مكررة؛ تحقق من سجل الصرافة بعد لحظات' }
+    // v5.9.4 — NO auto-takeover on FINANCIAL claims (split-brain guard): a stalled original
+    // writer could resume AFTER a takeover and post in parallel with the new owner. The op_id
+    // stays reserved — review the FX log, then create a NEW operation with a NEW op_id.
+    return { error: 'معرف العملية محجوز لمحاولة سابقة/متزامنة لم تُسجَّل نتيجتها — لا استيلاء تلقائياً على الأقفال المالية: راجع سجل الصرافة ثم أنشئ عملية جديدة بمعرف جديد' }
   }
   const result = await createFxInner(db, T, { ...b, op_id: opId }, opts)
   if (result?.error) {
@@ -10388,8 +10600,8 @@ async function createFxInner(db, T, b, opts = {}) {
   // Resolve refs — 'cash' uses box_currency_id/box_counter_id; 'account' uses currency_ref/counter_ref (or falls back)
   const refCur = b.currency_ref ? { kind: b.currency_ref.kind, id: b.currency_ref.id } : { kind: 'box', id: b.box_currency_id }
   const refCounter = b.counter_ref ? { kind: b.counter_ref.kind, id: b.counter_ref.id } : { kind: 'box', id: b.box_counter_id }
-  const accCur = await resolveAccountRef(db, T, refCur)
-  const accCounter = await resolveAccountRef(db, T, refCounter)
+  const accCur = await resolveAccountRef(db, T, refCur, opts.scopeB ?? null) // v5.9.4 — session-branch scoped
+  const accCounter = await resolveAccountRef(db, T, refCounter, opts.scopeB ?? null)
   if (!accCur || !accCounter) return { error: payment_method === 'cash' ? 'اختر صناديق العملتين' : 'اختر الحسابين للطرفين' }
   // v5.6 — FAIL-FAST postability guard (BEFORE doc insert / balance side effects):
   // any COA account type (equity included) is welcome, but ONLY active LEAF accounts.
@@ -10463,7 +10675,9 @@ async function createFxInner(db, T, b, opts = {}) {
   if (fxPayRef.kind === 'box') {
     const payBox = await db.collection('boxes').findOne({ id: fxPayRef.id, tenant_id: T })
     const payBal = Number(payBox?.balances?.[fxPayCcy]) || 0
-    if (payBal - fxPayAmt < -0.005) return { error: `رصيد الصندوق "${fxPayRef.name}" بعملة ${fxPayCcy} (${payBal.toLocaleString()}) لا يكفي لدفع ${fxPayAmt.toLocaleString()} — لا يُسمح برصيد صندوق سالب في الصرافة` }
+    // v5.9.4 — fail-fast UX only (the REAL guard is the atomic conditional debit below);
+    // the box balance figure is never exposed in the message (cross-scope info leak).
+    if (payBal - fxPayAmt < -0.005) return { error: `رصيد الصندوق "${fxPayRef.name}" بعملة ${fxPayCcy} لا يكفي لدفع ${fxPayAmt.toLocaleString()} — لا يُسمح برصيد صندوق سالب في الصرافة` }
   }
   // v5.8 — FX-002 ATOMICITY: journal lines are built and DRY-RUN through the central gate
   // (enforceJournalInvariants) BEFORE the exchange doc is inserted or any balance moves.
@@ -10509,13 +10723,30 @@ async function createFxInner(db, T, b, opts = {}) {
       await db.collection('currency_exchanges').updateOne({ id: doc.id, tenant_id: T }, { $set: { je_status: 'uncertain', je_error: String(reason).slice(0, 400), uncertain_at: new Date() } })
     } catch (mErr) { console.error('[FX-002] failed to flag uncertain', doc.id, mErr) }
   }
+  // v5.9.4 — ATOMIC conditional box debit (PR#24): the old «check balance ثم $inc» window let
+  // two DIFFERENT operations both pass the pre-check and drive the box negative together.
+  // The sufficiency condition and the decrement are now ONE filtered MongoDB update —
+  // matched 0 ⇒ insufficient funds ⇒ zero effect. Credits/non-box refs keep the central path.
+  const applyFxDelta = async (col, pid, cur, delta) => {
+    if (!Number.isFinite(Number(delta))) throw new Error(`قيمة غير صالحة لتحديث الرصيد (${delta}) — أُوقفت العملية لحماية الأرصدة`)
+    if (col === 'boxes' && delta < 0) {
+      const need = Math.abs(delta)
+      const rAtomic = await db.collection('boxes').updateOne(
+        { id: pid, tenant_id: T, [`balances.${cur}`]: { $gte: need - 0.005 } },
+        { $inc: { [`balances.${cur}`]: delta } }
+      )
+      if (rAtomic.matchedCount !== 1) throw new Error(`رصيد الصندوق بعملة ${cur} لا يكفي لخصم ${need.toLocaleString()} — منع ذري للرصيد السالب (لا أثر مالي)`)
+      return
+    }
+    await updateBalance(db, col, { id: pid, tenant_id: T }, cur, delta)
+  }
   try {
     if (accCur.updateBalance) {
-      await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, b.currency, debitAmtCur * accCur.debitSign)
+      await applyFxDelta(accCur.collection, accCur.id, b.currency, debitAmtCur * accCur.debitSign)
       appliedFx.push({ col: accCur.collection, pid: accCur.id, cur: b.currency, delta: debitAmtCur * accCur.debitSign })
     }
     if (accCounter.updateBalance) {
-      await updateBalance(db, accCounter.collection, { id: accCounter.id, tenant_id: T }, b.counter_currency, debitAmtCounter * accCounter.debitSign)
+      await applyFxDelta(accCounter.collection, accCounter.id, b.counter_currency, debitAmtCounter * accCounter.debitSign)
       appliedFx.push({ col: accCounter.collection, pid: accCounter.id, cur: b.counter_currency, delta: debitAmtCounter * accCounter.debitSign })
     }
   } catch (balErr) {
@@ -10698,11 +10929,13 @@ async function createManualJournal(db, T, b, opts = {}) {
   }
 }
 
-async function computeDashboard(db, T) {
+async function computeDashboard(db, T, scopeB = null) {
   const now = new Date()
   const todayStart = bizDayStart(bizTodayISO()) // v3.88.4 — U-001/U-014: business-TZ day boundary
   const monthAgo = new Date(now); monthAgo.setDate(monthAgo.getDate() - 30)
-  const tf = { tenant_id: T }
+  // v5.9.4 — BRANCH SCOPE (PR#24): scopeB = branch id (branch user / HQ pick) or '__HQ__'
+  // (HQ-only records incl. legacy without branch_id) or null (office-wide, HQ default).
+  const tf = scopeB === '__HQ__' ? { tenant_id: T, branch_id: null } : scopeB ? { tenant_id: T, branch_id: scopeB } : { tenant_id: T }
   const rates = (await db.collection('tenant_settings').findOne(tf))?.rates || DEFAULT_RATES
 
   const [ticketsToday, visasToday, servicesToday, ticketsMonth, visasMonth, servicesMonth, vouchersTodayCount, fxTodayCount] = await Promise.all([
@@ -10748,13 +10981,13 @@ async function computeDashboard(db, T) {
   // v3.0 — Visa expiration alerts: visas within 10 days of expected exit, not yet exited
   const in10Days = new Date(now); in10Days.setDate(in10Days.getDate() + 10)
   const visaAlerts = await db.collection('visas').find({
-    tenant_id: T,
+    ...tf,
     is_exited: { $ne: true },
     expected_exit_date: { $ne: null, $gte: todayStart, $lte: in10Days },
   }).sort({ expected_exit_date: 1 }).limit(50).toArray()
   // Also flag visas that have already passed expected exit
   const overdue = await db.collection('visas').find({
-    tenant_id: T,
+    ...tf,
     is_exited: { $ne: true },
     expected_exit_date: { $ne: null, $lt: todayStart },
   }).sort({ expected_exit_date: 1 }).limit(50).toArray()
@@ -10809,7 +11042,10 @@ async function reportProfits(db, T, q) {
   // with string/Date-safe filtering (no data migration).
   const from = q.from ? bizDayStart(q.from) : new Date(0)
   const to = q.to ? bizDayEnd(q.to) : bizDayEnd(bizTodayISO())
-  const tf = { tenant_id: T, is_refunded: { $ne: true }, ...dateRangeExpr('date', from, to) }
+  // v5.9.4 — BRANCH SCOPE (was tenant-wide leak): q._branch_id = branch id or '__HQ__'
+  // (HQ-only incl. legacy without branch_id) or null (office-wide, HQ default)
+  const brF = q._branch_id === '__HQ__' ? { branch_id: null } : q._branch_id ? { branch_id: q._branch_id } : {}
+  const tf = { tenant_id: T, is_refunded: { $ne: true }, ...brF, ...dateRangeExpr('date', from, to) }
   const [tickets, visas, services] = await Promise.all([
     db.collection('tickets').find(tf).sort({ date: 1 }).toArray(),
     db.collection('visas').find(tf).sort({ date: 1 }).toArray(),

@@ -4051,7 +4051,25 @@ function openPrintPreview(html) {
   if (!w) return toast.error('السماح للنوافذ المنبثقة مطلوب للمعاينة والطباعة')
   w.document.open(); w.document.write(html); w.document.close(); w.focus()
 }
-function buildUnifiedVoucherHTML({ settings, tenant, title, docNo, dateStr, rows = [], amount, currency, amountWords, amountsMulti = null, description, notes, parties = null, branchName, userName, signatures = ['المحاسب', 'المستلم / المسلّم'], thanks = true }) {
+// v5.9.4 — PRINTING BRANCH FIX (PR#24): the printed branch is the RECORD's branch
+// (record.branch_id / je.branch_id), NEVER the logged-in user's branch — HQ printing a
+// Branch-1 document must show «Branch 1». Names resolve from a cached /tenant/branches
+// map, with the logged-in branch context as a zero-cost fast path.
+let __ownBranchRef = null
+let __branchNamesPromise = null
+async function resolveRecordBranchName(branchId) {
+  if (!branchId) return 'المركز الرئيسي'
+  if (__ownBranchRef?.id === branchId && __ownBranchRef?.name) return __ownBranchRef.name
+  try {
+    if (!__branchNamesPromise) __branchNamesPromise = api('/tenant/branches').catch(() => null)
+    const r = await __branchNamesPromise
+    const list = Array.isArray(r) ? r : (r?.branches || [])
+    const hit = list.find(x => x && x.id === branchId)
+    if (hit?.name) return hit.name
+  } catch { }
+  return 'فرع آخر'
+}
+function buildUnifiedVoucherHTML({ settings, tenant, title, docNo, dateStr, rows = [], amount, currency, amountWords, amountsMulti = null, description, notes, parties = null, branchName, userName, createdBy, signatures = ['المحاسب', 'المستلم / المسلّم'], thanks = true }) {
   const color = settings?.primary_color || '#1e3a8a'
   const nameAr = escHtml(settings?.agency_name || tenant?.name || 'مكتب السفريات')
   const nameEn = settings?.agency_name_en ? escHtml(settings.agency_name_en) : ''
@@ -4137,7 +4155,8 @@ body{color:#0f172a;background:#f1f5f9;padding:16px}
   ${notes ? `<div class="desc"><b>ملاحظات:</b> ${escHtml(notes)}</div>` : ''}
   <div class="meta-strip">
     <span>🏢 الفرع: <b>${escHtml(branchName || 'المركز الرئيسي')}</b></span>
-    <span>👤 المستخدم: <b dir="ltr">${escHtml(userName || '—')}</b></span>
+    ${createdBy ? `<span>👤 المنشئ: <b dir="ltr">${escHtml(createdBy)}</b></span>` : ''}
+    <span>🖨️ طبع بواسطة: <b dir="ltr">${escHtml(userName || '—')}</b></span>
     <span>🖨️ طُبع: <b>${new Date().toLocaleString('ar-EG')}</b></span>
   </div>
   <div class="sigs">${(signatures || []).map(s => `<div>${escHtml(s)}</div>`).join('')}</div>
@@ -4148,7 +4167,7 @@ body{color:#0f172a;background:#f1f5f9;padding:16px}
 </body></html>`
 }
 // إشعار مدين / دائن لسند القيد — يعرض أسطر الاتجاه المطلوب فقط
-function printJournalNotice({ je, side, settings, tenant, branchName, userName }) {
+async function printJournalNotice({ je, side, settings, tenant, branchName, userName }) {
   const isDebit = side === 'debit'
   const lines = (je.lines || []).filter(l => (isDebit ? Number(l.debit) : Number(l.credit)) > 0)
   if (!lines.length) return toast.error(`لا توجد أسطر ${isDebit ? 'مدينة' : 'دائنة'} في هذا القيد`)
@@ -4164,6 +4183,8 @@ function printJournalNotice({ je, side, settings, tenant, branchName, userName }
   lines.forEach(l => { const c = l.currency || je.currency; byCur[c] = (byCur[c] || 0) + (isDebit ? Number(l.debit) : Number(l.credit)) })
   const curs = Object.keys(byCur)
   const single = curs.length === 1 && curs[0] !== 'MULTI'
+  // v5.9.4 — the notice prints the JOURNAL's branch (je.branch_id), not the printer's
+  const jeBranchName = await resolveRecordBranchName(je.branch_id ?? null)
   openPrintPreview(buildUnifiedVoucherHTML({
     settings, tenant,
     title: isDebit ? 'سند قيد — إشعار مدين' : 'سند قيد — إشعار دائن',
@@ -4172,7 +4193,7 @@ function printJournalNotice({ je, side, settings, tenant, branchName, userName }
     amount: single ? byCur[curs[0]] : undefined,
     currency: single ? curs[0] : undefined,
     amountsMulti: single ? null : curs.map(c => ({ display: fmt(byCur[c], c), words: amountInWords(byCur[c], c) })),
-    description: je.description, branchName, userName: userName || je.created_by,
+    description: je.description, branchName: jeBranchName, createdBy: je.created_by || '', userName,
     signatures: ['المحاسب', 'المدير المالي', isDebit ? 'توقيع الطرف المدين' : 'توقيع الطرف الدائن'],
   }))
 }
@@ -4190,12 +4211,14 @@ function printInterbranchVoucher({ tx, settings, tenant, userName }) {
     },
     amount: tx.amount, currency: tx.currency,
     description: tx.description, notes: tx.notes,
-    branchName: tx.source_branch_name, userName: userName || tx.created_by,
+    branchName: tx.source_branch_name, createdBy: tx.created_by || '', userName, // v5.9.4 — creator ≠ printer
     signatures: ['توقيع الطرف الأول (المصدر)', 'توقيع الطرف الثاني (الوجهة)'],
   }))
 }
 
-function printVoucher({ kind, record, settings, tenant, branchName, userName }) {
+async function printVoucher({ kind, record, settings, tenant, branchName, userName }) {
+  // v5.9.4 — the voucher prints the RECORD's branch (record.branch_id), never the printer's
+  const recBranchName = await resolveRecordBranchName(record?.branch_id ?? null)
   const titleMap = {
     ticket: 'سند/فاتورة حجز تذكرة',
     visa: 'سند/فاتورة تأشيرة/خدمة',
@@ -4364,7 +4387,7 @@ function printVoucher({ kind, record, settings, tenant, branchName, userName }) 
       dateStr: fmtDate(r.date), rows,
       amount: r.amount, currency: r.currency,
       description: r.description, notes: r.notes,
-      branchName, userName,
+      branchName: recBranchName, createdBy: record?.created_by || '', userName, // v5.9.4 — record branch + creator ≠ printer
       signatures: ['المحاسب', 'أمين الصندوق', isR ? 'توقيع الدافع' : 'توقيع المستلم'],
     }))
     return
@@ -13117,7 +13140,7 @@ function OutOfQuotaModal({ open, onOpenChange, tenant }) {
 // CURRENCY EXCHANGE SCREEN (Buy / Sell)
 // ================================================================
 function FxScreen() {
-  const { settings, tenant } = useAuth()
+  const { user, settings, tenant } = useAuth() // v5.9.4 — user for printed_by
   const [txs, setTxs] = useState([])
   const [boxes, setBoxes] = useState([])
   const [openBuy, setOpenBuy] = useState(false)
@@ -13139,18 +13162,21 @@ function FxScreen() {
   const totalGain = filtered.reduce((s, t) => s + (t.fx_gain_usd || t.fx_gain_base || 0), 0)
   const handleEdit = () => {
     if (!selected) return toast.error('اختر عملية أولاً')
+    // v5.9.4 — pending/uncertain FX rows are READ-ONLY (review-first; backend enforces too)
+    if (selected.je_status && selected.je_status !== 'posted') return toast.error(`⚠️ عملية بحالة «${selected.je_status === 'pending' ? 'معلّقة' : 'غير مؤكدة'}» — قراءة فقط حتى المراجعة اليدوية`)
     setEditing(selected)
     if (selected.type === 'buy') setOpenBuy(true); else setOpenSell(true)
   }
   const handleDelete = async () => {
     if (!selectedId) return
+    if (selected?.je_status && selected.je_status !== 'posted') return toast.error(`⚠️ عملية بحالة «${selected.je_status === 'pending' ? 'معلّقة' : 'غير مؤكدة'}» — لا تُحذف قبل المراجعة اليدوية`) // v5.9.4
     if (!(await askConfirm({ title: 'حذف العملية', desc: 'سيتم حذف هذه العملية وعكس القيد المحاسبي المرتبط بها.', variant: 'danger', confirmLabel: 'تأكيد الحذف' }))) return
     try { await api(`/fx/${selectedId}`, { method: 'DELETE' }); toast.success('تم الحذف'); setSelectedId(null); load() }
     catch (e) { toast.error(e.message) }
   }
   const handlePrintVoucher = () => {
     if (!selected) return toast.error('اختر عملية أولاً')
-    printVoucher({ kind: 'fx', record: selected, settings, tenant })
+    printVoucher({ kind: 'fx', record: selected, settings, tenant, userName: user?.email })
   }
   const handlePrintTable = () => {
     const totals = { amount: 0, counter_amount: 0, fx_gain: 0 }
@@ -13212,20 +13238,26 @@ function FxScreen() {
               <TableHeader><TableRow>
                 <TableHead className="w-8"></TableHead>
                 <TableHead>التاريخ</TableHead><TableHead>النوع</TableHead>
+                <TableHead>الحالة</TableHead>
                 <TableHead>المبلغ</TableHead><TableHead>السعر</TableHead>
                 <TableHead>القيمة</TableHead><TableHead>العميل</TableHead>
                 <TableHead>الغرض</TableHead>
                 <TableHead className="text-left">فرق الصرف</TableHead>
               </TableRow></TableHeader>
               <TableBody>
-                {filtered.length === 0 && <TableRow><TableCell colSpan={9} className="text-center text-slate-400 py-8">لا توجد عمليات صرافة</TableCell></TableRow>}
+                {filtered.length === 0 && <TableRow><TableCell colSpan={10} className="text-center text-slate-400 py-8">لا توجد عمليات صرافة</TableCell></TableRow>}
                 {filtered.map(t => {
                   const gain = t.fx_gain_usd || t.fx_gain_base || 0
+                  const fxPosted = !t.je_status || t.je_status === 'posted' // v5.9.4 — legacy rows = posted
                   return (
                     <TableRow key={t.id} className={selectedId === t.id ? 'bg-blue-50' : 'cursor-pointer hover:bg-slate-50'} onClick={() => setSelectedId(t.id === selectedId ? null : t.id)}>
                       <TableCell><input type="radio" checked={selectedId === t.id} onChange={() => setSelectedId(t.id)} /></TableCell>
                       <TableCell className="text-xs">{fmtDate(t.date)}</TableCell>
                       <TableCell><Badge className={t.type === 'buy' ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100' : 'bg-rose-100 text-rose-700 hover:bg-rose-100'}>{t.type === 'buy' ? 'شراء' : 'بيع'}</Badge></TableCell>
+                      <TableCell>{fxPosted
+                        ? <Badge className="bg-emerald-50 text-emerald-600 hover:bg-emerald-50 text-[10px]">مرحّلة</Badge>
+                        : <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100 text-[10px]" title="عملية غير مكتملة — قراءة فقط: لا تعديل ولا حذف قبل المراجعة اليدوية">{t.je_status === 'pending' ? '⏳ معلّقة' : '⚠️ غير مؤكدة'}</Badge>
+                      }</TableCell>
                       <TableCell className="font-bold">{fmt(t.amount, t.currency)}</TableCell>
                       <TableCell className="font-mono text-xs">{t.exchange_rate}</TableCell>
                       <TableCell className="font-bold">{fmt(t.counter_amount, t.counter_currency)}</TableCell>
@@ -14001,6 +14033,7 @@ function App() {
   const refreshMe = useCallback(async () => {
     try {
       const r = await api('/auth/me')
+      __ownBranchRef = r.branch || null // v5.9.4 — print-time record-branch resolver fast path
       setAuth({ loading: false, user: r.user, tenant: r.tenant, settings: r.settings, branch: r.branch || null }) // v5.3 — current-branch context
     } catch { setAuth({ loading: false, user: null, tenant: null, settings: null, branch: null }) }
   }, [])
