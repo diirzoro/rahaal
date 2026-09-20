@@ -68,6 +68,8 @@ agenthub/agents/youtube/db
 **/*.tar.gz
 **/*.tar
 **/*.tgz
+# Rahaal Chrome Extension package MUST ship with the app (settings → إضافة المتصفح download)
+!public/rahal-extension.zip
 *.pack
 *.deb
 *.dylib
