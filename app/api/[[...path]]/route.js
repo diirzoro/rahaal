@@ -1082,16 +1082,29 @@ async function checkClientCredit(db, tenantId, clientId, saleAmount, currency, s
 }
 
 async function createJournalEntry(db, tenantId, { date, description, ref_type, ref_id, currency, lines }, opts = {}) {
-  // v4.5 — generic idempotency (code-level): a caller may pass opts.idempotencyKey;
-  // the same financial operation never produces two journals on retry/concurrent calls.
-  // (DB-level unique index is intentionally NOT created now — would require checking
-  // existing production data first. Logged as deferred DB hardening.)
+  // v5.9.3 — PR#24 review: ATOMIC idempotency claim. The old findOne→insertOne window let two
+  // TRULY CONCURRENT calls with the same key both pass the check and create two journals.
+  // A claim doc keyed on MongoDB's unique _id is a REAL lock: exactly ONE caller wins;
+  // the loser returns the committed journal (if saved) or throws jePhase 'commit_uncertain'
+  // (in-flight/incomplete — the caller must NOT compensate or re-post).
+  let jeClaimId = null
   if (opts.idempotencyKey) {
-    const existing = await db.collection('journal_entries').findOne({ tenant_id: tenantId, idempotency_key: opts.idempotencyKey })
-    if (existing) return existing
+    jeClaimId = `je_claim:${tenantId}:${opts.idempotencyKey}`
+    try {
+      await db.collection('op_claims').insertOne({ _id: jeClaimId, tenant_id: tenantId, kind: 'journal', key: opts.idempotencyKey, at: new Date() })
+    } catch (clErr) {
+      if (clErr?.code !== 11000) throw clErr
+      const existing = await db.collection('journal_entries').findOne({ tenant_id: tenantId, idempotency_key: opts.idempotencyKey })
+      if (existing) return existing
+      const dupErr = new Error('قيد بنفس مفتاح العملية قيد الكتابة الآن أو بحالة غير مكتملة — لن يُنشأ قيد مكرر (مراجعة مطلوبة)')
+      dupErr.jePhase = 'commit_uncertain'
+      throw dupErr
+    }
+    // Claim WON — journals created BEFORE claim docs existed (legacy) are still honored
+    const legacyJe = await db.collection('journal_entries').findOne({ tenant_id: tenantId, idempotency_key: opts.idempotencyKey })
+    if (legacyJe) return legacyJe
   }
-  // Enforce quota (skipped in edit mode, and bypassed entirely for unlimited tenants)
-  if (!opts.skipQuota) await assertJournalQuota(db, tenantId)
+  const releaseJeClaim = async () => { if (jeClaimId) { try { await db.collection('op_claims').deleteOne({ _id: jeClaimId }) } catch { } } }
   // v3.89 — opts.extra: optional passthrough marker fields (e.g. meraaj_booking_ref for
   // idempotent Meraaj postings). Spread FIRST so extras can NEVER override core JE fields.
   const je = { ...(opts.extra || {}), id: opts.existingJeId || uuidv4(), tenant_id: tenantId, date: new Date(date || Date.now()), description, ref_type, ref_id, currency, lines, created_at: opts.createdAt || new Date() }
@@ -1103,7 +1116,15 @@ async function createJournalEntry(db, tenantId, { date, description, ref_type, r
   je.branch_id = opts.branchId ?? null // v5.3 — branch dimension on every NEW journal (null = HQ)
   // v4.5 — CENTRAL INVARIANTS (Priority 1+2+5): no automatic or manual journal can
   // skip validation — lines/accounts/tenant/group/inactive/period/base-balance.
-  await enforceJournalInvariants(db, tenantId, je, opts)
+  // v5.9.3 — quota check + invariants are pre-write: a rejection here provably wrote NOTHING,
+  // so the idempotency claim is released and the same key stays safely reusable.
+  try {
+    if (!opts.skipQuota) await assertJournalQuota(db, tenantId) // quota (skipped in edit mode / unlimited tenants)
+    await enforceJournalInvariants(db, tenantId, je, opts)
+  } catch (preErr) {
+    await releaseJeClaim()
+    throw preErr
+  }
   // v4.8.1 — PR#18-1: EXPLICIT WRITE PHASES.
   // Phase A — journal COMMIT. An insert error is verified against the collection:
   //   provably NOT saved  → e.jePhase='pre_commit'      (caller may compensate safely)
@@ -1118,8 +1139,8 @@ async function createJournalEntry(db, tenantId, { date, description, ref_type, r
       committed = !!(await db.collection('journal_entries').findOne({ id: je.id, tenant_id: tenantId }, { projection: { id: 1 } }))
       verified = true
     } catch { /* verification unavailable → state unknown */ }
-    if (!verified) { insErr.jePhase = 'commit_uncertain'; throw insErr }
-    if (!committed) { insErr.jePhase = 'pre_commit'; throw insErr }
+    if (!verified) { insErr.jePhase = 'commit_uncertain'; throw insErr } // claim KEPT — state unknown
+    if (!committed) { insErr.jePhase = 'pre_commit'; await releaseJeClaim(); throw insErr } // provably NOT saved → key reusable
     // committed=true: the journal IS saved — do not re-throw an "insert failure"
   }
   // Phase B — quota COUNTER. The journal is committed: a counter failure is NEVER
@@ -1201,7 +1222,50 @@ async function resolveIbScope(db, T, branchIdOrNull) {
 
 // ONE inter-branch financial operation = ATOMIC + IDEMPOTENT + AUDITABLE.
 // Either BOTH journals commit, or NOTHING has financial effect. Never one-sided.
+// v5.9.3 — PR#24 review: the old check(findOne)→insert→race-double-check sequence was NOT a
+// real lock — two truly concurrent calls could both pass. Replaced by an ATOMIC claim on
+// MongoDB's unique _id (`ib_claim:{tenant}:{op_id}`): exactly ONE caller ever proceeds for a
+// given op_id; the loser returns the posted tx (duplicate) or a review error — NEVER a second
+// transaction and NEVER a second pair of journals.
 async function postInterbranchTransaction(db, T, actor, b) {
+  const opId = String(b.op_id || '').trim()
+  if (!opId) return { error: 'op_id مطلوب (Idempotency)' }
+  const claimId = `ib_claim:${T}:${opId}`
+  const claimAt = new Date()
+  let claimed = false
+  try {
+    await db.collection('op_claims').insertOne({ _id: claimId, tenant_id: T, kind: 'interbranch', op_id: opId, at: claimAt })
+    claimed = true
+  } catch (clErr) {
+    if (clErr?.code !== 11000) return { error: `تعذر تأمين قفل العملية — أعد المحاولة: ${String(clErr?.message || clErr).slice(0, 120)}` }
+  }
+  // Claim WON or LOST — a previous registry doc with the SAME op_id decides the outcome
+  const prev = await db.collection('interbranch_transactions').findOne({ tenant_id: T, op_id: opId })
+  if (prev) {
+    if (prev.status === 'posted') return { duplicate: true, tx: prev }
+    return { error: `توجد عملية سابقة بنفس المعرف حالتها «${prev.status}» — راجعها ثم أنشئ عملية جديدة (لا يعاد استخدام op_id)` }
+  }
+  if (!claimed) {
+    // claim held with no registry doc yet → truly in-flight now, or a crashed pre-insert
+    // attempt (stale >120s → atomic takeover bound to the observed timestamp)
+    const curCl = await db.collection('op_claims').findOne({ _id: claimId })
+    if (curCl?.at && Date.now() - new Date(curCl.at).getTime() > 120000) {
+      const take = await db.collection('op_claims').updateOne({ _id: claimId, at: curCl.at }, { $set: { at: claimAt } })
+      if (take.matchedCount === 1) claimed = true
+    }
+    if (!claimed) return { error: 'عملية متزامنة بنفس المعرف قيد التنفيذ الآن — لن تُنشأ عملية مكررة؛ أعد التحميل وتحقق من السجل' }
+  }
+  const result = await postInterbranchTransactionInner(db, T, actor, b)
+  // zero-side-effect failure (validation — provably NO registry doc) → free the key so a
+  // corrected retry with the SAME op_id is allowed; ANY registry doc keeps the claim forever.
+  if (result?.error) {
+    const reg = await db.collection('interbranch_transactions').findOne({ tenant_id: T, op_id: opId }, { projection: { id: 1 } })
+    if (!reg) { try { await db.collection('op_claims').deleteOne({ _id: claimId }) } catch { } }
+  }
+  return result
+}
+
+async function postInterbranchTransactionInner(db, T, actor, b) {
   const type = String(b.type || '')
   if (!['receipt', 'payment', 'journal'].includes(type)) return { error: 'نوع العملية غير صحيح (receipt / payment / journal)' }
   const amount = Math.round((Number(b.amount) || 0) * 100) / 100
@@ -1213,13 +1277,6 @@ async function postInterbranchTransaction(db, T, actor, b) {
   // v5.9.2 — no future-dated inter-branch operations (verified BEFORE any write:
   // no counter increment, no jari ensure, no registry doc, no journal)
   if (b.date && isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ العملية بين الفروع)` }
-
-  // ---- Idempotency L1: the transaction registry (double click / retry / re-send) ----
-  const prev = await db.collection('interbranch_transactions').findOne({ tenant_id: T, op_id: opId })
-  if (prev) {
-    if (prev.status === 'posted') return { duplicate: true, tx: prev }
-    return { error: `توجد عملية سابقة بنفس المعرف حالتها «${prev.status}» — راجعها ثم أنشئ عملية جديدة (لا يعاد استخدام op_id)` }
-  }
 
   // ---- Scopes: MINE from the SESSION (never the body); counterparty validated inside the SAME office ----
   const myScope = await resolveIbScope(db, T, actor.branchId)
@@ -1288,13 +1345,9 @@ async function postInterbranchTransaction(db, T, actor, b) {
     created_by: actor.email, actor_user_id: actor.userId, actor_branch_id: actor.branchId ?? null,
     je_ids: [], created_at: new Date(),
   }
+  // v5.9.3 — single-writer guaranteed by the atomic ib_claim (op_claims _id lock): the old
+  // insert→race-double-check is obsolete — no concurrent same-op_id writer can reach here.
   await db.collection('interbranch_transactions').insertOne(tx)
-  // Race double-check (same op_id concurrent): keep the OLDEST registry doc only
-  const race = await db.collection('interbranch_transactions').find({ tenant_id: T, op_id: opId }).sort({ created_at: 1 }).limit(1).toArray()
-  if (race[0] && race[0].id !== txId) {
-    await db.collection('interbranch_transactions').deleteOne({ id: txId, tenant_id: T })
-    return race[0].status === 'posted' ? { duplicate: true, tx: race[0] } : { error: 'عملية متزامنة بنفس المعرف قيد التنفيذ — أعد التحميل' }
-  }
 
   // ---- Balanced journals (each side balanced INSIDE its own branch dimension) ----
   // v5.9 — party fields only for BOX sides (cached balance tracking); COA account sides
@@ -8245,7 +8298,7 @@ async function handleRoute(request, { params }) {
         await db.collection(coll).deleteOne({ id: docId, tenant_id: T })
         // Step 4: Re-create with same id + skip quota (edit doesn't count against limit)
         let result
-        const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at, branchId: oldDoc.branch_id ?? null, preserveNo: oldDoc.no } // v5.3 — preserve origin branch · v5.9 — preserve voucher number
+        const opts = { existingId: docId, skipQuota: true, createdAt: oldDoc.created_at, branchId: oldDoc.branch_id ?? null, preserveNo: oldDoc.no, preserveOpId: oldDoc.op_id ?? null } // v5.3 — preserve origin branch · v5.9 — preserve voucher number · v5.9.3 — preserve fx op_id
         try {
           if (kind === 'tickets') result = await createTicket(db, T, b, opts)
           else if (kind === 'visas') result = await createVisa(db, T, b, opts)
@@ -8254,9 +8307,24 @@ async function handleRoute(request, { params }) {
           else if (kind === 'fx') result = await createFx(db, T, { ...b, type: b.type || oldDoc.type }, opts)
         } catch (createErr) {
           // v3.88.5 — F-020: thrown errors (e.g. PARTY_NO_LEAF_ACCOUNT) take the SAME restore path
-          result = { error: createErr.message }
+          // v5.9.3 — EXCEPT unsafe/uncertain states: they must NEVER enter the restore path
+          result = { error: createErr.message, ...(createErr.unsafe_state ? { unsafe_state: createErr.unsafe_state } : {}) }
         }
         if (result.error) {
+          // v5.9.3 — PR#24 review: an UNCERTAIN new posting (commit_uncertain) may already be
+          // COMMITTED — re-inserting the old doc/JE and re-applying the old balances on top of
+          // it would DOUBLE the books. NO restore: document for manual review + loud no_retry 500.
+          if (result.unsafe_state) {
+            console.error(`[EDIT] CRITICAL unsafe state for ${kind}/${docId}:`, result.unsafe_state, result.error)
+            try {
+              await db.collection('je_audit').insertOne({ id: uuidv4(), tenant_id: T, action: 'edit_failed_unsafe_state', kind, doc_id: docId, unsafe_state: result.unsafe_state, balances_need_manual_review: true, error: String(result.error).slice(0, 300), at: new Date() })
+            } catch { }
+            return cors(NextResponse.json({
+              error: `⛔ ${result.error} — لم تُستعد الحالة القديمة (الأثر الجديد قد يكون محفوظاً): لا تُعد المحاولة؛ يلزم فحص يدوي فوري للسجل ${docId} وقيوده وأرصدته`,
+              unsafe_state: result.unsafe_state,
+              no_retry: true,
+            }, { status: 500 }))
+          }
           // v3.88.5 — F-020 ATOMIC RESTORE (review round): restore failures are NEVER swallowed.
           // replaceOne+upsert is idempotent (safe even if the failed create partially inserted a
           // doc with the same id); order is doc → JE → balances, and ANY restore failure aborts
@@ -10241,17 +10309,53 @@ async function resolveAccountRef(db, T, ref) {
   return null
 }
 
+// v5.9.3 — PR#24 review: FX creation idempotency is now a REAL atomic lock.
+//   • op_id is MANDATORY for every new exchange (no unprotected creation path exists).
+//   • The claim is an insertOne on MongoDB's unique _id (`fx_claim:{tenant}:{op_id}`) — two
+//     truly concurrent requests can never both pass (the old findOne→insertOne could).
+//   • The exchange doc carries je_status pending → posted; ONLY `posted` is ever answered as
+//     a successful duplicate — pending/uncertain returns a review error and NEVER re-executes.
+//   • A zero-side-effect failure (validation / full rollback — provably NO doc left) frees
+//     the key so a corrected retry with the SAME op_id stays possible.
 async function createFx(db, T, b, opts = {}) {
-  // v5.9.2 — FX IDEMPOTENCY: a client-supplied op_id makes creation retry-safe after a
-  // dropped response. Same key ⇒ return the already-saved exchange, NEVER create a second.
-  if (!opts.existingId && b.op_id) {
-    const prevFx = await db.collection('currency_exchanges').findOne({ tenant_id: T, op_id: String(b.op_id) })
-    if (prevFx) {
-      if (prevFx.je_status === 'uncertain') return { error: 'محاولة سابقة بنفس المعرف بحالة غير مؤكدة — راجع قيود اليومية قبل أي إعادة (لا يعاد استخدام المعرف)' }
-      const { _id, ...restPrev } = prevFx
-      return { doc: restPrev, duplicate: true }
-    }
+  // Edit mode (PUT) re-posts under the edit_locks mutex with the SAME doc id — no claim here
+  if (opts.existingId) return await createFxInner(db, T, b, opts)
+  const opId = String(b.op_id || '').trim()
+  if (!opId) return { error: 'op_id مطلوب (Idempotency) — لا تُقبل عملية صرافة جديدة بدون معرف عملية فريد' }
+  const claimId = `fx_claim:${T}:${opId}`
+  const claimAt = new Date()
+  let claimed = false
+  try {
+    await db.collection('op_claims').insertOne({ _id: claimId, tenant_id: T, kind: 'fx', op_id: opId, at: claimAt })
+    claimed = true
+  } catch (clErr) {
+    if (clErr?.code !== 11000) return { error: `تعذر تأمين قفل العملية — أعد المحاولة: ${String(clErr?.message || clErr).slice(0, 120)}` }
   }
+  // Claim WON or LOST — a previous exchange with the SAME op_id decides the outcome
+  const prevFx = await db.collection('currency_exchanges').findOne({ tenant_id: T, op_id: opId })
+  if (prevFx) {
+    if (prevFx.je_status === 'posted') { const { _id, ...restPrev } = prevFx; return { doc: restPrev, duplicate: true } }
+    return { error: `محاولة سابقة بنفس المعرف حالتها «${prevFx.je_status || 'pending'}» غير مكتملة — راجع اليومية قبل أي إعادة (لا يُعاد استخدام المعرف)` }
+  }
+  if (!claimed) {
+    // claim held with no doc yet → truly in-flight now, or a crashed pre-insert attempt
+    // (stale >120s → atomic takeover bound to the observed timestamp)
+    const curCl = await db.collection('op_claims').findOne({ _id: claimId })
+    if (curCl?.at && Date.now() - new Date(curCl.at).getTime() > 120000) {
+      const take = await db.collection('op_claims').updateOne({ _id: claimId, at: curCl.at }, { $set: { at: claimAt } })
+      if (take.matchedCount === 1) claimed = true
+    }
+    if (!claimed) return { error: 'عملية متزامنة بنفس المعرف قيد التنفيذ الآن — لن تُنشأ عملية مكررة؛ تحقق من سجل الصرافة بعد لحظات' }
+  }
+  const result = await createFxInner(db, T, { ...b, op_id: opId }, opts)
+  if (result?.error) {
+    const anyDoc = await db.collection('currency_exchanges').findOne({ tenant_id: T, op_id: opId }, { projection: { id: 1 } })
+    if (!anyDoc) { try { await db.collection('op_claims').deleteOne({ _id: claimId }) } catch { } }
+  }
+  return result
+}
+
+async function createFxInner(db, T, b, opts = {}) {
   if (isFutureDocDate(b.date)) return { error: `${FUTURE_DOC_DATE_MSG} (تاريخ عملية الصرافة)` } // v3.80
   // v4.5 — FAIL-FAST before box/party balance side effects (Priority 13)
   const perrFx = await assertOpenPeriod(db, T, b.date)
@@ -10391,7 +10495,8 @@ async function createFx(db, T, b, opts = {}) {
   // v5.9.2 — FX FULL ATOMICITY: doc insert + BOTH balance updates + journal creation are one
   // protected sequence. Any balance failure compensates exactly what was applied and removes
   // the doc (ZERO partial financial state). op_id is stored for retry-safe idempotency.
-  doc.op_id = b.op_id ? String(b.op_id) : null
+  doc.op_id = b.op_id ? String(b.op_id).trim() : (opts.preserveOpId || null)
+  doc.je_status = 'pending' // v5.9.3 — pending → posted; ONLY `posted` counts as a successful duplicate
   await db.collection('currency_exchanges').insertOne(doc)
   // Balance updates — only for accounts that track balances (client/supplier/box); COA accounts skip.
   // Buy: office receives `amount currency` (debit refCur), pays `counter_amount counter_currency` (credit refCounter)
@@ -10420,7 +10525,8 @@ async function createFx(db, T, b, opts = {}) {
       await db.collection('currency_exchanges').deleteOne({ id: doc.id, tenant_id: T })
     } catch (compErr) {
       await fxMarkUncertain(`فشل تحديث رصيد ثم فشل التعويض: ${String(compErr?.message || compErr).slice(0, 200)}`)
-      throw new Error(`تعذر تحديث الأرصدة وتعذر التعويض التلقائي — العملية ${doc.id} مسجلة بحالة غير مؤكدة: مراجعة يدوية فورية`)
+      const uerr1 = new Error(`تعذر تحديث الأرصدة وتعذر التعويض التلقائي — العملية ${doc.id} مسجلة بحالة غير مؤكدة: مراجعة يدوية فورية`)
+      uerr1.unsafe_state = 'fx_uncertain'; throw uerr1 // v5.9.3 — edit path must NOT restore over this
     }
     return { error: `تعذر تحديث الأرصدة — تم التراجع الكامل (لا أثر مالي): ${String(balErr?.message || balErr)}` }
   }
@@ -10437,7 +10543,9 @@ async function createFx(db, T, b, opts = {}) {
     // The exchange is DOCUMENTED as uncertain (reviewable) instead of a blind 500.
     if (jeErr.jePhase === 'commit_uncertain') {
       await fxMarkUncertain(jeErr.message)
-      return { error: 'قيد الصرافة بحالة غير مؤكدة (انقطاع أثناء الكتابة) — سُجلت العملية للمراجعة: راجع اليومية قبل أي إعادة، ولا تعِد الإرسال إلا بنفس معرف العملية' }
+      // v5.9.3 — unsafe_state/no_retry: the journal MAY be committed — the PUT edit path must
+      // NEVER run its normal restore (old doc/JE/balances) on top of this uncertain new state.
+      return { error: 'قيد الصرافة بحالة غير مؤكدة (انقطاع أثناء الكتابة) — سُجلت العملية للمراجعة: راجع اليومية قبل أي إعادة، ولا تعِد الإرسال إلا بنفس معرف العملية', unsafe_state: 'fx_commit_uncertain', no_retry: true }
     }
     try {
       for (const a of [...appliedFx].reverse()) await updateBalance(db, a.col, { id: a.pid, tenant_id: T }, a.cur, -a.delta)
@@ -10445,10 +10553,18 @@ async function createFx(db, T, b, opts = {}) {
     } catch (compErr) {
       console.error('[FX-002] CRITICAL: compensation failed for exchange', doc.id, compErr)
       await fxMarkUncertain(`${jeErr.message} — ثم فشل التعويض: ${String(compErr?.message || compErr).slice(0, 200)}`)
-      throw new Error(`${jeErr.message} — ثم فشل التعويض التلقائي: العملية ${doc.id} مسجلة بحالة غير مؤكدة، يلزم فحص يدوي فوري`)
+      const uerr2 = new Error(`${jeErr.message} — ثم فشل التعويض التلقائي: العملية ${doc.id} مسجلة بحالة غير مؤكدة، يلزم فحص يدوي فوري`)
+      uerr2.unsafe_state = 'fx_uncertain'; throw uerr2 // v5.9.3 — edit path must NOT restore over this
     }
     return { error: `${jeErr.message} — لم يُحفظ أي أثر مالي (تم التراجع الكامل)` }
   }
+  // v5.9.3 — everything committed (doc + balances + journal) → promote pending → posted.
+  // If the flag write itself fails the financials are STILL fully committed: never fail the
+  // request over a status flag — the doc stays `pending` (review-visible, never re-executed).
+  try {
+    await db.collection('currency_exchanges').updateOne({ id: doc.id, tenant_id: T }, { $set: { je_status: 'posted', posted_at: new Date() } })
+    doc.je_status = 'posted'
+  } catch (stErr) { console.error('[FX] posted-flag update failed (financials committed)', doc.id, stErr) }
   const { _id, ...rest } = doc; return { doc: rest }
 }
 
