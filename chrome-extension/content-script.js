@@ -9,7 +9,11 @@
   window.__RAHAL_SCRAPE__ = function () {
     const text = document.body ? document.body.innerText : '';
     if (!window.RahalParsers) return null;
-    const data = window.RahalParsers.scrape(text, { hostname: location.hostname, title: document.title });
+    // v1.4.2 — richer detection context: a framed ticket (PrintTickets viewer) often carries
+    // NO brand words in its own body — the brand lives in the TOP document's title/host.
+    let topTitle = '', topHost = '';
+    try { if (window.top !== window) { topTitle = window.top.document.title || ''; topHost = window.top.location.hostname || ''; } } catch (_) { /* cross-origin top — signature fallback applies */ }
+    const data = window.RahalParsers.scrape(text, { hostname: location.hostname, title: document.title, url: location.href, topTitle, topHost });
     if (data) data.source_url = location.href;
     return data;
   };

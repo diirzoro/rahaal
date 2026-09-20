@@ -173,12 +173,42 @@ async function scanHtml(tab) {
   }
   el('detected-info').innerHTML = '<div class="detected-empty">جارٍ القراءة...</div>';
   try {
-    const [{ result }] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+    // v1.4.2 — DETECTION REGRESSION FIX (two real-world classes the 11/11 unit tests missed):
+    //   A) STALE TAB: reloading/replacing an unpacked extension ORPHANS its old content
+    //      scripts — tabs opened BEFORE the install have no __RAHAL_SCRAPE__ in the new
+    //      isolated world → executeScript returned null → «لم يتم التعرف» before any parser
+    //      ran. Self-heal: inject the readers on demand, then retry — no page refresh needed.
+    //   B) FRAMED VIEWER: PrintTickets-style documents render inside an iframe; the manifest
+    //      had no all_frames, so only the TOP frame (site chrome) was ever read. Scan ALL
+    //      frames and pick the frame whose PROVEN fields score highest — scoring only
+    //      selects among label-anchored parser outputs, it never invents values.
+    const runScrape = () => chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
       func: () => window.__RAHAL_SCRAPE__ ? window.__RAHAL_SCRAPE__() : null,
-    });
+    }).catch(() => []);
+    let frames = await runScrape();
+    let results = (frames || []).map(f => f && f.result).filter(Boolean);
+    let injectedNow = false;
+    if (!results.length) {
+      injectedNow = true;
+      await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ['parsers.js', 'content-script.js'] }).catch(() => { });
+      frames = await runScrape();
+      results = (frames || []).map(f => f && f.result).filter(Boolean);
+    }
+    const provenScore = (r) => [
+      r?.traveler?.name_ar, r?.traveler?.passport_no, r?.booking?.ticket_no,
+      r?.booking?.route_from, r?.dates?.trip_date, (Number(r?.financial?.amount) > 0 ? 'amt' : ''),
+    ].filter(v => v && String(v).trim()).length;
+    const result = results.sort((a, b) => provenScore(b) - provenScore(a))[0] || null;
     if (!result || !result.booking?.doc_type) {
-      el('detected-info').innerHTML = '<div class="detected-empty">لم يتم التعرف على المستند — تأكد أنك في صفحة تذكرة/تأشيرة مدعومة</div>';
+      const diag = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        func: () => ({ reader: !!window.__RAHAL_SCRAPE__, len: (document.body?.innerText || '').length }),
+      }).catch(() => []);
+      const dParts = (diag || []).map(d => d && d.result).filter(Boolean);
+      const maxLen = dParts.length ? Math.max(...dParts.map(d => d.len || 0)) : 0;
+      el('detected-info').innerHTML = `<div class="detected-empty">لم يتم التعرف على المستند — تأكد أنك في صفحة تذكرة/تأشيرة مدعومة<br>
+        <span style="font-size:10px;color:#94a3b8">تشخيص: ${dParts.length} إطار · أطول نص ${maxLen} حرف · القارئ ${dParts.some(d => d.reader) ? 'محقون ✓' : 'غير محقون ✗'}${injectedNow ? ' (أُعيد حقنه الآن)' : ''} — إن تكررت الرسالة حدّث الصفحة وأعد المحاولة ثم أرسل لنا سطر التشخيص هذا</span></div>`;
       el('btn-open-widget').classList.add('hidden');
       return;
     }
@@ -326,6 +356,8 @@ async function init() {
     if (currentPdfPayload) { await openPdfConfirmForm(); return; }
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) return;
+    // v1.4.2 — stale-tab self-heal for the widget too (guarded by __RAHAL_INSTALLED__, no dupes)
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['parsers.js', 'content-script.js'] }).catch(() => { });
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: (payload) => { if (window.__RAHAL_OPEN_WIDGET__) window.__RAHAL_OPEN_WIDGET__(payload); },

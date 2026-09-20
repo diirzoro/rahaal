@@ -138,7 +138,17 @@
     },
     {
       name: 'albaraka-bus',
-      match(text, ctx) { return /albaraka|bus/i.test(ctx.hostname + ctx.title) || hasAny(text, 'البركة', 'نقل بري', 'حافلة'); },
+      match(text, ctx) {
+        // v1.4.2 — DETECTION covers the FRAMED ticket too (regression fix):
+        //   1) brand/URL signals from THIS frame OR the TOP document (PrintTickets viewers
+        //      carry the brand only in the top title)
+        //   2) the ticket body's OWN label signature (رقم التذكرة + تاريخ الرحلة + وقت الحضور)
+        //      when the frame has no brand words at all — labels, not value guessing.
+        const meta = `${ctx.hostname || ''} ${ctx.title || ''} ${ctx.url || ''} ${ctx.topTitle || ''} ${ctx.topHost || ''}`;
+        if (/albaraka|bus|printtickets/i.test(meta)) return true;
+        if (hasAny(`${text} ${meta}`, 'البركة', 'نقل بري', 'حافلة')) return true;
+        return has(text, 'رقم التذكرة') && has(text, 'تاريخ الرحلة') && has(text, 'وقت الحضور');
+      },
       parse(rawText) {
         // ============ v1.4.1 — LABEL-ANCHORED REWRITE (field-shift root cause fix) ============
         // ROOT CAUSE of the v1.4.0 wrong mapping (verified against the real Albaraka ticket):
@@ -156,7 +166,7 @@
         // either way). NO value-pattern guessing, NO td-index assumptions, NO first-date-in-DOM.
         // A field whose label/value pair cannot be PROVEN stays EMPTY — never guessed.
         const text = (rawText || '')
-          .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+          .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\u061c\ufeff]/g, '')
           .replace(/\u00a0/g, ' ');
         const lv = (labelSrc, valueSrc) => {
           let m = text.match(new RegExp(`(?:${labelSrc})\\s*[:|]?\\s*${valueSrc}`, 'i'));
