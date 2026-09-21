@@ -16,6 +16,7 @@ import { adminCommissionsHandler } from '@/lib/adminCommissions' // v3.94 — Ba
 import { adminRequestsHandler } from '@/lib/adminRequests' // v3.94 — Batch 2 (READ-ONLY)
 import { adminAdsHandler, activeAnnouncementsFor } from '@/lib/adminAds' // v3.94 — Batch 2 (extends announcements)
 import { adminSystemHandler } from '@/lib/adminSystem' // v3.95 — Batch 3 (Backup/Restore path/System)
+import { smartReaderHandler, adminSmartReaderHandler } from '@/lib/smartReader' // v6.0 — قاري رحّال (Smart Reader)
 import { adminAuditHandler } from '@/lib/adminAudit' // v3.95 — Batch 3 (Central Audit + Health — READ-ONLY)
 import { adminNotifyHandler } from '@/lib/adminNotify' // v3.95 — Batch 3 (In-App Notifications)
 import { adminReportsHandler } from '@/lib/adminReports' // v3.96 — Batch 4 (Reports — READ-ONLY)
@@ -2538,6 +2539,14 @@ async function handleRoute(request, { params }) {
       // rejected), and rahaal admin staff pass per-section/per-action RBAC.
       const gateErr = await adminGate(db, sess, route, method)
       if (gateErr) return bad(gateErr.error, gateErr.status)
+
+      // v6.0 — قاري رحّال (Smart Reader) platform management: credits, toggle, audit, history
+      if (route.startsWith('/admin/smart-reader/')) {
+        let bodySR = null
+        if (method !== 'GET') { try { bodySR = await request.json() } catch { bodySR = {} } }
+        const rASR = await adminSmartReaderHandler(db, route.slice('/admin/smart-reader'.length), method, new URL(request.url).searchParams, bodySR, sess)
+        return rASR?.error ? bad(rASR.error, rASR.status || 400) : ok(rASR)
+      }
 
       // v3.97 — Batch 5 delegations: staff RBAC, geo, payments/entities, refdata.
       if (route.startsWith('/admin/staff/') || route.startsWith('/admin/geo/') || route.startsWith('/admin/payfin/') || route.startsWith('/admin/refdata/')) {
@@ -7809,6 +7818,16 @@ async function handleRoute(request, { params }) {
         { $set: { settlement_voucher_id: result.doc.id, settled_at: new Date(), settled_amount: amount, settled_currency: currency } }
       )
       return ok({ voucher: result.doc, statement_id: stmt.id, settled_amount: amount, settled_currency: currency })
+    }
+
+    // ============ v6.0 — قاري رحّال (Smart Reader) — 3rd data-entry method ============
+    // Reading a document has ZERO financial effect. It only returns fields that
+    // prefill the existing Ticket/Visa forms — saving still goes through the
+    // existing POST /tickets | /visas with all current validators.
+    if (route.startsWith('/smart-reader/')) {
+      const P6 = (sess.user.role === 'owner' || isMainSA(sess.user)) ? null : effectivePermissions(sess.user)
+      const rSR = await smartReaderHandler(db, route, method, request, sess, T, B, P6)
+      return rSR?.error ? bad(rSR.error, rSR.status || 400) : ok(rSR)
     }
 
     if (route === '/tickets' && method === 'GET') {

@@ -51,6 +51,7 @@ import AdminCurrencyCenter from './admin/currency'
 import AdminGeoCenter from './admin/geo'
 import AdminPayFinCenter from './admin/payfin'
 import { MeraajStoreScreen, BulkImportDialog } from './components-heavy'
+import { SmartReaderButton, SmartReaderAdminPanel } from './smart-reader' // v6.0 — قاري رحّال
 
 // ================================================================
 // UTILS + AUTH
@@ -1994,6 +1995,7 @@ function PlatformOfficesHub() {
     { key: 'list', label: '🏢 المكاتب', render: () => <SuperAdminPanel embedded /> },
     { key: 'verify', label: '✅ توثيق المكاتب', render: () => <OfficeVerificationsPanel /> },
     { key: 'office360', label: '🔍 Office 360°', render: () => <OfficesSection /> },
+    { key: 'smartreader', label: '✨ قاري رحّال', render: () => <SmartReaderAdminPanel /> }, // v6.0
   ]} />
 }
 
@@ -3346,6 +3348,7 @@ function TicketsScreen() {
   const [suppliers, setSuppliers] = useState([])
   const [boxes, setBoxes] = useState([]) // v3.9.10 — for bulk edit
   const [openManual, setOpenManual] = useState(false)
+  const [smartPrefill, setSmartPrefill] = useState(null) // v6.0 — قاري رحّال prefill
   const [openBulk, setOpenBulk] = useState(false)
   const [openBulkEdit, setOpenBulkEdit] = useState(false) // v3.9.10
   const [openSearch, setOpenSearch] = useState(false)
@@ -3421,8 +3424,11 @@ function TicketsScreen() {
     <div className="space-y-4">
       <TopBar
         title="حجز التذاكر"
-        subtitle="شاشة مدمجة للشراء والبيع وحساب العمولة تلقائياً"
-        right={<Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>}
+        subtitle="شاشة مدمجة للشراء والبيع وحساب العمولة تلقائياً — إدخال يدوي أو Excel أو قاري رحّال"
+        right={<div className="flex gap-2 flex-wrap">
+          <SmartReaderButton kind="ticket" onLoaded={(mapped) => { setEditing(null); setSmartPrefill(mapped); setOpenManual(true) }} onBulkSaved={() => load()} />
+          <Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>
+        </div>}
       />
       <ActionToolbar
         addLabel="تذكرة جديدة" onAdd={handleAdd} onRefresh={load} onSearch={() => setOpenSearch(true)}
@@ -3495,8 +3501,8 @@ function TicketsScreen() {
           <PaginationBar lq={lq} />
         </CardContent>
       </Card>
-      <TicketDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }} clients={clients} suppliers={suppliers} rates={rates} record={editing}
-        onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل التذكرة وعكس القيد السابق تلقائياً' : 'تم حفظ التذكرة وإنشاء القيد المحاسبي تلقائياً') }} />
+      <TicketDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) { setEditing(null); setSmartPrefill(null) } }} clients={clients} suppliers={suppliers} rates={rates} record={editing} prefill={smartPrefill}
+        onSaved={() => { load(); setEditing(null); setSmartPrefill(null); toast.success(editing ? '✅ تم تعديل التذكرة وعكس القيد السابق تلقائياً' : 'تم حفظ التذكرة وإنشاء القيد المحاسبي تلقائياً') }} />
       <RefundDialog open={!!refundTarget} onOpenChange={v => !v && setRefundTarget(null)} record={refundTarget} refType="ticket" onSaved={() => { setRefundTarget(null); load() }} />
       <BulkImportDialog open={openBulk} onOpenChange={setOpenBulk} kind="tickets" onDone={() => { load(); setOpenBulk(false) }} />
       <BulkEditDialog open={openBulkEdit} onOpenChange={setOpenBulkEdit} kind="tickets" ids={Array.from(selectedIds)} suppliers={suppliers} boxes={boxes} onDone={() => { load(); setOpenBulkEdit(false); setSelectedIds(new Set()) }} />
@@ -3567,7 +3573,7 @@ function CommissionShareBlock({ form, setForm, clients, suppliers, commission, e
   )
 }
 
-function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
+function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record, prefill }) {
   const { user } = useAuth() // v3.9.9 — for default_box_id & lock_box
   const isEdit = !!record
   const emptyForm = {
@@ -3621,9 +3627,10 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
         commission_share_value: record.commission_share_value ?? '',
       })
     } else {
-      setForm(emptyForm)
+      // v6.0 — قاري رحّال: prefill from Smart Reader (NEW record — save still uses POST /tickets)
+      setForm(prefill ? { ...emptyForm, ...prefill } : emptyForm)
     }
-  }, [open, record])
+  }, [open, record, prefill])
   useEffect(() => { if (rates && form.currency && !isEdit) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
   useEffect(() => { if (open) api('/boxes').then(setBoxes).catch(()=>{}) }, [open])
   useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: (user?.default_box_id && boxes.find(b => b.id === user.default_box_id)) ? user.default_box_id : boxes[0].id })) }, [form.payment_method, boxes, user])
@@ -4389,8 +4396,11 @@ async function printVoucher({ kind, record, settings, tenant, branchName, userNa
         <div><b>المورد:</b> ${escHtml(record.supplier_name)}</div>
         <div><b>طريقة الدفع:</b> <span class="badge ${record.payment_method === 'cash' ? 'badge-cash' : 'badge-credit'}">${record.payment_method === 'cash' ? 'نقد' : 'آجل'}</span></div>
       </div>
-      <table><thead><tr><th>الوصف</th><th style="text-align:left">التكلفة</th><th style="text-align:left">البيع</th><th style="text-align:left">العمولة</th></tr></thead>
-      <tbody><tr><td>${escHtml(record.service_type)}</td><td style="text-align:left">${fmt(record.cost, record.currency)}</td><td style="text-align:left">${fmt(record.sale_price, record.currency)}</td><td style="text-align:left"><b>${fmt(record.commission, record.currency)}</b></td></tr></tbody></table>
+      ${''/* v6.3 PRIVACY RULE — Cost & Commission/Profit are INTERNAL ONLY and must NEVER
+           appear in any client-facing printed document (tickets/visas/services).
+           The printed invoice shows the sale price only. Values/calculations unchanged. */}
+      <table><thead><tr><th>الوصف</th><th style="text-align:left">السعر</th></tr></thead>
+      <tbody><tr><td>${escHtml(record.service_type)}</td><td style="text-align:left"><b>${fmt(record.sale_price, record.currency)}</b></td></tr></tbody></table>
       <div class="big">المبلغ المستحق: ${fmt(record.sale_price, record.currency)}</div>`
   } else if (kind === 'receipt' || kind === 'payment') {
     // v5.9 — unified professional template (A4/RTL/preview) with amount-in-words
@@ -4906,6 +4916,7 @@ function VisasScreen() {
   const [suppliers, setSuppliers] = useState([])
   const [boxes, setBoxes] = useState([]) // v3.9.10
   const [openManual, setOpenManual] = useState(false)
+  const [smartPrefill, setSmartPrefill] = useState(null) // v6.0 — قاري رحّال prefill
   const [openBulk, setOpenBulk] = useState(false)
   const [openBulkEdit, setOpenBulkEdit] = useState(false) // v3.9.10
   const [openSearch, setOpenSearch] = useState(false)
@@ -4977,8 +4988,11 @@ function VisasScreen() {
     <div className="space-y-4">
       <TopBar
         title="التأشيرات والخدمات"
-        subtitle="تأشيرات عمرة، موافقات أمنية، فيز، حجز فنادق — إدخال يدوي أو استيراد Excel"
-        right={<Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>}
+        subtitle="تأشيرات عمرة، موافقات أمنية، فيز، حجز فنادق — إدخال يدوي أو استيراد Excel أو قاري رحّال"
+        right={<div className="flex gap-2 flex-wrap">
+          <SmartReaderButton kind="visa" onLoaded={(mapped) => { setEditing(null); setSmartPrefill(mapped); setOpenManual(true) }} onBulkSaved={() => load()} />
+          <Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>
+        </div>}
       />
       <ActionToolbar
         addLabel="خدمة جديدة" onAdd={handleAdd} onRefresh={load} onSearch={() => setOpenSearch(true)}
@@ -5045,8 +5059,8 @@ function VisasScreen() {
           <PaginationBar lq={lq} />
         </CardContent>
       </Card>
-      <VisaDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }} clients={clients} suppliers={suppliers} rates={rates} record={editing}
-        onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل الخدمة وعكس القيد السابق تلقائياً' : 'تم حفظ الخدمة') }} />
+      <VisaDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) { setEditing(null); setSmartPrefill(null) } }} clients={clients} suppliers={suppliers} rates={rates} record={editing} prefill={smartPrefill}
+        onSaved={() => { load(); setEditing(null); setSmartPrefill(null); toast.success(editing ? '✅ تم تعديل الخدمة وعكس القيد السابق تلقائياً' : 'تم حفظ الخدمة') }} />
       <RefundDialog open={!!refundTarget} onOpenChange={v => !v && setRefundTarget(null)} record={refundTarget} refType="visa" onSaved={() => { setRefundTarget(null); load() }} />
       <BulkImportDialog open={openBulk} onOpenChange={setOpenBulk} kind="visas" onDone={() => { load(); setOpenBulk(false) }} />
       <BulkEditDialog open={openBulkEdit} onOpenChange={setOpenBulkEdit} kind="visas" ids={Array.from(selectedIds)} suppliers={suppliers} boxes={boxes} onDone={() => { load(); setOpenBulkEdit(false); setSelectedIds(new Set()) }} />
@@ -5063,7 +5077,7 @@ function VisasScreen() {
   )
 }
 
-function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
+function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record, prefill }) {
   const { user } = useAuth() // v3.9.9
   const isEdit = !!record
   const emptyForm = { date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', entry_date: '', expected_exit_date: '', passenger_phone: '', passenger_whatsapp: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '',
@@ -5098,8 +5112,8 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
         commission_share_mode: record.commission_share_mode || 'amount',
         commission_share_value: record.commission_share_value ?? '',
       })
-    } else { setForm(emptyForm) }
-  }, [open, record])
+    } else { setForm(prefill ? { ...emptyForm, ...prefill } : emptyForm) } // v6.0 — قاري رحّال prefill
+  }, [open, record, prefill])
   useEffect(() => { if (rates && !isEdit) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
   useEffect(() => { if (open) api('/boxes').then(setBoxes).catch(()=>{}) }, [open])
   useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: (user?.default_box_id && boxes.find(b => b.id === user.default_box_id)) ? user.default_box_id : boxes[0].id })) }, [form.payment_method, boxes, user])
