@@ -142,6 +142,18 @@ table { min-width: max-content; }
 /* Print-safe adjustments (unchanged from base but ensures tables don't get cut) */
 @media print {
   table { min-width: 100%; }
+  /* v5.9.5 — UNIFIED PRINT HYGIENE (in-page window.print paths): the app chrome never
+     prints — sidebar, nav, buttons, toasts, inputs' spin controls; the document content
+     prints under the centered Rahaal brand (same identity as the popup print template). */
+  aside, nav, button, [data-sonner-toaster], .no-print { display: none !important; }
+  body { background: #fff !important; }
+  body::before {
+    content: '';
+    display: block;
+    height: 48px;
+    background: url('/rahaal-logo-dark.png') center / contain no-repeat;
+    margin: 0 auto 8px;
+  }
 }
 
 /* ============================================================

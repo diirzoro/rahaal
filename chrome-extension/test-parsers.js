@@ -189,6 +189,28 @@ const FIXTURES = [
       السعر: 30000 YER
     `,
   },
+  {
+    // v1.4.2 — REGRESSION CASE: the REAL Albaraka PrintTickets structure (DOM-order RTL
+    // table serialization: label cell then value cell, tab-separated, with bidi RLM/ALM
+    // control chars). The 11 earlier cases were colon-labelled PDF-style text and MISSED
+    // the real page shape — this case pins the exact production ticket layout.
+    id: '12-albaraka-real-dom',
+    expected_doc_type: 'bus',
+    expected_carrier: 'شركة البركة للنقل البري',
+    require: ['name_ar', 'passport_no', 'ticket_no', 'trip_date', 'amount'],
+    text: `
+التذاكر - شركة البركة للنقل البري
+رقم الهوية أو الجواز
+PrintTickets
+رقم التذكرة\t\u200fMK16858\u200f\tرقم الجواز\t\u200f16788902\u200f
+الاسم\tعادل عبد الحكيم صالح حسين شنظور\t775409537\tالرحلة\t62869\tعدن - الرياض
+الميلاد\t1999/09/26\tالمقعد\t12\tتاريخ الرحلة\t2026/09/23\t\u200fpm 02:00
+الإصدار\t2026/09/20\tالوكيل\tرحاب المشاعر_الم\tوقت الحضور\t\u200fpm 01:00
+الفرع\tفرع المكلا\tاليوم\tالأربعاء
+السعر\t\u061c300.00 ر.س.\u200f\tملاحظات
+تمت الطباعة بواسطة: رحاب المشاعر - الأحد 23:11:16 2026/09/20
+`,
+  },
 ];
 
 // ---- Set up mock window / document ----

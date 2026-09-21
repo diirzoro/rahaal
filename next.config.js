@@ -7,7 +7,8 @@ const nextConfig = {
     ],
   },
   // Renamed from experimental.serverComponentsExternalPackages in Next 15
-  serverExternalPackages: ['mongodb'],
+  // v6.0 — pdfjs-dist + emergentintegrations must stay unbundled (Node-native, dynamic imports)
+  serverExternalPackages: ['mongodb', 'pdfjs-dist', 'emergentintegrations'],
   webpack(config, { dev }) {
     if (dev) {
       // Reduce CPU/memory from file watching

@@ -51,6 +51,7 @@ import AdminCurrencyCenter from './admin/currency'
 import AdminGeoCenter from './admin/geo'
 import AdminPayFinCenter from './admin/payfin'
 import { MeraajStoreScreen, BulkImportDialog } from './components-heavy'
+import { SmartReaderButton, SmartReaderAdminPanel } from './smart-reader' // v6.0 — قاري رحّال
 
 // ================================================================
 // UTILS + AUTH
@@ -1994,6 +1995,7 @@ function PlatformOfficesHub() {
     { key: 'list', label: '🏢 المكاتب', render: () => <SuperAdminPanel embedded /> },
     { key: 'verify', label: '✅ توثيق المكاتب', render: () => <OfficeVerificationsPanel /> },
     { key: 'office360', label: '🔍 Office 360°', render: () => <OfficesSection /> },
+    { key: 'smartreader', label: '✨ قاري رحّال', render: () => <SmartReaderAdminPanel /> }, // v6.0
   ]} />
 }
 
@@ -3346,6 +3348,7 @@ function TicketsScreen() {
   const [suppliers, setSuppliers] = useState([])
   const [boxes, setBoxes] = useState([]) // v3.9.10 — for bulk edit
   const [openManual, setOpenManual] = useState(false)
+  const [smartPrefill, setSmartPrefill] = useState(null) // v6.0 — قاري رحّال prefill
   const [openBulk, setOpenBulk] = useState(false)
   const [openBulkEdit, setOpenBulkEdit] = useState(false) // v3.9.10
   const [openSearch, setOpenSearch] = useState(false)
@@ -3421,8 +3424,11 @@ function TicketsScreen() {
     <div className="space-y-4">
       <TopBar
         title="حجز التذاكر"
-        subtitle="شاشة مدمجة للشراء والبيع وحساب العمولة تلقائياً"
-        right={<Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>}
+        subtitle="شاشة مدمجة للشراء والبيع وحساب العمولة تلقائياً — إدخال يدوي أو Excel أو قاري رحّال"
+        right={<div className="flex gap-2 flex-wrap">
+          <SmartReaderButton kind="ticket" onLoaded={(mapped) => { setEditing(null); setSmartPrefill(mapped); setOpenManual(true) }} onBulkSaved={() => load()} />
+          <Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>
+        </div>}
       />
       <ActionToolbar
         addLabel="تذكرة جديدة" onAdd={handleAdd} onRefresh={load} onSearch={() => setOpenSearch(true)}
@@ -3495,8 +3501,8 @@ function TicketsScreen() {
           <PaginationBar lq={lq} />
         </CardContent>
       </Card>
-      <TicketDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }} clients={clients} suppliers={suppliers} rates={rates} record={editing}
-        onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل التذكرة وعكس القيد السابق تلقائياً' : 'تم حفظ التذكرة وإنشاء القيد المحاسبي تلقائياً') }} />
+      <TicketDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) { setEditing(null); setSmartPrefill(null) } }} clients={clients} suppliers={suppliers} rates={rates} record={editing} prefill={smartPrefill}
+        onSaved={() => { load(); setEditing(null); setSmartPrefill(null); toast.success(editing ? '✅ تم تعديل التذكرة وعكس القيد السابق تلقائياً' : 'تم حفظ التذكرة وإنشاء القيد المحاسبي تلقائياً') }} />
       <RefundDialog open={!!refundTarget} onOpenChange={v => !v && setRefundTarget(null)} record={refundTarget} refType="ticket" onSaved={() => { setRefundTarget(null); load() }} />
       <BulkImportDialog open={openBulk} onOpenChange={setOpenBulk} kind="tickets" onDone={() => { load(); setOpenBulk(false) }} />
       <BulkEditDialog open={openBulkEdit} onOpenChange={setOpenBulkEdit} kind="tickets" ids={Array.from(selectedIds)} suppliers={suppliers} boxes={boxes} onDone={() => { load(); setOpenBulkEdit(false); setSelectedIds(new Set()) }} />
@@ -3567,7 +3573,7 @@ function CommissionShareBlock({ form, setForm, clients, suppliers, commission, e
   )
 }
 
-function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
+function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record, prefill }) {
   const { user } = useAuth() // v3.9.9 — for default_box_id & lock_box
   const isEdit = !!record
   const emptyForm = {
@@ -3621,9 +3627,10 @@ function TicketDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, 
         commission_share_value: record.commission_share_value ?? '',
       })
     } else {
-      setForm(emptyForm)
+      // v6.0 — قاري رحّال: prefill from Smart Reader (NEW record — save still uses POST /tickets)
+      setForm(prefill ? { ...emptyForm, ...prefill } : emptyForm)
     }
-  }, [open, record])
+  }, [open, record, prefill])
   useEffect(() => { if (rates && form.currency && !isEdit) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
   useEffect(() => { if (open) api('/boxes').then(setBoxes).catch(()=>{}) }, [open])
   useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: (user?.default_box_id && boxes.find(b => b.id === user.default_box_id)) ? user.default_box_id : boxes[0].id })) }, [form.payment_method, boxes, user])
@@ -3932,9 +3939,28 @@ function QuickAddDialog({ open, onOpenChange, kind, onSaved, initialName }) {
 // ================================================================
 function escHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])) }
 
+// ================================================================
+// v5.9.5 — UNIFIED RAHAAL PRINT IDENTITY (Shared Print Template):
+// ONE centered Rahaal brand header on EVERY printable document (vouchers,
+// notices, statements, tables, reports). The OFFICE logo is intentionally
+// NOT mixed in at this stage (planned as a later, separate addition).
+// ================================================================
+function rahaalPrintBrandHTML() {
+  const org = (typeof window !== 'undefined' && window.location?.origin) || ''
+  return `<div class="rahaal-brand" style="text-align:center;margin:0 0 10px">
+  <img src="${org}/rahaal-logo-dark.png" alt="رحّال — Rahaal" style="height:46px;border-radius:9px" onerror="this.style.display='none'" />
+  <div style="font-size:9.5px;color:#94a3b8;font-weight:700;letter-spacing:.4px;margin-top:3px">نظام رحّال لإدارة مكاتب السفر والسياحة — Rahaal ERP</div>
+</div>`
+}
+// shared preview actions bar (hidden on paper) — unified preview-first behavior
+function rahaalPrintActionsHTML() {
+  return `<div class="pactions no-print" style="position:sticky;top:0;z-index:10;display:flex;gap:10px;justify-content:center;padding:10px;background:#0f172acc;backdrop-filter:blur(4px);margin:-24px -24px 14px">
+  <button onclick="window.print()" style="border:0;border-radius:8px;padding:9px 26px;font-weight:900;font-size:14px;cursor:pointer;background:#059669;color:#fff;font-family:'Cairo',sans-serif">🖨️ طباعة</button>
+  <button onclick="window.close()" style="border:0;border-radius:8px;padding:9px 26px;font-weight:900;font-size:14px;cursor:pointer;background:#e2e8f0;color:#0f172a;font-family:'Cairo',sans-serif">إغلاق</button>
+</div>`
+}
 function buildPrintHead(settings, tenant, title) {
   const color = settings?.primary_color || '#1e3a8a'
-  const logo = settings?.logo_base64 ? `<img src="${settings.logo_base64}" style="height:64px;object-fit:contain;" />` : `<div style="width:64px;height:64px;background:${color};border-radius:12px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:22px;">${(settings?.agency_name || tenant?.name || 'R')[0]}</div>`
   return `<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>${escHtml(title)}</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
@@ -3960,11 +3986,15 @@ td{padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:right}
 .badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700}
 .badge-cash{background:#d1fae5;color:#065f46}
 .badge-credit{background:#fef3c7;color:#92400e}
-@media print{body{padding:12px}@page{margin:12mm}}
+thead{display:table-header-group}
+tr{page-break-inside:avoid}
+.no-print{}
+@media print{body{padding:12px}@page{size:A4;margin:12mm}.no-print,.pactions{display:none !important}}
 </style></head><body>
+${rahaalPrintActionsHTML()}
+${rahaalPrintBrandHTML()}
 <div class="brand">
   <div style="display:flex;gap:14px;align-items:center">
-    ${logo}
     <div>
       <h1>${escHtml(settings?.agency_name || tenant?.name || 'مكتب السفريات')}</h1>
       <div class="meta">
@@ -3991,10 +4021,12 @@ ${settings?.footer ? `<div style="text-align:center;font-size:12px;color:#64748b
 </body></html>`
 }
 function openPrint(html) {
-  const w = window.open('', '_blank', 'width=900,height=1100')
+  const w = window.open('', '_blank', 'width=920,height=1100')
   if (!w) return toast.error('السماح للنوافذ المنبثقة مطلوب للطباعة')
   w.document.write(html); w.document.close()
-  setTimeout(() => { w.focus(); w.print() }, 400)
+  // v5.9.5 — PREVIEW-FIRST (unified behavior): the window shows the final layout with a
+  // print button — no forced auto-print dialog on open.
+  setTimeout(() => { w.focus() }, 150)
 }
 
 // ================================================================
@@ -4073,9 +4105,8 @@ function buildUnifiedVoucherHTML({ settings, tenant, title, docNo, dateStr, rows
   const color = settings?.primary_color || '#1e3a8a'
   const nameAr = escHtml(settings?.agency_name || tenant?.name || 'مكتب السفريات')
   const nameEn = settings?.agency_name_en ? escHtml(settings.agency_name_en) : ''
-  const logo = settings?.logo_base64
-    ? `<img src="${settings.logo_base64}" style="height:72px;max-width:160px;object-fit:contain" onerror="this.style.display='none'" />`
-    : `<div style="width:66px;height:66px;background:${color};border-radius:14px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:26px;margin:auto">${escHtml((settings?.agency_name || tenant?.name || 'ر')[0])}</div>`
+  // v5.9.5 — unified identity: the CENTERED slot carries the RAHAAL brand (office logo
+  // integration is deferred by decision — لا نخلطه الآن)
   const filled = (rows || []).filter(r => r && r[1] !== undefined && r[1] !== null && String(r[1]).trim() !== '' && String(r[1]).trim() !== '—')
   const fr = (l, v, ltr = false) => `<div class="fr"><span class="fl">${escHtml(l)}</span><span class="fv"${ltr ? ' dir="ltr"' : ''}>${escHtml(String(v))}</span></div>`
   const partyCard = (p, idx) => `
@@ -4119,6 +4150,8 @@ body{color:#0f172a;background:#f1f5f9;padding:16px}
 .actions{position:sticky;top:0;z-index:10;display:flex;gap:10px;justify-content:center;padding:10px;background:#0f172acc;backdrop-filter:blur(4px);border-radius:0 0 12px 12px;margin:-16px -16px 14px}
 .actions button{border:0;border-radius:8px;padding:9px 26px;font-weight:900;font-size:14px;cursor:pointer;font-family:'Cairo'}
 .a-print{background:#059669;color:#fff}.a-close{background:#e2e8f0;color:#0f172a}
+thead{display:table-header-group}
+tr,.fr,.party{page-break-inside:avoid}
 @media print{body{background:#fff;padding:0}.sheet{border:none;box-shadow:none;border-radius:0;max-width:100%;padding:0}.actions{display:none !important}}
 </style></head><body>
 <div class="actions"><button class="a-print" onclick="window.print()">🖨️ طباعة</button><button class="a-close" onclick="window.close()">إغلاق</button></div>
@@ -4131,7 +4164,7 @@ body{color:#0f172a;background:#f1f5f9;padding:16px}
         ${settings?.commercial_id ? `س.ت: ${escHtml(settings.commercial_id)}` : ''}${settings?.tax_id ? ` • ضريبي: ${escHtml(settings.tax_id)}` : ''}
       </div>
     </div>
-    <div class="hd-logo">${logo}</div>
+    <div class="hd-logo">${rahaalPrintBrandHTML()}</div>
     <div class="hd-en" dir="ltr">
       ${nameEn ? `<h2>${nameEn}</h2>` : `<h2 style="opacity:.55">${nameAr}</h2>`}
       <div class="meta">
@@ -4363,8 +4396,11 @@ async function printVoucher({ kind, record, settings, tenant, branchName, userNa
         <div><b>المورد:</b> ${escHtml(record.supplier_name)}</div>
         <div><b>طريقة الدفع:</b> <span class="badge ${record.payment_method === 'cash' ? 'badge-cash' : 'badge-credit'}">${record.payment_method === 'cash' ? 'نقد' : 'آجل'}</span></div>
       </div>
-      <table><thead><tr><th>الوصف</th><th style="text-align:left">التكلفة</th><th style="text-align:left">البيع</th><th style="text-align:left">العمولة</th></tr></thead>
-      <tbody><tr><td>${escHtml(record.service_type)}</td><td style="text-align:left">${fmt(record.cost, record.currency)}</td><td style="text-align:left">${fmt(record.sale_price, record.currency)}</td><td style="text-align:left"><b>${fmt(record.commission, record.currency)}</b></td></tr></tbody></table>
+      ${''/* v6.3 PRIVACY RULE — Cost & Commission/Profit are INTERNAL ONLY and must NEVER
+           appear in any client-facing printed document (tickets/visas/services).
+           The printed invoice shows the sale price only. Values/calculations unchanged. */}
+      <table><thead><tr><th>الوصف</th><th style="text-align:left">السعر</th></tr></thead>
+      <tbody><tr><td>${escHtml(record.service_type)}</td><td style="text-align:left"><b>${fmt(record.sale_price, record.currency)}</b></td></tr></tbody></table>
       <div class="big">المبلغ المستحق: ${fmt(record.sale_price, record.currency)}</div>`
   } else if (kind === 'receipt' || kind === 'payment') {
     // v5.9 — unified professional template (A4/RTL/preview) with amount-in-words
@@ -4519,6 +4555,7 @@ function RefundDialog({ open, onOpenChange, record, refType, onSaved }) {
 .foot{padding:16px 28px;background:#f8fafc;font-size:11px;color:#64748b;text-align:center}
 @media print{.actions{display:none}}
 </style></head><body><div class="doc">
+${rahaalPrintBrandHTML()}
 <div class="hdr"><h1>🔄 سند استرداد (Credit Note)</h1><div style="text-align:left"><div style="font-size:14px;font-weight:800">${escHtml(tenant?.name || 'مكتب رحّال')}</div><div style="font-size:11px;opacity:.9">${dateStr}</div></div></div>
 <div class="sec"><div class="grid">
 <div class="row"><b>العميل:</b><span>${escHtml(record.client_name)}</span></div>
@@ -4879,6 +4916,7 @@ function VisasScreen() {
   const [suppliers, setSuppliers] = useState([])
   const [boxes, setBoxes] = useState([]) // v3.9.10
   const [openManual, setOpenManual] = useState(false)
+  const [smartPrefill, setSmartPrefill] = useState(null) // v6.0 — قاري رحّال prefill
   const [openBulk, setOpenBulk] = useState(false)
   const [openBulkEdit, setOpenBulkEdit] = useState(false) // v3.9.10
   const [openSearch, setOpenSearch] = useState(false)
@@ -4950,8 +4988,11 @@ function VisasScreen() {
     <div className="space-y-4">
       <TopBar
         title="التأشيرات والخدمات"
-        subtitle="تأشيرات عمرة، موافقات أمنية، فيز، حجز فنادق — إدخال يدوي أو استيراد Excel"
-        right={<Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>}
+        subtitle="تأشيرات عمرة، موافقات أمنية، فيز، حجز فنادق — إدخال يدوي أو استيراد Excel أو قاري رحّال"
+        right={<div className="flex gap-2 flex-wrap">
+          <SmartReaderButton kind="visa" onLoaded={(mapped) => { setEditing(null); setSmartPrefill(mapped); setOpenManual(true) }} onBulkSaved={() => load()} />
+          <Button variant="outline" onClick={() => setOpenBulk(true)} className="gap-2 border-emerald-200 text-emerald-700 hover:bg-emerald-50"><FileSpreadsheet className="w-4 h-4" /> رفع Excel/CSV</Button>
+        </div>}
       />
       <ActionToolbar
         addLabel="خدمة جديدة" onAdd={handleAdd} onRefresh={load} onSearch={() => setOpenSearch(true)}
@@ -5018,8 +5059,8 @@ function VisasScreen() {
           <PaginationBar lq={lq} />
         </CardContent>
       </Card>
-      <VisaDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) setEditing(null) }} clients={clients} suppliers={suppliers} rates={rates} record={editing}
-        onSaved={() => { load(); setEditing(null); toast.success(editing ? '✅ تم تعديل الخدمة وعكس القيد السابق تلقائياً' : 'تم حفظ الخدمة') }} />
+      <VisaDialog open={openManual} onOpenChange={(v) => { setOpenManual(v); if (!v) { setEditing(null); setSmartPrefill(null) } }} clients={clients} suppliers={suppliers} rates={rates} record={editing} prefill={smartPrefill}
+        onSaved={() => { load(); setEditing(null); setSmartPrefill(null); toast.success(editing ? '✅ تم تعديل الخدمة وعكس القيد السابق تلقائياً' : 'تم حفظ الخدمة') }} />
       <RefundDialog open={!!refundTarget} onOpenChange={v => !v && setRefundTarget(null)} record={refundTarget} refType="visa" onSaved={() => { setRefundTarget(null); load() }} />
       <BulkImportDialog open={openBulk} onOpenChange={setOpenBulk} kind="visas" onDone={() => { load(); setOpenBulk(false) }} />
       <BulkEditDialog open={openBulkEdit} onOpenChange={setOpenBulkEdit} kind="visas" ids={Array.from(selectedIds)} suppliers={suppliers} boxes={boxes} onDone={() => { load(); setOpenBulkEdit(false); setSelectedIds(new Set()) }} />
@@ -5036,7 +5077,7 @@ function VisasScreen() {
   )
 }
 
-function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record }) {
+function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, record, prefill }) {
   const { user } = useAuth() // v3.9.9
   const isEdit = !!record
   const emptyForm = { date: todayISO(), service_type: 'تأشيرة عمرة', currency: 'SAR', exchange_rate: 0.267, client_id: '', supplier_id: '', passenger_name: '', passport_no: '', nationality: '', entry_date: '', expected_exit_date: '', passenger_phone: '', passenger_whatsapp: '', cost: '', sale_price: '', payment_method: 'credit', box_id: '',
@@ -5071,8 +5112,8 @@ function VisaDialog({ open, onOpenChange, clients, suppliers, rates, onSaved, re
         commission_share_mode: record.commission_share_mode || 'amount',
         commission_share_value: record.commission_share_value ?? '',
       })
-    } else { setForm(emptyForm) }
-  }, [open, record])
+    } else { setForm(prefill ? { ...emptyForm, ...prefill } : emptyForm) } // v6.0 — قاري رحّال prefill
+  }, [open, record, prefill])
   useEffect(() => { if (rates && !isEdit) setForm(f => ({ ...f, exchange_rate: rates[f.currency] || 1 })) }, [rates, form.currency])
   useEffect(() => { if (open) api('/boxes').then(setBoxes).catch(()=>{}) }, [open])
   useEffect(() => { if (form.payment_method === 'cash' && boxes[0] && !form.box_id) setForm(f => ({ ...f, box_id: (user?.default_box_id && boxes.find(b => b.id === user.default_box_id)) ? user.default_box_id : boxes[0].id })) }, [form.payment_method, boxes, user])
@@ -7253,6 +7294,7 @@ function VisaMonitorScreen() {
         .tr-yellow td{background:#fefce8}.tr-red td{background:#fef2f2}.tr-overstay td{background:#e2e8f0}.tr-departed td{color:#94a3b8}
         @media print{@page{size:A4 landscape;margin:8mm}}
       </style></head><body>
+      ${rahaalPrintBrandHTML()}
       <h1>🛃 تقرير مراقبة التأشيرات</h1>
       <div class="sub">تاريخ التقرير: ${new Date().toLocaleDateString('ar-EG')} — عدد السجلات: ${rows.length}</div>
       <table><thead><tr>${heads.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>
@@ -7952,6 +7994,7 @@ function StatementReport() {
 </style>
 </head><body>
 <div class="doc">
+  ${rahaalPrintBrandHTML()}
   <div class="hdr">
     <h1>📊 كشف حساب</h1>
     <div class="off"><div class="n">${escHtml(off)}</div><div class="p">${escHtml(offPhone)}${offAddr ? ' • ' + escHtml(offAddr) : ''}</div></div>
@@ -9798,6 +9841,7 @@ function PartnerStatementDialog({ open, onOpenChange }) {
         .foot{margin-top:24px; font-size:11px; color:#94a3b8; display:flex; justify-content:space-between}
         @media print{ .noprint{display:none} }
       </style></head><body>
+      ${rahaalPrintBrandHTML()}
       <div style="display:flex; justify-content:space-between; align-items:start">
         <div>
           <h1>🤝 كشف حساب عمولات الشريك</h1>
@@ -9813,7 +9857,7 @@ function PartnerStatementDialog({ open, onOpenChange }) {
       </table>
       <div class="totals"><div class="totals-h">الإجماليات حسب العملة</div>${totalsHtml}</div>
       <div class="foot"><span>توقيع المكتب: ______________</span><span>توقيع الشريك: ______________</span></div>
-      <script>window.onload=()=>window.print()</script>
+      <div class="noprint" style="text-align:center;margin-top:14px"><button onclick="window.print()" style="border:0;border-radius:8px;padding:9px 26px;font-weight:900;font-size:14px;cursor:pointer;background:#059669;color:#fff">🖨️ طباعة</button> <button onclick="window.close()" style="border:0;border-radius:8px;padding:9px 26px;font-weight:900;font-size:14px;cursor:pointer;background:#e2e8f0;color:#0f172a">إغلاق</button></div>
       </body></html>`)
     w.document.close()
   }
@@ -11216,6 +11260,7 @@ function PackageDetailsDialog({ pkg, onClose, onChanged }) {
         th{background:#f1f5f9}
         @media print{@page{size:A4;margin:10mm}}
       </style></head><body>
+      ${rahaalPrintBrandHTML()}
       <h1>🛏️ كشف التسكين — ${pkg.name}</h1>
       <div class="sub">التاريخ: ${new Date().toLocaleDateString('ar-EG')} • إجمالي المسجلين: ${regs.length} • أنواع الغرف: ${Object.keys(groups).length}${pkg.start_date ? ' • البرنامج: ' + String(pkg.start_date).slice(0, 10) + (pkg.end_date ? ' → ' + String(pkg.end_date).slice(0, 10) : '') : ''}</div>
       ${sections}
@@ -12245,7 +12290,10 @@ function OfficeSettings() {
   const save = async () => {
     try {
       setSaving(true)
-      await api('/tenant/settings', { method: 'PUT', body: f })
+      // v5.9.5 — the base currency is pinned to 1 inside the payload itself: the backend
+      // validator rejects anything else, and a legacy table self-heals on this explicit save
+      const payload = f?.rates ? { ...f, rates: { ...f.rates, YER: { transfer: 1, buy: 1, sell: 1, min: 1, max: 1, remarks: 'العملة الأساسية' } } } : f
+      await api('/tenant/settings', { method: 'PUT', body: payload })
       toast.success('تم حفظ الإعدادات')
       refreshMe()
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
@@ -12418,7 +12466,11 @@ function OfficeSettings() {
                 <TableBody>
                   {CURRENCIES.map(c => {
                     const r = f.rates?.[c] || {}
-                    const rObj = typeof r === 'object' ? r : { transfer: r, buy: r, sell: r, min: r, max: r, remarks: '' }
+                    // v5.9.5 — the BASE currency row is PINNED to 1 (read-only by definition):
+                    // even a legacy corrupted table can never display or save YER ≠ 1
+                    const rObj = c === 'YER'
+                      ? { transfer: 1, buy: 1, sell: 1, min: 1, max: 1, remarks: 'العملة الأساسية' }
+                      : (typeof r === 'object' ? r : { transfer: r, buy: r, sell: r, min: r, max: r, remarks: '' })
                     const upd = (k, v) => setF({ ...f, rates: { ...f.rates, [c]: { ...rObj, [k]: v === '' ? '' : Number(v) } } })
                     return (
                       <TableRow key={c}>

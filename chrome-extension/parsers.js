@@ -138,45 +138,100 @@
     },
     {
       name: 'albaraka-bus',
-      match(text, ctx) { return /albaraka|bus/i.test(ctx.hostname + ctx.title) || hasAny(text, 'البركة', 'نقل بري', 'حافلة'); },
-      parse(text) {
-        // v1.3.2 — Pattern-based extraction (PDF text may have labels far from values)
-        // Passport pattern: alphanumeric like MK14733, BR12345 (2 letters + 4-6 digits) OR pure digits 8-12
-        const passport = first(text, /\b([A-Z]{2,3}\d{4,10})\b/)
-                      || first(text, /(?:رقم\s*(?:الجواز|الهوية|السفر|البطاقة))[:\s]*([A-Z0-9]{6,15})/i);
-        // Ticket: 8-9 digit number NOT preceded by uppercase letters (to distinguish from passport)
-        const ticketNo = first(text, /(?:رقم\s*التذكرة|Ticket\s*No\.?)[:\s]*(\d{7,12})/i)
-                      || first(text, /\b(1\d{7}|2\d{7}|3\d{7})\b/);
-        // Name: after "المسافر" label OR longest Arabic-only line with 3+ words
-        let nameAr = first(text, /(?:اسم\s*(?:المسافر|الراكب|صاحب\s*التذكرة))[:\s]*([\u0600-\u06FF ]{6,80})/);
-        if (!nameAr) {
-          const blacklist = /شركة|البركة|للنقل|الأفضل|نجمة|رواد|وزارة|السعودية|اليمنية|طيران|عدن|صنعاء|مكة|المدينة|جدة|الرياض/;
-          const arNames = (text.match(/[\u0621-\u064A][\u0621-\u064A]{2,14}(?:\s+[\u0621-\u064A][\u0621-\u064A]{1,14}){2,5}/g) || [])
-            .filter(n => !blacklist.test(n));
-          nameAr = arNames.sort((a, b) => b.length - a.length)[0] || '';
-        }
-        // Route: Yemen ↔ KSA
-        const cities = ['المكلا','عدن','صنعاء','تعز','الحديدة','سيئون','مأرب','الشحر','مكة','المدينة','جدة','الرياض','الدمام'];
-        const routeMatch = text.match(new RegExp(`(${cities.join('|')})\\s*[\\-–—→>]\\s*(${cities.join('|')})`))
-                        || text.match(new RegExp(`(${cities.join('|')})[\\s\\-]+(${cities.join('|')})`)); // handle wrapped
-        // Amount: MUST be followed by SAR currency indicator (not just any number)
-        const amount = firstNum(text, /([\d,]+\.\d{2})\s*(?:ر\.?\s*س|SAR|ريال\s*سعودي|ريال)/i)
-                    || firstNum(text, /(?:السعر|القيمة|المبلغ)[:\s]*([\d,]+\.\d{2})/);
+      match(text, ctx) {
+        // v1.4.2 — DETECTION covers the FRAMED ticket too (regression fix):
+        //   1) brand/URL signals from THIS frame OR the TOP document (PrintTickets viewers
+        //      carry the brand only in the top title)
+        //   2) the ticket body's OWN label signature (رقم التذكرة + تاريخ الرحلة + وقت الحضور)
+        //      when the frame has no brand words at all — labels, not value guessing.
+        const meta = `${ctx.hostname || ''} ${ctx.title || ''} ${ctx.url || ''} ${ctx.topTitle || ''} ${ctx.topHost || ''}`;
+        if (/albaraka|bus|printtickets/i.test(meta)) return true;
+        if (hasAny(`${text} ${meta}`, 'البركة', 'نقل بري', 'حافلة')) return true;
+        return has(text, 'رقم التذكرة') && has(text, 'تاريخ الرحلة') && has(text, 'وقت الحضور');
+      },
+      parse(rawText) {
+        // ============ v1.4.1 — LABEL-ANCHORED REWRITE (field-shift root cause fix) ============
+        // ROOT CAUSE of the v1.4.0 wrong mapping (verified against the real Albaraka ticket):
+        //   1) passport used a GENERIC value pattern ([A-Z]{2,3}\d{4,10}) with TOP priority —
+        //      it hijacked the TICKET number (MK16858) because it appears first in the text.
+        //   2) ticket_no accepted digits-only → its fallback (\b[123]\d{7}\b) grabbed the
+        //      PASSPORT number (16788902) instead.
+        //   3) name fallback took the "longest Arabic phrase anywhere" → picked page LABELS
+        //      («رقم الهوية أو الجواز») when the labelled value wasn't matched.
+        //   4) bidi control chars (\u200f RLM…) sat between values/labels and broke regex
+        //      adjacency (السعر «300.00 ر.س.» could degrade to SAR 0).
+        //   5) trip_date fallback took the FIRST date-like token in the DOM (could be الميلاد).
+        // FIX: sanitize bidi chars ONCE, then bind EVERY field to ITS OWN label — in BOTH
+        // serialization orders (label→value AND value→label, since RTL tables may linearize
+        // either way). NO value-pattern guessing, NO td-index assumptions, NO first-date-in-DOM.
+        // A field whose label/value pair cannot be PROVEN stays EMPTY — never guessed.
+        const text = (rawText || '')
+          .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\u061c\ufeff]/g, '')
+          .replace(/\u00a0/g, ' ');
+        const lv = (labelSrc, valueSrc) => {
+          let m = text.match(new RegExp(`(?:${labelSrc})\\s*[:|]?\\s*${valueSrc}`, 'i'));
+          if (m) return norm(m[1]);
+          m = text.match(new RegExp(`${valueSrc}\\s*[:|]?\\s*(?:${labelSrc})`, 'i'));
+          return m ? norm(m[1]) : '';
+        };
+        const to24 = (raw) => {
+          if (!raw) return '';
+          const t = raw.match(/(\d{1,2}):(\d{2})/); if (!t) return '';
+          let h = parseInt(t[1], 10); const mm = t[2];
+          if (/pm|مساء|م\s*$/i.test(raw) && h < 12) h += 12;
+          if (/am|صباح|ص\s*$/i.test(raw) && h === 12) h = 0;
+          return `${String(h).padStart(2, '0')}:${mm}`;
+        };
+        const TIME_SRC = '((?:AM|PM|ص|م)?\\s*\\d{1,2}:\\d{2}(?:\\s*(?:AM|PM|ص|م))?)';
+        const DATE_SRC = '(20\\d{2}[\\/\\-]\\d{1,2}[\\/\\-]\\d{1,2}|\\d{1,2}[\\/\\-]\\d{1,2}[\\/\\-]20\\d{2}|\\d{1,2}\\s+[\\u0600-\\u06FF]+\\s+20\\d{2})'; // numeric OR Arabic-month («20 يونيو 2026») — still LABEL-BOUND
+        // — Ticket number: bound to رقم التذكرة ONLY (alphanumeric like MK16858, or digits)
+        const ticketNo = lv('رقم\\s*التذكرة|Ticket\\s*(?:No\\.?|Number)', '([A-Z]{1,3}\\s?\\d{4,12}|\\d{6,12})');
+        // — Passport: bound to رقم الجواز ONLY; NEVER inherits the ticket value; empty if unproven
+        let passport = lv('رقم\\s*(?:الجواز|جواز\\s*السفر)|Passport(?:\\s*No\\.?)?', '([A-Z]{0,3}\\s?\\d{5,12})');
+        if (passport && ticketNo && passport.replace(/\s/g, '') === ticketNo.replace(/\s/g, '')) passport = '';
+        // — Passenger name: bound to the الاسم label; a LABEL PHRASE is never a person name
+        const LABEL_BLEED = /\s+(?=(?:رقم|تاريخ|السعر|المقعد|الوكيل|الفرع|اليوم|وقت|الميلاد|الرحلة|الإصدار|ملاحظات|الجواز|التذكرة)(?:\s|$))/;
+        const LABEL_PHRASE = /رقم\s*(?:الهوية|الجواز|التذكرة|الرحلة)|أو\s*الجواز|وقت\s*الحضور|تاريخ\s*(?:الرحلة|الإصدار)/;
+        let nameAr = lv('اسم\\s*(?:المسافر|الراكب|صاحب\\s*التذكرة)|الاسم', '([\\u0621-\\u064A][\\u0621-\\u064A \\t]{4,80})');
+        if (nameAr) nameAr = norm(nameAr.split(LABEL_BLEED)[0]);
+        if (!nameAr || nameAr.split(/\s+/).length < 2 || LABEL_PHRASE.test(nameAr)) nameAr = '';
+        // — Trip number: الرحلة label but NOT تاريخ الرحلة; value must not be a date fragment
+        const tripNo = lv('رقم\\s*الرحلة|(?<!تاريخ\\s)(?<!تاريخ)الرحلة', '(\\d{3,8})(?![\\/\\-\\d])');
+        // — Route: explicit separator ONLY (never adjacent-cell guessing)
+        const cities = ['المكلا', 'عدن', 'صنعاء', 'تعز', 'الحديدة', 'سيئون', 'مأرب', 'الشحر', 'مكة', 'المدينة', 'جدة', 'الرياض', 'الدمام'];
+        const routeMatch = text.match(new RegExp(`(${cities.join('|')})\\s*[\\-–—→>]+\\s*(${cities.join('|')})`));
+        // — Dates: each bound to ITS OWN label (الميلاد is never a trip date); unproven ⇒ empty
+        const tripDateRaw = lv('تاريخ\\s*(?:الرحلة|السفر)', DATE_SRC);
+        const issuedRaw = lv('(?:تاريخ\\s*)?(?:الإصدار|الطباعة)|تاريخ\\s*الحجز', DATE_SRC);
+        let tripTimeRaw = '';
+        { const m = text.match(new RegExp(`(?:تاريخ\\s*(?:الرحلة|السفر))\\s*[:|]?\\s*${DATE_SRC}\\s*${TIME_SRC}`, 'i')); if (m) tripTimeRaw = m[2]; }
+        const attendRaw = lv('وقت\\s*(?:الحضور|التحرك|الانطلاق|المغادرة)', TIME_SRC);
+        // — Amount: bound to السعر label or SAR-currency-anchored (both orders); NEVER 0-on-failure
+        const amtNum = firstNum(text, /(?:السعر|القيمة|المبلغ|الأجرة)\s*[:|]?\s*([\d,]+(?:\.\d{1,2})?)/)
+          || firstNum(text, /([\d,]+(?:\.\d{1,2})?)\s*(?:ر\s*\.?\s*س|SAR|ريال\s*سعودي)/i)
+          || firstNum(text, /(?:ر\s*\.?\s*س|SAR)\s*\.?\s*([\d,]+(?:\.\d{1,2})?)/i);
+        const amount = amtNum > 0 ? amtNum : null; // parsing failure = NULL — never a zero-value ticket
         return {
           traveler: { name_ar: nameAr, passport_no: passport },
           booking: {
             doc_type: 'bus', carrier: 'شركة البركة للنقل البري',
-            ticket_no: ticketNo, flight_no: first(text, /(?:رقم\s*الرحلة|Trip|Flight)\s*(?:No\.?)?[:\s]*(\d{3,8})/i),
+            ticket_no: ticketNo, flight_no: tripNo,
+            pnr: '', // bus tickets carry no explicit PNR — NEVER fabricated from other numbers
             route_from: routeMatch ? routeMatch[1] : '',
             route_to: routeMatch ? routeMatch[2] : '',
+            agent: (l => l ? norm(l.split(LABEL_BLEED)[0]) : '')(lv('الوكيل', '([\\u0621-\\u064A][\\u0621-\\u064A_ \\t]{2,40})')),
+            branch: (l => l ? norm(l.split(LABEL_BLEED)[0]) : '')(lv('الفرع', '([\\u0621-\\u064A][\\u0621-\\u064A \\t]{2,40})')),
+            day: lv('اليوم', '(السبت|الأحد|الاثنين|الإثنين|الثلاثاء|الأربعاء|الخميس|الجمعة)') || '',
+            seat_no: lv('المقعد', '(\\d{1,4})(?![\\/\\-\\d])') || '',
           },
           dates: {
-            trip_date: parseDate(first(text, /(?:تاريخ\s*(?:الرحلة|السفر))[:\s]*([^\n]+)/)) || parseDate(first(text, /(20\d{2}[\/\-]\d{1,2}[\/\-]\d{1,2})/)),
-            depart_time: parseTime(first(text, /(?:وقت\s*(?:التحرك|الانطلاق|المغادرة))[:\s]*([^\n]+)/)),
-            arrive_time: parseTime(first(text, /(?:وقت\s*الوصول)[:\s]*([^\n]+)/)),
-            issued_at: parseDate(first(text, /(?:تاريخ\s*(?:الإصدار|الطباعة|الحجز))[:\s]*([^\n]+)/)),
+            trip_date: tripDateRaw ? parseDate(tripDateRaw) : '',
+            depart_time: to24(tripTimeRaw) || '',
+            attend_time: to24(attendRaw) || '',
+            arrive_time: '',
+            issued_at: issuedRaw ? parseDate(issuedRaw) : '',
           },
-          financial: { amount, currency: 'SAR' },
+          financial: { amount, currency: /ر\s*\.?\s*س|SAR|ريال\s*سعودي/i.test(text) ? 'SAR' : (detectCurrency(text) || 'SAR') },
         };
       },
     },
@@ -281,6 +336,24 @@
     },
   ];
 
+  // v1.4.1 — SEND GUARDS: a wrong parse must NEVER become a financially-valid record in Rahaal.
+  // Used by BOTH send paths (popup PDF confirm + in-page widget confirm) BEFORE any ingest call.
+  const KNOWN_LABEL_PHRASES = /رقم\s*(?:الهوية|الجواز|التذكرة|الرحلة)|أو\s*الجواز|وقت\s*الحضور|تاريخ\s*(?:الرحلة|الإصدار)|اسم\s*المسافر/;
+  function validateForSend(payload) {
+    if (!payload || !payload.booking || !payload.booking.doc_type) return { ok: false, errors: ['لم يتم التعرف على المستند'] };
+    const errors = [];
+    const t = payload.traveler || {}, bk = payload.booking, fn = payload.financial || {};
+    const name = norm(t.name_ar || t.name_en || '');
+    if (!name || name.split(/\s+/).length < 2) errors.push('اسم المسافر غير مقروء من المستند');
+    else if (KNOWN_LABEL_PHRASES.test(name)) errors.push('حقل المسافر التقط نص Label من الصفحة وليس اسماً فعلياً');
+    if (bk.doc_type === 'bus' || bk.doc_type === 'flight') {
+      if (!norm(bk.ticket_no || '')) errors.push('رقم التذكرة غير مقروء من المستند');
+      const amt = Number(fn.amount);
+      if (!(amt > 0)) errors.push('المبلغ غير مقروء من المستند — لا يُسمح بإنشاء تذكرة بمبلغ 0');
+    }
+    return { ok: errors.length === 0, errors };
+  }
+
   function scrape(text, ctx) {
     if (!text || text.length < 20) return null;
     ctx = ctx || { hostname: '', title: '' };
@@ -298,5 +371,5 @@
   }
 
   const target = (typeof window !== 'undefined') ? window : (typeof self !== 'undefined' ? self : globalThis);
-  target.RahalParsers = { scrape, PARSERS };
+  target.RahalParsers = { scrape, PARSERS, validateForSend };
 })();
