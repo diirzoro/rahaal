@@ -11,25 +11,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect focused UI/print code
+      - name: Inspect exact print/package/auth regions
         shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('app/page.js')
-          lines=p.read_text().splitlines()
-          def show(title, pred, ctx=5, limit=100):
-              print('===',title,'===')
-              n=0
-              for i,l in enumerate(lines):
-                  if pred(l):
-                      a=max(0,i-ctx); b=min(len(lines),i+ctx+1)
-                      print(f'--- {i+1} ---')
-                      for j in range(a,b): print(f'{j+1}: {lines[j]}')
-                      n+=1
-                      if n>=limit: break
-          show('PACKAGE_KEYS', lambda l: ("key: 'packages'" in l or "mod_packages" in l or "الباكجات والبرامج" in l), 6, 40)
-          show('SUPPLIER_PRINT_STRINGS', lambda l: ('supplier_name' in l or 'المورد:' in l or 'الوكيل:' in l) and ('\${' in l or 'print' in l.lower() or '<div' in l or '<td' in l), 5, 80)
-          show('PRINT_DECLS', lambda l: 'printVoucher' in l or 'buildUnifiedVoucherHTML' in l or 'openPrint(' in l, 12, 40)
-          show('FORGOT_UI', lambda l: 'forgot-password' in l or 'نسيت كلمة المرور' in l or 'نسيت' in l, 15, 30)
-          PY
+          echo '=== PRINT_VOUCHER_RANGE ==='
+          sed -n '4252,4415p' app/page.js
+          echo '=== PACKAGE_PRINT_RANGE ==='
+          sed -n '9300,10250p' app/page.js | grep -n -C 18 -E 'print|طباعة|supplier|المورد|الوكيل|window.open|openPrint' | head -n 700 || true
+          echo '=== LOGIN_FORGOT_RANGE ==='
+          sed -n '245,370p' app/page.js
+          echo '=== ROUTE_IMPORTS ==='
+          sed -n '1,90p' 'app/api/[[...path]]/route.js'
+          echo '=== SIGNUP_FULL ==='
+          cat app/signup/page.js
