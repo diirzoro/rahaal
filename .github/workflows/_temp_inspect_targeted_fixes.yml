@@ -11,19 +11,25 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect exact targeted code
+      - name: Inspect focused UI/print code
         shell: bash
         run: |
-          set -e
-          echo '=== ADMIN STAFF CREATE ==='
-          grep -n -C 24 -E "path === '/users'.*POST|tenant_id: null, admin_realm|isAdminStaff|inAdminRealm" lib/adminStaff.js | head -n 260 || true
-          echo '=== ADMIN BLOCK ==='
-          sed -n '14120,14185p' app/page.js
-          echo '=== PACKAGE NAV ==='
-          grep -n -C 8 -E "key: 'packages'|mod_packages|Packages|الباكجات|الباقات والبرامج|الباقات" app/page.js | head -n 420 || true
-          echo '=== PRINT FUNCTIONS ==='
-          grep -n -C 25 -E "function printVoucher|async function printVoucher|buildUnifiedVoucherHTML|supplier_name|المورد:|الوكيل:" app/page.js | grep -E -B25 -A35 "printVoucher|buildUnifiedVoucherHTML|supplier_name|المورد:|الوكيل:" | head -n 900 || true
-          echo '=== LOGIN UI ==='
-          grep -n -C 20 -E "نسيت|forgot-password|Login|تسجيل الدخول|password" app/page.js | head -n 380 || true
-          echo '=== AUTH RESET BACKEND ==='
-          grep -n -C 35 -E "forgot-password|password_reset_requests|reset_password|reset-password" 'app/api/[[...path]]/route.js' | head -n 420 || true
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('app/page.js')
+          lines=p.read_text().splitlines()
+          def show(title, pred, ctx=5, limit=100):
+              print('===',title,'===')
+              n=0
+              for i,l in enumerate(lines):
+                  if pred(l):
+                      a=max(0,i-ctx); b=min(len(lines),i+ctx+1)
+                      print(f'--- {i+1} ---')
+                      for j in range(a,b): print(f'{j+1}: {lines[j]}')
+                      n+=1
+                      if n>=limit: break
+          show('PACKAGE_KEYS', lambda l: ("key: 'packages'" in l or "mod_packages" in l or "الباكجات والبرامج" in l), 6, 40)
+          show('SUPPLIER_PRINT_STRINGS', lambda l: ('supplier_name' in l or 'المورد:' in l or 'الوكيل:' in l) and ('\${' in l or 'print' in l.lower() or '<div' in l or '<td' in l), 5, 80)
+          show('PRINT_DECLS', lambda l: 'printVoucher' in l or 'buildUnifiedVoucherHTML' in l or 'openPrint(' in l, 12, 40)
+          show('FORGOT_UI', lambda l: 'forgot-password' in l or 'نسيت كلمة المرور' in l or 'نسيت' in l, 15, 30)
+          PY
