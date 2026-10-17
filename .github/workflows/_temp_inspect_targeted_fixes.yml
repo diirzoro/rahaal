@@ -11,21 +11,19 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect targeted code
+      - name: Inspect exact targeted code
         shell: bash
         run: |
           set -e
-          echo '=== ADMIN BINDING ==='
-          grep -n -C 14 -E 'AdminBindingRequiredNotice|غير مربوط|دفتر شركة رحال|دفتر.*رحال|tenant_id' app/page.js | head -n 260 || true
-          echo '=== PACKAGE LABELS ==='
-          grep -n -C 8 -E 'الباقات|البرامج|الباكجات' app/page.js | head -n 320 || true
-          echo '=== PRINT SUPPLIER ==='
-          grep -n -C 12 -E 'printVoucher|supplier_name|اسم المورد|المورد:|الوكيل:' app/page.js | head -n 520 || true
-          echo '=== AUTH ROUTES ==='
-          grep -n -C 14 -E 'login|signup|register|forgot|reset|verify|verification|password' 'app/api/[[...path]]/route.js' | head -n 520 || true
-          echo '=== SIGNUP FILES ==='
-          find app/signup -maxdepth 3 -type f -print
-          for f in $(find app/signup -maxdepth 3 -type f); do
-            echo "--- $f ---"
-            grep -n -C 12 -E 'email|password|verify|login|signup|register|نسيت|تحقق' "$f" | head -n 260 || true
-          done
+          echo '=== ADMIN STAFF CREATE ==='
+          grep -n -C 24 -E "path === '/users'.*POST|tenant_id: null, admin_realm|isAdminStaff|inAdminRealm" lib/adminStaff.js | head -n 260 || true
+          echo '=== ADMIN BLOCK ==='
+          sed -n '14120,14185p' app/page.js
+          echo '=== PACKAGE NAV ==='
+          grep -n -C 8 -E "key: 'packages'|mod_packages|Packages|الباكجات|الباقات والبرامج|الباقات" app/page.js | head -n 420 || true
+          echo '=== PRINT FUNCTIONS ==='
+          grep -n -C 25 -E "function printVoucher|async function printVoucher|buildUnifiedVoucherHTML|supplier_name|المورد:|الوكيل:" app/page.js | grep -E -B25 -A35 "printVoucher|buildUnifiedVoucherHTML|supplier_name|المورد:|الوكيل:" | head -n 900 || true
+          echo '=== LOGIN UI ==='
+          grep -n -C 20 -E "نسيت|forgot-password|Login|تسجيل الدخول|password" app/page.js | head -n 380 || true
+          echo '=== AUTH RESET BACKEND ==='
+          grep -n -C 35 -E "forgot-password|password_reset_requests|reset_password|reset-password" 'app/api/[[...path]]/route.js' | head -n 420 || true
