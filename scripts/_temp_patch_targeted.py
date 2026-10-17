@@ -138,3 +138,5 @@ s=s[:start]+panel+s[form:]
 p.write_text(s)
 print('package labels replaced:', n)
 print('supplier print lines removed:', removed)
+
+# trigger
