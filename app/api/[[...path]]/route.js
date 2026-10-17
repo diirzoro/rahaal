@@ -717,7 +717,7 @@ async function getPatSession(request, db) {
     return null
   }
 }
-function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, branch_id: u.branch_id || null, /* v5.3 */ active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : u.role === 'super_admin' ? { ...ownerPermissions(), ...(u.permissions || {}) } : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } } // v3.98 — platform SA in the company book = owner-equivalent perms, minus his explicit overrides (travel modules hidden)
+function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, admin_role_key: u.admin_role_key || null, admin_realm: u.admin_realm === true, platform_org: u.platform_org === true, tenant_id: u.tenant_id, branch_id: u.branch_id || null, /* v5.3 */ active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : u.role === 'super_admin' ? { ...ownerPermissions(), ...(u.permissions || {}) } : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } } // v3.98 — platform SA in the company book = owner-equivalent perms, minus his explicit overrides (travel modules hidden)
 // v3.97 — Batch 5: MAIN super admin realm check (role string is not enough —
 // a tenant user mistakenly holding 'super_admin' must NOT pass admin gates).
 // v3.98 — Phase 1 (Rahaal company book): the main SA may now be BOUND to the
@@ -2415,6 +2415,25 @@ async function handleRoute(request, { params }) {
       if (!user || !user.active) return bad('بيانات الدخول غير صحيحة', 401)
       const okpw = bcrypt.compareSync(b.password, user.password_hash)
       if (!okpw) return bad('بيانات الدخول غير صحيحة', 401)
+
+      // Repair legacy admin_staff accounts that were created unbound even though
+      // the unified admin UI requires the Rahaal company/platform tenant.
+      // This is strictly limited to verified admin-realm staff, never office users.
+      if (user.role === 'admin_staff' && user.admin_realm === true && !user.tenant_id) {
+        const platformOrg = await db.collection('tenants').findOne({ is_platform_org: true }, { projection: { id: 1 } })
+        if (!platformOrg?.id) return bad('دفتر شركة رحّال غير مهيأ — تعذر ربط حساب الإدارة', 409)
+        const restricted = {
+          ...(user.permissions || {}),
+          mod_tickets: false, mod_visas: false, mod_visa_monitor: false,
+          mod_services: false, mod_packages: false, mod_meraaj: false, mod_query: false,
+        }
+        await db.collection('users').updateOne({ id: user.id, tenant_id: { $in: [null, undefined] } }, {
+          $set: { tenant_id: platformOrg.id, platform_org: true, permissions: restricted, updated_at: new Date() },
+        })
+        user.tenant_id = platformOrg.id
+        user.platform_org = true
+        user.permissions = restricted
+      }
       if (user.tenant_id) {
         const t = await db.collection('tenants').findOne({ id: user.tenant_id })
         if (!t || t.status !== 'active') return bad('تم إيقاف المكتب — تواصل مع الإدارة', 403)
@@ -2510,7 +2529,7 @@ async function handleRoute(request, { params }) {
       if (/^\/tickets/.test(route) && !P.mod_tickets) return deny('حجز التذاكر')
       if (/^\/visas/.test(route) && !P.mod_visas) return deny('التأشيرات')
       if ((/^\/services/.test(route) || /^\/service-types/.test(route)) && !P.mod_services) return deny('الخدمات')
-      if (/^\/packages/.test(route) && !P.mod_packages && !P.mod_meraaj) return deny('الباكجات والبرامج')
+      if (/^\/packages/.test(route) && !P.mod_packages && !P.mod_meraaj) return deny('الباقات والبرامج')
       if (/^\/meraaj\//.test(route) && !P.mod_meraaj) return deny('متجر معراج')
       if (/^\/fx/.test(route) && !P.mod_fx) return deny('صرافة العملات')
       if (/^\/journal-entries/.test(route) && !P.mod_journal) return deny('قيود اليومية')
