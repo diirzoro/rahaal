@@ -273,18 +273,51 @@ function LoginPage({ onLogin, onBack, initialSignup }) {
     finally { setLoading(false) }
   }
 
-  // v3.12 — Forgot password (admin-mediated request)
+  // Forgot password — email OTP when mail delivery is configured,
+  // with the existing admin-mediated request retained as a fallback.
   const [mode, setMode] = useState('login')
   const [fpEmail, setFpEmail] = useState('')
   const [fpNote, setFpNote] = useState('')
   const [fpLoading, setFpLoading] = useState(false)
   const [fpSent, setFpSent] = useState(false)
+  const [fpStep, setFpStep] = useState('request')
+  const [fpCode, setFpCode] = useState('')
+  const [fpNewPassword, setFpNewPassword] = useState('')
+  const [fpConfirmPassword, setFpConfirmPassword] = useState('')
+
+  const resetForgotState = () => {
+    setFpSent(false); setFpStep('request'); setFpCode('')
+    setFpNewPassword(''); setFpConfirmPassword(''); setFpNote('')
+  }
+
   const sendForgot = async () => {
     if (!fpEmail || !fpEmail.includes('@')) return toast.error('أدخل بريدك الإلكتروني المسجل')
     try {
       setFpLoading(true)
-      await api('/auth/forgot-password', { method: 'POST', body: { email: fpEmail, note: fpNote } })
-      setFpSent(true)
+      const r = await api('/auth/forgot-password', { method: 'POST', body: { email: fpEmail, note: fpNote } })
+      if (r.delivery === 'email_code') {
+        setFpStep('code')
+        setFpSent(false)
+        toast.success('📨 إذا كان البريد مسجلاً فسيصلك رمز الاستعادة')
+      } else {
+        setFpSent(true)
+      }
+    } catch (e) { toast.error(e.message) }
+    finally { setFpLoading(false) }
+  }
+
+  const resetForgotPassword = async () => {
+    if (!/^\d{6}$/.test(fpCode.trim())) return toast.error('أدخل رمز التحقق المكوّن من 6 أرقام')
+    if (fpNewPassword.length < 6) return toast.error('كلمة المرور الجديدة يجب ألا تقل عن 6 أحرف')
+    if (fpNewPassword !== fpConfirmPassword) return toast.error('تأكيد كلمة المرور غير مطابق')
+    try {
+      setFpLoading(true)
+      await api('/auth/reset-password', { method: 'POST', body: {
+        email: fpEmail, code: fpCode.trim(),
+        new_password: fpNewPassword, confirm_password: fpConfirmPassword,
+      } })
+      toast.success('✅ تم تغيير كلمة المرور — سجل الدخول بكلمة المرور الجديدة')
+      setMode('login'); resetForgotState(); setFpEmail('')
     } catch (e) { toast.error(e.message) }
     finally { setFpLoading(false) }
   }
@@ -315,25 +348,48 @@ function LoginPage({ onLogin, onBack, initialSignup }) {
                   <div className="text-center space-y-3 py-4">
                     <div className="text-4xl">📨</div>
                     <div className="text-emerald-300 font-bold">تم استلام طلبك بنجاح</div>
-                    <div className="text-slate-300 text-sm">ستقوم الإدارة بمعالجة الطلب وتعيين كلمة مرور جديدة لك، ثم التواصل معك قريباً.</div>
-                    <Button variant="outline" onClick={() => { setMode('login'); setFpSent(false); setFpEmail(''); setFpNote('') }} className="mt-2">← العودة لتسجيل الدخول</Button>
+                    <div className="text-slate-300 text-sm">خدمة البريد غير مفعلة حالياً، لذلك وصل طلبك إلى الإدارة لمعالجته والتواصل معك.</div>
+                    <Button variant="outline" onClick={() => { setMode('login'); resetForgotState(); setFpEmail('') }} className="mt-2">← العودة لتسجيل الدخول</Button>
                   </div>
+                ) : fpStep === 'code' ? (
+                  <>
+                    <div className="text-slate-300 text-sm">أدخل رمز الـ6 أرقام الذي وصلك بالبريد، ثم اختر كلمة مرور جديدة.</div>
+                    <div className="space-y-2">
+                      <Label className="text-slate-300">رمز التحقق</Label>
+                      <Input dir="ltr" inputMode="numeric" maxLength={6} value={fpCode} onChange={e => setFpCode(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="123456" className="bg-slate-800 border-slate-700 text-white text-center text-xl tracking-[0.3em] font-bold" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-slate-300">كلمة المرور الجديدة</Label>
+                      <Input dir="ltr" type="password" value={fpNewPassword} onChange={e => setFpNewPassword(e.target.value)} className="bg-slate-800 border-slate-700 text-white" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-slate-300">تأكيد كلمة المرور</Label>
+                      <Input dir="ltr" type="password" value={fpConfirmPassword} onChange={e => setFpConfirmPassword(e.target.value)} className="bg-slate-800 border-slate-700 text-white" />
+                    </div>
+                    <Button onClick={resetForgotPassword} disabled={fpLoading} className="w-full grad-brand text-white h-11 font-bold">
+                      {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '✅ تحديث كلمة المرور'}
+                    </Button>
+                    <div className="flex items-center justify-between text-xs">
+                      <button type="button" disabled={fpLoading} onClick={sendForgot} className="text-orange-300 hover:text-orange-200">إعادة إرسال الرمز</button>
+                      <button type="button" onClick={() => { setFpStep('request'); setFpCode('') }} className="text-slate-400 hover:text-slate-200">تغيير البريد</button>
+                    </div>
+                  </>
                 ) : (
                   <>
-                    <div className="text-slate-300 text-sm">أدخل بريدك الإلكتروني المسجل وسيصل طلبك إلى الإدارة لتعيين كلمة مرور جديدة والتواصل معك.</div>
+                    <div className="text-slate-300 text-sm">أدخل بريدك الإلكتروني المسجل. إذا كانت خدمة البريد مفعلة سيصلك رمز استعادة، وإلا سيصل الطلب إلى الإدارة.</div>
                     <div className="space-y-2">
                       <Label className="text-slate-300">البريد الإلكتروني</Label>
                       <Input dir="ltr" type="email" value={fpEmail} onChange={e => setFpEmail(e.target.value)} placeholder="you@company.com" className="bg-slate-800 border-slate-700 text-white" />
                     </div>
                     <div className="space-y-2">
-                      <Label className="text-slate-300">ملاحظة للإدارة (اختياري)</Label>
-                      <Input value={fpNote} onChange={e => setFpNote(e.target.value)} placeholder="مثال: رقم جوالي للتواصل 77xxxxxxx" className="bg-slate-800 border-slate-700 text-white" />
+                      <Label className="text-slate-300">ملاحظة للإدارة (اختياري — تستخدم فقط عند تعذر البريد)</Label>
+                      <Input value={fpNote} onChange={e => setFpNote(e.target.value)} placeholder="رقم للتواصل أو ملاحظة" className="bg-slate-800 border-slate-700 text-white" />
                     </div>
                     <Button onClick={sendForgot} disabled={fpLoading} className="w-full grad-brand text-white h-11 font-bold">
-                      {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '📨 إرسال الطلب للإدارة'}
+                      {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '📨 إرسال رمز الاستعادة'}
                     </Button>
                     <div className="text-center">
-                      <button type="button" onClick={() => setMode('login')} className="text-xs text-slate-400 hover:text-slate-200">← العودة لتسجيل الدخول</button>
+                      <button type="button" onClick={() => { setMode('login'); resetForgotState() }} className="text-xs text-slate-400 hover:text-slate-200">← العودة لتسجيل الدخول</button>
                     </div>
                   </>
                 )}
@@ -2596,7 +2652,7 @@ const NAV = [
   { id: 'tickets',   label: 'حجز التذاكر', icon: Plane, color: 'from-sky-600 to-blue-500' },
   { id: 'visas',     label: 'التأشيرات', icon: FileBadge2, color: 'from-emerald-600 to-teal-500' },
   { id: 'services',  label: 'الخدمات', icon: Briefcase, color: 'from-orange-600 to-amber-500' },
-  { id: 'packages',  label: 'الباكجات والبرامج', icon: FileBadge2, color: 'from-teal-600 to-emerald-500' },
+  { id: 'packages',  label: 'الباقات والبرامج', icon: FileBadge2, color: 'from-teal-600 to-emerald-500' },
   { id: 'meraaj',    label: '🕋 متجر معراج', icon: Package, color: 'from-purple-700 to-fuchsia-500' },
   { id: 'visa-monitor', label: 'مراقبة التأشيرات', icon: CalendarClock, color: 'from-red-600 to-orange-500' },
   { id: 'query',     label: 'مركز الاستعلامات', icon: BarChart3, color: 'from-violet-600 to-indigo-500' },
@@ -2635,7 +2691,7 @@ const NAV = [
 // v3.45 — RBAC Phase 1: module access catalog + helper (owner always allowed; settings owner-only)
 const MODULE_LABELS = [
   { k: 'mod_dashboard', l: 'لوحة التحكم' }, { k: 'mod_tickets', l: 'حجز التذاكر' }, { k: 'mod_visas', l: 'التأشيرات' },
-  { k: 'mod_services', l: 'الخدمات' }, { k: 'mod_packages', l: 'الباكجات والبرامج' }, { k: 'mod_meraaj', l: '🕋 متجر معراج' },
+  { k: 'mod_services', l: 'الخدمات' }, { k: 'mod_packages', l: 'الباقات والبرامج' }, { k: 'mod_meraaj', l: '🕋 متجر معراج' },
   { k: 'mod_visa_monitor', l: 'مراقبة التأشيرات' }, { k: 'mod_query', l: 'مركز الاستعلامات' }, { k: 'mod_fx', l: 'صرافة العملات' },
   { k: 'mod_receipt', l: 'سند قبض' }, { k: 'mod_payment', l: 'سند صرف' }, { k: 'mod_clients', l: 'العملاء' },
   { k: 'mod_suppliers', l: 'الموردون والوكلاء' }, { k: 'mod_boxes', l: 'الصناديق والبنوك' }, { k: 'mod_chart', l: 'الدليل المحاسبي' },
@@ -4393,7 +4449,6 @@ async function printVoucher({ kind, record, settings, tenant, branchName, userNa
         <div><b>التاريخ:</b> ${fmtDate(record.date)}</div><div><b>نوع الخدمة:</b> ${escHtml(record.service_type)}</div>
         <div><b>اسم المسافر:</b> ${escHtml(record.passenger_name || '—')}</div><div><b>رقم الجواز:</b> ${escHtml(record.passport_no || '—')}</div>
         <div><b>الجنسية:</b> ${escHtml(record.nationality || '—')}</div><div><b>العميل:</b> ${escHtml(record.client_name)}</div>
-        <div><b>المورد:</b> ${escHtml(record.supplier_name)}</div>
         <div><b>طريقة الدفع:</b> <span class="badge ${record.payment_method === 'cash' ? 'badge-cash' : 'badge-credit'}">${record.payment_method === 'cash' ? 'نقد' : 'آجل'}</span></div>
       </div>
       ${''/* v6.3 PRIVACY RULE — Cost & Commission/Profit are INTERNAL ONLY and must NEVER
@@ -8797,7 +8852,7 @@ const HELP_SCREENS = [
     { name: 'الرقم المرجعي', required: false, desc: 'رقم عقد أو حجز' },
     { name: 'حساب القبض + المورد + التكاليف', required: true, desc: '' },
   ], workflow: ['أضف نوع خدمة جديد أو استخدم موجود', 'أدخل تكلفة وسعر بيع', 'حفظ — قيد يومية آلي'] },
-  { id: 'packages', icon: '📦', title: 'الباكجات والبرامج', color: 'from-teal-500 to-emerald-600', purpose: 'إدارة البرامج السياحية (عمرة/حج/سياحة) مع مكونات ديناميكية', fields: [
+  { id: 'packages', icon: '📦', title: 'الباقات والبرامج', color: 'from-teal-500 to-emerald-600', purpose: 'إدارة البرامج السياحية (عمرة/حج/سياحة) مع مكونات ديناميكية', fields: [
     { name: 'اسم الباكج + النوع', required: true, desc: '' },
     { name: 'تاريخ البداية والنهاية', required: true, desc: '' },
     { name: 'العملة الأساسية', required: true, desc: '' },
@@ -9384,7 +9439,7 @@ function PackagesScreen() {
   }
   return (
     <div className="space-y-4">
-      <TopBar title="الباكجات والبرامج السياحية" subtitle={`${openPackages.length} باكج نشط • ${closedPackages.length} مغلق`}
+      <TopBar title="الباقات والبرامج السياحية" subtitle={`${openPackages.length} باكج نشط • ${closedPackages.length} مغلق`}
         right={<div className="flex gap-2">
           <Button variant="outline" onClick={() => { setShowArchived(!showArchived); if (!showArchived) loadArchived() }} className={`gap-2 ${showArchived ? 'bg-slate-700 text-white border-slate-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>🗂️ المؤرشفة</Button>
           <Button variant="outline" onClick={() => setWaLogsOpen(true)} className="gap-2 border-green-300 text-green-700 hover:bg-green-50 relative">📲 سجل الواتساب{waReminders > 0 && <span className="absolute -top-2 -left-2 bg-rose-500 text-white text-[10px] rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 font-bold">{waReminders}</span>}</Button>
@@ -12985,7 +13040,7 @@ function TenantApp() {
         {tabAllowed && tab === 'tickets' && <ErrorBoundary tabName="حجز التذاكر"><TicketsScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'visas' && <ErrorBoundary tabName="التأشيرات والخدمات"><VisasScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'services' && <ErrorBoundary tabName="الخدمات"><ServicesScreen /></ErrorBoundary>}
-        {tabAllowed && tab === 'packages' && <ErrorBoundary tabName="الباكجات والبرامج"><PackagesScreen /></ErrorBoundary>}
+        {tabAllowed && tab === 'packages' && <ErrorBoundary tabName="الباقات والبرامج"><PackagesScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'meraaj' && <ErrorBoundary tabName="متجر معراج"><MeraajStoreScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'fx' && <ErrorBoundary tabName="صرافة العملات"><FxScreen /></ErrorBoundary>}
         {tabAllowed && tab === 'receipt' && <ErrorBoundary tabName="سند القبض"><VoucherScreen mode="receipt" /></ErrorBoundary>}
@@ -13794,7 +13849,7 @@ function LandingPage({ onLoginClick, onSignupClick }) {
     { icon: '💱', title: 'محاسبة متعدّدة العملات', desc: 'قيد مزدوج آلي بـ USD / SAR / YER مع أسعار صرف يومية وتقارير موحّدة.', color: 'from-blue-500 to-cyan-500' },
     { icon: '✈️', title: 'إدارة التذاكر والحجوزات', desc: 'إصدار تذاكر جوي وبري، طباعة احترافية، ومطابقة مع الموردين لحظياً.', color: 'from-orange-500 to-red-500' },
     { icon: '🛂', title: 'تأشيرات وموافقات', desc: 'إدارة تأشيرات العمرة والزيارة والعمل والموافقات الأمنية مع تنبيهات الصلاحية.', color: 'from-emerald-500 to-teal-500' },
-    { icon: '🕋', title: 'الباكجات والبرامج السياحية', desc: 'إنشاء باكجات كاملة مع تكاليف المكونات وتقارير ربحية لحظية عند إغلاق الباكج.', color: 'from-fuchsia-500 to-pink-500' },
+    { icon: '🕋', title: 'الباقات والبرامج السياحية', desc: 'إنشاء باكجات كاملة مع تكاليف المكونات وتقارير ربحية لحظية عند إغلاق الباكج.', color: 'from-fuchsia-500 to-pink-500' },
     { icon: '📊', title: 'تقارير مالية ذكية', desc: 'ميزانية عمومية، أرباح وخسائر، كشف حساب تفاعلي، ومقارنة ربحية الباكجات.', color: 'from-indigo-500 to-blue-500' },
     { icon: '📱', title: 'تكامل واتساب ذكي', desc: 'إرسال كشوف الحسابات والتذاكر عبر واتساب بقالب ديناميكي حسب نوع الرحلة.', color: 'from-green-500 to-emerald-500' },
     { icon: '💸', title: 'الإحالة والإحصائيات', desc: 'نظام إحالة يمنحك 50 قيد مجاني مكافأة عن كل مكتب مشترك يدفع فعلياً.', color: 'from-amber-500 to-orange-500' },
