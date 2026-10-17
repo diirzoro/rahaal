@@ -2510,7 +2510,7 @@ async function handleRoute(request, { params }) {
           mod_tickets: false, mod_visas: false, mod_visa_monitor: false,
           mod_services: false, mod_packages: false, mod_meraaj: false, mod_query: false,
         }
-        await db.collection('users').updateOne({ id: user.id, tenant_id: { $in: [null, undefined] } }, {
+        await db.collection('users').updateOne({ id: user.id, tenant_id: null }, {
           $set: { tenant_id: platformOrg.id, platform_org: true, permissions: restricted, updated_at: new Date() },
         })
         user.tenant_id = platformOrg.id
