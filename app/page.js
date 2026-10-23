@@ -193,8 +193,10 @@ function tplService(s) {
 // ============ v2.8.1 — Brand Components (Target Media theme: royal blue + orange) ============
 // v7.0 — UNIFIED PASSWORD POLICY (frontend mirror of the server rule — the server
 // remains the authority). Applies to NEW passwords only; existing ones untouched.
-const PW_POLICY_HINT = 'كلمة المرور يجب ألا تقل عن 8 أحرف، وتحتوي على حرف كبير (A-Z) ورقم (0-9) ورمز خاص (مثل ! @ # $ %) على الأقل'
-const pwPolicyOk = (s) => String(s || '').length >= 8 && /[A-Z]/.test(s) && /[0-9]/.test(s) && /[^A-Za-z0-9]/.test(s)
+const PW_POLICY_HINT = 'كلمة المرور يجب ألا تقل عن 8 أحرف، وتحتوي على حرف إنجليزي كبير (A-Z) ورقم (0-9) ورمز خاص حقيقي (مثل ! @ # $ %) — المسافة والأحرف العربية لا تُحتسب رمزاً خاصاً'
+// v7.1 — point 4: the special character must be a REAL ASCII symbol (space / Arabic
+// letters never count) — mirrors the server-side PW_SPECIAL_RE exactly.
+const pwPolicyOk = (s) => String(s || '').length >= 8 && /[A-Z]/.test(s) && /[0-9]/.test(s) && /[!"#$%&'()*+,\-./:;<=>?@[\]^_`{|}~\\]/.test(s)
 // Small live indicator shown under new-password inputs (no redesign — one line).
 function PwHint({ value }) {
   if (!value) return <div className="text-[10px] text-slate-400 mt-1 leading-relaxed">{PW_POLICY_HINT}</div>
@@ -12351,7 +12353,7 @@ function OfficeSettings() {
     // v3.88.4 — S-002: field-specific validation with clear reasons (mirrors backend)
     if (!newUser.name || !newUser.name.trim()) return toast.error('اسم الموظف مطلوب')
     if (!newUser.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newUser.email.trim())) return toast.error('البريد الإلكتروني غير صالح — مثال: name@example.com')
-    if (!newUser.password || newUser.password.length < 6) return toast.error('كلمة المرور يجب ألا تقل عن 6 أحرف')
+    if (!newUser.password || !pwPolicyOk(newUser.password)) return toast.error(PW_POLICY_HINT) // v7.1 — point 4: unified policy (was 6-char)
     try {
       setAddingUser(true)
       await api('/tenant/users', { method: 'POST', body: newUser })

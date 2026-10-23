@@ -47,7 +47,11 @@ function SignupPageInner() {
     // v3.9.18 — Phone must be international format with 7-15 digits
     const cleanPhone = form.owner_phone.replace(/[\s-]/g, '')
     if (!/^\+?[0-9]{7,15}$/.test(cleanPhone)) return toast.error('رقم الهاتف غير صالح — أدخل رمز الدولة والرقم (مثال: +967771234567)')
-    if (form.owner_password.length < 6) return toast.error('كلمة المرور يجب أن تكون 6 أحرف على الأقل')
+    // v7.1 — unified password policy (mirrors the server): 8+ chars, English uppercase,
+    // digit, and a REAL ASCII special character (space/Arabic letters don't count).
+    const pw = form.owner_password
+    const pwOk = String(pw || '').length >= 8 && /[A-Z]/.test(pw) && /[0-9]/.test(pw) && /[!"#$%&'()*+,\-./:;<=>?@[\]^_`{|}~\\]/.test(pw)
+    if (!pwOk) return toast.error('كلمة المرور يجب ألا تقل عن 8 أحرف، وتحتوي على حرف إنجليزي كبير (A-Z) ورقم (0-9) ورمز خاص حقيقي (مثل ! @ # $ %)')
     try {
       setSaving(true)
       const body = { ...form, owner_phone: cleanPhone, referral_code: ref || undefined }
@@ -132,7 +136,7 @@ function SignupPageInner() {
                 <div className="text-[10px] text-slate-500 mt-1">أدخل رمز الدولة والرقم (بدون مسافات). سيُستخدم للتواصل والدعم عبر الواتساب.</div>
               </div>
               <div>
-                <label className="text-xs text-slate-600 mb-1 block">كلمة المرور * (6 أحرف فأكثر)</label>
+                <label className="text-xs text-slate-600 mb-1 block">كلمة المرور * (8 أحرف فأكثر: حرف كبير A-Z + رقم + رمز خاص مثل !@#$%)</label>
                 <Input dir="ltr" type="password" value={form.owner_password} onChange={e => setForm({ ...form, owner_password: e.target.value })} />
               </div>
               <div>

@@ -22,7 +22,7 @@ import { adminNotifyHandler } from '@/lib/adminNotify' // v3.95 — Batch 3 (In-
 import { adminReportsHandler } from '@/lib/adminReports' // v3.96 — Batch 4 (Reports — READ-ONLY)
 import { adminDisputesHandler } from '@/lib/adminDisputes' // v3.96 — Batch 4 (Disputes)
 import { adminCurrencyHandler } from '@/lib/adminCurrency' // v3.96 — Batch 4 (Currencies & FX)
-import { adminGate, adminCan, adminStaffHandler } from '@/lib/adminStaff'
+import { adminGate, adminCan, adminStaffHandler, generateStrongPassword } from '@/lib/adminStaff'
 import { adminBranchesHandler, adminBranchUserAssignHandler } from '@/lib/adminBranches' // v5.0 — Enterprise branches (additive) // v3.97 — Batch 5 (Admin realm + staff RBAC)
 import { adminOrdersHandler, adminCommissionsLedgerHandler } from '@/lib/adminOrders' // v4.3 — unified orders + commissions ledger
 import { adminGeoHandler } from '@/lib/adminGeo' // v3.97 — Batch 5 (Geo locations)
@@ -396,13 +396,16 @@ async function seedTenantDefaults(db, tenantId) {
 // no lockout — old passwords keep working until the user changes them.
 // Rules: min 8 chars + at least one A-Z + one 0-9 + one symbol.
 // ============================================================================
-const PASSWORD_POLICY_MSG = 'كلمة المرور يجب ألا تقل عن 8 أحرف، وتحتوي على حرف إنجليزي كبير (A-Z) ورقم (0-9) ورمز خاص (مثل ! @ # $ %) على الأقل'
+const PASSWORD_POLICY_MSG = 'كلمة المرور يجب ألا تقل عن 8 أحرف، وتحتوي على حرف إنجليزي كبير (A-Z) ورقم (0-9) ورمز خاص حقيقي (مثل ! @ # $ %) — المسافة والأحرف العربية لا تُحتسب رمزاً خاصاً'
+// v7.1 — point 4: a REAL ASCII special character only — space, Arabic letters or any
+// other non-ASCII character are NOT accepted as the required special character.
+const PW_SPECIAL_RE = /[!"#$%&'()*+,\-./:;<=>?@[\]^_`{|}~\\]/
 function passwordPolicyError(pw) {
-  const s = String(pw || '')
+  const s = String(pw ?? '')
   if (s.length < 8) return PASSWORD_POLICY_MSG
   if (!/[A-Z]/.test(s)) return PASSWORD_POLICY_MSG
   if (!/[0-9]/.test(s)) return PASSWORD_POLICY_MSG
-  if (!/[^A-Za-z0-9]/.test(s)) return PASSWORD_POLICY_MSG
+  if (!PW_SPECIAL_RE.test(s)) return PASSWORD_POLICY_MSG
   return null
 }
 
@@ -734,7 +737,7 @@ async function getPatSession(request, db) {
     return null
   }
 }
-function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, branch_id: u.branch_id || null, /* v5.3 */ active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : u.role === 'super_admin' ? { ...ownerPermissions(), ...(u.permissions || {}) } : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } } // v3.98 — platform SA in the company book = owner-equivalent perms, minus his explicit overrides (travel modules hidden)
+function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, branch_id: u.branch_id || null, /* v5.3 */ active: u.active, /* v7.1 — point 1: fields the permissions UI needs for admin-realm users */ admin_role_key: u.admin_role_key || null, admin_realm: u.admin_realm === true, platform_org: u.platform_org === true, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : u.role === 'super_admin' ? { ...ownerPermissions(), ...(u.permissions || {}) } : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } } // v3.98 — platform SA in the company book = owner-equivalent perms, minus his explicit overrides (travel modules hidden)
 // v3.97 — Batch 5: MAIN super admin realm check (role string is not enough —
 // a tenant user mistakenly holding 'super_admin' must NOT pass admin gates).
 // v3.98 — Phase 1 (Rahaal company book): the main SA may now be BOUND to the
@@ -2572,9 +2575,14 @@ async function handleRoute(request, { params }) {
         if (method !== 'GET') { try { bodyB5 = await request.json() } catch { bodyB5 = {} } }
         // v7.0 — unified password policy also covers admin-staff account creation/reset
         // (enforced here at the router so the lib handler stays untouched)
-        if (route.startsWith('/admin/staff/') && bodyB5 && bodyB5.password) {
-          const pwErrA = passwordPolicyError(bodyB5.password)
-          if (pwErrA) return bad(pwErrA)
+        // v7.1 — point 4: new_password (admin-staff reset) is validated here as well.
+        if (route.startsWith('/admin/staff/') && bodyB5) {
+          for (const pf of ['password', 'new_password']) {
+            if (bodyB5[pf]) {
+              const pwErrA = passwordPolicyError(bodyB5[pf])
+              if (pwErrA) return bad(pwErrA)
+            }
+          }
         }
         const spB5 = new URL(request.url).searchParams
         const canB5 = await adminCan(db, sess)
@@ -3051,8 +3059,18 @@ async function handleRoute(request, { params }) {
           if (!reqDoc) return bad('الطلب غير موجود', 404)
           if (reqDoc.status !== 'pending') return bad('هذا الطلب تمت معالجته مسبقاً')
           if (b.action === 'reset') {
+            // v7.1 — point 3: NO privilege escalation through reset. A staff member whose
+            // only grant is a general offices write permission can NEVER reset a Super
+            // Admin (or any admin-realm) account — that requires the authorized main SA.
+            const targetU = await db.collection('users').findOne({ id: reqDoc.user_id })
+            if (!targetU) return bad('المستخدم المستهدف غير موجود', 404)
+            if ((targetU.role === 'super_admin' || targetU.role === 'admin_staff') && !isMainSA(sess.user)) {
+              return bad('🚫 إعادة تعيين كلمة مرور حساب إداري (Super Admin / موظف إدارة) متاحة حصراً للمشرف العام الرئيسي المخول', 403)
+            }
             const pwErrR = passwordPolicyError(b.new_password) // v7.0 — policy on admin reset
             if (pwErrR) return bad(pwErrR)
+            // v7.1 — the reset updates the password hash ONLY — role/permissions/branch
+            // bindings can never be altered through this operation.
             await db.collection('users').updateOne(
               { id: reqDoc.user_id },
               { $set: { password_hash: bcrypt.hashSync(String(b.new_password), 8), updated_at: new Date() } }
@@ -3344,13 +3362,11 @@ async function handleRoute(request, { params }) {
         const owner = await db.collection('users').findOne({ tenant_id: tid, role: 'owner' })
         if (!owner) return bad('لا يوجد مالك لهذا المكتب', 404)
         const b = await request.json().catch(() => ({}))
-        // Accept a provided password OR auto-generate a strong 10-char password
+        // v7.1 — point 4: a provided password must satisfy the FULL unified policy;
+        // the auto-generated fallback is always policy-compliant (never 6-char / no-symbol).
         let newPassword = String(b.new_password || '').trim()
-        if (!newPassword) {
-          const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'
-          newPassword = Array.from({ length: 10 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
-        }
-        if (newPassword.length < 6) return bad('كلمة السر يجب أن تكون 6 أحرف على الأقل')
+        if (!newPassword) newPassword = generateStrongPassword()
+        else { const pwErrOw = passwordPolicyError(newPassword); if (pwErrOw) return bad(pwErrOw) }
         await db.collection('users').updateOne({ id: owner.id }, {
           $set: { password_hash: bcrypt.hashSync(newPassword, 8), password_reset_at: new Date(), password_reset_by: sess.user.email },
         })
@@ -3426,7 +3442,12 @@ async function handleRoute(request, { params }) {
     // isolation; NO backfill — the legacy-NULL policy requires explicit approval).
     // ========================================================================
     const B = sess.user.branch_id || null
-    const btf = B ? { ...tf, branch_id: B } : tf
+    // v7.1 — point 5/6: btf is now SCOPE-EXCLUSIVE BOTH WAYS (was tenant-wide at HQ):
+    //   • Branch user → his branch records only (unchanged).
+    //   • HQ user     → HQ records ONLY (branch_id null/missing — Mongo null matches both).
+    // Knowing another branch's record ID grants NOTHING: every read/write/delete that
+    // filters by btf (or the guards below) rejects out-of-scope records.
+    const btf = { ...tf, branch_id: B }
     // v7.0 — OPERATIONAL scope (point 6 — Branch Visibility):
     // Normal operational lists/selectors are scope-exclusive BOTH ways:
     //   • Branch user  → his branch records only (as before, v5.3).
@@ -3435,8 +3456,10 @@ async function handleRoute(request, { params }) {
     // HQ keeps CONSOLIDATED visibility where explicitly designed (COA, reports with
     // an explicit branch filter, inter-branch reconciliation) — those use tf/q.branch.
     const opf = { ...tf, branch_id: B }
-    // IDOR guard for single-document access by a branch user
-    const inBranch = (doc) => !B || (!!doc && doc.branch_id === B)
+    // IDOR guard for single-document access — v7.1 point 5: STRICT BOTH WAYS.
+    // HQ (B=null) passes only HQ-owned docs (branch_id null/missing); a branch user
+    // passes only his own branch docs. Cross-scope IDs are rejected, not just hidden.
+    const inBranch = (doc) => !!doc && ((doc.branch_id || null) === B)
     // ========================================================================
     // v5.9.4 — CENTRAL BRANCH-SCOPE GUARDS (PR#24 one-pass): scope derives from
     // the SESSION only — branch_id / resource IDs in the body are NEVER trusted.
@@ -3447,7 +3470,8 @@ async function handleRoute(request, { params }) {
       if (!boxId) return null
       const bx = await db.collection('boxes').findOne({ id: String(boxId), tenant_id: T }, { projection: { id: 1, branch_id: 1 } })
       if (!bx) return 'الصندوق/البنك غير موجود'
-      if (B && (bx.branch_id || null) !== B) return '🚫 غير مصرح — الصندوق يخص نطاقاً آخر (فرع/مركز)'
+      // v7.1 — point 5: strict both ways — HQ may only use HQ boxes, a branch only its own.
+      if ((bx.branch_id || null) !== B) return '🚫 غير مصرح — الصندوق يخص نطاقاً آخر (فرع/مركز)'
       const abScope = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
       if (sess.user.role !== 'owner' && abScope.length > 0 && !abScope.includes(String(boxId))) return '🚫 غير مصرح — هذا الصندوق خارج قائمة الصناديق المسموحة لك'
       return null
@@ -3456,7 +3480,8 @@ async function handleRoute(request, { params }) {
       if (!partyId) return null
       const p = await db.collection(colName).findOne({ id: String(partyId), tenant_id: T }, { projection: { id: 1, branch_id: 1 } })
       if (!p) return colName === 'clients' ? 'العميل غير موجود' : colName === 'suppliers' ? 'المورد غير موجود' : 'الطرف غير موجود'
-      if (B && (p.branch_id || null) !== B) return '🚫 غير مصرح — هذا الطرف يخص نطاقاً آخر (فرع/مركز)'
+      // v7.1 — point 5: strict both ways — HQ may only use HQ parties, a branch only its own.
+      if ((p.branch_id || null) !== B) return '🚫 غير مصرح — هذا الطرف يخص نطاقاً آخر (فرع/مركز)'
       return null
     }
     // one call covering a transactional body (box/client/supplier ids) — used by tickets/visas/services/vouchers
@@ -6282,7 +6307,7 @@ async function handleRoute(request, { params }) {
     // Package bookings — register a client with auto-JE
     const pkgBookMatch = route.match(/^\/packages\/([^/]+)\/bookings$/)
     if (pkgBookMatch && method === 'GET') {
-      const list = await db.collection('package_bookings').find({ ...(B ? btf : tf), package_id: pkgBookMatch[1] }).sort({ created_at: -1 }).toArray() // v5.4 — branch scope
+      const list = await db.collection('package_bookings').find({ ...btf, package_id: pkgBookMatch[1] }).sort({ created_at: -1 }).toArray() // v7.1 — point 6: scope-exclusive (HQ=HQ only)
       return ok(list.map(b => ({ ...b, _id: undefined })))
     }
 
@@ -7121,7 +7146,10 @@ async function handleRoute(request, { params }) {
     //    branch_name so the UI shows clearly which branch every account belongs to.
     //    HQ accounting visibility ≠ HQ operational ownership (ownership unchanged).
     if (route === '/accounts' && method === 'GET') {
-      if (B) return ok(clean(await db.collection('accounts').find({ ...tf, branch_id: B }).sort({ code: 1 }).toArray()))
+      // v7.1 — point 9: the CORE chart of accounts stays office-unified. A branch user
+      // gets the shared core accounts (no branch_id) PLUS his own branch accounts —
+      // never another branch's. Parent accounts therefore never disappear.
+      if (B) return ok(clean(await db.collection('accounts').find({ ...tf, $or: [{ branch_id: { $exists: false } }, { branch_id: null }, { branch_id: B }] }).sort({ code: 1 }).toArray()))
       const accAll = clean(await db.collection('accounts').find(tf).sort({ code: 1 }).toArray())
       const brList = await db.collection('branches').find({ tenant_id: T }, { projection: { _id: 0, id: 1, name: 1 } }).toArray().catch(() => [])
       const brName = Object.fromEntries(brList.map(x => [x.id, x.name]))
@@ -7476,7 +7504,10 @@ async function handleRoute(request, { params }) {
       }
       if (wantAll || wantType === 'box') {
         const rows = await db.collection('boxes').find(baseQ).toArray()
+        // v7.1 — point 7: the picker respects the user's allowed-boxes restriction too
+        const abSearch = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
         rows.forEach(r => {
+          if (sess.user.role !== 'owner' && abSearch.length > 0 && !abSearch.includes(String(r.id))) return
           const label = (r.name_ar || '').toLowerCase()
           const code = (r.account_code || '').toLowerCase()
           if (!qText || label.includes(qText) || code.includes(qText)) {
@@ -7490,6 +7521,10 @@ async function handleRoute(request, { params }) {
         accs.forEach(a => {
           // Skip group-parents already served via sub-entities (client/supplier/box parents)
           if ([COA.CASHBOXES, COA.BANKS, COA.CLIENTS, COA.SUPPLIERS].includes(a.code)) return
+          // v7.1 — point 7: branch-stamped accounts of ANOTHER scope never surface in the
+          // regular picker (HQ sees core+HQ accounts; a branch sees core+its own). Access
+          // to another branch's accounts exists ONLY through /interbranch/accounts.
+          if ((a.branch_id || null) !== null && (a.branch_id || null) !== B) return
           if (acctTypeF && a.type !== acctTypeF) return // v3.79 — expense/revenue scoped selectors
           const label = (a.name_ar || '').toLowerCase()
           const code = (a.code || '').toLowerCase()
@@ -7510,9 +7545,14 @@ async function handleRoute(request, { params }) {
       // v7.0 — point 6 (COA visibility): branch user gets ONLY his branch scope in the
       // whole tree (accounts + linked clients/suppliers/boxes); HQ keeps the CONSOLIDATED
       // tree with a branch label on every branch-owned node (visibility ≠ ownership).
+      // v7.1 — point 9: the CORE COA is office-unified — a branch user ALWAYS receives the
+      // shared core accounts (no branch_id) plus his own branch accounts, so parent
+      // accounts never disappear and the tree never breaks. Operational sub-entities
+      // (clients/suppliers/boxes) remain strictly branch-scoped for branch users.
       const coaScope = B ? { branch_id: B } : {}
+      const accScope = B ? { $or: [{ branch_id: { $exists: false } }, { branch_id: null }, { branch_id: B }] } : {}
       const [accs, clients, suppliers, boxes, brListT] = await Promise.all([
-        db.collection('accounts').find({ tenant_id: T, ...coaScope }).sort({ code: 1 }).toArray(),
+        db.collection('accounts').find({ tenant_id: T, ...accScope }).sort({ code: 1 }).toArray(),
         db.collection('clients').find({ tenant_id: T, ...coaScope, ...filterInactive }).toArray(),
         db.collection('suppliers').find({ tenant_id: T, ...coaScope, ...filterInactive }).toArray(),
         db.collection('boxes').find({ tenant_id: T, ...coaScope, ...filterInactive }).toArray(),
@@ -7535,13 +7575,17 @@ async function handleRoute(request, { params }) {
         else roots.push(node)
       })
       // Attach sub-entities under their parent codes
+      // v7.1 — point 9: in the HQ consolidated view the STRUCTURE of branch-owned nodes
+      // is visible (with the branch label) but their BALANCES are hidden — financial
+      // figures of another branch's parties/boxes never leak through the normal tree.
+      const entBalances = (entity) => (!B && (entity.branch_id || null)) ? {} : (entity.balances || {})
       const attach = (entity, type) => {
         const ecode = entity.account_code
         // v3.92 — a COA-linked entity whose code exists as an accounts doc must not render
         // twice: decorate the existing tree node with the operational identity instead
         if (ecode && byCode.has(ecode)) {
           const n = byCode.get(ecode)
-          n.linked_entity = { type, id: entity.id, balances: entity.balances || {}, box_type: entity.type || null }
+          n.linked_entity = { type, id: entity.id, balances: entBalances(entity), box_type: entity.type || null }
           return
         }
         const pcode = entity.account_parent_code || entity.parent_code
@@ -7552,7 +7596,7 @@ async function handleRoute(request, { params }) {
             name: entity.name || entity.name_ar,
             type,
             box_type: entity.type,
-            balances: entity.balances || {},
+            balances: entBalances(entity),
             inactive: !!entity.inactive,
             branch_name: brTag(entity), // v7.0 — HQ consolidated view branch label
           })
@@ -8238,7 +8282,10 @@ async function handleRoute(request, { params }) {
 
     // Vouchers
     if (route === '/vouchers' && method === 'GET') {
-      const filter = B ? { ...btf } : (q.branch ? { ...tf, branch_id: q.branch === 'hq' ? null : q.branch } : { ...tf }); if (q.type) filter.type = q.type // v5.3/v5.4 branch scope + HQ filter
+      // v7.1 — point 6: vouchers are OPERATIONAL records — scope-exclusive both ways
+      // (HQ sees HQ vouchers only; a branch its own). The old tenant-wide HQ default
+      // and the cross-branch ?branch selector are removed from this operational list.
+      const filter = { ...btf }; if (q.type) filter.type = q.type
       const drVo = periodFilterExpr(q) // v5.7 — unified date filter
       return respondList(db, 'vouchers', drVo ? { ...filter, ...drVo } : filter, { date: -1, created_at: -1 }, q)
     }
@@ -8274,7 +8321,10 @@ async function handleRoute(request, { params }) {
     if (route === '/journal-entries' && method === 'GET') {
       // v5.6/v5.7 — SERVER-SIDE date filter (shared periodFilterExpr) + advanced search +
       // shared pagination. Filtering happens in the MongoDB query, never by hiding rows.
-      const jq = B ? { ...btf } : (q.branch ? { ...tf, branch_id: q.branch === 'hq' ? null : q.branch } : { ...tf }) /* v5.3/v5.4 branch scope + HQ filter */
+      // v7.1 — point 6: journal list is scope-exclusive both ways (HQ=HQ journals only;
+      // branch=own journals). Consolidated figures remain available via the designed
+      // reports (trial balance / income statement) — not via this operational list.
+      const jq = { ...btf }
       const andConds = []
       const drJe = periodFilterExpr(q)
       if (drJe) andConds.push(drJe)
@@ -8967,12 +9017,14 @@ async function handleRoute(request, { params }) {
     // Reports
     if (route === '/reports/profits' && method === 'GET') return ok(await reportProfits(db, T, { ...q, _branch_id: B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) })) // v5.9.4 — branch scope
     if (route === '/reports/statement' && method === 'GET') {
-      // v5.3 — branch user: (1) party must be inside his branch scope (2) rows/summary
-      // derive ONLY from his branch's journals. HQ (B=null) keeps full-office behavior.
-      if (B && q.party_id && ['client', 'supplier', 'box'].includes(String(q.party_type))) {
+      // v7.1 — point 8: the party-scope gate applies to EVERY session (not only when a
+      // branch_id exists in the session): HQ may only pull statements of HQ-owned
+      // clients/suppliers/boxes, and a branch only of its own — cross-scope party IDs
+      // are rejected outright.
+      if (q.party_id && ['client', 'supplier', 'box'].includes(String(q.party_type))) {
         const pc = String(q.party_type) === 'client' ? 'clients' : String(q.party_type) === 'supplier' ? 'suppliers' : 'boxes'
         const pOk = await db.collection(pc).findOne({ id: String(q.party_id), ...btf }, { projection: { id: 1 } })
-        if (!pOk) return bad('🚫 غير مصرح — كشف حساب طرف خارج نطاق فرعك', 403)
+        if (!pOk) return bad('🚫 غير مصرح — كشف حساب طرف خارج نطاقك التشغيلي (فرع/مركز)', 403)
       }
       const stScope = B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) // v5.4 — HQ scope selector
       return ok(await reportStatement(db, T, { ...q, _branch_id: stScope }))
