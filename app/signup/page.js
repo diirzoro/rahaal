@@ -68,13 +68,8 @@ function SignupPageInner() {
         {/* Left: benefits */}
         <div className="p-8 space-y-6 bg-white/70 backdrop-blur rounded-2xl border border-blue-100">
           <div className="flex items-center gap-3">
-            <div className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-[#1e3a8a] via-[#1e40af] to-[#0f1e4d] flex items-center justify-center shadow-2xl border border-orange-400/40">
-              <svg viewBox="0 0 64 64" fill="none" className="w-10 h-10">
-                <path d="M8 40 L28 36 L40 20 L50 20 L44 34 L54 32 L58 40 L44 42 L38 50 L30 50 L34 42 L14 44 Z" fill="#f97316" stroke="#fff" strokeWidth="1.5" strokeLinejoin="round"/>
-                <circle cx="52" cy="16" r="3" fill="#f97316" />
-              </svg>
-              <div className="absolute -bottom-1 -left-1 w-4 h-4 rounded-full bg-[#f97316] border-2 border-white shadow" />
-            </div>
+            {/* v7.5 — APPROVED INTEGRATION: official Rahaal logo on ALL auth screens (aspect ratio preserved) */}
+            <img src="/rahaal-logo-official.png" alt="شعار رحّال" className="w-20 h-auto object-contain drop-shadow-lg" />
             <div>
               <div className="text-3xl font-extrabold text-[#1e3a8a]">رحّـــال</div>
               <div className="text-sm font-black text-[#f97316] tracking-widest" style={{ letterSpacing: '0.15em' }}>RAHAL ERP</div>

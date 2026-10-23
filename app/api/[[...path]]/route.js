@@ -1043,6 +1043,51 @@ async function validateJournalLines(db, tenantId, lines) {
   return { ok: true }
 }
 
+// =============================================================================
+// v7.5 — APPROVED INTEGRATION (manual-journal protection): operational account
+// CODES and party IDs inside MANUAL journals must belong to the SESSION scope —
+// validated BEFORE any reversal/deletion/recreation/balance mutation.
+// Covers BOTH formats: single-entry (lines[]) and dual-entry (debit_*/credit_*).
+// Shared/Base COA stays usable per the approved accounting design (untagged AND
+// not operationally linked). Automatic engine postings (transactions, FX engine,
+// interbranch, opening/closing) do NOT pass through this guard — posting
+// formulas/calculations are untouched.
+// =============================================================================
+async function assertManualJournalScope(db, T, B, b) {
+  const opMap = await operationalCodeScopeMap(db, T)
+  const checkCode = async (code, where) => {
+    if (!code || code === 'MANUAL') return null
+    const c = String(code)
+    const accD = await db.collection('accounts').findOne({ tenant_id: T, code: c }, { projection: { code: 1, branch_id: 1 } })
+    if (accD && !accountInScope(accD, opMap, B)) return `🚫 الحساب "${c}" يخص نطاقاً آخر (فرع/مركز) — غير مسموح في القيد اليدوي (${where})`
+    if (!accD && opMap.has(c) && opMap.get(c) !== B) return `🚫 الحساب "${c}" مرتبط بطرف تشغيلي يخص نطاقاً آخر (فرع/مركز) — (${where})`
+    return null
+  }
+  const checkParty = async (pt, pid, where) => {
+    if (!pid || !['client', 'supplier', 'box'].includes(String(pt))) return null
+    const pc = String(pt) === 'client' ? 'clients' : String(pt) === 'supplier' ? 'suppliers' : 'boxes'
+    const p = await db.collection(pc).findOne({ id: String(pid), tenant_id: T }, { projection: { branch_id: 1 } })
+    if (!p) return `الطرف المحدد غير موجود (${where})`
+    if ((p.branch_id || null) !== B) return `🚫 الطرف المحدد يخص نطاقاً آخر (فرع/مركز) — (${where})`
+    return null
+  }
+  if (b?.dual) {
+    for (const side of ['debit', 'credit']) {
+      const lbl = side === 'debit' ? 'الطرف المدين' : 'الطرف الدائن'
+      const e1 = await checkCode(b[`${side}_account_code`], lbl); if (e1) return e1
+      const e2 = await checkParty(b[`${side}_party_type`], b[`${side}_party_id`], lbl); if (e2) return e2
+    }
+    return null
+  }
+  const lines = Array.isArray(b?.lines) ? b.lines : []
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i] || {}
+    const e1 = await checkCode(l.account_code, `السطر ${i + 1}`); if (e1) return e1
+    const e2 = await checkParty(l.party_type, l.party_id, `السطر ${i + 1}`); if (e2) return e2
+  }
+  return null
+}
+
 // ============ v4.5 — ACCOUNTING CORE HARDENING (central invariants) ============
 // Engine/structural accounts the Accounting Engine depends on (Opening, Year Close,
 // Retained Earnings, FX, fixed postings). Protected in code regardless of is_system
@@ -8829,12 +8874,12 @@ async function handleRoute(request, { params }) {
     // Manual Journal Voucher (single-currency or dual)
     if (route === '/journal-entries' && method === 'POST') {
       const b = await request.json()
-      // v5.9.4 — branch scope on every line-level party (box/client/supplier) — session-derived
-      for (const ln of (Array.isArray(b.lines) ? b.lines : [])) {
-        if (!ln || !ln.party_id) continue
-        if (ln.party_type === 'box') { const gLn = await assertBoxScope(ln.party_id); if (gLn) return bad(gLn, 403) }
-        else if (ln.party_type === 'client' || ln.party_type === 'supplier') { const gLn = await assertPartyScope(ln.party_type === 'client' ? 'clients' : 'suppliers', ln.party_id); if (gLn) return bad(gLn, 403) }
-      }
+      // v5.9.4 + v7.5 — APPROVED INTEGRATION: account codes AND party IDs (single +
+      // dual formats, debit & credit sides) are session-scope-validated BEFORE any
+      // financial effect — a branch can never post to HQ/another-branch operational
+      // accounts or parties, and vice versa. Shared/Base COA stays usable.
+      const scErr = await assertManualJournalScope(db, T, B, b)
+      if (scErr) return bad(scErr, 403)
       const result = await createManualJournal(db, T, b, { branchId: B }) // v5.3
       if (result.error) {
         // v4.8.2 — PR#18 (final point): the explicit unsafe state from createManualJournal
@@ -8876,6 +8921,21 @@ async function handleRoute(request, { params }) {
       if (perrOld) return bad(`القيد الأصلي داخل فترة/سنة مقفلة — ${perrOld}`)
       const perrNew = await assertOpenPeriod(db, T, b.date)
       if (perrNew) return bad(perrNew)
+      // v7.5 — APPROVED INTEGRATION: the NEW body is fully validated BEFORE any
+      // destructive step (reversal / deletion / recreation / balance mutation):
+      //   (a) session-scope of every account code + party ID (single & dual formats);
+      //   (b) structural validity of the lines (existence, group guard, negatives).
+      // The old journal and all balances remain untouched if anything is rejected here.
+      const scErrU = await assertManualJournalScope(db, T, B, b)
+      if (scErrU) return bad(scErrU, 403)
+      const preLinesU = b.dual
+        ? [
+          { account_code: b.debit_account_code, debit: Number(b.debit_amount) || 0, credit: 0 },
+          { account_code: b.credit_account_code, debit: 0, credit: Number(b.credit_amount) || 0 },
+        ]
+        : (Array.isArray(b.lines) ? b.lines : [])
+      const vPreU = await validateJournalLines(db, T, preLinesU)
+      if (!vPreU.ok) return bad(vPreU.error)
       // Reverse old effects
       await reverseManualJournalEffects(db, T, oldJe)
       await db.collection('journal_entries').deleteOne({ id: jeId, tenant_id: T }) // v4.5 — tenant-scoped delete
@@ -9155,7 +9215,9 @@ async function handleRoute(request, { params }) {
     }
 
     // Reports
-    if (route === '/reports/profits' && method === 'GET') return ok(await reportProfits(db, T, { ...q, _branch_id: B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) })) // v5.9.4 — branch scope
+    // v7.5 — APPROVED INTEGRATION: profits rows expose operational party identity →
+    // STRICT session scope (HQ=HQ docs only, branch=own) — ?branch can never widen it.
+    if (route === '/reports/profits' && method === 'GET') return ok(await reportProfits(db, T, { ...q, _branch_id: B || '__HQ__' }))
     if (route === '/reports/statement' && method === 'GET') {
       // v7.1 — point 8: the party-scope gate applies to EVERY session (not only when a
       // branch_id exists in the session): HQ may only pull statements of HQ-owned
@@ -9191,7 +9253,16 @@ async function handleRoute(request, { params }) {
       const stScope = B || '__HQ__'
       return ok(await reportStatement(db, T, { ...q, _branch_id: stScope }))
     }
-    if (route === '/reports/trial-balance' && method === 'GET') return ok(await reportTrialBalance(db, T, B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null), { mode: q.mode, currency: q.currency })) // v5.3/v5.4 branch scope | v5.6 mode+currency
+    if (route === '/reports/trial-balance' && method === 'GET') {
+      // v7.5 — APPROVED INTEGRATION: SUMMARY mode (party dimension collapsed) may stay
+      // consolidated office-wide for HQ (?branch selector honored — designed aggregate).
+      // DETAILED mode exposes operational party identity → SESSION scope only:
+      // HQ detailed = HQ scope, branch detailed = own branch (?branch never widens it).
+      const tbScope = q.mode === 'summary'
+        ? (B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null))
+        : (B || '__HQ__')
+      return ok(await reportTrialBalance(db, T, tbScope, { mode: q.mode, currency: q.currency }))
+    }
     if (route === '/reports/income-statement' && method === 'GET') return ok(await reportIncome(db, T, { ...q, _branch_id: B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) })) // v5.3/v5.4 — branch/HQ scope
     // v3.10.4 — Unified Query & Filters for Visas + Tickets
     if (route === '/reports/query' && method === 'GET') {
