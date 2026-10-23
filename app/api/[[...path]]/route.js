@@ -3181,6 +3181,11 @@ async function handleRoute(request, { params }) {
         if (!linkMode) { const pwErrT = passwordPolicyError(b.owner_password); if (pwErrT) return bad(pwErrT) } // v7.0 — policy on SA office creation
         let linkUser = null
         if (linkMode) {
+          // v7.2 — SA-SENSITIVE OPERATION: binding (or re-binding) a super_admin account
+          // to a tenant can NEVER ride on the general offices write permission — it is
+          // allowed exclusively for the authorized MAIN super admin (isMainSA).
+          // Normal (non-link) tenant creation below is untouched.
+          if (!isMainSA(sess.user)) return bad('🚫 ربط حساب Super Admin بمكتب عملية حساسة — متاحة حصراً للمشرف العام الرئيسي المخول', 403)
           linkUser = await db.collection('users').findOne({ id: b.link_owner_user_id })
           if (!linkUser) return bad('المستخدم المطلوب ربطه غير موجود', 404)
           if (linkUser.role !== 'super_admin') return bad('الربط متاح لحساب المشرف العام الرئيسي فقط')
