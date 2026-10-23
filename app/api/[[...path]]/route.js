@@ -2436,6 +2436,46 @@ async function handleRoute(request, { params }) {
       if (!user || !user.active) return bad('بيانات الدخول غير صحيحة', 401)
       const okpw = bcrypt.compareSync(b.password, user.password_hash)
       if (!okpw) return bad('بيانات الدخول غير صحيحة', 401)
+      // =======================================================================
+      // v7.2 — BINDING DEADLOCK FIX: the MAIN super admin (role=super_admin with
+      // no tenant) was blocked by the frontend «غير مربوط بدفتر شركة رحّال» notice,
+      // while the approved binding operation itself requires him to be INSIDE the
+      // panel — an unresolvable loop on fresh/production databases.
+      // Resolution: at login we IDEMPOTENTLY ensure the Rahaal company book
+      // (is_platform_org=true) exists and bind the account to it using EXACTLY the
+      // same field shape as the approved link-mode operation (/admin/tenants link
+      // mode): tenant_id + platform_org=true + travel modules hidden.
+      // Runs ONLY for the main SA; office users and admin_staff are never touched;
+      // an already-bound account passes through unchanged.
+      // =======================================================================
+      if (user.role === 'super_admin' && !user.tenant_id) {
+        let org = await db.collection('tenants').findOne({ is_platform_org: true })
+        if (!org) {
+          org = {
+            id: uuidv4(), slug: 'rahaal-hq-' + uuidv4().slice(0, 4), name: 'شركة رحّال',
+            status: 'active', is_platform_org: true,
+            max_users: 0, max_branches: 0, // 0 = unlimited (v5.0 semantics)
+            subscription: 'paid', plan_tier: 'enterprise',
+            journal_quota: { used: 0, limit: 0, top_ups: [] }, unlimited_journals: true,
+            referral_code: genReferralCode(), referred_by: null,
+            referral_stats: { signups: 0, activations: 0, bonus_earned: 0 },
+            activation_confirmed: true, subscription_expires_at: null, subscription_price: 0,
+            created_at: new Date(),
+          }
+          await db.collection('tenants').insertOne(org)
+          await seedTenantDefaults(db, org.id) // company-book COA tree + defaults
+        } else if (org.status !== 'active') {
+          await db.collection('tenants').updateOne({ id: org.id }, { $set: { status: 'active' } })
+          org.status = 'active'
+        }
+        const permsBind = {
+          ...(user.permissions || {}),
+          mod_tickets: false, mod_visas: false, mod_visa_monitor: false,
+          mod_services: false, mod_packages: false, mod_meraaj: false, mod_query: false,
+        }
+        await db.collection('users').updateOne({ id: user.id }, { $set: { tenant_id: org.id, platform_org: true, permissions: permsBind, updated_at: new Date() } })
+        user.tenant_id = org.id; user.platform_org = true; user.permissions = permsBind
+      }
       if (user.tenant_id) {
         const t = await db.collection('tenants').findOne({ id: user.tenant_id })
         if (!t || t.status !== 'active') return bad('تم إيقاف المكتب — تواصل مع الإدارة', 403)

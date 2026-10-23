@@ -14220,12 +14220,12 @@ function AdminBindingRequiredNotice({ user, logout }) {
         <h1 className="text-xl font-extrabold text-slate-800">حساب الإدارة غير مربوط بدفتر شركة رحّال</h1>
         <p className="text-sm text-slate-600 leading-relaxed">
           حسابك (<b>{user?.email}</b>) بدور «{user?.role === 'super_admin' ? 'المشرف العام' : 'موظف إدارة'}»
-          لكنه غير مربوط بأي Tenant، ولوحة التحكم المعتمدة هي تطبيق الشركة الموحّد (TenantApp).
-          لأسباب تتعلق بسلامة البيانات لا يُنشأ الربط تلقائياً عند الدخول —
-          يلزم ربط الحساب يدوياً بدفتر شركة رحّال عبر عملية معتمدة من الإدارة.
+          لكنه غير مربوط بأي Tenant بعد. {/* v7.2 — binding now happens automatically at login */}
+          تم تفعيل الربط التلقائي بدفتر شركة رحّال عند تسجيل الدخول —
+          كل ما عليك هو تسجيل الخروج ثم الدخول مجدداً وسيتم ربط حسابك تلقائياً بدفتر الشركة.
         </p>
-        <div className="text-xs text-slate-400">راجع فريق التطوير لاعتماد الربط، ثم أعد تسجيل الدخول.</div>
-        <button onClick={logout} className="px-6 py-2.5 rounded-lg bg-slate-800 text-white text-sm font-bold hover:bg-slate-700 transition">تسجيل الخروج</button>
+        <div className="text-xs text-slate-400">سجّل الخروج ثم ادخل مجدداً — إن استمرت المشكلة راجع فريق التطوير.</div>
+        <button onClick={logout} className="px-6 py-2.5 rounded-lg bg-slate-800 text-white text-sm font-bold hover:bg-slate-700 transition">تسجيل الخروج وإعادة الدخول</button>
       </div>
     </div>
   )
