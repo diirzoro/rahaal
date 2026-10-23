@@ -2675,9 +2675,18 @@ const canModule = (user, tabId) => {
     }
     return false
   }
-  // v7.0 — admin_staff accounts are platform-realm only (tenant_id=null by design):
-  // office/book modules never render for them; their world is the granted platform sections.
-  if (user.role === 'admin_staff') return tabId === 'help'
+  // v7.3 — item 6: the ABSOLUTE role block is REMOVED. An admin_staff's access to the
+  // Rahaal Company-Ledger modules is decided by Role + Permissions ONLY: his admin-realm
+  // role (e.g. finance_manager → accounting section) is materialized at login as EXPLICIT
+  // mod_* permissions (=== true; the office-staff "!== false" default NEVER applies here).
+  // Being admin_staff alone grants nothing beyond 'help'. Travel-office operational
+  // modules and office settings are NEVER exposed to admin_staff.
+  if (user.role === 'admin_staff') {
+    if (tabId === 'help') return true
+    if (SA_OFFICE_MODULES.has(String(tabId))) return false // travel ops stay platform-separated
+    if (tabId === 'settings') return false                 // office settings stay owner/SA-side
+    return user.permissions?.[`mod_${String(tabId).replace(/-/g, '_')}`] === true // explicit grant only
+  }
   // v5.4 — inter-branch is an OPT-IN module: full accounting perms do NOT imply it
   if (tabId === 'interbranch') return user.role === 'owner' || user.permissions?.mod_interbranch === true
   if (user.role === 'owner') return true
