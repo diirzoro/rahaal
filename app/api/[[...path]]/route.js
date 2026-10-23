@@ -389,6 +389,23 @@ async function seedTenantDefaults(db, tenantId) {
   })
 }
 
+// ============================================================================
+// v7.0 — UNIFIED PASSWORD POLICY (server-enforced — never frontend-only).
+// Applies to NEW passwords ONLY (create user / signup / change / reset).
+// Existing stored passwords are untouched: no migration, no forced reset,
+// no lockout — old passwords keep working until the user changes them.
+// Rules: min 8 chars + at least one A-Z + one 0-9 + one symbol.
+// ============================================================================
+const PASSWORD_POLICY_MSG = 'كلمة المرور يجب ألا تقل عن 8 أحرف، وتحتوي على حرف إنجليزي كبير (A-Z) ورقم (0-9) ورمز خاص (مثل ! @ # $ %) على الأقل'
+function passwordPolicyError(pw) {
+  const s = String(pw || '')
+  if (s.length < 8) return PASSWORD_POLICY_MSG
+  if (!/[A-Z]/.test(s)) return PASSWORD_POLICY_MSG
+  if (!/[0-9]/.test(s)) return PASSWORD_POLICY_MSG
+  if (!/[^A-Za-z0-9]/.test(s)) return PASSWORD_POLICY_MSG
+  return null
+}
+
 // v3.4 — Employee permissions defaults (owner has all=true implicitly)
 const DEFAULT_STAFF_PERMISSIONS = {
   tickets_view: true, tickets_add: true, tickets_edit: false, tickets_delete: false,
@@ -2334,6 +2351,7 @@ async function handleRoute(request, { params }) {
     if (route === '/public/signup' && method === 'POST') {
       const b = await request.json()
       if (!b.name || !b.owner_email || !b.owner_password || !b.owner_name) return bad('الاسم الكامل، اسم المكتب، البريد وكلمة المرور مطلوبة')
+      { const pwErrS = passwordPolicyError(b.owner_password); if (pwErrS) return bad(pwErrS) } // v7.0 — policy on signup
       // v3.9.18 — Mandatory phone/WhatsApp (with country code)
       const phone = String(b.owner_phone || '').trim()
       if (!phone) return bad('رقم الهاتف / الواتساب مطلوب')
@@ -2466,7 +2484,7 @@ async function handleRoute(request, { params }) {
           })
         }
       }
-      return ok({ message: 'تم استلام طلبك — ستقوم الإدارة بمعالجته والتواصل معك قريباً' })
+      return ok({ message: 'إذا كان البريد مسجلاً لدينا، فسيتم معالجة طلب الاستعادة والتواصل معك قريباً' }) // v7.0 — neutral (no email enumeration)
     }
 
     // Everything below requires session (except /auth/me which returns null gracefully)
@@ -2510,7 +2528,7 @@ async function handleRoute(request, { params }) {
       if (/^\/tickets/.test(route) && !P.mod_tickets) return deny('حجز التذاكر')
       if (/^\/visas/.test(route) && !P.mod_visas) return deny('التأشيرات')
       if ((/^\/services/.test(route) || /^\/service-types/.test(route)) && !P.mod_services) return deny('الخدمات')
-      if (/^\/packages/.test(route) && !P.mod_packages && !P.mod_meraaj) return deny('الباكجات والبرامج')
+      if (/^\/packages/.test(route) && !P.mod_packages && !P.mod_meraaj) return deny('الباقات والبرامج')
       if (/^\/meraaj\//.test(route) && !P.mod_meraaj) return deny('متجر معراج')
       if (/^\/fx/.test(route) && !P.mod_fx) return deny('صرافة العملات')
       if (/^\/journal-entries/.test(route) && !P.mod_journal) return deny('قيود اليومية')
@@ -2552,6 +2570,12 @@ async function handleRoute(request, { params }) {
       if (route.startsWith('/admin/staff/') || route.startsWith('/admin/geo/') || route.startsWith('/admin/payfin/') || route.startsWith('/admin/refdata/')) {
         let bodyB5 = null
         if (method !== 'GET') { try { bodyB5 = await request.json() } catch { bodyB5 = {} } }
+        // v7.0 — unified password policy also covers admin-staff account creation/reset
+        // (enforced here at the router so the lib handler stays untouched)
+        if (route.startsWith('/admin/staff/') && bodyB5 && bodyB5.password) {
+          const pwErrA = passwordPolicyError(bodyB5.password)
+          if (pwErrA) return bad(pwErrA)
+        }
         const spB5 = new URL(request.url).searchParams
         const canB5 = await adminCan(db, sess)
         const ctxB5 = { currencies: CURRENCIES, baseCurrency: BASE_CURRENCY }
@@ -3027,7 +3051,8 @@ async function handleRoute(request, { params }) {
           if (!reqDoc) return bad('الطلب غير موجود', 404)
           if (reqDoc.status !== 'pending') return bad('هذا الطلب تمت معالجته مسبقاً')
           if (b.action === 'reset') {
-            if (!b.new_password || String(b.new_password).length < 6) return bad('كلمة المرور الجديدة يجب ألا تقل عن 6 أحرف')
+            const pwErrR = passwordPolicyError(b.new_password) // v7.0 — policy on admin reset
+            if (pwErrR) return bad(pwErrR)
             await db.collection('users').updateOne(
               { id: reqDoc.user_id },
               { $set: { password_hash: bcrypt.hashSync(String(b.new_password), 8), updated_at: new Date() } }
@@ -3095,6 +3120,7 @@ async function handleRoute(request, { params }) {
         // book). No duplicate owner is created; the account keeps role=super_admin.
         const linkMode = !!b.link_owner_user_id
         if (!b.name || (!linkMode && (!b.owner_email || !b.owner_password))) return bad('الاسم وبيانات المالك مطلوبة')
+        if (!linkMode) { const pwErrT = passwordPolicyError(b.owner_password); if (pwErrT) return bad(pwErrT) } // v7.0 — policy on SA office creation
         let linkUser = null
         if (linkMode) {
           linkUser = await db.collection('users').findOne({ id: b.link_owner_user_id })
@@ -3401,6 +3427,14 @@ async function handleRoute(request, { params }) {
     // ========================================================================
     const B = sess.user.branch_id || null
     const btf = B ? { ...tf, branch_id: B } : tf
+    // v7.0 — OPERATIONAL scope (point 6 — Branch Visibility):
+    // Normal operational lists/selectors are scope-exclusive BOTH ways:
+    //   • Branch user  → his branch records only (as before, v5.3).
+    //   • HQ user      → HQ records ONLY (branch_id null/missing) — branch records
+    //     must NOT appear inside HQ operational lists as if they were HQ records.
+    // HQ keeps CONSOLIDATED visibility where explicitly designed (COA, reports with
+    // an explicit branch filter, inter-branch reconciliation) — those use tf/q.branch.
+    const opf = { ...tf, branch_id: B }
     // IDOR guard for single-document access by a branch user
     const inBranch = (doc) => !B || (!!doc && doc.branch_id === B)
     // ========================================================================
@@ -5060,7 +5094,12 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       if (!b.name || !String(b.name).trim()) return bad('اسم الموظف مطلوب') // v3.88.4 — S-002: field-specific validation
       if (!b.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(b.email).trim())) return bad('البريد الإلكتروني غير صالح — مثال: name@example.com')
-      if (!b.password || String(b.password).length < 6) return bad('كلمة المرور يجب ألا تقل عن 6 أحرف')
+      const pwErr = passwordPolicyError(b.password) // v7.0 — unified password policy (new passwords only)
+      if (pwErr) return bad(pwErr)
+      // v7.0 — ROLE WHITELIST (no privilege escalation): office users are created as
+      // 'staff' ONLY. 'owner' / 'super_admin' / 'admin_staff' can NEVER be assigned here —
+      // actual capabilities come from the permissions object + role_key templates.
+      if (b.role && b.role !== 'staff') return bad('🚫 الدور غير مسموح — مستخدمو المكتب يُنشؤون بدور «موظف» فقط، والصلاحيات تُحدد من قوالب الأدوار والصلاحيات')
       // v2.8 gold-only gate → v4.0.1 REMOVED: self-creating users is now allowed for ALL
       // tiers (silver/gold/enterprise/trial). The ONLY server gate is max_users — the value
       // the Super Admin set (plan default or per-office override). Owner counts within it.
@@ -5208,9 +5247,16 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       const upd = {}
       if (b.active !== undefined) upd.active = !!b.active
+      // v7.0 — ROLE WHITELIST on update too: a staff user can never be promoted to
+      // owner/super_admin/admin_staff by editing. Capabilities = permissions object only.
+      if (b.role && b.role !== 'staff') return bad('🚫 الدور غير مسموح — لا يمكن ترقية مستخدم مكتب إلى مالك أو مشرف من هنا')
       if (b.role) upd.role = b.role
       if (b.name) upd.name = b.name
-      if (b.password) upd.password_hash = bcrypt.hashSync(b.password, 8)
+      if (b.password) {
+        const pwErr2 = passwordPolicyError(b.password) // v7.0 — policy on password change
+        if (pwErr2) return bad(pwErr2)
+        upd.password_hash = bcrypt.hashSync(b.password, 8)
+      }
       // v3.4 — Permission update
       if (b.permissions && typeof b.permissions === 'object') {
         const sanitized = {}
@@ -6953,7 +6999,7 @@ async function handleRoute(request, { params }) {
     }
 
     // Clients
-    if (route === '/clients' && method === 'GET') return ok(clean(await db.collection('clients').find(btf) /* v5.3 branch scope */.sort({ created_at: -1 }).toArray()))
+    if (route === '/clients' && method === 'GET') return ok(clean(await db.collection('clients').find(opf) /* v7.0 operational scope: HQ-only for HQ, branch-only for branch */.sort({ created_at: -1 }).toArray()))
     if (route === '/clients' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم العميل مطلوب')
@@ -7005,7 +7051,7 @@ async function handleRoute(request, { params }) {
     }
 
     // Suppliers
-    if (route === '/suppliers' && method === 'GET') return ok(clean(await db.collection('suppliers').find(btf) /* v5.3 branch scope */.sort({ created_at: -1 }).toArray()))
+    if (route === '/suppliers' && method === 'GET') return ok(clean(await db.collection('suppliers').find(opf) /* v7.0 operational scope */.sort({ created_at: -1 }).toArray()))
     if (route === '/suppliers' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم المورد مطلوب')
@@ -7049,7 +7095,7 @@ async function handleRoute(request, { params }) {
     // Boxes
     // v3.51 — RBAC Phase 3: staff restricted to specific boxes see ONLY those boxes (names & balances)
     if (route === '/boxes' && method === 'GET') {
-      const allBoxes = clean(await db.collection('boxes').find(btf).sort({ created_at: 1 }).toArray()) // v5.3 branch scope
+      const allBoxes = clean(await db.collection('boxes').find(opf).sort({ created_at: 1 }).toArray()) // v7.0 operational scope (HQ-only for HQ / branch-only for branch)
       const abIds = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
       if (sess.user.role !== 'owner' && abIds.length > 0) return ok(allBoxes.filter(x => abIds.includes(x.id)))
       return ok(allBoxes)
@@ -7068,7 +7114,19 @@ async function handleRoute(request, { params }) {
     }
 
     // Accounts (Chart of Accounts)
-    if (route === '/accounts' && method === 'GET') return ok(clean(await db.collection('accounts').find(tf).sort({ code: 1 }).toArray()))
+    // v7.0 — point 6 (COA visibility):
+    //  • Branch user → ONLY accounts belonging to his branch scope (HQ/other-branch
+    //    accounts never appear in the branch COA — even for a branch manager).
+    //  • HQ user    → CONSOLIDATED COA (HQ + all branches) with each account carrying
+    //    branch_name so the UI shows clearly which branch every account belongs to.
+    //    HQ accounting visibility ≠ HQ operational ownership (ownership unchanged).
+    if (route === '/accounts' && method === 'GET') {
+      if (B) return ok(clean(await db.collection('accounts').find({ ...tf, branch_id: B }).sort({ code: 1 }).toArray()))
+      const accAll = clean(await db.collection('accounts').find(tf).sort({ code: 1 }).toArray())
+      const brList = await db.collection('branches').find({ tenant_id: T }, { projection: { _id: 0, id: 1, name: 1 } }).toArray().catch(() => [])
+      const brName = Object.fromEntries(brList.map(x => [x.id, x.name]))
+      return ok(accAll.map(a => ({ ...a, branch_name: a.branch_id ? (brName[a.branch_id] || 'فرع') : null })))
+    }
 
     // ================================================================
     // v3.10.5 — VISA MONITORING CENTER — Countries + Rules + Records
@@ -7449,17 +7507,25 @@ async function handleRoute(request, { params }) {
     if (route === '/accounts/tree' && method === 'GET') {
       const includeInactive = String(q.include_inactive || '0') === '1'
       const filterInactive = includeInactive ? {} : { $or: [{ inactive: { $exists: false } }, { inactive: { $ne: true } }] }
-      const [accs, clients, suppliers, boxes] = await Promise.all([
-        db.collection('accounts').find({ tenant_id: T }).sort({ code: 1 }).toArray(),
-        db.collection('clients').find({ tenant_id: T, ...filterInactive }).toArray(),
-        db.collection('suppliers').find({ tenant_id: T, ...filterInactive }).toArray(),
-        db.collection('boxes').find({ tenant_id: T, ...filterInactive }).toArray(),
+      // v7.0 — point 6 (COA visibility): branch user gets ONLY his branch scope in the
+      // whole tree (accounts + linked clients/suppliers/boxes); HQ keeps the CONSOLIDATED
+      // tree with a branch label on every branch-owned node (visibility ≠ ownership).
+      const coaScope = B ? { branch_id: B } : {}
+      const [accs, clients, suppliers, boxes, brListT] = await Promise.all([
+        db.collection('accounts').find({ tenant_id: T, ...coaScope }).sort({ code: 1 }).toArray(),
+        db.collection('clients').find({ tenant_id: T, ...coaScope, ...filterInactive }).toArray(),
+        db.collection('suppliers').find({ tenant_id: T, ...coaScope, ...filterInactive }).toArray(),
+        db.collection('boxes').find({ tenant_id: T, ...coaScope, ...filterInactive }).toArray(),
+        B ? Promise.resolve([]) : db.collection('branches').find({ tenant_id: T }, { projection: { _id: 0, id: 1, name: 1 } }).toArray().catch(() => []),
       ])
+      const brNameT = Object.fromEntries((brListT || []).map(x => [x.id, x.name]))
+      const brTag = (doc) => (!B && doc.branch_id) ? (brNameT[doc.branch_id] || 'فرع') : null
       // Build accounts tree by parent
       const byCode = new Map()
       accs.forEach(a => byCode.set(a.code, {
         id: a.id, code: a.code, name: a.name_ar, type: a.type, parent: a.parent,
         is_group: !!a.is_group, is_parent: !!a.is_parent, next_child_seq: a.next_child_seq || 0,
+        branch_name: brTag(a), // v7.0 — HQ consolidated view: which branch owns this account
         children: [], sub_entities: [],
       }))
       const roots = []
@@ -7488,6 +7554,7 @@ async function handleRoute(request, { params }) {
             box_type: entity.type,
             balances: entity.balances || {},
             inactive: !!entity.inactive,
+            branch_name: brTag(entity), // v7.0 — HQ consolidated view branch label
           })
         }
       }
