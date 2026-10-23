@@ -22,7 +22,7 @@ import { adminNotifyHandler } from '@/lib/adminNotify' // v3.95 — Batch 3 (In-
 import { adminReportsHandler } from '@/lib/adminReports' // v3.96 — Batch 4 (Reports — READ-ONLY)
 import { adminDisputesHandler } from '@/lib/adminDisputes' // v3.96 — Batch 4 (Disputes)
 import { adminCurrencyHandler } from '@/lib/adminCurrency' // v3.96 — Batch 4 (Currencies & FX)
-import { adminGate, adminCan, adminStaffHandler, generateStrongPassword } from '@/lib/adminStaff'
+import { adminGate, adminCan, adminStaffHandler, generateStrongPassword, syncDerivedLedgerPerms } from '@/lib/adminStaff'
 import { adminBranchesHandler, adminBranchUserAssignHandler } from '@/lib/adminBranches' // v5.0 — Enterprise branches (additive) // v3.97 — Batch 5 (Admin realm + staff RBAC)
 import { adminOrdersHandler, adminCommissionsLedgerHandler } from '@/lib/adminOrders' // v4.3 — unified orders + commissions ledger
 import { adminGeoHandler } from '@/lib/adminGeo' // v3.97 — Batch 5 (Geo locations)
@@ -916,6 +916,32 @@ function opLinkMapFor(parentCode) {
   if (p === COA.SUPPLIERS) return { coll: 'suppliers', kind: 'مورد', nameField: 'name', screen: 'شاشة الموردين' }
   return null
 }
+// =============================================================================
+// v7.4 — item 1 ROOT CAUSE: branch_id == null alone NEVER proves an account is
+// Shared/Base COA. An untagged accounts doc whose code is carried by an operational
+// entity (client/supplier/box) is an OPERATIONAL account whose ownership follows the
+// LINKED ENTITY's scope (null = HQ). Genuine Shared/Base COA = untagged AND not
+// operationally linked. No migration: legacy untagged operational accounts derive
+// their scope safely from the linked entity at read time.
+// =============================================================================
+async function operationalCodeScopeMap(db, T) {
+  const map = new Map() // account_code -> owner scope (branch_id || null = HQ)
+  for (const coll of ['clients', 'suppliers', 'boxes']) {
+    const rows = await db.collection(coll).find({ tenant_id: T, account_code: { $exists: true, $nin: [null, ''] } }, { projection: { account_code: 1, branch_id: 1 } }).toArray()
+    for (const r of rows) map.set(String(r.account_code), r.branch_id || null)
+  }
+  return map
+}
+// Visible/usable inside scope B? tagged → own scope only; untagged+linked → entity's
+// scope only; untagged+unlinked → genuine Shared/Base COA (visible to all scopes).
+function accountInScope(acc, opMap, B) {
+  const tag = acc.branch_id || null
+  if (tag !== null) return tag === B
+  const code = String(acc.code || '')
+  if (code && opMap.has(code)) return opMap.get(code) === B
+  return true
+}
+
 async function ensureOperationalLink(db, T, account) {
   if (account.is_group) return { skipped: 'group' }
   const m = opLinkMapFor(account.parent)
@@ -933,6 +959,7 @@ async function ensureOperationalLink(db, T, account) {
   if (dupName) return { conflict: `يوجد ${m.kind} آخر بنفس الاسم "${name}" (حساب ${dupName.account_code || '—'}) — عدّل الاسم أو استخدم ${m.screen}` }
   const base = {
     id: uuidv4(), tenant_id: T, parent_code: String(account.parent),
+    branch_id: account.branch_id ?? null, // v7.4 — item 1: ownership is EXPLICIT for new links (follows the account's scope; null = HQ)
     account_code: account.code, account_parent_code: String(account.parent),
     balances: emptyBalances(), created_at: new Date(), created_from: 'coa',
   }
@@ -2480,33 +2507,21 @@ async function handleRoute(request, { params }) {
         user.tenant_id = org.id; user.platform_org = true; user.permissions = permsBind
       }
       // =======================================================================
-      // v7.3 — item 6: COMPANY-LEDGER ACCESS FOR admin_staff = ROLE + PERMISSIONS.
-      // At EVERY login the ledger module permissions are RE-DERIVED from the user's
-      // admin-realm role (the 'accounting' section — e.g. finance_manager) and
-      // materialized as EXPLICIT mod_* permissions on the user document:
-      //   • grant  → ledger modules (fx/receipt/payment/clients/suppliers/boxes/chart/
-      //     journal) + reports + statements become true, and the account is bound to
-      //     the company book (same shape as the SA binding: tenant_id + platform_org).
-      //   • revoke → the derived permissions are DROPPED on next login (no drift).
-      // Being admin_staff alone grants NOTHING (no role section → no permissions).
-      // Travel-office operational modules are NEVER derived. Super-admin-only
-      // restrictions (SA creation, SA password reset, tenant link) are untouched.
+      // v7.3 — item 6 · v7.4 — items 2+3: COMPANY-LEDGER ACCESS FOR admin_staff =
+      // ROLE + PERMISSIONS, derived by the SINGLE shared derivation in
+      // lib/adminStaff.js (syncDerivedLedgerPerms). The same derivation also runs
+      // immediately on assign_role / overrides / custom-role edits, so login is
+      // just one of the sync points — never the only one.
+      //   • accounting view → ledger READ modules; accounting edit → ledger_write.
+      //   • no role → every derived flag dropped. Travel modules never derived.
       // =======================================================================
       if (user.role === 'admin_staff' && user.admin_realm === true) {
         try {
-          const canL = await adminCan(db, { user })
-          const hasAcct = !!canL?.has && canL.has('accounting', 'view')
-          const hasRpt = (!!canL?.has && canL.has('reports', 'view')) || hasAcct
-          const LEDGER_MODS = ['mod_fx', 'mod_receipt', 'mod_payment', 'mod_clients', 'mod_suppliers', 'mod_boxes', 'mod_chart', 'mod_journal']
-          const orgIdL = await getRahaalBookTenantId(db)
-          const nextPerms = { ...(user.permissions || {}) }
-          for (const k of LEDGER_MODS) { if (hasAcct && orgIdL) nextPerms[k] = true; else delete nextPerms[k] }
-          if (hasRpt && orgIdL) nextPerms.mod_reports = true; else delete nextPerms.mod_reports
-          if (hasAcct && orgIdL) nextPerms.fin_statements = true; else delete nextPerms.fin_statements
-          const setL = { permissions: nextPerms, updated_at: new Date() }
-          if ((hasAcct || hasRpt) && orgIdL && !user.tenant_id) { setL.tenant_id = orgIdL; setL.platform_org = true; user.tenant_id = orgIdL; user.platform_org = true }
-          await db.collection('users').updateOne({ id: user.id }, { $set: setL })
-          user.permissions = nextPerms
+          const syncedL = await syncDerivedLedgerPerms(db, user)
+          if (syncedL) {
+            user.permissions = syncedL.permissions
+            if (syncedL.tenant_id && !user.tenant_id) { user.tenant_id = syncedL.tenant_id; user.platform_org = syncedL.platform_org === true }
+          }
         } catch (eDerive) { console.error('[login] admin_staff ledger derivation failed:', eDerive?.message) }
       }
       if (user.tenant_id) {
@@ -2615,6 +2630,20 @@ async function handleRoute(request, { params }) {
       // v3.51 — RBAC Phase 3: fine-grained financial guards (staff only)
       if ((route === '/reports/statement' || route === '/bulk-statement/generate') && !P.fin_statements) return deny('كشوفات الحساب')
       if (/^\/partners\/statements/.test(route) && !P.fin_partner_summary) return deny('ملخص الشركاء')
+      // =======================================================================
+      // v7.4 — item 3: READ NEVER IMPLIES WRITE on the Company Ledger.
+      // For admin_staff the derived mod_* flags grant READ/visibility only — every
+      // non-GET request on a ledger route additionally requires the EXPLICIT write
+      // flag ledger_write (derived exclusively from the admin-realm accounting
+      // 'edit' action; accounting view/export never produce it).
+      // bulk-statement/generate is a READ operation over POST → stays on the
+      // fin_statements READ gate above, not here.
+      // =======================================================================
+      if (sess.user.role === 'admin_staff' && method !== 'GET' && route !== '/bulk-statement/generate') {
+        if (/^\/(fx|journal-entries|vouchers|clients|suppliers|boxes|accounts|refunds|rates|interbranch)(\/|$)/.test(route) && P.ledger_write !== true) {
+          return bad('🚫 صلاحيتك على دفتر الشركة قراءة/عرض فقط — الإنشاء والتعديل والحذف يتطلب صلاحية كتابة صريحة (accounting: edit)', 403)
+        }
+      }
     }
     // v3.45 — Role templates catalog for the permissions manager (owner only)
     if (route === '/rbac/templates' && method === 'GET') {
@@ -6985,11 +7014,14 @@ async function handleRoute(request, { params }) {
     // ============ v3.5 — BULK STATEMENT SEND ============
     if (route === '/bulk-statement/generate' && method === 'POST') {
       const b = await request.json()
-      const kind = b.kind || 'clients'   // 'clients' | 'suppliers'
+      // v7.4 — item 4: body parameters can never widen scope — kind is a strict whitelist
+      // (it is used as a collection name) and no body/query value touches the branch scope.
+      const kind = ['clients', 'suppliers'].includes(String(b.kind)) ? String(b.kind) : 'clients'
       const period = b.period || 'month' // 'month' | 'all'
       const officeName = sess.tenant?.name || 'مكتب رحّال'
-      // v5.9.4 — BRANCH SCOPE (was tenant-wide leak): branch user generates statements for
-      // HIS branch parties only, and recent lines derive from HIS branch journals only.
+      // v5.9.4 — parties: session scope only (btf) — a cross-scope party ID is unusable.
+      // v7.4 — item 4: journal movements are pinned to the SESSION scope for EVERY session
+      // (HQ = HQ journals only; branch = its own) — same rule as /reports/statement.
       const parties = await db.collection(kind).find(btf).sort({ name: 1 }).toArray()
       const now = new Date()
       const results = []
@@ -7001,7 +7033,7 @@ async function handleRoute(request, { params }) {
         if (!hasBalance) continue
         // Get last 5 transactions from journal entries
         const recentLines = await db.collection('journal_entries').aggregate([
-          { $match: { tenant_id: T, ...(B ? { branch_id: B } : {}), [kind === 'clients' ? 'lines.party_type' : 'lines.party_type']: kind === 'clients' ? 'client' : 'supplier' } }, // v5.9.4 — branch scope
+          { $match: { tenant_id: T, branch_id: B, [kind === 'clients' ? 'lines.party_type' : 'lines.party_type']: kind === 'clients' ? 'client' : 'supplier' } }, // v7.4 — item 4: session-scope pinned (HQ=null matches missing/null; branch=own)
           { $sort: { date: -1 } }, { $limit: 100 },
           { $unwind: '$lines' },
           { $match: { 'lines.party_id': p.id } },
@@ -7049,11 +7081,15 @@ async function handleRoute(request, { params }) {
       ])
       const abAll = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
       const boxes = (sess.user.role !== 'owner' && abAll.length > 0) ? boxesAll.filter(x => abAll.includes(x.id)) : boxesAll
+      // v7.4 — item 1 ROOT FIX: untagged accounts linked to an out-of-scope operational
+      // entity are NOT Shared COA — they are filtered out of this selector too.
+      const opMapAll = await operationalCodeScopeMap(db, T)
+      const coaScoped = coa.filter(a => accountInScope(a, opMapAll, B))
       const list = [
         ...clients.map(c => ({ kind: 'client', id: c.id, code: COA.CLIENTS, name: c.name, group: 'العملاء', balances: c.balances })),
         ...suppliers.map(s => ({ kind: 'supplier', id: s.id, code: COA.SUPPLIERS, name: s.name, group: 'الموردون', balances: s.balances })),
         ...boxes.map(b => ({ kind: 'box', id: b.id, code: b.type === 'cash' ? COA.CASHBOXES : COA.BANKS, name: b.name_ar, group: b.type === 'cash' ? 'الصناديق' : 'البنوك', balances: b.balances })),
-        ...coa.map(a => ({ kind: 'account', id: a.id, code: a.code, name: a.name_ar || a.name, group: a.type || 'دليل الحسابات' })),
+        ...coaScoped.map(a => ({ kind: 'account', id: a.id, code: a.code, name: a.name_ar || a.name, group: a.type || 'دليل الحسابات' })),
       ]
       return ok(list)
     }
@@ -7235,12 +7271,14 @@ async function handleRoute(request, { params }) {
     //    branch_name so the UI shows clearly which branch every account belongs to.
     //    HQ accounting visibility ≠ HQ operational ownership (ownership unchanged).
     if (route === '/accounts' && method === 'GET') {
-      // v7.3 — item 5: ONE rule for every session — Shared/Base COA (no branch_id) is
-      // office-unified and always returned (parents never disappear), PLUS the session
-      // scope's OWN branch-stamped accounts only. Another branch's account names/IDs
-      // never surface here (HQ included) — cross-branch selection = /interbranch/accounts.
+      // v7.3 — item 5 + v7.4 — item 1 ROOT FIX: three-way distinction per account —
+      //   tagged → own scope only · untagged+operationally-linked → linked entity's scope
+      //   only (null-branch_id is NOT proof of Shared COA) · untagged+unlinked → genuine
+      //   Shared/Base COA, returned to every scope (parents never disappear).
       const accScopeQ = { ...tf, $or: [{ branch_id: { $exists: false } }, { branch_id: null }, { branch_id: B }] }
-      return ok(clean(await db.collection('accounts').find(accScopeQ).sort({ code: 1 }).toArray()))
+      const accRows = await db.collection('accounts').find(accScopeQ).sort({ code: 1 }).toArray()
+      const opMapAcc = await operationalCodeScopeMap(db, T)
+      return ok(clean(accRows.filter(a => accountInScope(a, opMapAcc, B))))
     }
 
     // ================================================================
@@ -7610,13 +7648,16 @@ async function handleRoute(request, { params }) {
       // v3.10.0 — include parent/chart accounts (revenue/expense/generic) when type='account' or 'all'
       if (wantAll || wantType === 'account') {
         const accs = await db.collection('accounts').find({ tenant_id: T }).toArray()
+        // v7.4 — item 1 ROOT FIX: untagged ≠ Shared COA — an untagged account linked to an
+        // out-of-scope client/supplier/box follows the ENTITY's scope and never surfaces here.
+        const opMapSearch = await operationalCodeScopeMap(db, T)
         accs.forEach(a => {
           // Skip group-parents already served via sub-entities (client/supplier/box parents)
           if ([COA.CASHBOXES, COA.BANKS, COA.CLIENTS, COA.SUPPLIERS].includes(a.code)) return
-          // v7.1 — point 7: branch-stamped accounts of ANOTHER scope never surface in the
-          // regular picker (HQ sees core+HQ accounts; a branch sees core+its own). Access
-          // to another branch's accounts exists ONLY through /interbranch/accounts.
-          if ((a.branch_id || null) !== null && (a.branch_id || null) !== B) return
+          // v7.1 — point 7 + v7.4 item 1: tagged accounts → own scope only; untagged
+          // operational accounts → linked entity's scope only; genuine Shared COA → all.
+          // Cross-branch access exists ONLY through /interbranch/accounts.
+          if (!accountInScope(a, opMapSearch, B)) return
           if (acctTypeF && a.type !== acctTypeF) return // v3.79 — expense/revenue scoped selectors
           const label = (a.name_ar || '').toLowerCase()
           const code = (a.code || '').toLowerCase()
@@ -7643,7 +7684,7 @@ async function handleRoute(request, { params }) {
       //      only its own. Cross-branch selection = /interbranch/accounts exclusively.
       const coaScope = { branch_id: B }
       const accScope = { $or: [{ branch_id: { $exists: false } }, { branch_id: null }, { branch_id: B }] }
-      const [accs, clients, suppliers, boxes, brListT] = await Promise.all([
+      const [accsRaw, clients, suppliers, boxes, brListT] = await Promise.all([
         db.collection('accounts').find({ tenant_id: T, ...accScope }).sort({ code: 1 }).toArray(),
         db.collection('clients').find({ tenant_id: T, ...coaScope, ...filterInactive }).toArray(),
         db.collection('suppliers').find({ tenant_id: T, ...coaScope, ...filterInactive }).toArray(),
@@ -7652,6 +7693,11 @@ async function handleRoute(request, { params }) {
       ])
       const brNameT = Object.fromEntries((brListT || []).map(x => [x.id, x.name]))
       const brTag = (doc) => (!B && doc.branch_id) ? (brNameT[doc.branch_id] || 'فرع') : null
+      // v7.4 — item 1 ROOT FIX: an UNTAGGED account linked to an out-of-scope operational
+      // entity is NOT Shared COA — drop it from the tree (leaf-only: linked operational
+      // accounts are never group parents, so the tree structure stays intact).
+      const opMapTree = await operationalCodeScopeMap(db, T)
+      const accs = accsRaw.filter(a => accountInScope(a, opMapTree, B))
       // Build accounts tree by parent
       const byCode = new Map()
       accs.forEach(a => byCode.set(a.code, {
@@ -7807,6 +7853,7 @@ async function handleRoute(request, { params }) {
       }
       const doc = {
         id: uuidv4(), tenant_id: T, code, name_ar: String(b.name_ar),
+        branch_id: B, // v7.4 — item 1: ownership is EXPLICIT for new accounts (null = HQ) — the untagged ambiguity is not recreated
         type: b.type, parent: parentStr,
         is_group: !!b.is_group, notes: b.notes || '',
         created_at: new Date(),
@@ -10815,6 +10862,20 @@ async function resolveAccountRef(db, T, ref, scopeB = null) {
     // v7.3 — item 3: shared core COA accounts (no branch_id) stay office-unified, but a
     // BRANCH-STAMPED account resolves only inside its own scope (same strict rule).
     if (d && (d.branch_id || null) !== null && !inScope(d)) return null
+    // v7.4 — item 1 ROOT FIX: an UNTAGGED account is NOT automatically Shared COA — if its
+    // code is carried by an operational entity (client/supplier/box), ownership follows
+    // that ENTITY's scope: cross-scope → resolves to null (existence never leaked).
+    // Genuine Shared/Base COA (untagged + unlinked) stays usable by every scope.
+    if (d && (d.branch_id || null) === null && d.code && scopeB !== REF_SCOPE_INTERNAL) {
+      const wantScope = scopeB ?? null
+      const [lnkC, lnkS, lnkB] = await Promise.all([
+        db.collection('clients').findOne({ tenant_id: T, account_code: d.code }, { projection: { branch_id: 1 } }),
+        db.collection('suppliers').findOne({ tenant_id: T, account_code: d.code }, { projection: { branch_id: 1 } }),
+        db.collection('boxes').findOne({ tenant_id: T, account_code: d.code }, { projection: { branch_id: 1 } }),
+      ])
+      const lnk = lnkC || lnkS || lnkB
+      if (lnk && (lnk.branch_id || null) !== wantScope) return null
+    }
     return d ? { kind: 'account', id: d.id, name: d.name_ar || d.name, code: d.code, updateBalance: false, collection: 'accounts', debitSign: +1, is_group: !!d.is_group, inactive: isInactiveAccount(d), acct_type: d.type } : null
   }
   return null
