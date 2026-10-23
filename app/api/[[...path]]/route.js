@@ -22,7 +22,7 @@ import { adminNotifyHandler } from '@/lib/adminNotify' // v3.95 — Batch 3 (In-
 import { adminReportsHandler } from '@/lib/adminReports' // v3.96 — Batch 4 (Reports — READ-ONLY)
 import { adminDisputesHandler } from '@/lib/adminDisputes' // v3.96 — Batch 4 (Disputes)
 import { adminCurrencyHandler } from '@/lib/adminCurrency' // v3.96 — Batch 4 (Currencies & FX)
-import { adminGate, adminCan, adminStaffHandler } from '@/lib/adminStaff'
+import { adminGate, adminCan, adminStaffHandler, generateStrongPassword, syncDerivedLedgerPerms } from '@/lib/adminStaff'
 import { adminBranchesHandler, adminBranchUserAssignHandler } from '@/lib/adminBranches' // v5.0 — Enterprise branches (additive) // v3.97 — Batch 5 (Admin realm + staff RBAC)
 import { adminOrdersHandler, adminCommissionsLedgerHandler } from '@/lib/adminOrders' // v4.3 — unified orders + commissions ledger
 import { adminGeoHandler } from '@/lib/adminGeo' // v3.97 — Batch 5 (Geo locations)
@@ -62,7 +62,6 @@ const CURRENCIES = ['USD', 'SAR', 'YER']
 // Base currency = YER. Rates represent: 1 unit of currency = X YER
 const DEFAULT_RATES = { USD: 1554, SAR: 410, YER: 1 }
 const BASE_CURRENCY = 'YER'
-
 // Helper: convert amount to base (YER)
 // v5.8 — FX-001 ROOT-CAUSE FIX: the BASE currency converts at EXACTLY 1 BY DEFINITION
 // (1 YER = 1 YER), regardless of whatever a legacy/corrupt tenant rate table stores
@@ -390,6 +389,26 @@ async function seedTenantDefaults(db, tenantId) {
   })
 }
 
+// ============================================================================
+// v7.0 — UNIFIED PASSWORD POLICY (server-enforced — never frontend-only).
+// Applies to NEW passwords ONLY (create user / signup / change / reset).
+// Existing stored passwords are untouched: no migration, no forced reset,
+// no lockout — old passwords keep working until the user changes them.
+// Rules: min 8 chars + at least one A-Z + one 0-9 + one symbol.
+// ============================================================================
+const PASSWORD_POLICY_MSG = 'كلمة المرور يجب ألا تقل عن 8 أحرف، وتحتوي على حرف إنجليزي كبير (A-Z) ورقم (0-9) ورمز خاص حقيقي (مثل ! @ # $ %) — المسافة والأحرف العربية لا تُحتسب رمزاً خاصاً'
+// v7.1 — point 4: a REAL ASCII special character only — space, Arabic letters or any
+// other non-ASCII character are NOT accepted as the required special character.
+const PW_SPECIAL_RE = /[!"#$%&'()*+,\-./:;<=>?@[\]^_`{|}~\\]/
+function passwordPolicyError(pw) {
+  const s = String(pw ?? '')
+  if (s.length < 8) return PASSWORD_POLICY_MSG
+  if (!/[A-Z]/.test(s)) return PASSWORD_POLICY_MSG
+  if (!/[0-9]/.test(s)) return PASSWORD_POLICY_MSG
+  if (!PW_SPECIAL_RE.test(s)) return PASSWORD_POLICY_MSG
+  return null
+}
+
 // v3.4 — Employee permissions defaults (owner has all=true implicitly)
 const DEFAULT_STAFF_PERMISSIONS = {
   tickets_view: true, tickets_add: true, tickets_edit: false, tickets_delete: false,
@@ -421,6 +440,9 @@ function ownerPermissions() {
 function effectivePermissions(user) {
   if (!user) return DEFAULT_STAFF_PERMISSIONS
   if (user.role === 'owner') return ownerPermissions()
+  // v7.3 — item 6: an admin_staff NEVER inherits the office-staff defaults — his module
+  // access is EXPLICIT only (materialized at login from his admin-realm Role sections).
+  if (user.role === 'admin_staff') return { ...(user.permissions || {}) }
   return { ...DEFAULT_STAFF_PERMISSIONS, ...(user.permissions || {}) }
 }
 // v3.45 — RBAC role templates: baseline presets applied by the owner, then per-employee
@@ -718,7 +740,7 @@ async function getPatSession(request, db) {
     return null
   }
 }
-function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, admin_role_key: u.admin_role_key || null, admin_realm: u.admin_realm === true, platform_org: u.platform_org === true, tenant_id: u.tenant_id, branch_id: u.branch_id || null, /* v5.3 */ active: u.active, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : u.role === 'super_admin' ? { ...ownerPermissions(), ...(u.permissions || {}) } : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } } // v3.98 — platform SA in the company book = owner-equivalent perms, minus his explicit overrides (travel modules hidden)
+function sanitizeUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role, role_key: u.role_key || null, tenant_id: u.tenant_id, branch_id: u.branch_id || null, /* v5.3 */ active: u.active, /* v7.1 — point 1: fields the permissions UI needs for admin-realm users */ admin_role_key: u.admin_role_key || null, admin_realm: u.admin_realm === true, platform_org: u.platform_org === true, default_box_id: u.default_box_id || null, lock_box: !!u.lock_box, allowed_box_ids: Array.isArray(u.allowed_box_ids) ? u.allowed_box_ids : [], permissions: u.role === 'owner' ? ownerPermissions() : u.role === 'super_admin' ? { ...ownerPermissions(), ...(u.permissions || {}) } : u.role === 'admin_staff' ? { ...(u.permissions || {}) } : { ...DEFAULT_STAFF_PERMISSIONS, ...(u.permissions || {}) } } } // v3.98 — platform SA in the company book = owner-equivalent perms, minus his explicit overrides (travel modules hidden) · v7.3 item 6 — admin_staff gets EXPLICIT permissions only (no hidden staff defaults)
 // v3.97 — Batch 5: MAIN super admin realm check (role string is not enough —
 // a tenant user mistakenly holding 'super_admin' must NOT pass admin gates).
 // v3.98 — Phase 1 (Rahaal company book): the main SA may now be BOUND to the
@@ -894,6 +916,107 @@ function opLinkMapFor(parentCode) {
   if (p === COA.SUPPLIERS) return { coll: 'suppliers', kind: 'مورد', nameField: 'name', screen: 'شاشة الموردين' }
   return null
 }
+// =============================================================================
+// v7.4 — item 1 ROOT CAUSE: branch_id == null alone NEVER proves an account is
+// Shared/Base COA. An untagged accounts doc whose code is carried by an operational
+// entity (client/supplier/box) is an OPERATIONAL account whose ownership follows the
+// LINKED ENTITY's scope (null = HQ). Genuine Shared/Base COA = untagged AND not
+// operationally linked. No migration: legacy untagged operational accounts derive
+// their scope safely from the linked entity at read time.
+// =============================================================================
+async function operationalCodeScopeMap(db, T) {
+  const map = new Map() // account_code -> owner scope (branch_id || null = HQ)
+  for (const coll of ['clients', 'suppliers', 'boxes']) {
+    const rows = await db.collection(coll).find({ tenant_id: T, account_code: { $exists: true, $nin: [null, ''] } }, { projection: { account_code: 1, branch_id: 1 } }).toArray()
+    for (const r of rows) map.set(String(r.account_code), r.branch_id || null)
+  }
+  return map
+}
+// Visible/usable inside scope B? tagged → own scope only; untagged+linked → entity's
+// scope only; untagged+unlinked → genuine Shared/Base COA (visible to all scopes).
+function accountInScope(acc, opMap, B) {
+  const tag = acc.branch_id || null
+  if (tag !== null) return tag === B
+  const code = String(acc.code || '')
+  if (code && opMap.has(code)) return opMap.get(code) === B
+  return true
+}
+
+// Manual input authorization only: system/automatic/Interbranch journals keep their
+// existing posting path. Every supplied code AND party is checked independently.
+async function assertManualJournalScope(db, T, body, branchId, user = {}) {
+  const B = branchId || null
+  const opMap = await operationalCodeScopeMap(db, T)
+  const codeChecks = new Map()
+  const checkCode = async (rawCode) => {
+    if (!rawCode || rawCode === 'MANUAL') return null // existing accounting validator handles missing codes
+    const code = String(rawCode)
+    if (codeChecks.has(code)) return codeChecks.get(code)
+    const acc = await db.collection('accounts').findOne({ tenant_id: T, code })
+    let error = null
+    if ((!acc && !opMap.has(code))) error = 'الحساب غير موجود في دليل المكتب'
+    else if ((acc && !accountInScope(acc, opMap, B)) || (opMap.has(code) && opMap.get(code) !== B)) {
+      error = '🚫 غير مصرح — حساب القيد يخص نطاقاً آخر (فرع/مركز)'
+    }
+    codeChecks.set(code, error)
+    return error
+  }
+  const checkLine = async (line) => {
+    if (!line || typeof line !== 'object') return null
+    let error = await checkCode(line.account_code)
+    if (error) return error
+    if (!line.party_id) return null
+    const type = String(line.party_type || '')
+    const id = String(line.party_id)
+    let party, partyCode
+    if (type === 'account') {
+      party = await db.collection('accounts').findOne({ tenant_id: T, $or: [{ id }, { code: id }] })
+      if (!party) return 'حساب الطرف غير موجود في دليل المكتب'
+      error = await checkCode(party.code)
+      if (error) return error
+      partyCode = party.code
+    } else {
+      const coll = { client: 'clients', supplier: 'suppliers', box: 'boxes' }[type]
+      if (!coll) return 'نوع طرف القيد غير صالح'
+      party = await db.collection(coll).findOne({ tenant_id: T, id })
+      if (!party || (party.branch_id || null) !== B) return '🚫 غير مصرح — طرف القيد خارج نطاقك'
+      if (type === 'box' && user.role !== 'owner' && Array.isArray(user.allowed_box_ids) &&
+          user.allowed_box_ids.length && !user.allowed_box_ids.includes(id)) return '🚫 الصندوق خارج الصناديق المسموحة'
+      partyCode = party.account_code
+    }
+    if (line.account_code && partyCode && String(line.account_code) !== String(partyCode)) return 'حساب القيد لا يطابق حساب الطرف المحدد'
+    return null
+  }
+  const lines = Array.isArray(body?.lines) ? body.lines : []
+  for (const line of lines) {
+    const error = await checkLine(line)
+    if (error) return error
+  }
+  // Check dual fields even if lines[] is absent; never trust party identity or code alone.
+  for (const side of ['debit', 'credit']) {
+    const error = await checkLine({
+      account_code: body?.[`${side}_account_code`],
+      party_type: body?.[`${side}_party_type`],
+      party_id: body?.[`${side}_party_id`],
+    })
+    if (error) return error
+  }
+  return null
+}
+
+async function companyLedgerReadAllowed(db, user) {
+  if (user.role !== 'admin_staff') return true // existing owner/Super Admin/office guards remain
+  const can = await adminCan(db, { user })
+  return can.has('accounting', 'view') // current role + overrides from DB, never tenant linkage or cached mod_*
+}
+
+function sessionTrialBalanceScope(B, q) {
+  if (B) return B
+  // Only explicitly requested summary may consolidate; default is detailed.
+  if (q.mode !== 'summary') return '__HQ__'
+  return q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null
+}
+
 async function ensureOperationalLink(db, T, account) {
   if (account.is_group) return { skipped: 'group' }
   const m = opLinkMapFor(account.parent)
@@ -911,6 +1034,7 @@ async function ensureOperationalLink(db, T, account) {
   if (dupName) return { conflict: `يوجد ${m.kind} آخر بنفس الاسم "${name}" (حساب ${dupName.account_code || '—'}) — عدّل الاسم أو استخدم ${m.screen}` }
   const base = {
     id: uuidv4(), tenant_id: T, parent_code: String(account.parent),
+    branch_id: account.branch_id ?? null, // v7.4 — item 1: ownership is EXPLICIT for new links (follows the account's scope; null = HQ)
     account_code: account.code, account_parent_code: String(account.parent),
     balances: emptyBalances(), created_at: new Date(), created_from: 'coa',
   }
@@ -1577,8 +1701,8 @@ async function reverseTransactionEffects(db, T, kind, doc) {
     // Use stored refs (falls back to box_currency_id for pre-v2.6 records)
     const refCur = doc.currency_ref || { kind: 'box', id: doc.box_currency_id }
     const refCounter = doc.counter_ref || { kind: 'box', id: doc.box_counter_id }
-    const accCur = await resolveAccountRef(db, T, refCur)
-    const accCounter = await resolveAccountRef(db, T, refCounter)
+    const accCur = await resolveAccountRef(db, T, refCur, REF_SCOPE_INTERNAL) // v7.3 — doc already scope-validated by the caller
+    const accCounter = await resolveAccountRef(db, T, refCounter, REF_SCOPE_INTERNAL)
     const debitAmtCur = doc.type === 'buy' ? doc.amount : -doc.amount
     const debitAmtCounter = doc.type === 'buy' ? -doc.counter_amount : doc.counter_amount
     if (accCur && accCur.updateBalance) {
@@ -1621,8 +1745,8 @@ async function restoreTransactionEffects(db, T, kind, doc) {
   } else if (kind === 'fx') {
     const refCur = doc.currency_ref || { kind: 'box', id: doc.box_currency_id }
     const refCounter = doc.counter_ref || { kind: 'box', id: doc.box_counter_id }
-    const accCur = await resolveAccountRef(db, T, refCur)
-    const accCounter = await resolveAccountRef(db, T, refCounter)
+    const accCur = await resolveAccountRef(db, T, refCur, REF_SCOPE_INTERNAL) // v7.3 — doc already scope-validated by the caller
+    const accCounter = await resolveAccountRef(db, T, refCounter, REF_SCOPE_INTERNAL)
     const debitAmtCur = doc.type === 'buy' ? doc.amount : -doc.amount
     const debitAmtCounter = doc.type === 'buy' ? -doc.counter_amount : doc.counter_amount
     if (accCur && accCur.updateBalance) await updateBalance(db, accCur.collection, { id: accCur.id, tenant_id: T }, doc.currency, +debitAmtCur * accCur.debitSign)
@@ -2335,6 +2459,7 @@ async function handleRoute(request, { params }) {
     if (route === '/public/signup' && method === 'POST') {
       const b = await request.json()
       if (!b.name || !b.owner_email || !b.owner_password || !b.owner_name) return bad('الاسم الكامل، اسم المكتب، البريد وكلمة المرور مطلوبة')
+      { const pwErrS = passwordPolicyError(b.owner_password); if (pwErrS) return bad(pwErrS) } // v7.0 — policy on signup
       // v3.9.18 — Mandatory phone/WhatsApp (with country code)
       const phone = String(b.owner_phone || '').trim()
       if (!phone) return bad('رقم الهاتف / الواتساب مطلوب')
@@ -2416,7 +2541,55 @@ async function handleRoute(request, { params }) {
       if (!user || !user.active) return bad('بيانات الدخول غير صحيحة', 401)
       const okpw = bcrypt.compareSync(b.password, user.password_hash)
       if (!okpw) return bad('بيانات الدخول غير صحيحة', 401)
-
+      // =======================================================================
+      // v7.2 — BINDING DEADLOCK FIX: the MAIN super admin (role=super_admin with
+      // no tenant) was blocked by the frontend «غير مربوط بدفتر شركة رحّال» notice,
+      // while the approved binding operation itself requires him to be INSIDE the
+      // panel — an unresolvable loop on fresh/production databases.
+      // Resolution: at login we IDEMPOTENTLY ensure the Rahaal company book
+      // (is_platform_org=true) exists and bind the account to it using EXACTLY the
+      // same field shape as the approved link-mode operation (/admin/tenants link
+      // mode): tenant_id + platform_org=true + travel modules hidden.
+      // Runs ONLY for the main SA; office users and admin_staff are never touched;
+      // an already-bound account passes through unchanged.
+      // =======================================================================
+      if (user.role === 'super_admin' && !user.tenant_id) {
+        let org = await db.collection('tenants').findOne({ is_platform_org: true })
+        if (!org) {
+          org = {
+            id: uuidv4(), slug: 'rahaal-hq-' + uuidv4().slice(0, 4), name: 'شركة رحّال',
+            status: 'active', is_platform_org: true,
+            max_users: 0, max_branches: 0, // 0 = unlimited (v5.0 semantics)
+            subscription: 'paid', plan_tier: 'enterprise',
+            journal_quota: { used: 0, limit: 0, top_ups: [] }, unlimited_journals: true,
+            referral_code: genReferralCode(), referred_by: null,
+            referral_stats: { signups: 0, activations: 0, bonus_earned: 0 },
+            activation_confirmed: true, subscription_expires_at: null, subscription_price: 0,
+            created_at: new Date(),
+          }
+          await db.collection('tenants').insertOne(org)
+          await seedTenantDefaults(db, org.id) // company-book COA tree + defaults
+        } else if (org.status !== 'active') {
+          await db.collection('tenants').updateOne({ id: org.id }, { $set: { status: 'active' } })
+          org.status = 'active'
+        }
+        const permsBind = {
+          ...(user.permissions || {}),
+          mod_tickets: false, mod_visas: false, mod_visa_monitor: false,
+          mod_services: false, mod_packages: false, mod_meraaj: false, mod_query: false,
+        }
+        await db.collection('users').updateOne({ id: user.id }, { $set: { tenant_id: org.id, platform_org: true, permissions: permsBind, updated_at: new Date() } })
+        user.tenant_id = org.id; user.platform_org = true; user.permissions = permsBind
+      }
+      // =======================================================================
+      // v7.3 — item 6 · v7.4 — items 2+3: COMPANY-LEDGER ACCESS FOR admin_staff =
+      // ROLE + PERMISSIONS, derived by the SINGLE shared derivation in
+      // lib/adminStaff.js (syncDerivedLedgerPerms). The same derivation also runs
+      // immediately on assign_role / overrides / custom-role edits, so login is
+      // just one of the sync points — never the only one.
+      //   • accounting view → ledger READ modules; accounting edit → ledger_write.
+      //   • no role → every derived flag dropped. Travel modules never derived.
+      // =======================================================================
       // Repair legacy admin_staff accounts that were created unbound even though
       // the unified admin UI requires the Rahaal company/platform tenant.
       // This is strictly limited to verified admin-realm staff, never office users.
@@ -2434,6 +2607,16 @@ async function handleRoute(request, { params }) {
         user.tenant_id = platformOrg.id
         user.platform_org = true
         user.permissions = restricted
+      }
+
+      if (user.role === 'admin_staff' && user.admin_realm === true) {
+        try {
+          const syncedL = await syncDerivedLedgerPerms(db, user)
+          if (syncedL) {
+            user.permissions = syncedL.permissions
+            if (syncedL.tenant_id && !user.tenant_id) { user.tenant_id = syncedL.tenant_id; user.platform_org = syncedL.platform_org === true }
+          }
+        } catch (eDerive) { console.error('[login] admin_staff ledger derivation failed:', eDerive?.message) }
       }
       if (user.tenant_id) {
         const t = await db.collection('tenants').findOne({ id: user.tenant_id })
@@ -2454,8 +2637,8 @@ async function handleRoute(request, { params }) {
       return ok({ ok: true }, cookie)
     }
 
-    // Forgot Password — admin-mediated request only (no email delivery).
-    // Unified response avoids disclosing whether an email exists.
+    // v3.12 — Forgot Password (admin-mediated: request goes to Super Admin inbox)
+    // PUBLIC endpoint. Unified response always (no email enumeration).
     if (route === '/auth/forgot-password' && method === 'POST') {
       const b = await request.json()
       const email = String(b.email || '').toLowerCase().trim()
@@ -2530,9 +2713,27 @@ async function handleRoute(request, { params }) {
       if (/^\/reports\//.test(route) && route !== '/reports/query' && !P.mod_reports) return deny('التقارير المالية')
       if (/^\/vouchers/.test(route) && !P.mod_receipt && !P.mod_payment) return deny('السندات')
       if (/^\/affiliate/.test(route) && !P.mod_affiliate) return deny('التسويق بالعمولة')
+      // Admin staff ledger reads require the CURRENT accounting role permission.
+      // These responses include ledger identities/balances, so linkage is never sufficient.
+      if (method === 'GET' && /^\/(clients|suppliers|boxes|accounts)(\/|$)/.test(route) &&
+          !(await companyLedgerReadAllowed(db, sess.user))) return deny('قراءة دفتر الشركة')
       // v3.51 — RBAC Phase 3: fine-grained financial guards (staff only)
       if ((route === '/reports/statement' || route === '/bulk-statement/generate') && !P.fin_statements) return deny('كشوفات الحساب')
       if (/^\/partners\/statements/.test(route) && !P.fin_partner_summary) return deny('ملخص الشركاء')
+      // =======================================================================
+      // v7.4 — item 3: READ NEVER IMPLIES WRITE on the Company Ledger.
+      // For admin_staff the derived mod_* flags grant READ/visibility only — every
+      // non-GET request on a ledger route additionally requires the EXPLICIT write
+      // flag ledger_write (derived exclusively from the admin-realm accounting
+      // 'edit' action; accounting view/export never produce it).
+      // bulk-statement/generate is a READ operation over POST → stays on the
+      // fin_statements READ gate above, not here.
+      // =======================================================================
+      if (sess.user.role === 'admin_staff' && method !== 'GET' && route !== '/bulk-statement/generate') {
+        if (/^\/(fx|journal-entries|vouchers|clients|suppliers|boxes|accounts|refunds|rates|interbranch)(\/|$)/.test(route) && P.ledger_write !== true) {
+          return bad('🚫 صلاحيتك على دفتر الشركة قراءة/عرض فقط — الإنشاء والتعديل والحذف يتطلب صلاحية كتابة صريحة (accounting: edit)', 403)
+        }
+      }
     }
     // v3.45 — Role templates catalog for the permissions manager (owner only)
     if (route === '/rbac/templates' && method === 'GET') {
@@ -2564,6 +2765,17 @@ async function handleRoute(request, { params }) {
       if (route.startsWith('/admin/staff/') || route.startsWith('/admin/geo/') || route.startsWith('/admin/payfin/') || route.startsWith('/admin/refdata/')) {
         let bodyB5 = null
         if (method !== 'GET') { try { bodyB5 = await request.json() } catch { bodyB5 = {} } }
+        // v7.0 — unified password policy also covers admin-staff account creation/reset
+        // (enforced here at the router so the lib handler stays untouched)
+        // v7.1 — point 4: new_password (admin-staff reset) is validated here as well.
+        if (route.startsWith('/admin/staff/') && bodyB5) {
+          for (const pf of ['password', 'new_password']) {
+            if (bodyB5[pf]) {
+              const pwErrA = passwordPolicyError(bodyB5[pf])
+              if (pwErrA) return bad(pwErrA)
+            }
+          }
+        }
         const spB5 = new URL(request.url).searchParams
         const canB5 = await adminCan(db, sess)
         const ctxB5 = { currencies: CURRENCIES, baseCurrency: BASE_CURRENCY }
@@ -3039,7 +3251,18 @@ async function handleRoute(request, { params }) {
           if (!reqDoc) return bad('الطلب غير موجود', 404)
           if (reqDoc.status !== 'pending') return bad('هذا الطلب تمت معالجته مسبقاً')
           if (b.action === 'reset') {
-            if (!b.new_password || String(b.new_password).length < 6) return bad('كلمة المرور الجديدة يجب ألا تقل عن 6 أحرف')
+            // v7.1 — point 3: NO privilege escalation through reset. A staff member whose
+            // only grant is a general offices write permission can NEVER reset a Super
+            // Admin (or any admin-realm) account — that requires the authorized main SA.
+            const targetU = await db.collection('users').findOne({ id: reqDoc.user_id })
+            if (!targetU) return bad('المستخدم المستهدف غير موجود', 404)
+            if ((targetU.role === 'super_admin' || targetU.role === 'admin_staff') && !isMainSA(sess.user)) {
+              return bad('🚫 إعادة تعيين كلمة مرور حساب إداري (Super Admin / موظف إدارة) متاحة حصراً للمشرف العام الرئيسي المخول', 403)
+            }
+            const pwErrR = passwordPolicyError(b.new_password) // v7.0 — policy on admin reset
+            if (pwErrR) return bad(pwErrR)
+            // v7.1 — the reset updates the password hash ONLY — role/permissions/branch
+            // bindings can never be altered through this operation.
             await db.collection('users').updateOne(
               { id: reqDoc.user_id },
               { $set: { password_hash: bcrypt.hashSync(String(b.new_password), 8), updated_at: new Date() } }
@@ -3107,8 +3330,14 @@ async function handleRoute(request, { params }) {
         // book). No duplicate owner is created; the account keeps role=super_admin.
         const linkMode = !!b.link_owner_user_id
         if (!b.name || (!linkMode && (!b.owner_email || !b.owner_password))) return bad('الاسم وبيانات المالك مطلوبة')
+        if (!linkMode) { const pwErrT = passwordPolicyError(b.owner_password); if (pwErrT) return bad(pwErrT) } // v7.0 — policy on SA office creation
         let linkUser = null
         if (linkMode) {
+          // v7.2 — SA-SENSITIVE OPERATION: binding (or re-binding) a super_admin account
+          // to a tenant can NEVER ride on the general offices write permission — it is
+          // allowed exclusively for the authorized MAIN super admin (isMainSA).
+          // Normal (non-link) tenant creation below is untouched.
+          if (!isMainSA(sess.user)) return bad('🚫 ربط حساب Super Admin بمكتب عملية حساسة — متاحة حصراً للمشرف العام الرئيسي المخول', 403)
           linkUser = await db.collection('users').findOne({ id: b.link_owner_user_id })
           if (!linkUser) return bad('المستخدم المطلوب ربطه غير موجود', 404)
           if (linkUser.role !== 'super_admin') return bad('الربط متاح لحساب المشرف العام الرئيسي فقط')
@@ -3330,13 +3559,11 @@ async function handleRoute(request, { params }) {
         const owner = await db.collection('users').findOne({ tenant_id: tid, role: 'owner' })
         if (!owner) return bad('لا يوجد مالك لهذا المكتب', 404)
         const b = await request.json().catch(() => ({}))
-        // Accept a provided password OR auto-generate a strong 10-char password
+        // v7.1 — point 4: a provided password must satisfy the FULL unified policy;
+        // the auto-generated fallback is always policy-compliant (never 6-char / no-symbol).
         let newPassword = String(b.new_password || '').trim()
-        if (!newPassword) {
-          const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'
-          newPassword = Array.from({ length: 10 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
-        }
-        if (newPassword.length < 6) return bad('كلمة السر يجب أن تكون 6 أحرف على الأقل')
+        if (!newPassword) newPassword = generateStrongPassword()
+        else { const pwErrOw = passwordPolicyError(newPassword); if (pwErrOw) return bad(pwErrOw) }
         await db.collection('users').updateOne({ id: owner.id }, {
           $set: { password_hash: bcrypt.hashSync(newPassword, 8), password_reset_at: new Date(), password_reset_by: sess.user.email },
         })
@@ -3412,9 +3639,24 @@ async function handleRoute(request, { params }) {
     // isolation; NO backfill — the legacy-NULL policy requires explicit approval).
     // ========================================================================
     const B = sess.user.branch_id || null
-    const btf = B ? { ...tf, branch_id: B } : tf
-    // IDOR guard for single-document access by a branch user
-    const inBranch = (doc) => !B || (!!doc && doc.branch_id === B)
+    // v7.1 — point 5/6: btf is now SCOPE-EXCLUSIVE BOTH WAYS (was tenant-wide at HQ):
+    //   • Branch user → his branch records only (unchanged).
+    //   • HQ user     → HQ records ONLY (branch_id null/missing — Mongo null matches both).
+    // Knowing another branch's record ID grants NOTHING: every read/write/delete that
+    // filters by btf (or the guards below) rejects out-of-scope records.
+    const btf = { ...tf, branch_id: B }
+    // v7.0 — OPERATIONAL scope (point 6 — Branch Visibility):
+    // Normal operational lists/selectors are scope-exclusive BOTH ways:
+    //   • Branch user  → his branch records only (as before, v5.3).
+    //   • HQ user      → HQ records ONLY (branch_id null/missing) — branch records
+    //     must NOT appear inside HQ operational lists as if they were HQ records.
+    // HQ keeps CONSOLIDATED visibility where explicitly designed (COA, reports with
+    // an explicit branch filter, inter-branch reconciliation) — those use tf/q.branch.
+    const opf = { ...tf, branch_id: B }
+    // IDOR guard for single-document access — v7.1 point 5: STRICT BOTH WAYS.
+    // HQ (B=null) passes only HQ-owned docs (branch_id null/missing); a branch user
+    // passes only his own branch docs. Cross-scope IDs are rejected, not just hidden.
+    const inBranch = (doc) => !!doc && ((doc.branch_id || null) === B)
     // ========================================================================
     // v5.9.4 — CENTRAL BRANCH-SCOPE GUARDS (PR#24 one-pass): scope derives from
     // the SESSION only — branch_id / resource IDs in the body are NEVER trusted.
@@ -3425,7 +3667,8 @@ async function handleRoute(request, { params }) {
       if (!boxId) return null
       const bx = await db.collection('boxes').findOne({ id: String(boxId), tenant_id: T }, { projection: { id: 1, branch_id: 1 } })
       if (!bx) return 'الصندوق/البنك غير موجود'
-      if (B && (bx.branch_id || null) !== B) return '🚫 غير مصرح — الصندوق يخص نطاقاً آخر (فرع/مركز)'
+      // v7.1 — point 5: strict both ways — HQ may only use HQ boxes, a branch only its own.
+      if ((bx.branch_id || null) !== B) return '🚫 غير مصرح — الصندوق يخص نطاقاً آخر (فرع/مركز)'
       const abScope = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
       if (sess.user.role !== 'owner' && abScope.length > 0 && !abScope.includes(String(boxId))) return '🚫 غير مصرح — هذا الصندوق خارج قائمة الصناديق المسموحة لك'
       return null
@@ -3434,7 +3677,8 @@ async function handleRoute(request, { params }) {
       if (!partyId) return null
       const p = await db.collection(colName).findOne({ id: String(partyId), tenant_id: T }, { projection: { id: 1, branch_id: 1 } })
       if (!p) return colName === 'clients' ? 'العميل غير موجود' : colName === 'suppliers' ? 'المورد غير موجود' : 'الطرف غير موجود'
-      if (B && (p.branch_id || null) !== B) return '🚫 غير مصرح — هذا الطرف يخص نطاقاً آخر (فرع/مركز)'
+      // v7.1 — point 5: strict both ways — HQ may only use HQ parties, a branch only its own.
+      if ((p.branch_id || null) !== B) return '🚫 غير مصرح — هذا الطرف يخص نطاقاً آخر (فرع/مركز)'
       return null
     }
     // one call covering a transactional body (box/client/supplier ids) — used by tickets/visas/services/vouchers
@@ -5072,7 +5316,12 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       if (!b.name || !String(b.name).trim()) return bad('اسم الموظف مطلوب') // v3.88.4 — S-002: field-specific validation
       if (!b.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(b.email).trim())) return bad('البريد الإلكتروني غير صالح — مثال: name@example.com')
-      if (!b.password || String(b.password).length < 6) return bad('كلمة المرور يجب ألا تقل عن 6 أحرف')
+      const pwErr = passwordPolicyError(b.password) // v7.0 — unified password policy (new passwords only)
+      if (pwErr) return bad(pwErr)
+      // v7.0 — ROLE WHITELIST (no privilege escalation): office users are created as
+      // 'staff' ONLY. 'owner' / 'super_admin' / 'admin_staff' can NEVER be assigned here —
+      // actual capabilities come from the permissions object + role_key templates.
+      if (b.role && b.role !== 'staff') return bad('🚫 الدور غير مسموح — مستخدمو المكتب يُنشؤون بدور «موظف» فقط، والصلاحيات تُحدد من قوالب الأدوار والصلاحيات')
       // v2.8 gold-only gate → v4.0.1 REMOVED: self-creating users is now allowed for ALL
       // tiers (silver/gold/enterprise/trial). The ONLY server gate is max_users — the value
       // the Super Admin set (plan default or per-office override). Owner counts within it.
@@ -5220,9 +5469,16 @@ async function handleRoute(request, { params }) {
       const b = await request.json()
       const upd = {}
       if (b.active !== undefined) upd.active = !!b.active
+      // v7.0 — ROLE WHITELIST on update too: a staff user can never be promoted to
+      // owner/super_admin/admin_staff by editing. Capabilities = permissions object only.
+      if (b.role && b.role !== 'staff') return bad('🚫 الدور غير مسموح — لا يمكن ترقية مستخدم مكتب إلى مالك أو مشرف من هنا')
       if (b.role) upd.role = b.role
       if (b.name) upd.name = b.name
-      if (b.password) upd.password_hash = bcrypt.hashSync(b.password, 8)
+      if (b.password) {
+        const pwErr2 = passwordPolicyError(b.password) // v7.0 — policy on password change
+        if (pwErr2) return bad(pwErr2)
+        upd.password_hash = bcrypt.hashSync(b.password, 8)
+      }
       // v3.4 — Permission update
       if (b.permissions && typeof b.permissions === 'object') {
         const sanitized = {}
@@ -5482,7 +5738,9 @@ async function handleRoute(request, { params }) {
     //  - Office keeps office_fee (recorded as revenue 4104)
     //  - Client receives sale_price - supplier_penalty - office_fee
     if (route === '/refunds' && method === 'GET') {
-      const list = await db.collection('refunds').find(tf).sort({ created_at: -1 }).limit(200).toArray()
+      // v7.3 — item 2: refunds list is scope-exclusive both ways (HQ=HQ refunds only,
+      // branch=its own). Was tenant-wide.
+      const list = await db.collection('refunds').find(btf).sort({ created_at: -1 }).limit(200).toArray()
       return ok(list.map(r => ({ ...r, _id: undefined })))
     }
     if (route === '/refunds' && method === 'POST') {
@@ -5492,6 +5750,10 @@ async function handleRoute(request, { params }) {
       const coll = refType === 'ticket' ? 'tickets' : refType === 'visa' ? 'visas' : 'services'
       const orig = await db.collection(coll).findOne({ id: b.ref_id, tenant_id: T })
       if (!orig) return bad('السجل الأصلي غير موجود', 404)
+      // v7.3 — item 2: the ORIGINAL document is scope-validated BEFORE any financial
+      // effect — a known ID of a ticket/visa/service belonging to another branch (or to
+      // HQ when the caller is a branch, and vice versa) is rejected outright.
+      if (!inBranch(orig)) return bad('🚫 غير مصرح — السجل الأصلي يخص نطاقاً آخر (فرع/مركز): لا يمكن تنفيذ استرداد عليه', 403)
       if (orig.is_refunded) return bad('هذا السجل تم استرداده مسبقاً')
 
       // v3.88.4 — F-010 ROOT-CAUSE REWRITE:
@@ -5575,7 +5837,7 @@ async function handleRoute(request, { params }) {
 
       // Store refund record
       const refundDoc = {
-        id: uuidv4(), tenant_id: T, ref_type: refType, ref_id: orig.id,
+        id: uuidv4(), tenant_id: T, branch_id: B, /* v7.3 — item 2: scope stamp (null=HQ) */ ref_type: refType, ref_id: orig.id,
         currency: cur, original_sale: sale, original_cost: cost,
         supplier_penalty: supplierPenalty, office_fee: officeFee, refund_to_client: refundToClient,
         client_id: orig.client_id, client_name: orig.client_name,
@@ -5784,8 +6046,10 @@ async function handleRoute(request, { params }) {
       let startFilter = null
       if (period === 'month') { startFilter = new Date(now.getFullYear(), now.getMonth(), 1) }
       else if (period === 'year') { startFilter = new Date(now.getFullYear(), 0, 1) }
-      const pkgs = await db.collection('packages').find(tf).toArray()
-      const bookingsQ = { tenant_id: T, status: { $ne: 'cancelled' } } // v3.74 — soft-cancelled bookings are audit-only, never revenue
+      // v7.3 — item 4: scope-exclusive both ways (was tenant-wide): HQ compares HQ
+      // packages/bookings only; a branch compares its own only.
+      const pkgs = await db.collection('packages').find(btf).toArray()
+      const bookingsQ = { ...btf, status: { $ne: 'cancelled' } } // v3.74 — soft-cancelled bookings are audit-only, never revenue
       if (startFilter) bookingsQ.created_at = { $gte: startFilter }
       const allBookings = await db.collection('package_bookings').find(bookingsQ).toArray()
       // v3.57 — per-age tier profit: room+age lookup maps (direct pricing packages only)
@@ -6248,7 +6512,7 @@ async function handleRoute(request, { params }) {
     // Package bookings — register a client with auto-JE
     const pkgBookMatch = route.match(/^\/packages\/([^/]+)\/bookings$/)
     if (pkgBookMatch && method === 'GET') {
-      const list = await db.collection('package_bookings').find({ ...(B ? btf : tf), package_id: pkgBookMatch[1] }).sort({ created_at: -1 }).toArray() // v5.4 — branch scope
+      const list = await db.collection('package_bookings').find({ ...btf, package_id: pkgBookMatch[1] }).sort({ created_at: -1 }).toArray() // v7.1 — point 6: scope-exclusive (HQ=HQ only)
       return ok(list.map(b => ({ ...b, _id: undefined })))
     }
 
@@ -6840,11 +7104,14 @@ async function handleRoute(request, { params }) {
     // ============ v3.5 — BULK STATEMENT SEND ============
     if (route === '/bulk-statement/generate' && method === 'POST') {
       const b = await request.json()
-      const kind = b.kind || 'clients'   // 'clients' | 'suppliers'
+      // v7.4 — item 4: body parameters can never widen scope — kind is a strict whitelist
+      // (it is used as a collection name) and no body/query value touches the branch scope.
+      const kind = ['clients', 'suppliers'].includes(String(b.kind)) ? String(b.kind) : 'clients'
       const period = b.period || 'month' // 'month' | 'all'
       const officeName = sess.tenant?.name || 'مكتب رحّال'
-      // v5.9.4 — BRANCH SCOPE (was tenant-wide leak): branch user generates statements for
-      // HIS branch parties only, and recent lines derive from HIS branch journals only.
+      // v5.9.4 — parties: session scope only (btf) — a cross-scope party ID is unusable.
+      // v7.4 — item 4: journal movements are pinned to the SESSION scope for EVERY session
+      // (HQ = HQ journals only; branch = its own) — same rule as /reports/statement.
       const parties = await db.collection(kind).find(btf).sort({ name: 1 }).toArray()
       const now = new Date()
       const results = []
@@ -6856,7 +7123,7 @@ async function handleRoute(request, { params }) {
         if (!hasBalance) continue
         // Get last 5 transactions from journal entries
         const recentLines = await db.collection('journal_entries').aggregate([
-          { $match: { tenant_id: T, ...(B ? { branch_id: B } : {}), [kind === 'clients' ? 'lines.party_type' : 'lines.party_type']: kind === 'clients' ? 'client' : 'supplier' } }, // v5.9.4 — branch scope
+          { $match: { tenant_id: T, branch_id: B, [kind === 'clients' ? 'lines.party_type' : 'lines.party_type']: kind === 'clients' ? 'client' : 'supplier' } }, // v7.4 — item 4: session-scope pinned (HQ=null matches missing/null; branch=own)
           { $sort: { date: -1 } }, { $limit: 100 },
           { $unwind: '$lines' },
           { $match: { 'lines.party_id': p.id } },
@@ -6898,15 +7165,21 @@ async function handleRoute(request, { params }) {
         db.collection('clients').find(btf).sort({ name: 1 }).toArray(),
         db.collection('suppliers').find(btf).sort({ name: 1 }).toArray(),
         db.collection('boxes').find(btf).sort({ name_ar: 1 }).toArray(),
-        db.collection('accounts').find(tf).sort({ code: 1 }).toArray(),
+        // v7.3 — item 5: Shared/Base COA + session-scope accounts only (another branch's
+        // account names/IDs never surface in this selector)
+        db.collection('accounts').find({ ...tf, $or: [{ branch_id: { $exists: false } }, { branch_id: null }, { branch_id: B }] }).sort({ code: 1 }).toArray(),
       ])
       const abAll = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
       const boxes = (sess.user.role !== 'owner' && abAll.length > 0) ? boxesAll.filter(x => abAll.includes(x.id)) : boxesAll
+      // v7.4 — item 1 ROOT FIX: untagged accounts linked to an out-of-scope operational
+      // entity are NOT Shared COA — they are filtered out of this selector too.
+      const opMapAll = await operationalCodeScopeMap(db, T)
+      const coaScoped = coa.filter(a => accountInScope(a, opMapAll, B))
       const list = [
         ...clients.map(c => ({ kind: 'client', id: c.id, code: COA.CLIENTS, name: c.name, group: 'العملاء', balances: c.balances })),
         ...suppliers.map(s => ({ kind: 'supplier', id: s.id, code: COA.SUPPLIERS, name: s.name, group: 'الموردون', balances: s.balances })),
         ...boxes.map(b => ({ kind: 'box', id: b.id, code: b.type === 'cash' ? COA.CASHBOXES : COA.BANKS, name: b.name_ar, group: b.type === 'cash' ? 'الصناديق' : 'البنوك', balances: b.balances })),
-        ...coa.map(a => ({ kind: 'account', id: a.id, code: a.code, name: a.name_ar || a.name, group: a.type || 'دليل الحسابات' })),
+        ...coaScoped.map(a => ({ kind: 'account', id: a.id, code: a.code, name: a.name_ar || a.name, group: a.type || 'دليل الحسابات' })),
       ]
       return ok(list)
     }
@@ -6916,12 +7189,13 @@ async function handleRoute(request, { params }) {
       const now = new Date()
       const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0)
       const dayAfter = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 2, 0, 0, 0, 0)
-      const tickets = await db.collection('tickets').find({ tenant_id: T, travel_date: { $gte: tomorrow, $lt: dayAfter } }).sort({ travel_date: 1 }).toArray()
+      // v7.3 — item 4: travelers are branch-owned operational data — scope-exclusive both ways
+      const tickets = await db.collection('tickets').find({ ...btf, travel_date: { $gte: tomorrow, $lt: dayAfter } }).sort({ travel_date: 1 }).toArray()
       // Enrich with client phone
       const cliMap = {}
       const cliIds = [...new Set(tickets.map(t => t.client_id).filter(Boolean))]
       if (cliIds.length) {
-        const cs = await db.collection('clients').find({ tenant_id: T, id: { $in: cliIds } }).toArray()
+        const cs = await db.collection('clients').find({ ...btf, id: { $in: cliIds } }).toArray() // v7.3 — scoped enrichment
         for (const c of cs) cliMap[c.id] = c
       }
       const rows = tickets.map(t => {
@@ -6965,7 +7239,7 @@ async function handleRoute(request, { params }) {
     }
 
     // Clients
-    if (route === '/clients' && method === 'GET') return ok(clean(await db.collection('clients').find(btf) /* v5.3 branch scope */.sort({ created_at: -1 }).toArray()))
+    if (route === '/clients' && method === 'GET') return ok(clean(await db.collection('clients').find(opf) /* v7.0 operational scope: HQ-only for HQ, branch-only for branch */.sort({ created_at: -1 }).toArray()))
     if (route === '/clients' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم العميل مطلوب')
@@ -7017,7 +7291,7 @@ async function handleRoute(request, { params }) {
     }
 
     // Suppliers
-    if (route === '/suppliers' && method === 'GET') return ok(clean(await db.collection('suppliers').find(btf) /* v5.3 branch scope */.sort({ created_at: -1 }).toArray()))
+    if (route === '/suppliers' && method === 'GET') return ok(clean(await db.collection('suppliers').find(opf) /* v7.0 operational scope */.sort({ created_at: -1 }).toArray()))
     if (route === '/suppliers' && method === 'POST') {
       const b = await request.json()
       if (!b.name) return bad('اسم المورد مطلوب')
@@ -7061,7 +7335,7 @@ async function handleRoute(request, { params }) {
     // Boxes
     // v3.51 — RBAC Phase 3: staff restricted to specific boxes see ONLY those boxes (names & balances)
     if (route === '/boxes' && method === 'GET') {
-      const allBoxes = clean(await db.collection('boxes').find(btf).sort({ created_at: 1 }).toArray()) // v5.3 branch scope
+      const allBoxes = clean(await db.collection('boxes').find(opf).sort({ created_at: 1 }).toArray()) // v7.0 operational scope (HQ-only for HQ / branch-only for branch)
       const abIds = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
       if (sess.user.role !== 'owner' && abIds.length > 0) return ok(allBoxes.filter(x => abIds.includes(x.id)))
       return ok(allBoxes)
@@ -7080,7 +7354,22 @@ async function handleRoute(request, { params }) {
     }
 
     // Accounts (Chart of Accounts)
-    if (route === '/accounts' && method === 'GET') return ok(clean(await db.collection('accounts').find(tf).sort({ code: 1 }).toArray()))
+    // v7.0 — point 6 (COA visibility):
+    //  • Branch user → ONLY accounts belonging to his branch scope (HQ/other-branch
+    //    accounts never appear in the branch COA — even for a branch manager).
+    //  • HQ user    → CONSOLIDATED COA (HQ + all branches) with each account carrying
+    //    branch_name so the UI shows clearly which branch every account belongs to.
+    //    HQ accounting visibility ≠ HQ operational ownership (ownership unchanged).
+    if (route === '/accounts' && method === 'GET') {
+      // v7.3 — item 5 + v7.4 — item 1 ROOT FIX: three-way distinction per account —
+      //   tagged → own scope only · untagged+operationally-linked → linked entity's scope
+      //   only (null-branch_id is NOT proof of Shared COA) · untagged+unlinked → genuine
+      //   Shared/Base COA, returned to every scope (parents never disappear).
+      const accScopeQ = { ...tf, $or: [{ branch_id: { $exists: false } }, { branch_id: null }, { branch_id: B }] }
+      const accRows = await db.collection('accounts').find(accScopeQ).sort({ code: 1 }).toArray()
+      const opMapAcc = await operationalCodeScopeMap(db, T)
+      return ok(clean(accRows.filter(a => accountInScope(a, opMapAcc, B))))
+    }
 
     // ================================================================
     // v3.10.5 — VISA MONITORING CENTER — Countries + Rules + Records
@@ -7211,7 +7500,7 @@ async function handleRoute(request, { params }) {
       const track = String(q.track || 'inside').toLowerCase()
       const agentText = (q.agent || '').toString().trim().toLowerCase()
       const searchText = (q.search || '').toString().trim().toLowerCase()
-      const rows = await db.collection('visa_monitoring').find({ tenant_id: T }).toArray()
+      const rows = await db.collection('visa_monitoring').find(btf).toArray() // v7.3 — item 4: scope-exclusive both ways
       let enriched = rows.map(r => ({ ...r, ...monCompute(r) }))
       // Track filter
       if (track === 'inside') enriched = enriched.filter(x => x.track_status !== 'departed')
@@ -7249,7 +7538,7 @@ async function handleRoute(request, { params }) {
       if (!b.entry_date) return bad('تاريخ الدخول مطلوب')
       const allowedDays = Number(b.allowed_days) > 0 ? Number(b.allowed_days) : 85
       const doc = {
-        id: uuidv4(), tenant_id: T,
+        id: uuidv4(), tenant_id: T, branch_id: B, /* v7.3 — item 4: scope stamp (null=HQ) */
         traveler_name: String(b.traveler_name).trim(),
         passport_no: String(b.passport_no).trim().toUpperCase(),
         nationality: b.nationality || '',
@@ -7281,6 +7570,11 @@ async function handleRoute(request, { params }) {
     {
       const m = route.match(/^\/visa-monitor\/([^/]+)$/)
       if (m && method === 'PATCH') {
+        // v7.3 — item 4: direct-ID writes are scope-validated (knowing an id of a record
+        // from another scope grants nothing)
+        const vmDoc = await db.collection('visa_monitoring').findOne({ id: m[1], tenant_id: T })
+        if (!vmDoc) return bad('السجل غير موجود', 404)
+        if (!inBranch(vmDoc)) return bad('🚫 غير مصرح — السجل يخص نطاقاً آخر (فرع/مركز)', 403)
         const b = await request.json()
         const upd = { updated_at: new Date() }
         if (b.action === 'exited') {
@@ -7310,7 +7604,7 @@ async function handleRoute(request, { params }) {
         return ok({ success: true })
       }
       if (m && method === 'DELETE') {
-        await db.collection('visa_monitoring').deleteOne({ id: m[1], tenant_id: T })
+        await db.collection('visa_monitoring').deleteOne({ id: m[1], ...btf }) // v7.3 — item 4: scoped delete
         return ok({ success: true })
       }
     }
@@ -7324,7 +7618,7 @@ async function handleRoute(request, { params }) {
       for (const r of rows) {
         if (!r.passport_no) { skipped++; skipReasons.push('صف بدون رقم جواز'); continue }
         const passport = String(r.passport_no).trim().toUpperCase()
-        const existing = await db.collection('visa_monitoring').findOne({ tenant_id: T, passport_no: passport })
+        const existing = await db.collection('visa_monitoring').findOne({ ...btf, passport_no: passport }) // v7.3 — item 4: upsert matches inside the session scope only
         if (existing) {
           const upd = { updated_at: new Date() }
           ;['traveler_name', 'nationality', 'agent_name', 'agent_phone', 'phone', 'visa_no', 'visa_issue_date', 'host_name', 'entry_date', 'entry_port', 'exit_port', 'notes'].forEach(f => { if (r[f]) upd[f] = r[f] })
@@ -7348,7 +7642,7 @@ async function handleRoute(request, { params }) {
           if (missing.length) { skipped++; skipReasons.push(`${passport}: ينقصه ${missing.join('، ')}`); continue }
           const allowedDays = Number(r.allowed_days) > 0 ? Number(r.allowed_days) : 85
           await db.collection('visa_monitoring').insertOne({
-            id: uuidv4(), tenant_id: T,
+            id: uuidv4(), tenant_id: T, branch_id: B, /* v7.3 — item 4: scope stamp (null=HQ) */
             traveler_name: r.traveler_name, passport_no: passport,
             nationality: r.nationality || '',
             agent_name: r.agent_name, agent_phone: r.agent_phone,
@@ -7374,7 +7668,7 @@ async function handleRoute(request, { params }) {
 
     // GET /visa-monitor/stats — counters per track status
     if (route === '/visa-monitor/stats' && method === 'GET') {
-      const rows = await db.collection('visa_monitoring').find({ tenant_id: T }).toArray()
+      const rows = await db.collection('visa_monitoring').find(btf).toArray() // v7.3 — item 4: scoped
       const counts = { green: 0, yellow: 0, red: 0, overstay: 0, departed: 0, total: rows.length }
       for (const r of rows) {
         const { track_status } = monCompute(r)
@@ -7385,7 +7679,7 @@ async function handleRoute(request, { params }) {
 
     // GET /visa-monitor/alerts — dashboard widget (yellow + red + overstay only)
     if (route === '/visa-monitor/alerts' && method === 'GET') {
-      const rows = await db.collection('visa_monitoring').find({ tenant_id: T }).toArray()
+      const rows = await db.collection('visa_monitoring').find(btf).toArray() // v7.3 — item 4: scoped
       const alerts = rows.map(r => ({ ...r, ...monCompute(r) }))
         .filter(x => ['yellow', 'red', 'overstay'].includes(x.track_status))
         .sort((a, b) => (a.remaining_days ?? 99999) - (b.remaining_days ?? 99999))
@@ -7430,7 +7724,10 @@ async function handleRoute(request, { params }) {
       }
       if (wantAll || wantType === 'box') {
         const rows = await db.collection('boxes').find(baseQ).toArray()
+        // v7.1 — point 7: the picker respects the user's allowed-boxes restriction too
+        const abSearch = Array.isArray(sess.user.allowed_box_ids) ? sess.user.allowed_box_ids : []
         rows.forEach(r => {
+          if (sess.user.role !== 'owner' && abSearch.length > 0 && !abSearch.includes(String(r.id))) return
           const label = (r.name_ar || '').toLowerCase()
           const code = (r.account_code || '').toLowerCase()
           if (!qText || label.includes(qText) || code.includes(qText)) {
@@ -7441,9 +7738,16 @@ async function handleRoute(request, { params }) {
       // v3.10.0 — include parent/chart accounts (revenue/expense/generic) when type='account' or 'all'
       if (wantAll || wantType === 'account') {
         const accs = await db.collection('accounts').find({ tenant_id: T }).toArray()
+        // v7.4 — item 1 ROOT FIX: untagged ≠ Shared COA — an untagged account linked to an
+        // out-of-scope client/supplier/box follows the ENTITY's scope and never surfaces here.
+        const opMapSearch = await operationalCodeScopeMap(db, T)
         accs.forEach(a => {
           // Skip group-parents already served via sub-entities (client/supplier/box parents)
           if ([COA.CASHBOXES, COA.BANKS, COA.CLIENTS, COA.SUPPLIERS].includes(a.code)) return
+          // v7.1 — point 7 + v7.4 item 1: tagged accounts → own scope only; untagged
+          // operational accounts → linked entity's scope only; genuine Shared COA → all.
+          // Cross-branch access exists ONLY through /interbranch/accounts.
+          if (!accountInScope(a, opMapSearch, B)) return
           if (acctTypeF && a.type !== acctTypeF) return // v3.79 — expense/revenue scoped selectors
           const label = (a.name_ar || '').toLowerCase()
           const code = (a.code || '').toLowerCase()
@@ -7461,17 +7765,35 @@ async function handleRoute(request, { params }) {
     if (route === '/accounts/tree' && method === 'GET') {
       const includeInactive = String(q.include_inactive || '0') === '1'
       const filterInactive = includeInactive ? {} : { $or: [{ inactive: { $exists: false } }, { inactive: { $ne: true } }] }
-      const [accs, clients, suppliers, boxes] = await Promise.all([
-        db.collection('accounts').find({ tenant_id: T }).sort({ code: 1 }).toArray(),
-        db.collection('clients').find({ tenant_id: T, ...filterInactive }).toArray(),
-        db.collection('suppliers').find({ tenant_id: T, ...filterInactive }).toArray(),
-        db.collection('boxes').find({ tenant_id: T, ...filterInactive }).toArray(),
+      // v7.3 — item 5: ONE distinction for EVERY session (HQ included):
+      //   A. Shared/Base COA (accounts without branch_id) — office-unified, always
+      //      returned: parent accounts never disappear, the tree never breaks.
+      //   B. Branch-owned operational accounts & entities (branch-stamped accounts,
+      //      clients/suppliers/boxes) — SESSION SCOPE ONLY. HQ no longer receives other
+      //      branches' entity names/IDs/balances in the normal tree; a branch receives
+      //      only its own. Cross-branch selection = /interbranch/accounts exclusively.
+      const coaScope = { branch_id: B }
+      const accScope = { $or: [{ branch_id: { $exists: false } }, { branch_id: null }, { branch_id: B }] }
+      const [accsRaw, clients, suppliers, boxes, brListT] = await Promise.all([
+        db.collection('accounts').find({ tenant_id: T, ...accScope }).sort({ code: 1 }).toArray(),
+        db.collection('clients').find({ tenant_id: T, ...coaScope, ...filterInactive }).toArray(),
+        db.collection('suppliers').find({ tenant_id: T, ...coaScope, ...filterInactive }).toArray(),
+        db.collection('boxes').find({ tenant_id: T, ...coaScope, ...filterInactive }).toArray(),
+        B ? Promise.resolve([]) : db.collection('branches').find({ tenant_id: T }, { projection: { _id: 0, id: 1, name: 1 } }).toArray().catch(() => []),
       ])
+      const brNameT = Object.fromEntries((brListT || []).map(x => [x.id, x.name]))
+      const brTag = (doc) => (!B && doc.branch_id) ? (brNameT[doc.branch_id] || 'فرع') : null
+      // v7.4 — item 1 ROOT FIX: an UNTAGGED account linked to an out-of-scope operational
+      // entity is NOT Shared COA — drop it from the tree (leaf-only: linked operational
+      // accounts are never group parents, so the tree structure stays intact).
+      const opMapTree = await operationalCodeScopeMap(db, T)
+      const accs = accsRaw.filter(a => accountInScope(a, opMapTree, B))
       // Build accounts tree by parent
       const byCode = new Map()
       accs.forEach(a => byCode.set(a.code, {
         id: a.id, code: a.code, name: a.name_ar, type: a.type, parent: a.parent,
         is_group: !!a.is_group, is_parent: !!a.is_parent, next_child_seq: a.next_child_seq || 0,
+        branch_name: brTag(a), // v7.0 — HQ consolidated view: which branch owns this account
         children: [], sub_entities: [],
       }))
       const roots = []
@@ -7481,13 +7803,17 @@ async function handleRoute(request, { params }) {
         else roots.push(node)
       })
       // Attach sub-entities under their parent codes
+      // v7.1 — point 9: in the HQ consolidated view the STRUCTURE of branch-owned nodes
+      // is visible (with the branch label) but their BALANCES are hidden — financial
+      // figures of another branch's parties/boxes never leak through the normal tree.
+      const entBalances = (entity) => (!B && (entity.branch_id || null)) ? {} : (entity.balances || {})
       const attach = (entity, type) => {
         const ecode = entity.account_code
         // v3.92 — a COA-linked entity whose code exists as an accounts doc must not render
         // twice: decorate the existing tree node with the operational identity instead
         if (ecode && byCode.has(ecode)) {
           const n = byCode.get(ecode)
-          n.linked_entity = { type, id: entity.id, balances: entity.balances || {}, box_type: entity.type || null }
+          n.linked_entity = { type, id: entity.id, balances: entBalances(entity), box_type: entity.type || null }
           return
         }
         const pcode = entity.account_parent_code || entity.parent_code
@@ -7498,8 +7824,9 @@ async function handleRoute(request, { params }) {
             name: entity.name || entity.name_ar,
             type,
             box_type: entity.type,
-            balances: entity.balances || {},
+            balances: entBalances(entity),
             inactive: !!entity.inactive,
+            branch_name: brTag(entity), // v7.0 — HQ consolidated view branch label
           })
         }
       }
@@ -7616,6 +7943,7 @@ async function handleRoute(request, { params }) {
       }
       const doc = {
         id: uuidv4(), tenant_id: T, code, name_ar: String(b.name_ar),
+        branch_id: B, // v7.4 — item 1: ownership is EXPLICIT for new accounts (null = HQ) — the untagged ambiguity is not recreated
         type: b.type, parent: parentStr,
         is_group: !!b.is_group, notes: b.notes || '',
         created_at: new Date(),
@@ -8183,7 +8511,10 @@ async function handleRoute(request, { params }) {
 
     // Vouchers
     if (route === '/vouchers' && method === 'GET') {
-      const filter = B ? { ...btf } : (q.branch ? { ...tf, branch_id: q.branch === 'hq' ? null : q.branch } : { ...tf }); if (q.type) filter.type = q.type // v5.3/v5.4 branch scope + HQ filter
+      // v7.1 — point 6: vouchers are OPERATIONAL records — scope-exclusive both ways
+      // (HQ sees HQ vouchers only; a branch its own). The old tenant-wide HQ default
+      // and the cross-branch ?branch selector are removed from this operational list.
+      const filter = { ...btf }; if (q.type) filter.type = q.type
       const drVo = periodFilterExpr(q) // v5.7 — unified date filter
       return respondList(db, 'vouchers', drVo ? { ...filter, ...drVo } : filter, { date: -1, created_at: -1 }, q)
     }
@@ -8219,7 +8550,10 @@ async function handleRoute(request, { params }) {
     if (route === '/journal-entries' && method === 'GET') {
       // v5.6/v5.7 — SERVER-SIDE date filter (shared periodFilterExpr) + advanced search +
       // shared pagination. Filtering happens in the MongoDB query, never by hiding rows.
-      const jq = B ? { ...btf } : (q.branch ? { ...tf, branch_id: q.branch === 'hq' ? null : q.branch } : { ...tf }) /* v5.3/v5.4 branch scope + HQ filter */
+      // v7.1 — point 6: journal list is scope-exclusive both ways (HQ=HQ journals only;
+      // branch=own journals). Consolidated figures remain available via the designed
+      // reports (trial balance / income statement) — not via this operational list.
+      const jq = { ...btf }
       const andConds = []
       const drJe = periodFilterExpr(q)
       if (drJe) andConds.push(drJe)
@@ -8585,6 +8919,8 @@ async function handleRoute(request, { params }) {
     // Manual Journal Voucher (single-currency or dual)
     if (route === '/journal-entries' && method === 'POST') {
       const b = await request.json()
+      const scopeError = await assertManualJournalScope(db, T, b, B, sess.user)
+      if (scopeError) return bad(scopeError, 403)
       // v5.9.4 — branch scope on every line-level party (box/client/supplier) — session-derived
       for (const ln of (Array.isArray(b.lines) ? b.lines : [])) {
         if (!ln || !ln.party_id) continue
@@ -8632,6 +8968,9 @@ async function handleRoute(request, { params }) {
       if (perrOld) return bad(`القيد الأصلي داخل فترة/سنة مقفلة — ${perrOld}`)
       const perrNew = await assertOpenPeriod(db, T, b.date)
       if (perrNew) return bad(perrNew)
+      // Authorize replacement input BEFORE reversal, deletion, or any balance effect.
+      const scopeError = await assertManualJournalScope(db, T, b, B, sess.user)
+      if (scopeError) return bad(scopeError, 403)
       // Reverse old effects
       await reverseManualJournalEffects(db, T, oldJe)
       await db.collection('journal_entries').deleteOne({ id: jeId, tenant_id: T }) // v4.5 — tenant-scoped delete
@@ -8904,25 +9243,50 @@ async function handleRoute(request, { params }) {
 
     // Dashboard
     if (route === '/dashboard' && method === 'GET') {
-      // v5.9.4 — branch user: OWN branch only; HQ may pick ?branch=<id>|hq or omit (all)
-      const dashScope = B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null)
+      // v7.3 — item 4: the dashboard shows SESSION-SCOPE operational data only — HQ never
+      // defaults to tenant-wide, and ?branch can never widen the authenticated scope.
+      const dashScope = B || '__HQ__'
       return ok(await computeDashboard(db, T, dashScope))
     }
 
     // Reports
-    if (route === '/reports/profits' && method === 'GET') return ok(await reportProfits(db, T, { ...q, _branch_id: B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) })) // v5.9.4 — branch scope
+    if (route === '/reports/profits' && method === 'GET') return ok(await reportProfits(db, T, { ...q, _branch_id: B || '__HQ__' })) // operational detail: session scope only
     if (route === '/reports/statement' && method === 'GET') {
-      // v5.3 — branch user: (1) party must be inside his branch scope (2) rows/summary
-      // derive ONLY from his branch's journals. HQ (B=null) keeps full-office behavior.
-      if (B && q.party_id && ['client', 'supplier', 'box'].includes(String(q.party_type))) {
+      // v7.1 — point 8: the party-scope gate applies to EVERY session (not only when a
+      // branch_id exists in the session): HQ may only pull statements of HQ-owned
+      // clients/suppliers/boxes, and a branch only of its own — cross-scope party IDs
+      // are rejected outright.
+      if (q.party_id && ['client', 'supplier', 'box'].includes(String(q.party_type))) {
         const pc = String(q.party_type) === 'client' ? 'clients' : String(q.party_type) === 'supplier' ? 'suppliers' : 'boxes'
         const pOk = await db.collection(pc).findOne({ id: String(q.party_id), ...btf }, { projection: { id: 1 } })
-        if (!pOk) return bad('🚫 غير مصرح — كشف حساب طرف خارج نطاق فرعك', 403)
+        if (!pOk) return bad('🚫 غير مصرح — كشف حساب طرف خارج نطاقك التشغيلي (فرع/مركز)', 403)
       }
-      const stScope = B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) // v5.4 — HQ scope selector
+      // v7.3 — item 1: party_type=account can no longer bypass the scope gate:
+      //   (a) a BRANCH-STAMPED COA account outside the session scope is rejected;
+      //   (b) an account whose code is the LEAF account of a client/supplier/box owned
+      //       by another scope is rejected (account-reference bypass closed).
+      // Shared core COA accounts (no branch_id, not linked to a foreign party) stay usable.
+      if (q.party_id && String(q.party_type) === 'account') {
+        const accD = await db.collection('accounts').findOne({ id: String(q.party_id), tenant_id: T }, { projection: { id: 1, code: 1, branch_id: 1 } })
+        if (!accD) return bad('الحساب غير موجود', 404)
+        if ((accD.branch_id || null) !== null && (accD.branch_id || null) !== B) return bad('🚫 غير مصرح — الحساب يخص نطاقاً آخر (فرع/مركز)', 403)
+        if (accD.code) {
+          const [lnkC, lnkS, lnkB] = await Promise.all([
+            db.collection('clients').findOne({ tenant_id: T, account_code: accD.code }, { projection: { branch_id: 1 } }),
+            db.collection('suppliers').findOne({ tenant_id: T, account_code: accD.code }, { projection: { branch_id: 1 } }),
+            db.collection('boxes').findOne({ tenant_id: T, account_code: accD.code }, { projection: { branch_id: 1 } }),
+          ])
+          for (const lnk of [lnkC, lnkS, lnkB]) {
+            if (lnk && (lnk.branch_id || null) !== B) return bad('🚫 غير مصرح — الحساب مرتبط بطرف تشغيلي يخص نطاقاً آخر (فرع/مركز)', 403)
+          }
+        }
+      }
+      // v7.3 — item 1: the statement derives STRICTLY from the session scope's journals —
+      // HQ='__HQ__' (branch_id null), branch=its own. ?branch can never widen the scope.
+      const stScope = B || '__HQ__'
       return ok(await reportStatement(db, T, { ...q, _branch_id: stScope }))
     }
-    if (route === '/reports/trial-balance' && method === 'GET') return ok(await reportTrialBalance(db, T, B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null), { mode: q.mode, currency: q.currency })) // v5.3/v5.4 branch scope | v5.6 mode+currency
+    if (route === '/reports/trial-balance' && method === 'GET') return ok(await reportTrialBalance(db, T, sessionTrialBalanceScope(B, q), { mode: q.mode, currency: q.currency })) // HQ summary may consolidate; details remain session-scoped
     if (route === '/reports/income-statement' && method === 'GET') return ok(await reportIncome(db, T, { ...q, _branch_id: B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) })) // v5.3/v5.4 — branch/HQ scope
     // v3.10.4 — Unified Query & Filters for Visas + Tickets
     if (route === '/reports/query' && method === 'GET') {
@@ -8937,10 +9301,10 @@ async function handleRoute(request, { params }) {
       const minQty = Number(q.min_qty) || 0            // count filter
       const searchText = (q.search || '').toString().trim().toLowerCase()
       const baseFilter = { tenant_id: T }
-      // v5.9.4 — BRANCH SCOPE (was tenant-wide leak): branch user sees ONLY his branch;
-      // HQ may pick ?branch=<id>|hq explicitly or omit for office-wide.
-      if (B) baseFilter.branch_id = B
-      else if (q.branch) baseFilter.branch_id = q.branch === 'hq' ? null : q.branch
+      // v7.3 — item 4: the query center returns branch-owned operational records (visas/
+      // tickets) — SESSION scope only, both ways: HQ=HQ records, branch=its own.
+      // ?branch can never widen the authenticated scope (parameter is ignored).
+      baseFilter.branch_id = B
       if (from) baseFilter.date = { ...(baseFilter.date || {}), $gte: from }
       if (to) baseFilter.date = { ...(baseFilter.date || {}), $lte: to }
       if (clientId) baseFilter.client_id = clientId
@@ -10555,11 +10919,18 @@ async function createVoucher(db, T, b, opts = {}) {
   const { _id, ...rest } = doc; return { doc: rest }
 }
 
+// v7.3 — item 3: INTERNAL sentinel for reversal/restore paths ONLY. Those paths resolve
+// refs stored on a document that the calling handler ALREADY scope-validated (inBranch/btf)
+// — blocking them would corrupt balance reversals of legitimately-owned documents.
+// It is NEVER accepted from user input and never used on a creation/edit path.
+const REF_SCOPE_INTERNAL = '__INTERNAL_DOC_REFS__'
 async function resolveAccountRef(db, T, ref, scopeB = null) {
-  // v5.9.4 — scopeB (SESSION branch) enforces branch isolation on balance-tracked refs:
-  // a cross-branch box/client/supplier resolves to null (indistinguishable from not-found —
-  // existence is never leaked). COA accounts are office-unified (ledger-only, no cached balance).
-  const inScope = (d) => !scopeB || (d && (d.branch_id || null) === scopeB)
+  // v5.9.4 — scopeB (SESSION branch) enforces branch isolation on balance-tracked refs.
+  // v7.3 — item 3: STRICT BOTH WAYS — a missing/null scopeB now means the HQ scope
+  // (branch_id null/missing), NOT unrestricted tenant access. HQ resolves HQ refs only;
+  // a branch resolves its own refs only. Cross-scope refs resolve to null
+  // (indistinguishable from not-found — existence is never leaked).
+  const inScope = (d) => scopeB === REF_SCOPE_INTERNAL ? !!d : (!!d && (d.branch_id || null) === (scopeB ?? null))
   if (!ref || !ref.id) return null
   if (ref.kind === 'client') {
     const d = await db.collection('clients').findOne({ id: ref.id, tenant_id: T })
@@ -10583,6 +10954,23 @@ async function resolveAccountRef(db, T, ref, scopeB = null) {
     // ALL five COA types (asset/liability/equity/revenue/expense) are valid here — the
     // leaf-only + active checks are enforced by the caller (fail-fast, before side effects).
     const d = await db.collection('accounts').findOne({ tenant_id: T, $or: [{ id: ref.id }, { code: ref.id }] })
+    // v7.3 — item 3: shared core COA accounts (no branch_id) stay office-unified, but a
+    // BRANCH-STAMPED account resolves only inside its own scope (same strict rule).
+    if (d && (d.branch_id || null) !== null && !inScope(d)) return null
+    // v7.4 — item 1 ROOT FIX: an UNTAGGED account is NOT automatically Shared COA — if its
+    // code is carried by an operational entity (client/supplier/box), ownership follows
+    // that ENTITY's scope: cross-scope → resolves to null (existence never leaked).
+    // Genuine Shared/Base COA (untagged + unlinked) stays usable by every scope.
+    if (d && (d.branch_id || null) === null && d.code && scopeB !== REF_SCOPE_INTERNAL) {
+      const wantScope = scopeB ?? null
+      const [lnkC, lnkS, lnkB] = await Promise.all([
+        db.collection('clients').findOne({ tenant_id: T, account_code: d.code }, { projection: { branch_id: 1 } }),
+        db.collection('suppliers').findOne({ tenant_id: T, account_code: d.code }, { projection: { branch_id: 1 } }),
+        db.collection('boxes').findOne({ tenant_id: T, account_code: d.code }, { projection: { branch_id: 1 } }),
+      ])
+      const lnk = lnkC || lnkS || lnkB
+      if (lnk && (lnk.branch_id || null) !== wantScope) return null
+    }
     return d ? { kind: 'account', id: d.id, name: d.name_ar || d.name, code: d.code, updateBalance: false, collection: 'accounts', debitSign: +1, is_group: !!d.is_group, inactive: isInactiveAccount(d), acct_type: d.type } : null
   }
   return null

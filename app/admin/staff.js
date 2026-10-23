@@ -74,11 +74,11 @@ const RoleDialog = ({ sections, role, onClose, onDone }) => {
   )
 }
 
-const StaffDialog = ({ roles, onClose, onDone }) => {
-  const [v, setV] = useState({ name: '', email: '', password: '', admin_role_key: '', reason: '' })
+const StaffDialog = ({ roles, onClose, onDone, canCreateSA = false }) => {
+  const [v, setV] = useState({ name: '', email: '', password: '', admin_role_key: '', reason: '', role: 'admin_staff' })
   const save = async () => {
     if (!v.name || !v.email || !v.password || !v.reason) return toast.error('كل الحقول والسبب إلزامية')
-    try { await api('/admin/staff/users', { method: 'POST', body: v }); toast.success('أُضيف المدير'); onDone() } catch (e) { toast.error(e.message) }
+    try { await api('/admin/staff/users', { method: 'POST', body: v }); toast.success(v.role === 'super_admin' ? 'أُنشئ المشرف العام' : 'أُضيف المدير'); onDone() } catch (e) { toast.error(e.message) }
   }
   return (
     <Dialog open onOpenChange={onClose}><DialogContent className="max-w-md" dir="rtl">
@@ -86,10 +86,13 @@ const StaffDialog = ({ roles, onClose, onDone }) => {
       <div className="space-y-3">
         {fld('الاسم *', <Input value={v.name} onChange={e => setV({ ...v, name: e.target.value })} />)}
         {fld('البريد *', <Input dir="ltr" value={v.email} onChange={e => setV({ ...v, email: e.target.value })} />)}
-        {fld('كلمة المرور * (6+ أحرف)', <Input dir="ltr" type="password" value={v.password} onChange={e => setV({ ...v, password: e.target.value })} />)}
-        {fld('الدور الإداري', <Select value={v.admin_role_key} onValueChange={c => setV({ ...v, admin_role_key: c })}><SelectTrigger><SelectValue placeholder="بلا دور (يحدد لاحقاً)" /></SelectTrigger><SelectContent>{roles.filter(r => r.active !== false).map(r => <SelectItem key={r.key} value={r.key}>{r.label}</SelectItem>)}</SelectContent></Select>)}
+        {fld('كلمة المرور * (8+ أحرف: حرف كبير A-Z + رقم + رمز خاص مثل !@#$%)', <Input dir="ltr" type="password" value={v.password} onChange={e => setV({ ...v, password: e.target.value })} />)}
+        {/* v7.1 — point 2: creating another Super Admin is offered ONLY to the authorized
+            main Super Admin (server enforces 403 for anyone else regardless of the UI) */}
+        {canCreateSA && fld('نوع الحساب', <Select value={v.role} onValueChange={c => setV({ ...v, role: c, admin_role_key: c === 'super_admin' ? '' : v.admin_role_key })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="admin_staff">موظف إدارة (صلاحيات حسب الدور)</SelectItem><SelectItem value="super_admin">Super Admin (كل الصلاحيات)</SelectItem></SelectContent></Select>)}
+        {v.role !== 'super_admin' && fld('الدور الإداري', <Select value={v.admin_role_key} onValueChange={c => setV({ ...v, admin_role_key: c })}><SelectTrigger><SelectValue placeholder="بلا دور (يحدد لاحقاً)" /></SelectTrigger><SelectContent>{roles.filter(r => r.active !== false).map(r => <SelectItem key={r.key} value={r.key}>{r.label}</SelectItem>)}</SelectContent></Select>)}
         {fld('السبب * (Audit)', <Input value={v.reason} onChange={e => setV({ ...v, reason: e.target.value })} />)}
-        <div className="text-[11px] text-slate-500">الحساب يُنشأ في نطاق الإدارة العليا فقط (بلا مكتب) — لا يستطيع مستخدم مكتب منح هذا الدور. لا يحصل الموظف على كل الصلاحيات تلقائياً</div>
+        <div className="text-[11px] text-slate-500">الحساب يُنشأ في نطاق الإدارة العليا فقط (بلا مكتب) — لا يستطيع مستخدم مكتب منح هذا الدور. لا يحصل الموظف على كل الصلاحيات تلقائياً{canCreateSA ? '. إنشاء Super Admin متاح حصراً للمشرف العام الرئيسي' : ''}</div>
         <Button onClick={save} className="w-full">إضافة</Button>
       </div>
     </DialogContent></Dialog>
@@ -223,7 +226,7 @@ const AdminStaffCenter = () => {
           </TableBody></Table>
       </CardContent></Card>}
 
-      {dlg?.type === 'staff' && <StaffDialog roles={roles} onClose={() => setDlg(null)} onDone={() => { setDlg(null); load() }} />}
+      {dlg?.type === 'staff' && <StaffDialog roles={roles} canCreateSA={perms?.all === true} onClose={() => setDlg(null)} onDone={() => { setDlg(null); load() }} />}
       {dlg?.type === 'role' && <RoleDialog sections={sections} role={dlg.role} onClose={() => setDlg(null)} onDone={() => { setDlg(null); load() }} />}
       {dlg?.type === 'overrides' && <OverridesDialog sections={sections} user={dlg.user} onClose={() => setDlg(null)} onDone={() => { setDlg(null); load() }} />}
       {preview && (

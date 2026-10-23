@@ -191,23 +191,33 @@ function tplService(s) {
 // LOGIN
 // ================================================================
 // ============ v2.8.1 — Brand Components (Target Media theme: royal blue + orange) ============
-function RahaalLogo({ size = 'md', variant = 'dark' }) {
-  const sizeMap = { sm: { box: 40, text: 'text-lg', ar: 'text-xl' }, md: { box: 56, text: 'text-2xl', ar: 'text-3xl' }, lg: { box: 76, text: 'text-4xl', ar: 'text-5xl' } }
-  const s = sizeMap[size] || sizeMap.md
-  const arColor = variant === 'light' ? 'text-white' : 'text-[#1e3a8a]'
-  const enColor = variant === 'light' ? 'text-orange-400' : 'text-[#f97316]'
+// v7.0 — UNIFIED PASSWORD POLICY (frontend mirror of the server rule — the server
+// remains the authority). Applies to NEW passwords only; existing ones untouched.
+const PW_POLICY_HINT = 'كلمة المرور يجب ألا تقل عن 8 أحرف، وتحتوي على حرف إنجليزي كبير (A-Z) ورقم (0-9) ورمز خاص حقيقي (مثل ! @ # $ %) — المسافة والأحرف العربية لا تُحتسب رمزاً خاصاً'
+// v7.1 — point 4: the special character must be a REAL ASCII symbol (space / Arabic
+// letters never count) — mirrors the server-side PW_SPECIAL_RE exactly.
+const pwPolicyOk = (s) => String(s || '').length >= 8 && /[A-Z]/.test(s) && /[0-9]/.test(s) && /[!"#$%&'()*+,\-./:;<=>?@[\]^_`{|}~\\]/.test(s)
+// Small live indicator shown under new-password inputs (no redesign — one line).
+function PwHint({ value }) {
+  if (!value) return <div className="text-[10px] text-slate-400 mt-1 leading-relaxed">{PW_POLICY_HINT}</div>
+  return pwPolicyOk(value)
+    ? <div className="text-[10px] text-emerald-600 mt-1 font-bold">✓ كلمة المرور مستوفية للشروط</div>
+    : <div className="text-[10px] text-amber-600 mt-1 leading-relaxed">{PW_POLICY_HINT}</div>
+}
+
+function RahaalLogo({ size = 'md', variant = 'dark' }) {  // v7.0 — UNIFIED OFFICIAL BRAND ASSET (point 12): single shared file
+  // /public/rahaal-logo-official.png (the approved logo supplied by management —
+  // trimmed + transparent, original colors/elements untouched, aspect ratio preserved).
+  // Auth screens use larger sizes; navbars/sidebars use the compact size.
+  const hMap = { sm: 44, md: 64, lg: 132 }
+  const h = hMap[size] || hMap.md
   return (
-    <div className="inline-flex items-center gap-3">
-      <div className="relative" style={{ width: s.box, height: s.box }}>
-        {/* v5.7 — official Rahaal brand asset (replaces the hand-drawn SVG) */}
-        <img src="/rahaal-icon.png" alt="شعار رحّال" className="absolute inset-0 w-full h-full rounded-2xl shadow-xl shadow-blue-900/40 object-cover" />
-        <div className="absolute -bottom-1 -left-1 w-4 h-4 rounded-full bg-[#f97316] border-2 border-white shadow" />
-      </div>
-      <div className="text-right leading-none">
-        <div className={`font-extrabold tracking-tight ${s.ar} ${arColor}`}>رحّـــال</div>
-        <div className={`font-black tracking-widest ${s.text} ${enColor}`} style={{ letterSpacing: '0.15em' }}>RAHAL</div>
-      </div>
-    </div>
+    <img
+      src="/rahaal-logo-official.png"
+      alt="شعار رحّال الرسمي — RAHAL"
+      style={{ height: h, width: 'auto' }}
+      className={`inline-block object-contain select-none ${variant === 'light' ? 'drop-shadow-[0_2px_10px_rgba(255,255,255,0.25)]' : ''}`}
+    />
   )
 }
 
@@ -945,13 +955,16 @@ function AdminResetPasswordDialog({ req, onClose, onDone }) {
   const [doneInfo, setDoneInfo] = useState(null)
   useEffect(() => { if (req) { setPw(''); setDoneInfo(null) } }, [req])
   const generate = () => {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'
-    let s = ''
-    for (let i = 0; i < 10; i++) s += chars[Math.floor(Math.random() * chars.length)]
-    setPw(s)
+    // v7.0 — generator ALWAYS satisfies the unified password policy (8+ / A-Z / 0-9 / symbol)
+    const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ', lower = 'abcdefghjkmnpqrstuvwxyz', digits = '23456789', symbols = '!@#$%&*'
+    const all = upper + lower + digits + symbols
+    const pick = (set) => set[Math.floor(Math.random() * set.length)]
+    let s = pick(upper) + pick(digits) + pick(symbols)
+    for (let i = 0; i < 7; i++) s += pick(all)
+    setPw(s.split('').sort(() => Math.random() - 0.5).join(''))
   }
   const submit = async () => {
-    if (!pw || pw.length < 6) return toast.error('كلمة المرور يجب ألا تقل عن 6 أحرف')
+    if (!pwPolicyOk(pw)) return toast.error(PW_POLICY_HINT) // v7.0 — unified policy
     try {
       setSaving(true)
       await api(`/admin/password-reset-requests/${req.id}`, { method: 'PATCH', body: { action: 'reset', new_password: pw } })
@@ -985,9 +998,10 @@ function AdminResetPasswordDialog({ req, onClose, onDone }) {
               {req?.note && <div className="text-xs bg-amber-50 border border-amber-200 rounded p-2">📝 ملاحظة المستخدم: {req.note}</div>}
               <Field label="كلمة المرور الجديدة" required>
                 <div className="flex gap-2">
-                  <Input dir="ltr" value={pw} onChange={e => setPw(e.target.value)} placeholder="6 أحرف على الأقل" className="font-mono" />
+                  <Input dir="ltr" value={pw} onChange={e => setPw(e.target.value)} placeholder="Rahaal@123 مثال" className="font-mono" />
                   <Button type="button" variant="outline" onClick={generate} className="whitespace-nowrap">🎲 توليد</Button>
                 </div>
+                <PwHint value={pw} />
               </Field>
               <div className="text-[11px] text-slate-500">بعد الحفظ: تُغلق جلسات المستخدم الحالية ويدخل بالكلمة الجديدة فقط. أنت من يبلّغه بها (هاتف/واتساب).</div>
             </div>
@@ -1130,7 +1144,7 @@ function PricingConfigEditor({ asScreen = false, onDone }) {
           )
         })}
       </div>
-      <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ تذكير: مراقبة التأشيرات وإدارة البكجات متاحة في جميع الباقات بلا استثناء — أبقِها ضمن المزايا الثلاث. تغيير الأسعار/الخصم لا يمس اشتراكات أو أقساطاً قائمة — يسري على الجديد فقط، إلا بتدخل يدوي صريح على مكتب محدد.</div>
+      <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">⚠️ تذكير: مراقبة التأشيرات وإدارة الباقات والبرامج متاحة في جميع باقات الاشتراك بلا استثناء — أبقِها ضمن المزايا الثلاث. تغيير الأسعار/الخصم لا يمس اشتراكات أو أقساطاً قائمة — يسري على الجديد فقط، إلا بتدخل يدوي صريح على مكتب محدد.</div>
       {!asScreen && (
         <DialogFooter>
           <Button onClick={save} disabled={saving} className="grad-brand text-white">{saving ? 'جارٍ الحفظ...' : '💾 حفظ ونشر التسعير'}</Button>
@@ -2148,7 +2162,7 @@ function NewTenantDialog({ open, onOpenChange, onSaved }) {
           </Field>
           <Field label="اسم المالك"><Input value={f.owner_name} onChange={e => setF({ ...f, owner_name: e.target.value })} placeholder="أحمد محمد" /></Field>
           <Field label="بريد المالك" required><Input dir="ltr" type="email" value={f.owner_email} onChange={e => setF({ ...f, owner_email: e.target.value })} placeholder="owner@office.com" /></Field>
-          <Field label="كلمة المرور" required><Input dir="ltr" type="text" value={f.owner_password} onChange={e => setF({ ...f, owner_password: e.target.value })} placeholder="اختر كلمة مرور قوية" /></Field>
+          <Field label="كلمة المرور" required><Input dir="ltr" type="text" value={f.owner_password} onChange={e => setF({ ...f, owner_password: e.target.value })} placeholder="مثال: Rahaal@123" /><PwHint value={f.owner_password} /></Field>
           <Field label="حد المستخدمين"><Input type="number" min={1} value={f.max_users} onChange={e => setF({ ...f, max_users: e.target.value })} /></Field>
           <Field label="عدد الفروع ⚠️ غير مفعل تشغيلياً"><Input type="number" min={1} value={f.max_branches} onChange={e => setF({ ...f, max_branches: e.target.value })} /></Field>
           <Field label="🎁 رمز الإحالة (اختياري)"><Input dir="ltr" value={f.referral_code} onChange={e => setF({ ...f, referral_code: e.target.value.toUpperCase() })} placeholder="مثال: ABCD1234" /></Field>
@@ -2649,7 +2663,30 @@ const canModule = (user, tabId) => {
   // v4.9 — admin_staff (Rahaal managers) now also see the platform entries INSIDE TenantApp
   // (the separate AdminApp shell was removed); every action stays server-gated per section
   // via adminGate/adminCan — this is UI visibility only.
-  if (String(tabId).startsWith('platform-')) return user.role === 'super_admin' || user.role === 'admin_staff'
+  // v7.0 — point 1: admin_staff sees ONLY the platform sections GRANTED to him
+  // (visible sections come from /admin/staff/me — same catalog the backend gate uses).
+  // Frontend visibility now MATCHES backend authorization instead of showing everything.
+  if (String(tabId).startsWith('platform-')) {
+    if (user.role === 'super_admin') return true
+    if (user.role === 'admin_staff') {
+      if (!Array.isArray(ADMIN_VIS_SECTIONS)) return false // not loaded yet — hide until known
+      const sec = PLATFORM_TAB_SECTION[tabId] || 'offices'
+      return ADMIN_VIS_SECTIONS.includes(sec)
+    }
+    return false
+  }
+  // v7.3 — item 6: the ABSOLUTE role block is REMOVED. An admin_staff's access to the
+  // Rahaal Company-Ledger modules is decided by Role + Permissions ONLY: his admin-realm
+  // role (e.g. finance_manager → accounting section) is materialized at login as EXPLICIT
+  // mod_* permissions (=== true; the office-staff "!== false" default NEVER applies here).
+  // Being admin_staff alone grants nothing beyond 'help'. Travel-office operational
+  // modules and office settings are NEVER exposed to admin_staff.
+  if (user.role === 'admin_staff') {
+    if (tabId === 'help') return true
+    if (SA_OFFICE_MODULES.has(String(tabId))) return false // travel ops stay platform-separated
+    if (tabId === 'settings') return false                 // office settings stay owner/SA-side
+    return user.permissions?.[`mod_${String(tabId).replace(/-/g, '_')}`] === true // explicit grant only
+  }
   // v5.4 — inter-branch is an OPT-IN module: full accounting perms do NOT imply it
   if (tabId === 'interbranch') return user.role === 'owner' || user.permissions?.mod_interbranch === true
   if (user.role === 'owner') return true
@@ -2658,6 +2695,19 @@ const canModule = (user, tabId) => {
   if (tabId === 'settings') return user.role === 'super_admin'
   return user.permissions?.[`mod_${String(tabId).replace(/-/g, '_')}`] !== false
 }
+
+// v7.0 — point 1: platform tab → admin section mapping (MATCHES lib/adminStaff.js
+// sectionOfRoute fallbacks: pricing/subs live under the legacy 'offices' section).
+const PLATFORM_TAB_SECTION = {
+  'platform-offices': 'offices', 'platform-people': 'staff', 'platform-plans': 'offices',
+  'platform-subs': 'offices', 'platform-sales': 'sales', 'platform-orders': 'requests',
+  'platform-commissions': 'commissions', 'platform-ads': 'ads', 'platform-notify': 'notifications',
+  'platform-system': 'system', 'platform-geo': 'geo',
+}
+// Loaded once by TenantApp for admin_staff from GET /admin/staff/me (visible sections).
+// Module-level on purpose: canModule is a pure helper used across components; TenantApp
+// re-renders after setting it, so all consumers see the fresh value. null = not loaded.
+let ADMIN_VIS_SECTIONS = null
 
 // v4.7 — SA sidebar VISUAL grouping only (collapsible). Existing NAV entries/ids/labels are
 // reused untouched — this is a render-time arrangement for the platform Super Admin ONLY;
@@ -2720,7 +2770,7 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
   const { tenant, settings, user, branch } = useAuth() // v5.3 — branch for the current-branch badge
   // v4.7 — SA collapsible groups: multiple groups may stay open; the group holding the
   // active tab opens automatically (without closing others). Pure visual state.
-  const isPlatformSA = user?.role === 'super_admin'
+  const isPlatformSA = user?.role === 'super_admin' || user?.role === 'admin_staff' // v7.0 — admin_staff gets the same grouped platform sidebar (items still filtered per-section by canModule)
   const [openGroups, setOpenGroups] = useState(() => {
     const g = SA_SIDEBAR_GROUPS.find(x => x.items.includes(current))
     return new Set(g ? [g.id] : [])
@@ -2754,7 +2804,7 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
           {settings?.logo_base64 ? (
             <img src={settings.logo_base64} alt="logo" className="w-11 h-11 rounded-xl object-cover bg-white" />
           ) : (
-            <img src="/rahaal-icon.png" alt="شعار رحّال" className="w-11 h-11 rounded-xl object-cover shadow-lg shadow-orange-500/20 border border-orange-400/40 shrink-0" />
+            <img src="/rahaal-logo-official.png" alt="شعار رحّال" className="w-11 h-11 rounded-xl object-contain bg-white p-0.5 shadow-lg shadow-orange-500/20 border border-orange-400/40 shrink-0" /> /* v7.0 — unified official asset */
           )}
           <div className="min-w-0 flex-1">
             <div className="text-lg font-extrabold tracking-tight truncate">{settings?.agency_name || tenant?.name || 'رحّـــال'}</div>
@@ -2876,7 +2926,7 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
           <div className="w-9 h-9 rounded-full grad-brand flex items-center justify-center shrink-0"><User className="w-4 h-4 text-white" /></div>
           <div className="flex-1 min-w-0">
             <div className="text-xs font-semibold truncate">{user.name}</div>
-            <div className="text-[10px] text-slate-400 truncate">{user.role === 'owner' ? 'مالك المكتب' : user.role === 'super_admin' ? 'المشرف العام' : 'موظف'}</div>
+            <div className="text-[10px] text-slate-400 truncate">{user.role === 'owner' ? 'مالك المكتب' : user.role === 'super_admin' ? 'المشرف العام' : user.role === 'admin_staff' ? 'موظف إدارة رحّال' : 'موظف'}</div>
             {branch?.name && <div className="mt-0.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-bold truncate max-w-full">🏢 الفرع الحالي: {branch.name}</div>}
           </div>
         </div>
@@ -2952,7 +3002,7 @@ function Dashboard({ setTab }) {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <QuickAction icon={FileBadge2} label="التأشيرات" grad="grad-green" onClick={() => setTab('visas')} />
         <QuickAction icon={Plane} label="التذاكر" grad="grad-brand" onClick={() => setTab('tickets')} />
-        <QuickAction icon={Package} label="الباقات" grad="grad-teal" onClick={() => setTab('packages')} />
+        <QuickAction icon={Package} label="الباقات والبرامج" grad="grad-teal" onClick={() => setTab('packages')} />
         <QuickAction icon={Briefcase} label="الخدمات" grad="grad-gold" onClick={() => setTab('services')} />
       </div>
       {/* v3.61 — Rejected-webhooks alert banner (owner, threshold configurable in متجر معراج → صحة المزامنة) */}
@@ -4562,7 +4612,7 @@ ${rahaalPrintBrandHTML()}
 <div class="row"><b>${refType === 'ticket' ? 'PNR' : refType === 'visa' ? 'الجواز' : 'المرجع'}:</b><span>${escHtml(record.pnr || record.passport_no || record.reference_no || '—')}</span></div>
 <div class="row"><b>العملة:</b><span>${escHtml(record.currency)}</span></div>
 <div class="row"><b>قيمة البيع الأصلية:</b><span>${fmt(sale, record.currency)}</span></div>
-<div class="row"><b>غرامة المورد:</b><span style="color:#dc2626">-${fmt(sp, record.currency)}</span></div>
+<div class="row"><b>غرامة الإلغاء:</b><span style="color:#dc2626">-${fmt(sp, record.currency)}</span></div>
 <div class="row"><b>رسوم خدمة المكتب:</b><span style="color:#dc2626">-${fmt(of, record.currency)}</span></div>
 <div class="row"><b>سبب الإلغاء:</b><span>${escHtml(f.reason || '—')}</span></div>
 </div>
@@ -4577,7 +4627,7 @@ ${rahaalPrintBrandHTML()}
   }
   const shareWA = () => {
     const passenger = record.passenger_name || record.beneficiary_name || record.client_name
-    const msg = `عزيزنا العميل ${record.client_name}،\n\n🔄 سند استرداد\n📋 ${refType === 'ticket' ? 'تذكرة' : refType === 'visa' ? 'تأشيرة' : 'خدمة'} ${passenger}\n💰 قيمة البيع: ${fmt(sale, record.currency)}\n➖ غرامة المورد: ${fmt(sp, record.currency)}\n➖ رسوم المكتب: ${fmt(of, record.currency)}\n\n✅ *صافي المبلغ المسترد: ${fmt(refundToClient, record.currency)}*\n\n${f.reason ? `السبب: ${f.reason}\n\n` : ''}شكراً لتعاملكم — ${tenant?.name || 'مكتب رحّال'}`
+    const msg = `عزيزنا العميل ${record.client_name}،\n\n🔄 سند استرداد\n📋 ${refType === 'ticket' ? 'تذكرة' : refType === 'visa' ? 'تأشيرة' : 'خدمة'} ${passenger}\n💰 قيمة البيع: ${fmt(sale, record.currency)}\n➖ غرامة الإلغاء: ${fmt(sp, record.currency)}\n➖ رسوم المكتب: ${fmt(of, record.currency)}\n\n✅ *صافي المبلغ المسترد: ${fmt(refundToClient, record.currency)}*\n\n${f.reason ? `السبب: ${f.reason}\n\n` : ''}شكراً لتعاملكم — ${tenant?.name || 'مكتب رحّال'}`
     const phone = record.passenger_whatsapp || record.passenger_phone || record.beneficiary_whatsapp || record.beneficiary_phone
     openWhatsApp(phone, msg)
   }
@@ -6161,6 +6211,7 @@ function ChartScreen() {
             ) : <span className="w-5 h-5 inline-block" />}
             <span className="font-mono text-[11px] font-bold px-1.5 py-0.5 rounded bg-white/70 border">{node.code}</span>
             <span className="text-sm font-semibold truncate">{node.name}</span>
+            {node.branch_name && <Badge className="text-[9px] shrink-0 bg-amber-100 text-amber-800 border border-amber-300" title="هذا الحساب يتبع هذا الفرع — الرؤية الموحدة للمركز لا تنقل ملكيته">🏢 {node.branch_name}</Badge>}
             {node.linked_entity && <span title={`مرتبط بسجل تشغيلي (${node.linked_entity.type === 'box' ? 'صندوق/بنك' : node.linked_entity.type === 'client' ? 'عميل' : 'مورد'})`} className="text-emerald-600 text-xs">🔗</span>}
             {node.is_group && <Badge variant="outline" className="text-[10px] shrink-0">📁 مجموعة</Badge>}
             {node.is_parent && <Badge variant="outline" className="text-[10px] shrink-0 bg-white">🌳 شجري · {node.next_child_seq} فرع</Badge>}
@@ -6185,6 +6236,7 @@ function ChartScreen() {
                   <span>{subEntityIcon[se.type] || '•'}</span>
                   <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-purple-50 border border-purple-200 text-purple-700">{se.code}</span>
                   <span className="text-slate-800 truncate">{se.name}</span>
+                  {se.branch_name && <Badge className="text-[9px] shrink-0 bg-amber-100 text-amber-800 border border-amber-300">🏢 {se.branch_name}</Badge>}
                   {se.inactive && <Badge variant="outline" className="text-[9px] shrink-0 bg-slate-100 text-slate-500">🌙 غير نشط</Badge>}
                 </div>
                 <div className="text-[10px] text-slate-500 shrink-0 font-mono">
@@ -9383,7 +9435,7 @@ function PackagesScreen() {
   }
   return (
     <div className="space-y-4">
-      <TopBar title="الباقات والبرامج السياحية" subtitle={`${openPackages.length} باكج نشط • ${closedPackages.length} مغلق`}
+      <TopBar title="الباقات والبرامج" subtitle={`${openPackages.length} باكج نشط • ${closedPackages.length} مغلق`}
         right={<div className="flex gap-2">
           <Button variant="outline" onClick={() => { setShowArchived(!showArchived); if (!showArchived) loadArchived() }} className={`gap-2 ${showArchived ? 'bg-slate-700 text-white border-slate-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>🗂️ المؤرشفة</Button>
           <Button variant="outline" onClick={() => setWaLogsOpen(true)} className="gap-2 border-green-300 text-green-700 hover:bg-green-50 relative">📲 سجل الواتساب{waReminders > 0 && <span className="absolute -top-2 -left-2 bg-rose-500 text-white text-[10px] rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 font-bold">{waReminders}</span>}</Button>
@@ -12310,7 +12362,7 @@ function OfficeSettings() {
     // v3.88.4 — S-002: field-specific validation with clear reasons (mirrors backend)
     if (!newUser.name || !newUser.name.trim()) return toast.error('اسم الموظف مطلوب')
     if (!newUser.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newUser.email.trim())) return toast.error('البريد الإلكتروني غير صالح — مثال: name@example.com')
-    if (!newUser.password || newUser.password.length < 6) return toast.error('كلمة المرور يجب ألا تقل عن 6 أحرف')
+    if (!newUser.password || !pwPolicyOk(newUser.password)) return toast.error(PW_POLICY_HINT) // v7.1 — point 4: unified policy (was 6-char)
     try {
       setAddingUser(true)
       await api('/tenant/users', { method: 'POST', body: newUser })
@@ -12394,7 +12446,7 @@ function OfficeSettings() {
                 <Field label="الاسم"><Input value={newUser.name} onChange={e => setNewUser({ ...newUser, name: e.target.value })} /></Field>
                 <Field label="البريد"><Input dir="ltr" value={newUser.email} onChange={e => setNewUser({ ...newUser, email: e.target.value })} /></Field>
                 {/* v3.88.4 — S-001: proper password field — masked with autocomplete isolation */}
-                <Field label="كلمة المرور"><Input dir="ltr" type="password" autoComplete="new-password" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} /></Field>
+                <Field label="كلمة المرور"><Input dir="ltr" type="password" autoComplete="new-password" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} /><PwHint value={newUser.password} /></Field>
                 <Button onClick={addUser} disabled={addingUser} className="grad-brand text-white gap-2">{addingUser ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} إضافة موظف</Button>
               </div>
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 text-xs text-amber-900">
@@ -12612,6 +12664,23 @@ function TenantApp() {
     }
   }, [])
   const { user, tenant, logout } = useAuth()
+  // v7.0 — point 1: admin_staff loads his GRANTED platform sections once (same catalog
+  // the backend adminGate uses) → sidebar/tabs show ONLY what he is allowed to view,
+  // and he lands on his first visible platform section instead of the office dashboard.
+  const [adminVisLoaded, setAdminVisLoaded] = useState(false)
+  useEffect(() => {
+    if (user?.role !== 'admin_staff') return
+    let stop = false
+    api('/admin/staff/me').then(d => {
+      if (stop) return
+      ADMIN_VIS_SECTIONS = (d?.sections || []).filter(s => s.visible).map(s => s.key)
+      setAdminVisLoaded(true)
+      const firstTab = Object.keys(PLATFORM_TAB_SECTION).find(t => ADMIN_VIS_SECTIONS.includes(PLATFORM_TAB_SECTION[t]))
+      setTab(firstTab || 'help')
+    }).catch(() => { if (!stop) { ADMIN_VIS_SECTIONS = []; setAdminVisLoaded(true); setTab('help') } })
+    return () => { stop = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.role])
   // v3.46 — Idle session auto-lock: logout via the EXISTING logout mechanism after inactivity,
   // saving the current section so the user resumes exactly where they were after re-login.
   const idleTimerRef = useRef(null)
@@ -13793,7 +13862,7 @@ function LandingPage({ onLoginClick, onSignupClick }) {
     { icon: '💱', title: 'محاسبة متعدّدة العملات', desc: 'قيد مزدوج آلي بـ USD / SAR / YER مع أسعار صرف يومية وتقارير موحّدة.', color: 'from-blue-500 to-cyan-500' },
     { icon: '✈️', title: 'إدارة التذاكر والحجوزات', desc: 'إصدار تذاكر جوي وبري، طباعة احترافية، ومطابقة مع الموردين لحظياً.', color: 'from-orange-500 to-red-500' },
     { icon: '🛂', title: 'تأشيرات وموافقات', desc: 'إدارة تأشيرات العمرة والزيارة والعمل والموافقات الأمنية مع تنبيهات الصلاحية.', color: 'from-emerald-500 to-teal-500' },
-    { icon: '🕋', title: 'الباقات والبرامج السياحية', desc: 'إنشاء باكجات كاملة مع تكاليف المكونات وتقارير ربحية لحظية عند إغلاق الباكج.', color: 'from-fuchsia-500 to-pink-500' },
+    { icon: '🕋', title: 'الباقات والبرامج', desc: 'إنشاء باكجات كاملة مع تكاليف المكونات وتقارير ربحية لحظية عند إغلاق الباكج.', color: 'from-fuchsia-500 to-pink-500' },
     { icon: '📊', title: 'تقارير مالية ذكية', desc: 'ميزانية عمومية، أرباح وخسائر، كشف حساب تفاعلي، ومقارنة ربحية الباكجات.', color: 'from-indigo-500 to-blue-500' },
     { icon: '📱', title: 'تكامل واتساب ذكي', desc: 'إرسال كشوف الحسابات والتذاكر عبر واتساب بقالب ديناميكي حسب نوع الرحلة.', color: 'from-green-500 to-emerald-500' },
     { icon: '💸', title: 'الإحالة والإحصائيات', desc: 'نظام إحالة يمنحك 50 قيد مجاني مكافأة عن كل مكتب مشترك يدفع فعلياً.', color: 'from-amber-500 to-orange-500' },
@@ -13825,7 +13894,7 @@ function LandingPage({ onLoginClick, onSignupClick }) {
       <header className="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-slate-200">
         <div className="max-w-7xl mx-auto px-4 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <img src="/rahaal-icon.png" alt="شعار رحّال" className="w-10 h-10 rounded-xl object-cover shadow" />
+            <img src="/rahaal-logo-official.png" alt="شعار رحّال" className="w-10 h-10 rounded-xl object-contain bg-white p-0.5 shadow" />
             <div>
               <div className="font-extrabold text-slate-900">Rahaal <span className="text-blue-700">رحّال</span></div>
               <div className="text-[10px] text-slate-500 -mt-0.5">by Target Media</div>
@@ -14131,14 +14200,16 @@ function App() {
       <ConfirmHost />
       {/* v4.9+v5 (merged) — TenantApp IS the single authoritative dashboard for every role:
           the company book (vouchers, boxes/banks, COA, journals) + the moved platform admin
-          sections, all RBAC-gated inside ONE app. The separate AdminApp shell was REMOVED and
-          «إدارة المنصة» is a pure in-app navigation shortcut (see Sidebar). STRICTER Emergent
-          rule kept: a platform account (super_admin / admin_staff) MUST already be bound to
-          the Rahaal company tenant; an unbound account gets an explicit blocking notice —
-          NO alternate panel, NO auto tenant creation, NO auto binding on login. */}
+          sections, all RBAC-gated inside ONE app. The separate AdminApp shell was REMOVED.
+          v7.0 — point 1 ROOT-CAUSE FIX (new administrative user blocked at first login):
+          admin_staff accounts are tenant-less BY DESIGN (lib/adminStaff isAdminStaff REQUIRES
+          tenant_id=null) — yet v4.9 blocked EVERY tenant-less platform account here, so a
+          freshly created administrative user could never enter. Resolution: the binding
+          requirement stays for the MAIN super_admin only; a valid admin_staff user enters
+          TenantApp in platform-only mode (office modules hidden, sections filtered by his
+          granted permissions, every call still server-gated by adminGate). */}
       {(() => {
-        const isPlatformRole = auth.user.role === 'super_admin' || auth.user.role === 'admin_staff'
-        if (isPlatformRole && !auth.user.tenant_id) {
+        if (auth.user.role === 'super_admin' && !auth.user.tenant_id) {
           return <AdminBindingRequiredNotice user={auth.user} logout={logout} />
         }
         return <TenantApp />
@@ -14158,12 +14229,12 @@ function AdminBindingRequiredNotice({ user, logout }) {
         <h1 className="text-xl font-extrabold text-slate-800">حساب الإدارة غير مربوط بدفتر شركة رحّال</h1>
         <p className="text-sm text-slate-600 leading-relaxed">
           حسابك (<b>{user?.email}</b>) بدور «{user?.role === 'super_admin' ? 'المشرف العام' : 'موظف إدارة'}»
-          لكنه غير مربوط بأي Tenant، ولوحة التحكم المعتمدة هي تطبيق الشركة الموحّد (TenantApp).
-          لأسباب تتعلق بسلامة البيانات لا يُنشأ الربط تلقائياً عند الدخول —
-          يلزم ربط الحساب يدوياً بدفتر شركة رحّال عبر عملية معتمدة من الإدارة.
+          لكنه غير مربوط بأي Tenant بعد. {/* v7.2 — binding now happens automatically at login */}
+          تم تفعيل الربط التلقائي بدفتر شركة رحّال عند تسجيل الدخول —
+          كل ما عليك هو تسجيل الخروج ثم الدخول مجدداً وسيتم ربط حسابك تلقائياً بدفتر الشركة.
         </p>
-        <div className="text-xs text-slate-400">راجع فريق التطوير لاعتماد الربط، ثم أعد تسجيل الدخول.</div>
-        <button onClick={logout} className="px-6 py-2.5 rounded-lg bg-slate-800 text-white text-sm font-bold hover:bg-slate-700 transition">تسجيل الخروج</button>
+        <div className="text-xs text-slate-400">سجّل الخروج ثم ادخل مجدداً — إن استمرت المشكلة راجع فريق التطوير.</div>
+        <button onClick={logout} className="px-6 py-2.5 rounded-lg bg-slate-800 text-white text-sm font-bold hover:bg-slate-700 transition">تسجيل الخروج وإعادة الدخول</button>
       </div>
     </div>
   )
