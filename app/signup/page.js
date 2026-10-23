@@ -33,8 +33,6 @@ function SignupPageInner() {
   const [ref, setRef] = useState('')
   const [form, setForm] = useState({ name: '', owner_name: '', owner_email: '', owner_phone: '', owner_password: '' })
   const [saving, setSaving] = useState(false)
-  const [step, setStep] = useState('form')
-  const [verificationCode, setVerificationCode] = useState('')
 
   useEffect(() => {
     const r = params.get('ref')
@@ -58,8 +56,8 @@ function SignupPageInner() {
     return { ...form, owner_phone: cleanPhone, referral_code: ref || undefined }
   }
 
-  const finishSignup = async (body, code = '') => {
-    const r = await apiPost('/public/signup', { ...body, verification_code: code || undefined })
+  const finishSignup = async (body) => {
+    const r = await apiPost('/public/signup', body)
     toast.success('🎉 تم إنشاء حسابك بنجاح!' + (r.referral_applied ? ' • تم منح المُحيل +50 قيد عند استحقاق المكافأة' : ''))
     setTimeout(() => { window.location.href = '/' }, 1000)
   }
@@ -70,33 +68,7 @@ function SignupPageInner() {
     if (!body) return
     try {
       setSaving(true)
-      const r = await apiPost('/public/signup/request-code', { email: body.owner_email })
-      if (r.verification_required) {
-        setStep('verify')
-        toast.success('📨 أرسلنا رمز تحقق إلى بريدك الإلكتروني')
-      } else {
-        await finishSignup(body)
-      }
-    } catch (err) { toast.error(err.message) } finally { setSaving(false) }
-  }
-
-  const verifyAndCreate = async (e) => {
-    e.preventDefault()
-    const body = validateAndBuildBody()
-    if (!body) return
-    if (!/^\d{6}$/.test(verificationCode.trim())) return toast.error('أدخل رمز التحقق المكوّن من 6 أرقام')
-    try {
-      setSaving(true)
-      await finishSignup(body, verificationCode.trim())
-    } catch (err) { toast.error(err.message) } finally { setSaving(false) }
-  }
-
-  const resendVerification = async () => {
-    if (!form.owner_email) return toast.error('البريد الإلكتروني غير موجود')
-    try {
-      setSaving(true)
-      await apiPost('/public/signup/request-code', { email: form.owner_email })
-      toast.success('تم إرسال رمز جديد إن انتهت مهلة الإرسال السابقة')
+      await finishSignup(body)
     } catch (err) { toast.error(err.message) } finally { setSaving(false) }
   }
 
@@ -156,26 +128,6 @@ function SignupPageInner() {
             {ref && <Badge className="w-fit bg-emerald-100 text-emerald-700 hover:bg-emerald-100">🎁 مكافأة إحالة نشطة: {ref}</Badge>}
           </CardHeader>
           <CardContent>
-            {step === 'verify' ? (
-              <form onSubmit={verifyAndCreate} className="space-y-4">
-                <div className="text-center space-y-2 py-2">
-                  <div className="text-4xl">📨</div>
-                  <div className="font-extrabold text-slate-800">تحقق من بريدك الإلكتروني</div>
-                  <div className="text-sm text-slate-500">أرسلنا رمزاً من 6 أرقام إلى <b dir="ltr">{form.owner_email}</b>. أدخله لإكمال إنشاء الحساب.</div>
-                </div>
-                <div>
-                  <label className="text-xs text-slate-600 mb-1 block">رمز التحقق *</label>
-                  <Input dir="ltr" inputMode="numeric" maxLength={6} value={verificationCode} onChange={e => setVerificationCode(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="123456" className="text-center text-2xl tracking-[0.35em] font-bold" autoFocus />
-                </div>
-                <Button type="submit" disabled={saving} className="w-full bg-gradient-to-l from-[#1e3a8a] to-[#f97316] text-white gap-2">
-                  {saving ? <Loader2 className="w-5 h-5 animate-spin" /> : '✅ تأكيد البريد وإنشاء الحساب'}
-                </Button>
-                <div className="flex items-center justify-between text-xs">
-                  <button type="button" disabled={saving} onClick={resendVerification} className="text-[#1e3a8a] font-bold hover:text-[#f97316]">إعادة إرسال الرمز</button>
-                  <button type="button" onClick={() => { setStep('form'); setVerificationCode('') }} className="text-slate-500 hover:text-slate-700">تعديل البيانات</button>
-                </div>
-              </form>
-            ) : (
             <form onSubmit={submit} className="space-y-3">
               <div>
                 <label className="text-xs text-slate-600 mb-1 block">اسم المكتب التجاري *</label>
@@ -207,7 +159,6 @@ function SignupPageInner() {
               </Button>
               <div className="text-center text-xs text-slate-500">لديك حساب بالفعل؟ <a href="/" className="text-[#1e3a8a] font-bold hover:text-[#f97316]">سجّل الدخول</a></div>
             </form>
-            )}
           </CardContent>
         </Card>
       </div>

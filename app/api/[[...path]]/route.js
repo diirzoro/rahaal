@@ -63,71 +63,6 @@ const CURRENCIES = ['USD', 'SAR', 'YER']
 const DEFAULT_RATES = { USD: 1554, SAR: 410, YER: 1 }
 const BASE_CURRENCY = 'YER'
 
-// Public-account email verification / password-reset codes.
-// Delivery is activated only when both RESEND_API_KEY and RAHAAL_EMAIL_FROM exist.
-// Until then the legacy forgot-password admin flow remains available and signup is not blocked.
-const AUTH_EMAIL_CODE_TTL_MS = 10 * 60 * 1000
-const AUTH_EMAIL_CODE_COOLDOWN_MS = 60 * 1000
-const emailDeliveryConfigured = () => !!(process.env.RESEND_API_KEY && process.env.RAHAAL_EMAIL_FROM)
-async function sendRahaalEmail(to, subject, html) {
-  if (!emailDeliveryConfigured()) throw new Error('خدمة البريد الإلكتروني غير مهيأة')
-  const r = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from: process.env.RAHAAL_EMAIL_FROM, to: [to], subject, html }),
-  })
-  if (!r.ok) {
-    const msg = await r.text().catch(() => '')
-    console.error('[AUTH_EMAIL] delivery failed', r.status, msg.slice(0, 300))
-    throw new Error('تعذر إرسال رسالة التحقق حالياً')
-  }
-}
-async function issueAuthEmailCode(db, { email, userId = null, purpose }) {
-  const now = new Date()
-  const recent = await db.collection('auth_email_codes').findOne({
-    email, purpose, used_at: null, created_at: { $gte: new Date(Date.now() - AUTH_EMAIL_CODE_COOLDOWN_MS) },
-  })
-  if (recent) return { sent: true, cooldown: true }
-  const code = String(crypto.randomInt(100000, 1000000))
-  const doc = {
-    id: uuidv4(), email, user_id: userId, purpose,
-    code_hash: bcrypt.hashSync(code, 8), attempts: 0,
-    created_at: now, expires_at: new Date(Date.now() + AUTH_EMAIL_CODE_TTL_MS), used_at: null,
-  }
-  await db.collection('auth_email_codes').insertOne(doc)
-  const title = purpose === 'signup_verify' ? 'تأكيد بريدك في رحّال' : 'رمز استعادة كلمة المرور — رحّال'
-  const action = purpose === 'signup_verify' ? 'تأكيد بريدك الإلكتروني' : 'استعادة كلمة المرور'
-  try {
-    await sendRahaalEmail(email, title, `
-      <div dir="rtl" style="font-family:Arial,sans-serif;max-width:520px;margin:auto">
-        <h2 style="color:#1e3a8a">رحّال — Rahaal ERP</h2>
-        <p>استخدم الرمز التالي لإكمال ${action}:</p>
-        <div style="font-size:32px;font-weight:900;letter-spacing:8px;text-align:center;padding:18px;background:#f1f5f9;border-radius:12px">${code}</div>
-        <p style="color:#64748b">صلاحية الرمز 10 دقائق. لا تشارك هذا الرمز مع أي شخص.</p>
-      </div>`)
-  } catch (e) {
-    await db.collection('auth_email_codes').deleteOne({ id: doc.id })
-    throw e
-  }
-  return { sent: true, cooldown: false }
-}
-async function verifyAuthEmailCode(db, { email, purpose, code, consume = false }) {
-  const rec = await db.collection('auth_email_codes').findOne(
-    { email, purpose, used_at: null, expires_at: { $gt: new Date() } },
-    { sort: { created_at: -1 } }
-  )
-  if (!rec) return { ok: false, error: 'الرمز غير صالح أو انتهت صلاحيته' }
-  if ((Number(rec.attempts) || 0) >= 5) return { ok: false, error: 'تم تجاوز عدد المحاولات — اطلب رمزاً جديداً' }
-  if (!bcrypt.compareSync(String(code || ''), rec.code_hash || '')) {
-    await db.collection('auth_email_codes').updateOne({ id: rec.id }, { $inc: { attempts: 1 } })
-    return { ok: false, error: 'رمز التحقق غير صحيح' }
-  }
-  if (consume) {
-    const used = await db.collection('auth_email_codes').updateOne({ id: rec.id, used_at: null }, { $set: { used_at: new Date() } })
-    if (!used.modifiedCount) return { ok: false, error: 'تم استخدام هذا الرمز مسبقاً' }
-  }
-  return { ok: true, record: rec }
-}
 // Helper: convert amount to base (YER)
 // v5.8 — FX-001 ROOT-CAUSE FIX: the BASE currency converts at EXACTLY 1 BY DEFINITION
 // (1 YER = 1 YER), regardless of whatever a legacy/corrupt tenant rate table stores
@@ -2397,18 +2332,6 @@ async function handleRoute(request, { params }) {
     }
 
     // ============ PUBLIC SIGNUP (no auth) ============
-    if (route === '/public/signup/request-code' && method === 'POST') {
-      const b = await request.json()
-      const email = String(b.email || '').toLowerCase().trim()
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return bad('البريد الإلكتروني غير صالح')
-      if (await db.collection('users').findOne({ email })) return bad('البريد الإلكتروني مستخدم بالفعل')
-      if (!emailDeliveryConfigured()) return ok({ verification_required: false })
-      try {
-        await issueAuthEmailCode(db, { email, purpose: 'signup_verify' })
-        return ok({ verification_required: true, message: 'أرسلنا رمز تحقق إلى بريدك الإلكتروني' })
-      } catch (e) { return bad(e.message || 'تعذر إرسال رمز التحقق', 503) }
-    }
-
     if (route === '/public/signup' && method === 'POST') {
       const b = await request.json()
       if (!b.name || !b.owner_email || !b.owner_password || !b.owner_name) return bad('الاسم الكامل، اسم المكتب، البريد وكلمة المرور مطلوبة')
@@ -2423,10 +2346,6 @@ async function handleRoute(request, { params }) {
         return bad('البريد الإلكتروني غير صالح')
       }
       if (await db.collection('users').findOne({ email })) return bad('البريد الإلكتروني مستخدم بالفعل')
-      if (emailDeliveryConfigured()) {
-        const verified = await verifyAuthEmailCode(db, { email, purpose: 'signup_verify', code: b.verification_code, consume: true })
-        if (!verified.ok) return bad(verified.error, 400)
-      }
       const slug = (b.slug || b.name).toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 40) + '-' + uuidv4().slice(0, 4)
       let referredBy = null
       if (b.referral_code) {
@@ -2474,7 +2393,6 @@ async function handleRoute(request, { params }) {
       await db.collection('users').insertOne({
         id: userId, tenant_id: tenant.id, email, name: b.owner_name,
         role: 'owner', active: true,
-        email_verified_at: emailDeliveryConfigured() ? new Date() : null,
         phone: phone.replace(/[\s-]/g, ''), // v3.9.18 — Store normalized phone
         password_hash: bcrypt.hashSync(b.owner_password, 8),
         created_at: new Date(),
@@ -2536,22 +2454,14 @@ async function handleRoute(request, { params }) {
       return ok({ ok: true }, cookie)
     }
 
-    // Forgot Password — self-service email code when mail delivery is configured.
+    // Forgot Password — admin-mediated request only (no email delivery).
     // Unified response avoids disclosing whether an email exists.
     if (route === '/auth/forgot-password' && method === 'POST') {
       const b = await request.json()
       const email = String(b.email || '').toLowerCase().trim()
       if (!email || !email.includes('@')) return bad('البريد الإلكتروني مطلوب')
       const user = await db.collection('users').findOne({ email })
-      if (emailDeliveryConfigured()) {
-        if (user && user.active) {
-          try { await issueAuthEmailCode(db, { email, userId: user.id, purpose: 'password_reset' }) }
-          catch (e) { return bad(e.message || 'تعذر إرسال رمز الاستعادة', 503) }
-        }
-        return ok({ delivery: 'email_code', message: 'إذا كان البريد مسجلاً فسيصلك رمز استعادة خلال لحظات' })
-      }
-
-      // Legacy fallback while no mail provider is configured: keep the admin inbox flow.
+      // Requests are handled by the existing authorized admin reset process.
       if (user && user.active) {
         const existing = await db.collection('password_reset_requests').findOne({ user_id: user.id, status: 'pending' })
         if (!existing) {
@@ -2569,26 +2479,6 @@ async function handleRoute(request, { params }) {
         }
       }
       return ok({ delivery: 'admin', message: 'تم استلام طلبك — ستقوم الإدارة بمعالجته والتواصل معك قريباً' })
-    }
-
-    if (route === '/auth/reset-password' && method === 'POST') {
-      if (!emailDeliveryConfigured()) return bad('الاستعادة بالكود غير مفعلة حالياً', 503)
-      const b = await request.json()
-      const email = String(b.email || '').toLowerCase().trim()
-      const newPassword = String(b.new_password || '')
-      const confirmPassword = String(b.confirm_password || '')
-      if (!email || !b.code) return bad('البريد ورمز التحقق مطلوبان')
-      if (newPassword.length < 6) return bad('كلمة المرور الجديدة يجب ألا تقل عن 6 أحرف')
-      if (newPassword !== confirmPassword) return bad('تأكيد كلمة المرور غير مطابق')
-      const user = await db.collection('users').findOne({ email, active: { $ne: false } })
-      if (!user) return bad('الرمز غير صالح أو انتهت صلاحيته', 400)
-      const verified = await verifyAuthEmailCode(db, { email, purpose: 'password_reset', code: b.code, consume: true })
-      if (!verified.ok) return bad(verified.error, 400)
-      await db.collection('users').updateOne({ id: user.id }, {
-        $set: { password_hash: bcrypt.hashSync(newPassword, 8), password_reset_at: new Date(), password_reset_by: 'self_service_email' },
-      })
-      await db.collection('sessions').deleteMany({ user_id: user.id })
-      return ok({ success: true, message: 'تم تغيير كلمة المرور بنجاح — يمكنك تسجيل الدخول الآن' })
     }
 
     // Everything below requires session (except /auth/me which returns null gracefully)

@@ -273,51 +273,18 @@ function LoginPage({ onLogin, onBack, initialSignup }) {
     finally { setLoading(false) }
   }
 
-  // Forgot password — email OTP when mail delivery is configured,
-  // with the existing admin-mediated request retained as a fallback.
+  // Forgot password — admin-mediated request only.
   const [mode, setMode] = useState('login')
   const [fpEmail, setFpEmail] = useState('')
   const [fpNote, setFpNote] = useState('')
   const [fpLoading, setFpLoading] = useState(false)
   const [fpSent, setFpSent] = useState(false)
-  const [fpStep, setFpStep] = useState('request')
-  const [fpCode, setFpCode] = useState('')
-  const [fpNewPassword, setFpNewPassword] = useState('')
-  const [fpConfirmPassword, setFpConfirmPassword] = useState('')
-
-  const resetForgotState = () => {
-    setFpSent(false); setFpStep('request'); setFpCode('')
-    setFpNewPassword(''); setFpConfirmPassword(''); setFpNote('')
-  }
-
   const sendForgot = async () => {
     if (!fpEmail || !fpEmail.includes('@')) return toast.error('أدخل بريدك الإلكتروني المسجل')
     try {
       setFpLoading(true)
-      const r = await api('/auth/forgot-password', { method: 'POST', body: { email: fpEmail, note: fpNote } })
-      if (r.delivery === 'email_code') {
-        setFpStep('code')
-        setFpSent(false)
-        toast.success('📨 إذا كان البريد مسجلاً فسيصلك رمز الاستعادة')
-      } else {
-        setFpSent(true)
-      }
-    } catch (e) { toast.error(e.message) }
-    finally { setFpLoading(false) }
-  }
-
-  const resetForgotPassword = async () => {
-    if (!/^\d{6}$/.test(fpCode.trim())) return toast.error('أدخل رمز التحقق المكوّن من 6 أرقام')
-    if (fpNewPassword.length < 6) return toast.error('كلمة المرور الجديدة يجب ألا تقل عن 6 أحرف')
-    if (fpNewPassword !== fpConfirmPassword) return toast.error('تأكيد كلمة المرور غير مطابق')
-    try {
-      setFpLoading(true)
-      await api('/auth/reset-password', { method: 'POST', body: {
-        email: fpEmail, code: fpCode.trim(),
-        new_password: fpNewPassword, confirm_password: fpConfirmPassword,
-      } })
-      toast.success('✅ تم تغيير كلمة المرور — سجل الدخول بكلمة المرور الجديدة')
-      setMode('login'); resetForgotState(); setFpEmail('')
+      await api('/auth/forgot-password', { method: 'POST', body: { email: fpEmail, note: fpNote } })
+      setFpSent(true)
     } catch (e) { toast.error(e.message) }
     finally { setFpLoading(false) }
   }
@@ -348,48 +315,25 @@ function LoginPage({ onLogin, onBack, initialSignup }) {
                   <div className="text-center space-y-3 py-4">
                     <div className="text-4xl">📨</div>
                     <div className="text-emerald-300 font-bold">تم استلام طلبك بنجاح</div>
-                    <div className="text-slate-300 text-sm">خدمة البريد غير مفعلة حالياً، لذلك وصل طلبك إلى الإدارة لمعالجته والتواصل معك.</div>
-                    <Button variant="outline" onClick={() => { setMode('login'); resetForgotState(); setFpEmail('') }} className="mt-2">← العودة لتسجيل الدخول</Button>
+                    <div className="text-slate-300 text-sm">ستقوم الإدارة بمعالجة الطلب وتعيين كلمة مرور جديدة لك، ثم التواصل معك قريباً.</div>
+                    <Button variant="outline" onClick={() => { setMode('login'); setFpSent(false); setFpEmail(''); setFpNote('') }} className="mt-2">← العودة لتسجيل الدخول</Button>
                   </div>
-                ) : fpStep === 'code' ? (
-                  <>
-                    <div className="text-slate-300 text-sm">أدخل رمز الـ6 أرقام الذي وصلك بالبريد، ثم اختر كلمة مرور جديدة.</div>
-                    <div className="space-y-2">
-                      <Label className="text-slate-300">رمز التحقق</Label>
-                      <Input dir="ltr" inputMode="numeric" maxLength={6} value={fpCode} onChange={e => setFpCode(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="123456" className="bg-slate-800 border-slate-700 text-white text-center text-xl tracking-[0.3em] font-bold" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-slate-300">كلمة المرور الجديدة</Label>
-                      <Input dir="ltr" type="password" value={fpNewPassword} onChange={e => setFpNewPassword(e.target.value)} className="bg-slate-800 border-slate-700 text-white" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-slate-300">تأكيد كلمة المرور</Label>
-                      <Input dir="ltr" type="password" value={fpConfirmPassword} onChange={e => setFpConfirmPassword(e.target.value)} className="bg-slate-800 border-slate-700 text-white" />
-                    </div>
-                    <Button onClick={resetForgotPassword} disabled={fpLoading} className="w-full grad-brand text-white h-11 font-bold">
-                      {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '✅ تحديث كلمة المرور'}
-                    </Button>
-                    <div className="flex items-center justify-between text-xs">
-                      <button type="button" disabled={fpLoading} onClick={sendForgot} className="text-orange-300 hover:text-orange-200">إعادة إرسال الرمز</button>
-                      <button type="button" onClick={() => { setFpStep('request'); setFpCode('') }} className="text-slate-400 hover:text-slate-200">تغيير البريد</button>
-                    </div>
-                  </>
                 ) : (
                   <>
-                    <div className="text-slate-300 text-sm">أدخل بريدك الإلكتروني المسجل. إذا كانت خدمة البريد مفعلة سيصلك رمز استعادة، وإلا سيصل الطلب إلى الإدارة.</div>
+                    <div className="text-slate-300 text-sm">أدخل بريدك الإلكتروني المسجل لإرسال طلب استعادة كلمة المرور إلى الإدارة.</div>
                     <div className="space-y-2">
                       <Label className="text-slate-300">البريد الإلكتروني</Label>
                       <Input dir="ltr" type="email" value={fpEmail} onChange={e => setFpEmail(e.target.value)} placeholder="you@company.com" className="bg-slate-800 border-slate-700 text-white" />
                     </div>
                     <div className="space-y-2">
-                      <Label className="text-slate-300">ملاحظة للإدارة (اختياري — تستخدم فقط عند تعذر البريد)</Label>
+                      <Label className="text-slate-300">ملاحظة للإدارة (اختياري)</Label>
                       <Input value={fpNote} onChange={e => setFpNote(e.target.value)} placeholder="رقم للتواصل أو ملاحظة" className="bg-slate-800 border-slate-700 text-white" />
                     </div>
                     <Button onClick={sendForgot} disabled={fpLoading} className="w-full grad-brand text-white h-11 font-bold">
-                      {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '📨 إرسال رمز الاستعادة'}
+                      {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '📨 إرسال طلب الاستعادة'}
                     </Button>
                     <div className="text-center">
-                      <button type="button" onClick={() => { setMode('login'); resetForgotState() }} className="text-xs text-slate-400 hover:text-slate-200">← العودة لتسجيل الدخول</button>
+                      <button type="button" onClick={() => { setMode('login'); setFpSent(false); setFpNote('') }} className="text-xs text-slate-400 hover:text-slate-200">← العودة لتسجيل الدخول</button>
                     </div>
                   </>
                 )}
