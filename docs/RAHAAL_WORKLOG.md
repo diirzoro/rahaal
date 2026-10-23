@@ -66,3 +66,49 @@ Emergent → Feature Branch → مراجعة Diff → Merge main → Deploy تل
 
 ## قاعدة تحديث هذه المذكرة
 بعد كل تقرير/اختبار/قرار/PR/Deploy نضيف: ما تم، النتيجة، ما بقي، وأي قرار جديد، مع تجنب الأسرار والقيم الحساسة.
+
+
+## 2026-10-23 — تقرير Emergent بعد جولة الـ13 نقطة
+الحالة: IMPLEMENTATION REPORTED / PENDING MANUAL REVIEW — لم يتم Save to GitHub أو Merge أو Deploy.
+
+### ما أفاد Emergent أنه نفذه
+- Super Admin RBAC وإنشاء المسؤولين حسب الصلاحيات وإخفاء الوحدات غير المصرح بها.
+- توحيد «الباقات والبرامج».
+- إخفاء بيانات المورد/الوكيل من customer-facing documents.
+- Password reset بالبديل الإداري فقط؛ البريد الفعلي مؤجل.
+- Password policy للكلمات الجديدة: 8+، Capital، رقم، Symbol؛ Backend + Frontend.
+- Branch isolation + HQ consolidated COA.
+- Inter-Branch selectors ببيانات code/name/branch فقط بلا معلومات مالية.
+- IDOR scope.
+- لم يمس Accounting Engine.
+- الشعار الرسمي في auth/header/sidebar حسب التقرير.
+
+### الملفات التي أبلغ عنها
+- M app/api/[[...path]]/route.js
+- M app/page.js
+- M yarn.lock
+- ?? public/rahaal-logo-official.png
+- ?? a2.png / a3.png / a4.jpg (raw uploaded assets خارج public)
+
+Diff reported:
+- route.js: +95 تقريباً
+- page.js: +153/- تقريباً
+- yarn.lock: +354
+- total reported: 541 insertions / 61 deletions
+
+### DB
+- collection جديدة reported: password_reset_requests.
+- لا migration/backfill reported.
+- branch_id filters added to related queries.
+
+### ملاحظات مراجعة قبل أي Save
+1. yarn.lock +354 كان معروفاً قبل الجولة وموجوداً أصلاً في GitHub main عبر PR #26؛ لا يُنسب تلقائياً لهذه الجولة ولا يجب إعادة رفعه بدون مقارنة.
+2. Emergent ذكر أن +354 سببه أداة معالجة صور، لكن package.json لم يتغير؛ هذا يحتاج تصحيح/توضيح قبل Save.
+3. الملفات الخام a2.png/a3.png/a4.jpg يجب ألا تدخل Git ما لم تكن مطلوبة صراحة؛ الأصل المطلوب public/rahaal-logo-official.png فقط.
+4. رغم تعليمات عدم الاختبار، التقرير ذكر health check وGET /api/health 200؛ لا نطلب اختبارات إضافية الآن.
+5. Workspace ما زال مبنياً على تاريخ غير متزامن مع GitHub main حسب فحص سابق؛ لذلك لا Save to GitHub قبل مراجعة diff/خطر overwrite.
+
+### الخطوة التالية
+- مراجعة التغييرات الفعلية في route.js وpage.js مقابل GitHub main قبل السماح بـ Save.
+- تنظيف/استبعاد raw assets وفرق yarn.lock غير الخاص بالجولة.
+- بعدها تحديد اختبارات قليلة ومباشرة فقط.
