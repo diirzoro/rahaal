@@ -327,8 +327,26 @@ button, a, [role="button"], [role="tab"], input[type="checkbox"], input[type="ra
   }
   [role="tablist"]::-webkit-scrollbar { display: none; }
 }
-/* while the mobile drawer is open the page behind must not scroll */
+/* while the mobile drawer is open the page behind must not scroll.
+   v8.1.3 — ROOT-CAUSE FIX: touch-action on an ancestor gates ALL descendants,
+   so `touch-action: none` on body was freezing the drawer itself (items not
+   tappable, no finger scrolling). The page lock stays via overflow: hidden;
+   touch blocking moved to the BACKDROP only — it is a sibling of the drawer,
+   not an ancestor, so nothing propagates into the sidebar. */
 body.rahaal-drawer-open {
   overflow: hidden;
+}
+/* the dark backdrop itself eats every touch gesture behind the drawer */
+.rahaal-drawer-backdrop {
   touch-action: none;
+}
+/* the drawer explicitly allows taps + natural vertical finger-scrolling */
+.rahaal-sidebar {
+  touch-action: pan-y;
+}
+.rahaal-sidebar nav,
+.rahaal-sidebar .overflow-y-auto {
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
