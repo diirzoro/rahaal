@@ -44,6 +44,7 @@ import AdminRequestsCenter from './admin/requests' // v4.3 — الطلبات ا
 // v4.4 — scope-correction consolidation: existing components reused as TABS (no copies, no new engines)
 import OfficesSection, { Office360 } from './admin/offices' // Office 360° viewer
 import AdminSystemCenter from './admin/system'
+import AdminEmailCenter from './admin/email-center' // v8.1 — مركز البريد والتحقق والإشعارات
 import AdminAuditCenter from './admin/audit'
 import AdminBackupCenter from './admin/backup'
 import AdminHealthCenter from './admin/health'
@@ -2111,6 +2112,7 @@ function PlatformPeopleHub() {
 function PlatformSystemHub() {
   return <HubTabs tabs={[
     { key: 'system', label: '⚙️ عام وصيانة وبيئة', render: () => <AdminSystemCenter /> },
+    { key: 'email', label: '📧 البريد والإشعارات', render: () => <AdminEmailCenter /> }, // v8.1
     { key: 'backup', label: '💾 النسخ الاحتياطي والاستعادة', render: () => <AdminBackupCenter /> },
     { key: 'audit', label: '🕵️ Audit & Security', render: () => <AdminAuditCenter /> },
     { key: 'health', label: '❤️ System Health', render: () => <AdminHealthCenter /> },

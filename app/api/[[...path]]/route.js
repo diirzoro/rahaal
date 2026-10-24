@@ -23,7 +23,8 @@ import { adminReportsHandler } from '@/lib/adminReports' // v3.96 — Batch 4 (R
 import { adminDisputesHandler } from '@/lib/adminDisputes' // v3.96 — Batch 4 (Disputes)
 import { adminCurrencyHandler } from '@/lib/adminCurrency' // v3.96 — Batch 4 (Currencies & FX)
 import { adminGate, adminCan, adminStaffHandler, generateStrongPassword, syncDerivedLedgerPerms } from '@/lib/adminStaff'
-import { sendOtpEmail, verifyOtp, emailServiceConfigured } from '@/lib/emailOtp' // v8.0 — Resend OTP (email verification + password reset)
+import { sendOtpEmail, verifyOtp, emailVerificationActive } from '@/lib/emailOtp' // v8.1 — OTP (provider-agnostic + dynamic limits)
+import { adminEmailCenterHandler, handleInboundWebhook } from '@/lib/emailCenter' // v8.1 — Email, Verification & Notifications Center
 import { buildBackupPackage, validatePackage, storeBackupBlob, loadBackupBlob, smartRestore, buildRestorePreview, OFFICE_ALLOWED_TYPES, BACKUP_TYPE_DEFS } from '@/lib/backupEngine' // v8.0 — Office backup center
 import JSZip from 'jszip'
 import { adminBranchesHandler, adminBranchUserAssignHandler } from '@/lib/adminBranches' // v5.0 — Enterprise branches (additive) // v3.97 — Batch 5 (Admin realm + staff RBAC)
@@ -2532,7 +2533,9 @@ async function handleRoute(request, { params }) {
       // v8.0 — EMAIL VERIFICATION (Resend OTP): new accounts are created UNVERIFIED and
       // must complete Signup → OTP → Verify → email_verified=true before first login.
       // Existing accounts (field absent) are NEVER backfilled/blocked.
-      const otpEnabled = emailServiceConfigured()
+      // v8.1 — verification is active only when the provider is configured AND the
+      // user_verification event is enabled in the Email Center (DB-driven toggle).
+      const otpEnabled = await emailVerificationActive(db)
       await db.collection('users').insertOne({
         id: userId, tenant_id: tenant.id, email, name: b.owner_name,
         role: 'owner', active: true,
@@ -2754,6 +2757,16 @@ async function handleRoute(request, { params }) {
       return ok({ success: true, message: 'تم تغيير كلمة المرور بنجاح — سجّل الدخول بكلمة المرور الجديدة' })
     }
 
+    // v8.1 — PUBLIC INBOUND EMAIL WEBHOOK (provider → Rahaal): feeds the support
+    // inbox + updates delivery-log statuses (delivered/bounced/complained).
+    // No session — the provider calls it. Payload is normalized & size-capped
+    // inside handleInboundWebhook; no secrets are stored.
+    if (route === '/email/inbound' && method === 'POST') {
+      const payloadIn = await request.json().catch(() => ({}))
+      const rIn = await handleInboundWebhook(db, payloadIn)
+      return ok(rIn)
+    }
+
     // Everything below requires session (except /auth/me which returns null gracefully)
     // v3.8 — Support Bearer PAT auth in addition to cookie session (for Chrome Extension / API clients)
     let sess = await getSession(request, db)
@@ -2849,6 +2862,16 @@ async function handleRoute(request, { params }) {
         if (method !== 'GET') { try { bodySR = await request.json() } catch { bodySR = {} } }
         const rASR = await adminSmartReaderHandler(db, route.slice('/admin/smart-reader'.length), method, new URL(request.url).searchParams, bodySR, sess)
         return rASR?.error ? bad(rASR.error, rASR.status || 400) : ok(rASR)
+      }
+
+      // v8.1 — EMAIL, VERIFICATION & NOTIFICATIONS CENTER (lib/emailCenter.js).
+      // Section «email_center» (adminGate) + fine-grained manage/inbox checks inside.
+      if (route.startsWith('/admin/email-center/')) {
+        let bodyEC = null
+        if (method !== 'GET') { try { bodyEC = await request.json() } catch { bodyEC = {} } }
+        const canEC = await adminCan(db, sess)
+        const rEC = await adminEmailCenterHandler(db, route.slice('/admin/email-center'.length), method, new URL(request.url).searchParams, bodyEC, sess, canEC)
+        return rEC?.error ? bad(rEC.error, rEC.status || 400) : ok(rEC)
       }
 
       // v3.97 — Batch 5 delegations: staff RBAC, geo, payments/entities, refdata.
