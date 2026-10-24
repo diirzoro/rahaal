@@ -24,7 +24,7 @@ import { adminDisputesHandler } from '@/lib/adminDisputes' // v3.96 — Batch 4 
 import { adminCurrencyHandler } from '@/lib/adminCurrency' // v3.96 — Batch 4 (Currencies & FX)
 import { adminGate, adminCan, adminStaffHandler, generateStrongPassword, syncDerivedLedgerPerms } from '@/lib/adminStaff'
 import { sendOtpEmail, verifyOtp, emailVerificationActive } from '@/lib/emailOtp' // v8.1 — OTP (provider-agnostic + dynamic limits)
-import { adminEmailCenterHandler, handleInboundWebhook } from '@/lib/emailCenter' // v8.1 — Email, Verification & Notifications Center
+import { adminEmailCenterHandler, handleInboundWebhook, verifyInboundSignature } from '@/lib/emailCenter' // v8.1 — Email, Verification & Notifications Center
 import { buildBackupPackage, validatePackage, storeBackupBlob, loadBackupBlob, smartRestore, buildRestorePreview, OFFICE_ALLOWED_TYPES, BACKUP_TYPE_DEFS } from '@/lib/backupEngine' // v8.0 — Office backup center
 import JSZip from 'jszip'
 import { adminBranchesHandler, adminBranchUserAssignHandler } from '@/lib/adminBranches' // v5.0 — Enterprise branches (additive) // v3.97 — Batch 5 (Admin realm + staff RBAC)
@@ -2759,10 +2759,19 @@ async function handleRoute(request, { params }) {
 
     // v8.1 — PUBLIC INBOUND EMAIL WEBHOOK (provider → Rahaal): feeds the support
     // inbox + updates delivery-log statuses (delivered/bounced/complained).
-    // No session — the provider calls it. Payload is normalized & size-capped
-    // inside handleInboundWebhook; no secrets are stored.
+    // v8.1.2 — SIGNATURE REQUIRED (official Svix/Resend scheme, fail-closed):
+    // the RAW body is verified BEFORE parsing; unsigned/invalid/expired requests
+    // are rejected with 401 and NOTHING is written to support_inbox or the
+    // delivery logs. Secret stays server-side only (env or provider settings).
     if (route === '/email/inbound' && method === 'POST') {
-      const payloadIn = await request.json().catch(() => ({}))
+      const rawIn = await request.text().catch(() => '')
+      const sigV = await verifyInboundSignature(db, request.headers, rawIn)
+      if (!sigV.ok) {
+        console.error('[email/inbound] rejected unsigned/invalid webhook:', sigV.reason) // safe — no payload, no secret
+        return bad('unauthorized', 401)
+      }
+      let payloadIn = {}
+      try { payloadIn = JSON.parse(rawIn) } catch { payloadIn = {} }
       const rIn = await handleInboundWebhook(db, payloadIn)
       return ok(rIn)
     }

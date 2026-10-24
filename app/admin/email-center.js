@@ -41,6 +41,7 @@ function ProviderTab() {
   const [data, setData] = useState(null)
   const [f, setF] = useState(null)
   const [apiKey, setApiKey] = useState('')
+  const [whSecret, setWhSecret] = useState('') // v8.1.2 — inbound webhook signing secret (write-only)
   const [reason, setReason] = useState('')
   const [testTo, setTestTo] = useState('')
   const [busy, setBusy] = useState(false)
@@ -51,8 +52,8 @@ function ProviderTab() {
     if (!reason.trim()) return toast.error('السبب إلزامي')
     setBusy(true)
     try {
-      await api('/admin/email-center/provider', { method: 'PUT', body: { ...f, ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}), reason } })
-      toast.success('✅ حُفظت إعدادات المزود'); setApiKey(''); setReason(''); load()
+      await api('/admin/email-center/provider', { method: 'PUT', body: { ...f, ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}), ...(whSecret.trim() ? { webhook_secret: whSecret.trim() } : {}), reason } })
+      toast.success('✅ حُفظت إعدادات المزود'); setApiKey(''); setWhSecret(''); setReason(''); load()
     } catch (e) { toast.error(e.message) } finally { setBusy(false) }
   }
   const test = async () => {
@@ -92,6 +93,7 @@ function ProviderTab() {
         {fld('بريد المرسل', <Input dir="ltr" value={f.sender_email} onChange={e => setF({ ...f, sender_email: e.target.value })} />, 'يجب أن يكون نطاقاً موثقاً لدى المزود')}
         {fld('بريد الرد (Reply-To)', <Input dir="ltr" value={f.reply_to} onChange={e => setF({ ...f, reply_to: e.target.value })} />, 'عنوان الدعم الذي تصل إليه ردود العملاء')}
         {fld('مفتاح API (كتابة فقط — لا يُعرض أبداً)', <Input dir="ltr" type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={data.settings.has_api_key ? `محفوظ: ${data.settings.api_key_masked || '••••'} — اتركه فارغاً للإبقاء عليه` : 'أدخل مفتاح المزود'} />, data.settings.key_source === 'env' ? 'المفتاح الحالي من متغيرات البيئة — إدخال مفتاح هنا يتجاوزه' : null)}
+        {fld('سر توقيع الـ Webhook الوارد (whsec_… — كتابة فقط)', <Input dir="ltr" type="password" value={whSecret} onChange={e => setWhSecret(e.target.value)} placeholder={data.settings.has_webhook_secret ? 'محفوظ ••••• — اتركه فارغاً للإبقاء عليه' : 'من لوحة المزود → Webhooks → Signing Secret'} />, 'بدون هذا السر يُرفض كل ما يصل إلى /api/email/inbound (حماية fail-closed)')}
         <div className="md:col-span-2"><ReasonBox value={reason} onChange={setReason} /></div>
         <div className="md:col-span-2 flex flex-wrap gap-2">
           <Button onClick={save} disabled={busy} className="bg-sky-600 hover:bg-sky-700"><Settings2 className="w-4 h-4 ml-1" />حفظ الإعدادات</Button>
