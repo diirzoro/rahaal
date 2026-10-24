@@ -35,7 +35,7 @@ const AdminSalesCenter = ({ initialTab = 'sales' }) => {
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
 
-  useEffect(() => { api('/admin/tenants').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
+  useEffect(() => { api('/admin/tenants/lookup').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
 
   const qs = (extra = {}) => {
     const o = { ...f, ...extra, skip, limit: ps }

@@ -330,7 +330,7 @@ const AdminDisputesCenter = () => {
     const qs = Object.entries(o).filter(([, v]) => v !== '' && v !== false).map(([k, v]) => `${k}=${encodeURIComponent(v === true ? '1' : v)}`).join('&')
     api(`/admin/disputes${qs ? `?${qs}` : ''}`).then(setData).catch(e => toast.error(e.message))
   }
-  useEffect(() => { loadCfg(); load(); api('/admin/tenants').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
+  useEffect(() => { loadCfg(); load(); api('/admin/tenants/lookup').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
 
   const q = data?.queues || {}
   const QUEUES = [['مفتوحة', q.open, { status: 'open' }, 'bg-blue-600'], ['تحتاج إجراء', q.needs_action, {}, 'bg-amber-600'], ['متأخرة SLA', q.overdue, { overdue: true }, 'bg-rose-600'], ['حرجة', q.critical, { priority: 'critical' }, 'bg-rose-700'], ['بانتظار مستندات', q.awaiting_docs, { status: 'awaiting_docs' }, 'bg-amber-500'], ['بانتظار طرف', q.awaiting_party, { status: 'awaiting_party' }, 'bg-amber-500'], ['مصعّدة', q.escalated, { status: 'escalated' }, 'bg-orange-600'], ['محلولة/مغلقة', q.resolved_closed, { status: 'resolved' }, 'bg-emerald-600']]

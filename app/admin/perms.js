@@ -220,7 +220,7 @@ const AdminPermsCenter = () => {
   }
   const loadAudit = () => api('/admin/perms/audit').then(d => setAudit(d.rows || [])).catch(e => toast.error(e.message))
 
-  useEffect(() => { loadRoles(); api('/admin/tenants').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
+  useEffect(() => { loadRoles(); api('/admin/tenants/lookup').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
   useEffect(() => { if (tab === 'users') loadUsers(); if (tab === 'audit') loadAudit() }, [tab])
 
   const AUDIT_ACT = { role_create: ['إنشاء دور', 'bg-emerald-100 text-emerald-700'], role_update: ['تعديل دور', 'bg-blue-100 text-blue-700'], role_disable: ['تعطيل دور', 'bg-orange-100 text-orange-700'], role_enable: ['تفعيل دور', 'bg-emerald-100 text-emerald-700'], role_delete: ['حذف دور', 'bg-rose-100 text-rose-700'] }

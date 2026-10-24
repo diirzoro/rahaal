@@ -62,7 +62,7 @@ const AdminAuditCenter = () => {
 
   useEffect(() => {
     api('/admin/audit/categories').then(d => setCats(d.categories || [])).catch(() => {})
-    api('/admin/tenants').then(d => setTenants(d?.tenants || [])).catch(() => {})
+    api('/admin/tenants/lookup').then(d => setTenants(d?.tenants || [])).catch(() => {})
   }, [])
 
   const load = async (over = {}) => {

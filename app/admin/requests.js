@@ -124,7 +124,7 @@ const AdminRequestsCenter = () => {
   const [loading, setLoading] = useState(false)
 
   const loadOv = () => api('/admin/requests/overview').then(setOv).catch(() => {})
-  useEffect(() => { loadOv(); api('/admin/tenants').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
+  useEffect(() => { loadOv(); api('/admin/tenants/lookup').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
 
   const load = async (over = {}) => {
     setLoading(true)

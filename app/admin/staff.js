@@ -102,29 +102,203 @@ const StaffDialog = ({ roles, onClose, onDone, canCreateSA = false }) => {
 const OverridesDialog = ({ sections, user, onClose, onDone }) => {
   const [ov, setOv] = useState({ ...(user.admin_overrides || {}) })
   const [reason, setReason] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
   const save = async () => {
-    if (!reason.trim()) return toast.error('السبب إلزامي')
-    try { await api(`/admin/staff/users/${user.id}`, { method: 'PATCH', body: { action: 'overrides', overrides: ov, reason } }); toast.success('تم'); onDone() } catch (e) { toast.error(e.message) }
+    // v8.0 — item 3: clear INLINE validation (no «broken button» impression)
+    if (!reason.trim()) { setErr('⚠️ سبب التدقيق إلزامي — اكتب سبب التعديل قبل الحفظ'); return }
+    setErr(''); setBusy(true)
+    try {
+      await api(`/admin/staff/users/${user.id}`, { method: 'PATCH', body: { action: 'overrides', overrides: ov, reason } })
+      toast.success('✅ حُفظت الـOverrides — الصلاحيات المشتقة حُدّثت فوراً')
+      onDone()
+    } catch (e) { setErr(e.message); toast.error(e.message) }
+    finally { setBusy(false) }
   }
   return (
-    <Dialog open onOpenChange={onClose}><DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto" dir="rtl">
+    <Dialog open onOpenChange={onClose}><DialogContent className="max-w-2xl w-[calc(100vw-1.5rem)] max-h-[88dvh] overflow-y-auto overscroll-contain" dir="rtl">
       <DialogHeader><DialogTitle>⚙️ Overrides — {user.name}</DialogTitle></DialogHeader>
       <div className="space-y-3">
         <div className="text-[11px] text-slate-500">منح (✓) أو منع (✗) إجراء بعينه فوق الدور المسند — اترك بلا تحديد للوراثة من الدور</div>
-        <div className="max-h-72 overflow-y-auto border rounded-lg"><table className="w-full text-xs"><tbody>
+        <div className="max-h-72 overflow-y-auto overflow-x-auto border rounded-lg"><table className="w-full text-xs"><tbody>
           {sections.map(s => (
             <tr key={s.key} className="border-b"><td className="p-2 font-bold whitespace-nowrap">{s.label}</td>
               <td className="p-2"><div className="flex gap-2 flex-wrap">{s.actions.map(a => {
                 const k = `${s.key}.${a}`
                 const state = ov[k] === true ? 'allow' : ov[k] === false ? 'deny' : 'inherit'
-                return <button key={a} onClick={() => setOv(o => { const n = { ...o }; if (state === 'inherit') n[k] = true; else if (state === 'allow') n[k] = false; else delete n[k]; return n })}
-                  className={`px-2 py-0.5 rounded border text-[11px] ${state === 'allow' ? 'bg-emerald-100 border-emerald-300 text-emerald-700' : state === 'deny' ? 'bg-red-100 border-red-300 text-red-700' : 'bg-white text-slate-500'}`}>
+                return <button key={a} type="button" onClick={() => setOv(o => { const n = { ...o }; if (state === 'inherit') n[k] = true; else if (state === 'allow') n[k] = false; else delete n[k]; return n })}
+                  className={`px-2.5 py-1.5 min-h-[36px] rounded border text-[11px] touch-manipulation ${state === 'allow' ? 'bg-emerald-100 border-emerald-300 text-emerald-700' : state === 'deny' ? 'bg-red-100 border-red-300 text-red-700' : 'bg-white text-slate-500'}`}>
                   {ACT_LABELS[a] || a} {state === 'allow' ? '✓' : state === 'deny' ? '✗' : ''}</button>
               })}</div></td></tr>
           ))}
         </tbody></table></div>
-        {fld('السبب * (Audit)', <Input value={reason} onChange={e => setReason(e.target.value)} />)}
-        <Button onClick={save} className="w-full">حفظ الـOverrides</Button>
+        {fld('السبب * (Audit)', <Input value={reason} onChange={e => { setReason(e.target.value); if (err) setErr('') }} placeholder="مثال: سحب صلاحية عرض الحسابات مؤقتاً" />)}
+        {err && <div className="text-xs font-bold text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5">{err}</div>}
+        <div className="flex gap-2">
+          <Button onClick={save} disabled={busy} className="flex-1 min-h-[44px]">{busy ? '...جارٍ الحفظ' : 'حفظ الـOverrides'}</Button>
+          <Button variant="outline" onClick={onClose} className="min-h-[44px]">إلغاء</Button>
+        </div>
+      </div>
+    </DialogContent></Dialog>
+  )
+}
+
+// ============================================================================
+// v8.0 — item 4: PROFESSIONAL MODALS replacing every browser-native prompt/
+// confirm/alert in admin user management (Edit / Assign Role / Disable / Reset).
+// Visual reference: the Overrides modal (RTL, internal scrolling, touch-friendly).
+// ============================================================================
+
+// A. Edit User — loads current values, Save/Cancel, inline validation
+const EditUserDialog = ({ user, onClose, onDone }) => {
+  const [v, setV] = useState({ name: user.name || '', phone: user.phone || '', job_title: user.job_title || '', department: user.department || '', reason: '' })
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const save = async () => {
+    if (!v.name.trim()) { setErr('⚠️ الاسم إلزامي'); return }
+    if (!v.reason.trim()) { setErr('⚠️ سبب التدقيق إلزامي — اكتب سبب التعديل قبل الحفظ'); return }
+    setErr(''); setBusy(true)
+    try {
+      await api(`/admin/staff/users/${user.id}`, { method: 'PATCH', body: { action: 'edit_profile', name: v.name, phone: v.phone, job_title: v.job_title, department: v.department, reason: v.reason } })
+      toast.success('✅ حُدّثت بيانات المدير')
+      onDone()
+    } catch (e) { setErr(e.message); toast.error(e.message) }
+    finally { setBusy(false) }
+  }
+  return (
+    <Dialog open onOpenChange={onClose}><DialogContent className="max-w-md w-[calc(100vw-1.5rem)] max-h-[88dvh] overflow-y-auto overscroll-contain" dir="rtl">
+      <DialogHeader><DialogTitle>📝 تعديل بيانات — {user.name}</DialogTitle></DialogHeader>
+      <div className="space-y-3">
+        {fld('الاسم *', <Input value={v.name} onChange={e => setV({ ...v, name: e.target.value })} />)}
+        {fld('البريد (غير قابل للتعديل)', <Input dir="ltr" value={user.email} disabled className="bg-slate-50 text-slate-500" />)}
+        {fld('الهاتف', <Input dir="ltr" value={v.phone} onChange={e => setV({ ...v, phone: e.target.value })} />)}
+        <div className="grid grid-cols-2 gap-2">
+          {fld('المسمى الوظيفي', <Input value={v.job_title} onChange={e => setV({ ...v, job_title: e.target.value })} />)}
+          {fld('القسم', <Input value={v.department} onChange={e => setV({ ...v, department: e.target.value })} placeholder="المالية، المبيعات..." />)}
+        </div>
+        {fld('السبب * (Audit)', <Input value={v.reason} onChange={e => { setV({ ...v, reason: e.target.value }); if (err) setErr('') }} />)}
+        {err && <div className="text-xs font-bold text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5">{err}</div>}
+        <div className="flex gap-2">
+          <Button onClick={save} disabled={busy} className="flex-1 min-h-[44px]">{busy ? '...جارٍ الحفظ' : 'حفظ'}</Button>
+          <Button variant="outline" onClick={onClose} className="min-h-[44px]">إلغاء</Button>
+        </div>
+      </div>
+    </DialogContent></Dialog>
+  )
+}
+
+// B. Assign/Change Role — real Role Catalog as selectable cards (NO manual role_key typing)
+const AssignRoleDialog = ({ user, roles, onClose, onDone }) => {
+  const [selected, setSelected] = useState(user.admin_role_key || '')
+  const [reason, setReason] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const activeRoles = roles.filter(r => r.active !== false)
+  const save = async () => {
+    if (!reason.trim()) { setErr('⚠️ سبب التدقيق إلزامي — اكتب سبب تغيير الدور قبل الحفظ'); return }
+    setErr(''); setBusy(true)
+    try {
+      await api(`/admin/staff/users/${user.id}`, { method: 'PATCH', body: { action: 'assign_role', admin_role_key: selected || null, reason } })
+      toast.success('✅ أُسند الدور — الصلاحيات المشتقة حُدّثت فوراً')
+      onDone()
+    } catch (e) { setErr(e.message); toast.error(e.message) }
+    finally { setBusy(false) }
+  }
+  const permsSummary = (r) => Object.entries(r.perms || {}).map(([sec, acts]) => `${sec} (${(acts || []).length})`).slice(0, 4).join(' · ')
+  return (
+    <Dialog open onOpenChange={onClose}><DialogContent className="max-w-2xl w-[calc(100vw-1.5rem)] max-h-[88dvh] overflow-y-auto overscroll-contain" dir="rtl">
+      <DialogHeader><DialogTitle>🎭 إسناد / تغيير الدور — {user.name}</DialogTitle></DialogHeader>
+      <div className="space-y-3">
+        <div className="text-[11px] text-slate-500">اختر الدور بالنقر عليه — القائمة من كتالوج الأدوار الفعلي (قوالب مدمجة + أدوار مخصصة نشطة)</div>
+        <div className="max-h-80 overflow-y-auto space-y-2 pr-1">
+          <button type="button" onClick={() => setSelected('')}
+            className={`w-full text-right p-3 rounded-xl border-2 transition touch-manipulation ${!selected ? 'border-blue-500 bg-blue-50 shadow-sm' : 'border-slate-200 bg-white hover:border-slate-300'}`}>
+            <div className="flex items-center gap-2">
+              <span className={`w-4 h-4 rounded-full border-2 shrink-0 ${!selected ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`} />
+              <span className="font-bold text-sm">بلا دور</span>
+            </div>
+            <div className="text-[11px] text-slate-500 mt-1 mr-6">يُسحب الدور الحالي — تُلغى كل الصلاحيات المشتقة فوراً (تبقى الـOverrides الصريحة فقط)</div>
+          </button>
+          {activeRoles.map(r => (
+            <button key={r.key} type="button" onClick={() => setSelected(r.key)}
+              className={`w-full text-right p-3 rounded-xl border-2 transition touch-manipulation ${selected === r.key ? 'border-blue-500 bg-blue-50 shadow-sm' : 'border-slate-200 bg-white hover:border-slate-300'}`}>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={`w-4 h-4 rounded-full border-2 shrink-0 ${selected === r.key ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`} />
+                <span className="font-bold text-sm">{r.label}</span>
+                {r.built_in ? <Badge variant="outline" className="text-[9px]">قالب مدمج</Badge> : <Badge className="bg-blue-100 text-blue-700 text-[9px]">مخصص</Badge>}
+                {user.admin_role_key === r.key && <Badge className="bg-amber-100 text-amber-800 text-[9px]">الدور الحالي</Badge>}
+              </div>
+              {r.desc && <div className="text-[11px] text-slate-500 mt-1 mr-6 leading-relaxed">{r.desc}</div>}
+              <div className="text-[10px] text-slate-400 mt-1 mr-6" dir="ltr">{permsSummary(r)}</div>
+            </button>
+          ))}
+          {!activeRoles.length && <div className="text-center text-xs text-slate-400 py-6">لا توجد أدوار نشطة في الكتالوج</div>}
+        </div>
+        {fld('السبب * (Audit)', <Input value={reason} onChange={e => { setReason(e.target.value); if (err) setErr('') }} placeholder="مثال: نقل الموظف إلى إدارة العمليات" />)}
+        {err && <div className="text-xs font-bold text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5">{err}</div>}
+        <div className="flex gap-2">
+          <Button onClick={save} disabled={busy} className="flex-1 min-h-[44px]">{busy ? '...جارٍ الحفظ' : 'حفظ الدور'}</Button>
+          <Button variant="outline" onClick={onClose} className="min-h-[44px]">إلغاء</Button>
+        </div>
+      </div>
+    </DialogContent></Dialog>
+  )
+}
+
+// C. Confirmation modal for sensitive actions (disable/activate/terminate/reset) —
+// user name + clear warning + action type + mandatory Audit Reason + Confirm/Cancel.
+// Business logic preserved: Disable stays DISABLE (sessions terminated) — never hard delete.
+const ACTION_META = {
+  disable: { icon: '🔌', title: 'تعطيل المدير', cls: 'bg-red-50 border-red-200 text-red-800', btn: 'bg-red-600 hover:bg-red-700 text-white', warn: (u) => `سيُعطَّل حساب «${u.name}» وتُنهى كل جلساته النشطة فوراً. الحساب لا يُحذف نهائياً — يمكن إعادة تفعيله لاحقاً.` },
+  activate: { icon: '✅', title: 'تفعيل المدير', cls: 'bg-emerald-50 border-emerald-200 text-emerald-800', btn: 'bg-emerald-600 hover:bg-emerald-700 text-white', warn: (u) => `سيُعاد تفعيل حساب «${u.name}» ويستطيع تسجيل الدخول مجدداً بصلاحيات دوره الحالي.` },
+  terminate_sessions: { icon: '🚪', title: 'إنهاء الجلسات النشطة', cls: 'bg-amber-50 border-amber-200 text-amber-800', btn: 'bg-amber-600 hover:bg-amber-700 text-white', warn: (u) => `ستُنهى كل الجلسات النشطة لـ«${u.name}» فوراً وسيضطر لتسجيل الدخول من جديد.` },
+  reset_password: { icon: '🔑', title: 'إعادة تعيين كلمة المرور', cls: 'bg-blue-50 border-blue-200 text-blue-800', btn: 'bg-blue-600 hover:bg-blue-700 text-white', warn: (u) => `ستُولَّد كلمة مرور جديدة قوية لـ«${u.name}» وتُنهى كل جلساته — سلّمها له عبر قناة آمنة.` },
+}
+const ConfirmActionDialog = ({ user, action, onClose, onDone }) => {
+  const meta = ACTION_META[action]
+  const [reason, setReason] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState(null) // reset_password → show the new password inside the UI
+  const run = async () => {
+    if (!reason.trim()) { setErr('⚠️ سبب التدقيق إلزامي لهذا الإجراء'); return }
+    setErr(''); setBusy(true)
+    try {
+      const r = await api(`/admin/staff/users/${user.id}`, { method: 'PATCH', body: { action, reason } })
+      if (action === 'reset_password') { setResult(r); setBusy(false); return }
+      toast.success(action === 'disable' ? `✅ عُطل الحساب — أُنهيت ${r.sessions_terminated} جلسة` : action === 'terminate_sessions' ? `✅ أُنهيت ${r.sessions_terminated} جلسة` : '✅ تم')
+      onDone()
+    } catch (e) { setErr(e.message); toast.error(e.message); setBusy(false) }
+  }
+  if (result) return (
+    <Dialog open onOpenChange={() => { onDone() }}><DialogContent className="max-w-md w-[calc(100vw-1.5rem)]" dir="rtl">
+      <DialogHeader><DialogTitle>🔑 كلمة المرور الجديدة — {user.name}</DialogTitle></DialogHeader>
+      <div className="space-y-3">
+        <div className="p-4 rounded-xl bg-slate-900 text-center">
+          <code dir="ltr" className="text-xl font-black text-emerald-300 tracking-wider break-all select-all">{result.new_password}</code>
+        </div>
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2.5">⚠️ أُنهيت {result.sessions_terminated} جلسة — انسخ كلمة المرور الآن وسلّمها عبر قناة آمنة، لن تظهر مرة أخرى.</div>
+        <div className="flex gap-2">
+          <Button className="flex-1 min-h-[44px]" onClick={() => { navigator.clipboard?.writeText(result.new_password).then(() => toast.success('نُسخت')).catch(() => {}) }}>📋 نسخ</Button>
+          <Button variant="outline" className="min-h-[44px]" onClick={() => onDone()}>إغلاق</Button>
+        </div>
+      </div>
+    </DialogContent></Dialog>
+  )
+  return (
+    <Dialog open onOpenChange={onClose}><DialogContent className="max-w-md w-[calc(100vw-1.5rem)] max-h-[88dvh] overflow-y-auto" dir="rtl">
+      <DialogHeader><DialogTitle>{meta.icon} {meta.title}</DialogTitle></DialogHeader>
+      <div className="space-y-3">
+        <div className={`text-sm font-semibold border rounded-xl p-3 leading-relaxed ${meta.cls}`}>
+          {meta.warn(user)}
+          <div className="text-[11px] font-normal mt-1 opacity-80" dir="ltr">{user.email}</div>
+        </div>
+        {fld('سبب هذا الإجراء * (Audit)', <Input value={reason} onChange={e => { setReason(e.target.value); if (err) setErr('') }} placeholder="اكتب السبب — يُسجل في سجل التدقيق" />)}
+        {err && <div className="text-xs font-bold text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5">{err}</div>}
+        <div className="flex gap-2">
+          <Button onClick={run} disabled={busy} className={`flex-1 min-h-[44px] ${meta.btn}`}>{busy ? '...جارٍ التنفيذ' : `تأكيد — ${meta.title}`}</Button>
+          <Button variant="outline" onClick={onClose} className="min-h-[44px]">إلغاء</Button>
+        </div>
       </div>
     </DialogContent></Dialog>
   )
@@ -149,11 +323,9 @@ const AdminStaffCenter = () => {
   useEffect(() => { api('/admin/staff/me').then(setPerms).catch(() => setPerms({ all: true })); load() }, [])
   useEffect(() => { if (tab === 'audit') api('/admin/staff/audit').then(r => setAudit(r.rows || [])).catch(() => {}) }, [tab])
 
-  const patch = async (u, action, extra = {}) => {
-    const reason = prompt('السبب (إلزامي):')
-    if (!reason) return
-    try { const r = await api(`/admin/staff/users/${u.id}`, { method: 'PATCH', body: { action, reason, ...extra } }); toast.success(action === 'disable' ? `عُطل — أُنهيت ${r.sessions_terminated} جلسة` : 'تم'); load() } catch (e) { toast.error(e.message) }
-  }
+  // v8.0 — item 4: NO browser prompts. Every management action opens a professional
+  // modal (reason collected inside the modal) — see EditUserDialog / AssignRoleDialog /
+  // ConfirmActionDialog above.
   const showPreview = async (u) => { try { setPreview(await api(`/admin/staff/users/${u.id}/preview`)) } catch (e) { toast.error(e.message) } }
 
   const TABS = [['users', '👥 المديرون'], ['roles', '🎭 الأدوار الإدارية'], ['audit', '📜 التدقيق']]
@@ -177,24 +349,17 @@ const AdminStaffCenter = () => {
               <TableCell>{Object.keys(u.admin_overrides || {}).length || '—'}</TableCell>
               <TableCell><Badge className={u.active ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}>{u.active ? 'نشط' : 'معطل'}</Badge></TableCell>
               <TableCell className="text-[10px]">{u.created_by || '—'}</TableCell>
-              <TableCell><div className="flex gap-1">
+              <TableCell><div className="flex gap-1 flex-wrap">
                 <Button size="sm" variant="ghost" title="معاينة الصلاحيات الفعالة" onClick={() => showPreview(u)}><Eye className="w-3.5 h-3.5" /></Button>
-                {!u.is_main && can('edit') && <Button size="sm" variant="ghost" title="إسناد دور" onClick={() => { const rk = prompt(`مفتاح الدور (${roles.map(r => r.key).join(' / ')}):`, u.admin_role_key || ''); if (rk === null) return; patch(u, 'assign_role', { admin_role_key: rk || null }) }}><Pencil className="w-3.5 h-3.5" /></Button>}
+                {/* v8.0 — item 4B: role assignment from the REAL Role Catalog (clickable cards — no manual role_key typing) */}
+                {!u.is_main && can('edit') && <Button size="sm" variant="ghost" title="إسناد / تغيير الدور" onClick={() => setDlg({ type: 'assign_role', user: u })}><Pencil className="w-3.5 h-3.5" /></Button>}
                 {!u.is_main && can('manage') && <Button size="sm" variant="ghost" title="Overrides" onClick={() => setDlg({ type: 'overrides', user: u })}><ShieldCheck className="w-3.5 h-3.5" /></Button>}
-                {/* v4.2 — closure: profile edit + password reset + session termination (audited, reason mandatory) */}
-                {can('edit') && <Button size="sm" variant="ghost" title="تعديل البيانات (الاسم/الهاتف/المسمى/القسم)" onClick={() => {
-                  const name = prompt('الاسم:', u.name); if (name === null) return
-                  const phone = prompt('الهاتف:', u.phone || ''); if (phone === null) return
-                  const job_title = prompt('المسمى الوظيفي:', u.job_title || ''); if (job_title === null) return
-                  const department = prompt('القسم/النطاق (مثال: المالية، المبيعات، الدعم):', u.department || ''); if (department === null) return
-                  patch(u, 'edit_profile', { name, phone, job_title, department })
-                }}>📝</Button>}
-                {!u.is_main && can('manage') && <Button size="sm" variant="ghost" title="إعادة تعيين كلمة المرور (ينهي الجلسات)" onClick={async () => {
-                  const reason = prompt('السبب (إلزامي):'); if (!reason) return
-                  try { const r = await api(`/admin/staff/users/${u.id}`, { method: 'PATCH', body: { action: 'reset_password', reason } }); alert(`كلمة المرور الجديدة:\n${r.new_password}\n\nأُنهيت ${r.sessions_terminated} جلسة — سلّمها للمدير بقناة آمنة`); load() } catch (e) { toast.error(e.message) }
-                }}>🔑</Button>}
-                {!u.is_main && can('manage') && <Button size="sm" variant="ghost" title="إنهاء الجلسات النشطة" onClick={() => patch(u, 'terminate_sessions')}>🚪</Button>}
-                {!u.is_main && (can('activate') || can('disable')) && <Button size="sm" variant="ghost" title={u.active ? 'تعطيل (ينهي الجلسات)' : 'تفعيل'} onClick={() => patch(u, u.active ? 'disable' : 'activate')}><Power className="w-3.5 h-3.5" /></Button>}
+                {/* v8.0 — item 4A: professional Edit User modal (loads current values) */}
+                {can('edit') && <Button size="sm" variant="ghost" title="تعديل البيانات (الاسم/الهاتف/المسمى/القسم)" onClick={() => setDlg({ type: 'edit_user', user: u })}>📝</Button>}
+                {/* v8.0 — item 4C: confirmation modals with warning + mandatory reason (no prompt/alert) */}
+                {!u.is_main && can('manage') && <Button size="sm" variant="ghost" title="إعادة تعيين كلمة المرور (ينهي الجلسات)" onClick={() => setDlg({ type: 'confirm', action: 'reset_password', user: u })}>🔑</Button>}
+                {!u.is_main && can('manage') && <Button size="sm" variant="ghost" title="إنهاء الجلسات النشطة" onClick={() => setDlg({ type: 'confirm', action: 'terminate_sessions', user: u })}>🚪</Button>}
+                {!u.is_main && (can('activate') || can('disable')) && <Button size="sm" variant="ghost" title={u.active ? 'تعطيل (ينهي الجلسات)' : 'تفعيل'} onClick={() => setDlg({ type: 'confirm', action: u.active ? 'disable' : 'activate', user: u })}><Power className="w-3.5 h-3.5" /></Button>}
               </div></TableCell>
             </TableRow>))}
             {!users.length && <TableRow><TableCell colSpan={7} className="text-center text-slate-400 py-8">لا مستخدمين في نطاق الإدارة</TableCell></TableRow>}
@@ -229,6 +394,10 @@ const AdminStaffCenter = () => {
       {dlg?.type === 'staff' && <StaffDialog roles={roles} canCreateSA={perms?.all === true} onClose={() => setDlg(null)} onDone={() => { setDlg(null); load() }} />}
       {dlg?.type === 'role' && <RoleDialog sections={sections} role={dlg.role} onClose={() => setDlg(null)} onDone={() => { setDlg(null); load() }} />}
       {dlg?.type === 'overrides' && <OverridesDialog sections={sections} user={dlg.user} onClose={() => setDlg(null)} onDone={() => { setDlg(null); load() }} />}
+      {/* v8.0 — item 4: professional modals (no browser prompts) */}
+      {dlg?.type === 'edit_user' && <EditUserDialog user={dlg.user} onClose={() => setDlg(null)} onDone={() => { setDlg(null); load() }} />}
+      {dlg?.type === 'assign_role' && <AssignRoleDialog user={dlg.user} roles={roles} onClose={() => setDlg(null)} onDone={() => { setDlg(null); load() }} />}
+      {dlg?.type === 'confirm' && <ConfirmActionDialog user={dlg.user} action={dlg.action} onClose={() => setDlg(null)} onDone={() => { setDlg(null); load() }} />}
       {preview && (
         <Dialog open onOpenChange={() => setPreview(null)}><DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto" dir="rtl">
           <DialogHeader><DialogTitle>👁️ الصلاحيات الفعالة — {preview.user?.name}</DialogTitle></DialogHeader>
