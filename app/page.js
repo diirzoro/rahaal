@@ -2883,7 +2883,7 @@ function Sidebar({ current, onChange, mobileOpen, onMobileClose }) {
   return (
     <aside
       onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
-      className={`fixed md:sticky inset-y-0 right-0 z-50 md:z-auto w-72 max-w-[85vw] md:w-64 md:max-w-none h-[100dvh] md:h-screen shrink-0 bg-gradient-to-b from-[#0f1e4d] via-[#1e3a8a] to-[#0a1544] text-slate-100 flex flex-col border-l border-blue-900/60 transform transition-transform duration-200 ease-out ${mobileOpen ? 'translate-x-0' : 'translate-x-full'} md:translate-x-0`}
+      className={`rahaal-sidebar fixed md:sticky inset-y-0 right-0 z-50 md:z-auto w-72 max-w-[85vw] md:w-64 md:max-w-none h-[100dvh] md:h-screen shrink-0 bg-gradient-to-b from-[#0f1e4d] via-[#1e3a8a] to-[#0a1544] text-slate-100 flex flex-col border-l border-blue-900/60 transform transition-transform duration-200 ease-out ${mobileOpen ? 'translate-x-0' : 'translate-x-full'} md:translate-x-0`}
     >
       <div className="p-4 md:p-5 border-b border-blue-900/50">
         <div className="flex items-center gap-3">
@@ -13198,7 +13198,7 @@ function TenantApp() {
       {/* v3.86 — overlay is MOUNTED ONLY while the drawer is open (no invisible layer
           can ever block touches after closing), tapping it closes the drawer */}
       {mobileNavOpen && (
-        <div className="fixed inset-0 bg-black/50 z-40 md:hidden" onClick={() => setMobileNavOpen(false)} aria-hidden="true" />
+        <div className="rahaal-drawer-backdrop fixed inset-0 bg-black/50 z-40 md:hidden" onClick={() => setMobileNavOpen(false)} aria-hidden="true" />
       )}
       <Sidebar
         current={tab}
