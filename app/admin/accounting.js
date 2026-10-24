@@ -34,7 +34,7 @@ const AdminAccounting = () => {
   const [stmt, setStmt] = useState(null)
   const [jeDetail, setJeDetail] = useState(null)
 
-  useEffect(() => { api('/admin/tenants').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
+  useEffect(() => { api('/admin/tenants/lookup').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
 
   const load = async (t = tab) => {
     setLoading(true)

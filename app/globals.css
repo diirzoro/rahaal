@@ -277,3 +277,58 @@ input, select, textarea, button {
 .table-scroll thead th {
   background: #f8fafc;
 }
+
+/* ============================================================================
+   v8.0 — MOBILE TOUCH & SCROLL FIXES (item 2). Root-cause fixes, same design:
+   - taps respond instantly (no 300ms delay / double-tap zoom on controls)
+   - vertical + horizontal scrolling works naturally with touch momentum
+   - long modals scroll internally and never exceed the small viewport
+   - overlays never leave invisible layers that block touches
+   ============================================================================ */
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+button, a, [role="button"], [role="tab"], input[type="checkbox"], input[type="radio"], select, label {
+  touch-action: manipulation;
+}
+/* every scroll container gets touch momentum + contained overscroll */
+.overflow-auto, .overflow-y-auto, .overflow-x-auto, .table-scroll {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+/* horizontal table wrappers must allow both pan axes on touch */
+.overflow-x-auto, .overflow-auto, .table-scroll {
+  touch-action: pan-x pan-y;
+}
+@media (max-width: 767px) {
+  /* Radix/shadcn dialogs: fit the small viewport, scroll INSIDE the modal
+     (long modals like Overrides stay fully usable), never overflow the screen */
+  [role="dialog"] {
+    max-width: calc(100vw - 1.25rem) !important;
+    max-height: 90dvh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+  /* comfortable touch targets inside dialogs/tables without redesigning */
+  [role="dialog"] button:not([role="tab"]) {
+    min-height: 38px;
+  }
+  /* raw bordered tables (admin matrices) gain horizontal swipe room */
+  .max-h-72.overflow-y-auto, .max-h-80.overflow-y-auto {
+    overflow-x: auto;
+  }
+  /* tab strips become swipeable instead of cramped wrapping */
+  [role="tablist"] {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    max-width: 100%;
+  }
+  [role="tablist"]::-webkit-scrollbar { display: none; }
+}
+/* while the mobile drawer is open the page behind must not scroll */
+body.rahaal-drawer-open {
+  overflow: hidden;
+  touch-action: none;
+}

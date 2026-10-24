@@ -291,7 +291,7 @@ const AdminPayFinCenter = () => {
 
   useEffect(() => {
     api('/admin/staff/me').then(setPerms).catch(() => setPerms({ all: true }))
-    api('/admin/tenants').then(r => setTenants(Array.isArray(r) ? r : r.rows || [])).catch(() => {})
+    api('/admin/tenants/lookup').then(r => setTenants(r?.tenants || [])).catch(() => {})
   }, [])
   const loadMethods = () => api('/admin/payfin/methods').then(setMethods).catch(e => toast.error(e.message))
   const loadEntities = () => {

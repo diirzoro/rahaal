@@ -66,7 +66,10 @@ async function api(path, opts = {}) {
     if (data.quota_exceeded && typeof window !== 'undefined' && window.__rahaalOnQuotaExceeded) {
       try { window.__rahaalOnQuotaExceeded() } catch {}
     }
-    throw new Error(data.error || 'خطأ في الاتصال')
+    const err = new Error(data.error || 'خطأ في الاتصال')
+    err.data = data // v8.0 — carry structured flags (needs_verification, email, ...)
+    err.status = res.status
+    throw err
   }
   return data
 }

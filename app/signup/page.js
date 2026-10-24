@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { toast, Toaster } from 'sonner'
-import { Loader2, Gift, Plane, CheckCircle2 } from 'lucide-react'
+import { Loader2, Gift, CheckCircle2, MailCheck } from 'lucide-react'
 
 async function apiPost(path, body) {
   const res = await fetch(`/api${path}`, {
@@ -33,6 +33,11 @@ function SignupPageInner() {
   const [ref, setRef] = useState('')
   const [form, setForm] = useState({ name: '', owner_name: '', owner_email: '', owner_phone: '', owner_password: '' })
   const [saving, setSaving] = useState(false)
+  // v8.0 — Email verification step: Signup → OTP → Verify → auto-login
+  const [step, setStep] = useState('form') // form | otp
+  const [otp, setOtp] = useState('')
+  const [otpEmail, setOtpEmail] = useState('')
+  const [verifying, setVerifying] = useState(false)
 
   useEffect(() => {
     const r = params.get('ref')
@@ -62,8 +67,32 @@ function SignupPageInner() {
 
   const finishSignup = async (body) => {
     const r = await apiPost('/public/signup', body)
+    if (r.needs_verification) {
+      // v8.0 — OTP verification required before first login
+      setOtpEmail(r.email || body.owner_email)
+      setStep('otp')
+      toast.success(r.message || '📧 أرسلنا رمز تحقق إلى بريدك الإلكتروني')
+      return
+    }
     toast.success('🎉 تم إنشاء حسابك بنجاح!' + (r.referral_applied ? ' • تم منح المُحيل +50 قيد عند استحقاق المكافأة' : ''))
     setTimeout(() => { window.location.href = '/' }, 1000)
+  }
+
+  const verifyOtp = async () => {
+    if (!/^\d{6}$/.test(otp.trim())) return toast.error('أدخل رمز التحقق المكون من 6 أرقام')
+    try {
+      setVerifying(true)
+      await apiPost('/auth/verify-email', { email: otpEmail, otp: otp.trim() })
+      toast.success('🎉 تم تأكيد بريدك وإنشاء حسابك بنجاح!')
+      setTimeout(() => { window.location.href = '/' }, 800)
+    } catch (err) { toast.error(err.message) } finally { setVerifying(false) }
+  }
+
+  const resendOtp = async () => {
+    try {
+      await apiPost('/auth/resend-verification', { email: otpEmail })
+      toast.success('أُرسل رمز جديد إلى بريدك')
+    } catch (err) { toast.error(err.message) }
   }
 
   const submit = async (e) => {
@@ -83,13 +112,8 @@ function SignupPageInner() {
         {/* Left: benefits */}
         <div className="p-8 space-y-6 bg-white/70 backdrop-blur rounded-2xl border border-blue-100">
           <div className="flex items-center gap-3">
-            <div className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-[#1e3a8a] via-[#1e40af] to-[#0f1e4d] flex items-center justify-center shadow-2xl border border-orange-400/40">
-              <svg viewBox="0 0 64 64" fill="none" className="w-10 h-10">
-                <path d="M8 40 L28 36 L40 20 L50 20 L44 34 L54 32 L58 40 L44 42 L38 50 L30 50 L34 42 L14 44 Z" fill="#f97316" stroke="#fff" strokeWidth="1.5" strokeLinejoin="round"/>
-                <circle cx="52" cy="16" r="3" fill="#f97316" />
-              </svg>
-              <div className="absolute -bottom-1 -left-1 w-4 h-4 rounded-full bg-[#f97316] border-2 border-white shadow" />
-            </div>
+            {/* v7.5 — APPROVED INTEGRATION: official Rahaal logo on ALL auth screens (aspect ratio preserved) */}
+            <img src="/rahaal-logo-official.png" alt="شعار رحّال" className="w-20 h-auto object-contain drop-shadow-lg" />
             <div>
               <div className="text-3xl font-extrabold text-[#1e3a8a]">رحّـــال</div>
               <div className="text-sm font-black text-[#f97316] tracking-widest" style={{ letterSpacing: '0.15em' }}>RAHAL ERP</div>
@@ -126,6 +150,31 @@ function SignupPageInner() {
 
         {/* Right: form */}
         <Card className="shadow-2xl">
+          {step === 'otp' ? (
+            <>
+              <CardHeader>
+                <CardTitle className="text-2xl flex items-center gap-2"><MailCheck className="w-7 h-7 text-emerald-600" /> تأكيد البريد الإلكتروني</CardTitle>
+                <CardDescription>أرسلنا رمزاً مكوناً من 6 أرقام إلى <b dir="ltr" className="text-blue-700">{otpEmail}</b> — صالح لمدة 10 دقائق</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-xs text-slate-600 mb-1 block">رمز التحقق *</label>
+                    <Input dir="ltr" inputMode="numeric" maxLength={6} value={otp} onChange={e => setOtp(e.target.value.replace(/\D/g, ''))} placeholder="123456" className="text-center text-2xl tracking-[0.5em] font-black h-14" />
+                  </div>
+                  <Button onClick={verifyOtp} disabled={verifying} className="w-full bg-gradient-to-l from-[#1e3a8a] to-[#f97316] hover:opacity-90 text-white gap-2 text-lg py-5 shadow-lg">
+                    {verifying ? <Loader2 className="w-5 h-5 animate-spin" /> : <>✅ تأكيد ودخول</>}
+                  </Button>
+                  <div className="flex items-center justify-between text-xs">
+                    <button type="button" onClick={resendOtp} className="text-[#1e3a8a] font-bold hover:text-[#f97316]">🔄 إعادة إرسال الرمز</button>
+                    <button type="button" onClick={() => setStep('form')} className="text-slate-500 hover:text-slate-700">← تعديل البيانات</button>
+                  </div>
+                  <div className="text-[11px] text-slate-500 bg-slate-50 border rounded-lg p-2.5">💡 لم يصلك الرمز؟ تحقق من مجلد الرسائل غير المرغوبة (Spam)، أو اضغط «إعادة إرسال الرمز» بعد دقيقة.</div>
+                </div>
+              </CardContent>
+            </>
+          ) : (
+            <>
           <CardHeader>
             <CardTitle className="text-2xl">إنشاء حساب مكتبك</CardTitle>
             <CardDescription>ابدأ فترة تجريبية مجانية الآن — لا يتطلب بطاقة ائتمان</CardDescription>
@@ -164,6 +213,8 @@ function SignupPageInner() {
               <div className="text-center text-xs text-slate-500">لديك حساب بالفعل؟ <a href="/" className="text-[#1e3a8a] font-bold hover:text-[#f97316]">سجّل الدخول</a></div>
             </form>
           </CardContent>
+            </>
+          )}
         </Card>
       </div>
       {/* Footer with contact info + Target Media badge */}

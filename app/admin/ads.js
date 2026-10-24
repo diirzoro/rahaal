@@ -234,7 +234,7 @@ const AdminAdsCenter = () => {
     const qs = Object.entries({ ...f, extended: 1 }).filter(([, v]) => v !== '').map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&')
     api(`/admin/announcements?${qs}`).then(d => { setRows(d.rows || []); setCounts(d.counts || {}) }).catch(e => toast.error(e.message))
   }
-  useEffect(() => { load(); api('/admin/tenants').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [f.type, f.status])
+  useEffect(() => { load(); api('/admin/tenants/lookup').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [f.type, f.status])
   useEffect(() => { if (tab === 'audit') api('/admin/announcements/audit').then(d => setAudit(d.rows || [])).catch(() => {}) }, [tab])
 
   const act = async (ad, patch, okMsg, reason) => {

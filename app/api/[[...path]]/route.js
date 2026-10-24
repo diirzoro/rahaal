@@ -23,6 +23,10 @@ import { adminReportsHandler } from '@/lib/adminReports' // v3.96 — Batch 4 (R
 import { adminDisputesHandler } from '@/lib/adminDisputes' // v3.96 — Batch 4 (Disputes)
 import { adminCurrencyHandler } from '@/lib/adminCurrency' // v3.96 — Batch 4 (Currencies & FX)
 import { adminGate, adminCan, adminStaffHandler, generateStrongPassword, syncDerivedLedgerPerms } from '@/lib/adminStaff'
+import { sendOtpEmail, verifyOtp, emailVerificationActive } from '@/lib/emailOtp' // v8.1 — OTP (provider-agnostic + dynamic limits)
+import { adminEmailCenterHandler, handleInboundWebhook, verifyInboundSignature } from '@/lib/emailCenter' // v8.1 — Email, Verification & Notifications Center
+import { buildBackupPackage, validatePackage, storeBackupBlob, loadBackupBlob, smartRestore, buildRestorePreview, OFFICE_ALLOWED_TYPES, BACKUP_TYPE_DEFS } from '@/lib/backupEngine' // v8.0 — Office backup center
+import JSZip from 'jszip'
 import { adminBranchesHandler, adminBranchUserAssignHandler } from '@/lib/adminBranches' // v5.0 — Enterprise branches (additive) // v3.97 — Batch 5 (Admin realm + staff RBAC)
 import { adminOrdersHandler, adminCommissionsLedgerHandler } from '@/lib/adminOrders' // v4.3 — unified orders + commissions ledger
 import { adminGeoHandler } from '@/lib/adminGeo' // v3.97 — Batch 5 (Geo locations)
@@ -670,6 +674,8 @@ function cors(res, extra = {}) {
 export async function OPTIONS() { return cors(new NextResponse(null, { status: 200 })) }
 const ok = (d, cookie) => cors(NextResponse.json(d), cookie ? { 'Set-Cookie': cookie } : {})
 const bad = (m, s = 400) => cors(NextResponse.json({ error: m }, { status: s }))
+// v8.0.1 — client IP for OTP throttling (behind the K8s ingress → x-forwarded-for)
+const clientIp = (request) => ((request.headers.get('x-forwarded-for') || '').split(',')[0].trim() || request.headers.get('x-real-ip') || 'unknown')
 const clean = (arr) => arr.map(({ _id, ...r }) => r)
 // v5.7 — SHARED list responder: BACKWARD COMPATIBLE pagination. Without ?page → legacy
 // array (capped 500, unchanged contract). With ?page → { rows, total, page, page_size }
@@ -2470,7 +2476,16 @@ async function handleRoute(request, { params }) {
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
         return bad('البريد الإلكتروني غير صالح')
       }
-      if (await db.collection('users').findOne({ email })) return bad('البريد الإلكتروني مستخدم بالفعل')
+      if (await db.collection('users').findOne({ email })) {
+        // v8.0 — a previous signup that never completed OTP verification may resume
+        // verification instead of being dead-locked on «البريد مستخدم»
+        const prev = await db.collection('users').findOne({ email })
+        if (prev && prev.email_verified === false && prev.role === 'owner') {
+          // v8.0.1 — conserve quota: do NOT auto-send; the user can press «إعادة الإرسال»
+          return ok({ needs_verification: true, email, resumed: true, otp_sent: false, message: 'هذا البريد مسجل بانتظار التحقق — أدخل الرمز المرسل سابقاً أو اطلب رمزاً جديداً' })
+        }
+        return bad('البريد الإلكتروني مستخدم بالفعل')
+      }
       const slug = (b.slug || b.name).toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 40) + '-' + uuidv4().slice(0, 4)
       let referredBy = null
       if (b.referral_code) {
@@ -2515,17 +2530,33 @@ async function handleRoute(request, { params }) {
         )
       }
       const userId = uuidv4()
+      // v8.0 — EMAIL VERIFICATION (Resend OTP): new accounts are created UNVERIFIED and
+      // must complete Signup → OTP → Verify → email_verified=true before first login.
+      // Existing accounts (field absent) are NEVER backfilled/blocked.
+      // v8.1 — verification is active only when the provider is configured AND the
+      // user_verification event is enabled in the Email Center (DB-driven toggle).
+      const otpEnabled = await emailVerificationActive(db)
       await db.collection('users').insertOne({
         id: userId, tenant_id: tenant.id, email, name: b.owner_name,
         role: 'owner', active: true,
         phone: phone.replace(/[\s-]/g, ''), // v3.9.18 — Store normalized phone
         password_hash: bcrypt.hashSync(b.owner_password, 8),
+        email_verified: otpEnabled ? false : true,
         created_at: new Date(),
       })
       // v3.9.18 — Also store owner phone in tenant profile for admin visibility
       await db.collection('tenants').updateOne({ id: tenant.id }, { $set: { owner_phone: phone.replace(/[\s-]/g, '') } })
       await seedTenantDefaults(db, tenant.id)
-      // Auto-login
+      if (otpEnabled) {
+        const sendRes = await sendOtpEmail(db, email, 'verify_email', { name: b.owner_name, ip: clientIp(request) })
+        return ok({
+          needs_verification: true, email,
+          referral_applied: !!referredBy,
+          message: sendRes.success ? 'أرسلنا رمز تحقق مكوناً من 6 أرقام إلى بريدك الإلكتروني' : 'أُنشئ الحساب — تعذر إرسال رمز التحقق الآن، استخدم زر إعادة الإرسال',
+          otp_sent: !!sendRes.success,
+        })
+      }
+      // Email service not configured → legacy auto-login (no dead-lock)
       const sid = uuidv4()
       const expires = new Date(Date.now() + SESSION_DAYS * 86400000)
       await db.collection('sessions').insertOne({ id: sid, user_id: userId, expires_at: expires, created_at: new Date() })
@@ -2541,6 +2572,18 @@ async function handleRoute(request, { params }) {
       if (!user || !user.active) return bad('بيانات الدخول غير صحيحة', 401)
       const okpw = bcrypt.compareSync(b.password, user.password_hash)
       if (!okpw) return bad('بيانات الدخول غير صحيحة', 401)
+      // =======================================================================
+      // v8.0 — EMAIL VERIFICATION GATE (Resend OTP): ONLY accounts explicitly
+      // created unverified (email_verified === false) are blocked until OTP
+      // verification. Legacy/existing accounts (field absent) are NEVER blocked
+      // — no blind backfill.
+      // =======================================================================
+      if (user.email_verified === false) {
+        return cors(NextResponse.json({
+          error: 'يجب تأكيد بريدك الإلكتروني أولاً — اطلب رمز التحقق ثم أدخله لإكمال التفعيل',
+          needs_verification: true, email: user.email,
+        }, { status: 403 }))
+      }
       // =======================================================================
       // v7.2 — BINDING DEADLOCK FIX: the MAIN super admin (role=super_admin with
       // no tenant) was blocked by the frontend «غير مربوط بدفتر شركة رحّال» notice,
@@ -2637,31 +2680,100 @@ async function handleRoute(request, { params }) {
       return ok({ ok: true }, cookie)
     }
 
-    // v3.12 — Forgot Password (admin-mediated: request goes to Super Admin inbox)
-    // PUBLIC endpoint. Unified response always (no email enumeration).
-    if (route === '/auth/forgot-password' && method === 'POST') {
+    // ============ v8.0 — EMAIL VERIFICATION + PASSWORD RESET (Resend OTP) ============
+    // PUBLIC endpoints. Neutral responses — no email enumeration. OTPs are hashed,
+    // single-use, 10-min TTL, attempt-capped and rate-limited (lib/emailOtp.js).
+
+    // Resend the signup verification OTP
+    if (route === '/auth/resend-verification' && method === 'POST') {
       const b = await request.json()
       const email = String(b.email || '').toLowerCase().trim()
       if (!email || !email.includes('@')) return bad('البريد الإلكتروني مطلوب')
       const user = await db.collection('users').findOne({ email })
-      // Requests are handled by the existing authorized admin reset process.
-      if (user && user.active) {
-        const existing = await db.collection('password_reset_requests').findOne({ user_id: user.id, status: 'pending' })
-        if (!existing) {
-          let tenantName = null
-          if (user.tenant_id) {
-            const t = await db.collection('tenants').findOne({ id: user.tenant_id })
-            tenantName = t?.name || null
-          }
-          await db.collection('password_reset_requests').insertOne({
-            id: uuidv4(), user_id: user.id, email, user_name: user.name || '', role: user.role,
-            tenant_id: user.tenant_id || null, tenant_name: tenantName,
-            note: String(b.note || '').slice(0, 300), status: 'pending',
-            created_at: new Date(), resolved_at: null, resolved_by: null,
-          })
-        }
+      if (user && user.email_verified === false) {
+        const r = await sendOtpEmail(db, email, 'verify_email', { name: user.name, ip: clientIp(request) })
+        if (r.error && r.status === 429) return bad(r.error, 429)
       }
-      return ok({ delivery: 'admin', message: 'تم استلام طلبك — ستقوم الإدارة بمعالجته والتواصل معك قريباً' })
+      return ok({ message: 'إذا كان البريد مسجلًا لدينا وبانتظار التحقق، فسيصلك رمز جديد' })
+    }
+
+    // Verify the signup OTP → email_verified=true + auto-login
+    if (route === '/auth/verify-email' && method === 'POST') {
+      const b = await request.json()
+      const email = String(b.email || '').toLowerCase().trim()
+      if (!email || !b.otp) return bad('البريد والرمز مطلوبان')
+      const user = await db.collection('users').findOne({ email })
+      if (!user || user.email_verified !== false) return bad('الرمز غير صحيح أو منتهي الصلاحية')
+      const vr = await verifyOtp(db, email, 'verify_email', b.otp, { ip: clientIp(request) })
+      if (vr.error) return bad(vr.error, vr.status || 400)
+      await db.collection('users').updateOne({ id: user.id }, { $set: { email_verified: true, email_verified_at: new Date(), updated_at: new Date() } })
+      // auto-login after successful verification
+      const sidV = uuidv4()
+      const expiresV = new Date(Date.now() + SESSION_DAYS * 86400000)
+      await db.collection('sessions').insertOne({ id: sidV, user_id: user.id, expires_at: expiresV, created_at: new Date() })
+      const cookieV = `rahaal_session=${sidV}; HttpOnly; Path=/; Max-Age=${SESSION_DAYS * 86400}; SameSite=Lax`
+      const tV = user.tenant_id ? await db.collection('tenants').findOne({ id: user.tenant_id }) : null
+      return ok({ verified: true, user: sanitizeUser({ ...user, email_verified: true }), tenant: tV ? sanitizeTenant(tV) : null }, cookieV)
+    }
+
+    // v8.0 — Forgot Password via Resend OTP (replaces the admin-mediated flow).
+    // ALWAYS the same neutral response — never reveals whether the email exists.
+    if (route === '/auth/forgot-password' && method === 'POST') {
+      const b = await request.json()
+      const email = String(b.email || '').toLowerCase().trim()
+      if (!email || !email.includes('@')) return bad('البريد الإلكتروني مطلوب')
+      const NEUTRAL = 'إذا كان البريد مسجلًا لدينا، فستصلك رسالة تحتوي على تعليمات استعادة كلمة المرور.'
+      const user = await db.collection('users').findOne({ email })
+      if (user && user.active) {
+        const r = await sendOtpEmail(db, email, 'password_reset', { name: user.name, ip: clientIp(request) })
+        if (r.error && r.status === 429) return bad(r.error, 429) // rate-limit is safe to surface
+      }
+      return ok({ message: NEUTRAL })
+    }
+
+    // v8.0 — Reset Password: OTP → verify → new password (policy) → sessions invalidated
+    if (route === '/auth/reset-password' && method === 'POST') {
+      const b = await request.json()
+      const email = String(b.email || '').toLowerCase().trim()
+      if (!email || !b.otp || !b.new_password) return bad('البريد والرمز وكلمة المرور الجديدة مطلوبة')
+      const pwErrRst = passwordPolicyError(b.new_password)
+      if (pwErrRst) return bad(pwErrRst)
+      const user = await db.collection('users').findOne({ email })
+      if (!user || !user.active) return bad('الرمز غير صحيح أو منتهي الصلاحية') // neutral — no enumeration
+      const vr = await verifyOtp(db, email, 'password_reset', b.otp, { ip: clientIp(request) })
+      if (vr.error) return bad(vr.error, vr.status || 400)
+      await db.collection('users').updateOne({ id: user.id }, {
+        $set: { password_hash: bcrypt.hashSync(String(b.new_password), 8), password_reset_at: new Date(), updated_at: new Date() },
+      })
+      // the old password (and every open session) must stop working immediately
+      const delS = await db.collection('sessions').deleteMany({ user_id: user.id })
+      try {
+        await db.collection('audit_logs').insertOne({
+          id: uuidv4(), category: 'auth', at: new Date(), actor_id: user.id, actor_email: email,
+          action: 'password_reset_via_otp', target: { user_id: user.id }, before: null,
+          after: { sessions_terminated: delS.deletedCount || 0 }, reason: 'OTP password reset (Resend)',
+        })
+      } catch { /* audit never breaks */ }
+      return ok({ success: true, message: 'تم تغيير كلمة المرور بنجاح — سجّل الدخول بكلمة المرور الجديدة' })
+    }
+
+    // v8.1 — PUBLIC INBOUND EMAIL WEBHOOK (provider → Rahaal): feeds the support
+    // inbox + updates delivery-log statuses (delivered/bounced/complained).
+    // v8.1.2 — SIGNATURE REQUIRED (official Svix/Resend scheme, fail-closed):
+    // the RAW body is verified BEFORE parsing; unsigned/invalid/expired requests
+    // are rejected with 401 and NOTHING is written to support_inbox or the
+    // delivery logs. Secret stays server-side only (env or provider settings).
+    if (route === '/email/inbound' && method === 'POST') {
+      const rawIn = await request.text().catch(() => '')
+      const sigV = await verifyInboundSignature(db, request.headers, rawIn)
+      if (!sigV.ok) {
+        console.error('[email/inbound] rejected unsigned/invalid webhook:', sigV.reason) // safe — no payload, no secret
+        return bad('unauthorized', 401)
+      }
+      let payloadIn = {}
+      try { payloadIn = JSON.parse(rawIn) } catch { payloadIn = {} }
+      const rIn = await handleInboundWebhook(db, payloadIn)
+      return ok(rIn)
     }
 
     // Everything below requires session (except /auth/me which returns null gracefully)
@@ -2759,6 +2871,16 @@ async function handleRoute(request, { params }) {
         if (method !== 'GET') { try { bodySR = await request.json() } catch { bodySR = {} } }
         const rASR = await adminSmartReaderHandler(db, route.slice('/admin/smart-reader'.length), method, new URL(request.url).searchParams, bodySR, sess)
         return rASR?.error ? bad(rASR.error, rASR.status || 400) : ok(rASR)
+      }
+
+      // v8.1 — EMAIL, VERIFICATION & NOTIFICATIONS CENTER (lib/emailCenter.js).
+      // Section «email_center» (adminGate) + fine-grained manage/inbox checks inside.
+      if (route.startsWith('/admin/email-center/')) {
+        let bodyEC = null
+        if (method !== 'GET') { try { bodyEC = await request.json() } catch { bodyEC = {} } }
+        const canEC = await adminCan(db, sess)
+        const rEC = await adminEmailCenterHandler(db, route.slice('/admin/email-center'.length), method, new URL(request.url).searchParams, bodyEC, sess, canEC)
+        return rEC?.error ? bad(rEC.error, rEC.status || 400) : ok(rEC)
       }
 
       // v3.97 — Batch 5 delegations: staff RBAC, geo, payments/entities, refdata.
@@ -3284,6 +3406,17 @@ async function handleRoute(request, { params }) {
           }
           return bad('إجراء غير معروف')
         }
+      }
+
+      // v8.0 — SECURITY FIX: minimal authorized lookup for dropdowns/selectors across
+      // admin screens. Returns ONLY id + name + slug + status — no owner contacts, no
+      // stats, no subscription/financial data. Open to any admin-realm user (gate),
+      // while the FULL list below now requires offices.view.
+      if (route === '/admin/tenants/lookup' && method === 'GET') {
+        const rows = await db.collection('tenants')
+          .find({ is_platform_org: { $ne: true } }, { projection: { _id: 0, id: 1, name: 1, slug: 1, status: 1 } })
+          .sort({ name: 1 }).limit(2000).toArray()
+        return ok({ tenants: rows })
       }
 
       if (route === '/admin/tenants' && method === 'GET') {
@@ -6865,6 +6998,159 @@ async function handleRoute(request, { params }) {
         },
       })
     }
+
+    // ============================================================================
+    // v8.0 — OFFICE BACKUP & RESTORE CENTER (Owner only). 3 options ONLY:
+    // office_config / office_data / full_office — Full System Backup is NEVER
+    // visible or creatable here. Everything is hard-isolated by tenant_id and an
+    // office can never download/restore another office's package (manifest match).
+    // ============================================================================
+    if (route.startsWith('/backup/') && route !== '/backup/export') {
+      if (sess.user.role !== 'owner' && !isMainSA(sess.user)) return bad('غير مصرح — النسخ الاحتياطي والاستعادة متاحة لمالك المكتب فقط', 403)
+      if (!T) return bad('لا يوجد مكتب مرتبط بالجلسة', 400)
+      const officeAudit = async (action, target, after, reason) => {
+        try {
+          await db.collection('audit_logs').insertOne({
+            id: uuidv4(), category: 'backup', at: new Date(), actor_id: sess.user.id, actor_email: sess.user.email,
+            tenant_id: T, action, target, before: null, after: after ?? null, reason: reason || null,
+          })
+        } catch { /* audit never breaks */ }
+      }
+      const OFFICE_VISIBLE_TYPES = [...OFFICE_ALLOWED_TYPES, 'tenant_export']
+
+      if (route === '/backup/options' && method === 'GET') {
+        return ok({
+          options: OFFICE_ALLOWED_TYPES.map(t => ({ type: t, label: BACKUP_TYPE_DEFS[t].label })),
+          note: 'نسخ المكتب معزولة بالكامل بمعرّف المكتب — لا تشمل أي بيانات لمكاتب أخرى',
+        })
+      }
+
+      if (route === '/backup/create' && method === 'POST') {
+        const b = await request.json()
+        const type = b?.type
+        if (!OFFICE_ALLOWED_TYPES.includes(type)) return bad('نوع النسخة غير مسموح — الخيارات: إعدادات المكتب / بيانات المكتب / النسخة الكاملة للمكتب')
+        if (!String(b?.reason || '').trim()) return bad('سبب الإنشاء مطلوب (للتدقيق)')
+        const inflight = await db.collection('admin_backups').findOne({ type, tenant_id: T, status: 'running', created_at: { $gte: new Date(Date.now() - 3 * 60000) } })
+        if (inflight) return bad('توجد نسخة مماثلة قيد التنفيذ — منع تكرار', 409)
+        const regO = {
+          id: uuidv4(), type, scope: 'tenant', tenant_id: T, tenant_name: sess.tenant?.name || null,
+          environment: null, status: 'running', format: 'json',
+          reason: String(b.reason).trim().slice(0, 300), manual: true, protected: !!b.protect,
+          created_by: sess.user.email, created_at: new Date(), created_scope: 'office',
+          size_bytes: null, result: null, download_available: false, counts: null, manifest: null,
+        }
+        await db.collection('admin_backups').insertOne({ ...regO })
+        try {
+          const pkgO = await buildBackupPackage(db, { type, tenantId: T, createdBy: sess.user.email, backupId: regO.id })
+          const jsonO = JSON.stringify(pkgO)
+          const sizeO = Buffer.byteLength(jsonO, 'utf8')
+          await storeBackupBlob(db, regO.id, jsonO)
+          await db.collection('admin_backups').updateOne({ id: regO.id }, { $set: { status: 'completed', size_bytes: sizeO, counts: pkgO.manifest.counts, manifest: pkgO.manifest, result: 'success', download_available: true, completed_at: new Date() } })
+          await officeAudit('office_backup_create', regO.id, { type, size_bytes: sizeO, checksum: pkgO.manifest.checksum }, b.reason)
+          return ok({ success: true, id: regO.id, size_bytes: sizeO, counts: pkgO.manifest.counts, manifest: pkgO.manifest })
+        } catch (e) {
+          await db.collection('admin_backups').updateOne({ id: regO.id }, { $set: { status: 'failed', result: 'failed', error_message: String(e.message || e).slice(0, 400), completed_at: new Date() } })
+          return bad(`فشل إنشاء النسخة: ${e.message}`)
+        }
+      }
+
+      if (route === '/backup/list' && method === 'GET') {
+        const rows = await db.collection('admin_backups')
+          .find({ tenant_id: T, type: { $in: OFFICE_VISIBLE_TYPES } }, { projection: { _id: 0 } })
+          .sort({ created_at: -1 }).limit(100).toArray()
+        return ok({ rows, types: Object.fromEntries(OFFICE_VISIBLE_TYPES.map(t => [t, BACKUP_TYPE_DEFS[t].label])) })
+      }
+
+      if (route === '/backup/download' && method === 'GET') {
+        const id = q.id
+        const regD = await db.collection('admin_backups').findOne({ id, tenant_id: T, type: { $in: OFFICE_VISIBLE_TYPES } })
+        if (!regD) return bad('النسخة غير موجودة أو لا تخص مكتبك', 404)
+        if (!regD.download_available) return bad('محتوى النسخة غير مخزن')
+        const payloadD = await loadBackupBlob(db, regD.id)
+        if (!payloadD) return bad('محتوى النسخة غير متوفر', 404)
+        await officeAudit('office_backup_download', regD.id, { format: q.format || 'json' }, null)
+        const baseD = `rahaal-${regD.type}-${sess.tenant?.slug || T}-${new Date(regD.created_at).toISOString().slice(0, 10)}`.replace(/\s+/g, '_')
+        if (q.format === 'zip') {
+          try {
+            const pkgD = JSON.parse(payloadD)
+            const zip = new JSZip()
+            zip.file('manifest.json', JSON.stringify(pkgD.manifest || { legacy: true }, null, 2))
+            const folder = zip.folder('data')
+            for (const [collD, docsD] of Object.entries(pkgD.data || {})) folder.file(`${collD}.json`, JSON.stringify(docsD, null, 2))
+            const b64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE', compressionOptions: { level: 6 } })
+            return ok({ filename: `${baseD}.zip`, zip_base64: b64 })
+          } catch (e) { return bad(`تعذر توليد ZIP: ${e.message}`) }
+        }
+        return ok({ filename: `${baseD}.json`, payload: payloadD })
+      }
+
+      // Restore pre-flight: validate + preview (NEVER executes). Two sources:
+      // existing backup_id OR an uploaded package from the device.
+      if (route === '/backup/restore/validate' && method === 'POST') {
+        const b = await request.json()
+        let pkgV = null, backupId = null, source = null
+        if (b.backup_id) {
+          const regV = await db.collection('admin_backups').findOne({ id: b.backup_id, tenant_id: T, type: { $in: OFFICE_VISIBLE_TYPES }, status: 'completed' })
+          if (!regV) return bad('النسخة غير موجودة أو لا تخص مكتبك', 404)
+          const payloadV = await loadBackupBlob(db, regV.id)
+          if (!payloadV) return bad('محتوى النسخة غير متوفر', 404)
+          try { pkgV = JSON.parse(payloadV) } catch { return bad('محتوى النسخة تالف') }
+          backupId = regV.id; source = 'existing'
+        } else if (b.package) {
+          pkgV = b.package; source = 'upload'
+        } else return bad('أرسل backup_id لنسخة قائمة أو package لملف مرفوع')
+        const val = validatePackage(pkgV, { expectTenantId: T, allowedTypes: OFFICE_VISIBLE_TYPES })
+        if (!val.valid) return bad(val.errors.join(' · '))
+        if (source === 'upload') {
+          // register the upload (isolated to THIS tenant) so execute can reference it
+          backupId = uuidv4()
+          const jsonU = JSON.stringify(pkgV.manifest ? pkgV : { manifest: val.manifest, data: pkgV.data })
+          await db.collection('admin_backups').insertOne({
+            id: backupId, type: val.manifest.backup_type, scope: 'tenant', tenant_id: T,
+            tenant_name: sess.tenant?.name || null, status: 'completed', format: 'json',
+            reason: 'ملف مرفوع من جهاز المالك للاستعادة', manual: true, protected: false,
+            created_by: sess.user.email, created_at: new Date(), created_scope: 'office', source: 'upload',
+            size_bytes: Buffer.byteLength(jsonU, 'utf8'), result: 'success', download_available: true,
+            counts: val.manifest.counts || null, manifest: val.manifest, legacy_format: !!val.legacy,
+          })
+          await storeBackupBlob(db, backupId, jsonU)
+        }
+        const preview = await buildRestorePreview(db, pkgV.manifest ? pkgV : { manifest: val.manifest, data: pkgV.data }, { targetTenantId: T })
+        await officeAudit('office_restore_validate', backupId, { source, type: val.manifest.backup_type }, b.reason || null)
+        return ok({
+          valid: true, backup_id: backupId, source, manifest: val.manifest, preview,
+          warnings: val.warnings || [],
+          note: 'معاينة فقط — لم يتغير أي بيان. التنفيذ يتطلب سبباً وتأكيداً كتابياً',
+        })
+      }
+
+      if (route === '/backup/restore/execute' && method === 'POST') {
+        const b = await request.json()
+        if (!String(b?.reason || '').trim()) return bad('سبب الاستعادة مطلوب (للتدقيق)')
+        if (String(b?.confirm_text || '').trim() !== 'أؤكد الاستعادة') return bad('التأكيد الكتابي مطلوب: اكتب «أؤكد الاستعادة» حرفياً')
+        const regX = await db.collection('admin_backups').findOne({ id: b.backup_id, tenant_id: T, type: { $in: OFFICE_VISIBLE_TYPES }, status: 'completed' })
+        if (!regX) return bad('النسخة غير موجودة أو لا تخص مكتبك', 404)
+        const payloadX = await loadBackupBlob(db, regX.id)
+        if (!payloadX) return bad('محتوى النسخة غير متوفر', 404)
+        let pkgX
+        try { pkgX = JSON.parse(payloadX) } catch { return bad('محتوى النسخة تالف') }
+        if (!pkgX.manifest && pkgX.data) pkgX = { manifest: { backup_type: regX.type, scope: 'tenant', tenant_id: regX.tenant_id, legacy: true }, data: pkgX.data }
+        else {
+          const vx = validatePackage(pkgX, { expectTenantId: T, allowedTypes: OFFICE_VISIBLE_TYPES })
+          if (!vx.valid) return bad(`فشل التحقق النهائي: ${vx.errors.join(' · ')}`)
+        }
+        try {
+          const summary = await smartRestore(db, pkgX, { targetTenantId: T, actorScope: 'office', allowSystem: false })
+          await officeAudit('office_restore_execute', regX.id, { type: regX.type, summary }, b.reason)
+          return ok({ success: true, summary, note: 'استعادة ذكية: البيانات المالية أُدرج الناقص منها فقط — لا قيود مكررة ولا أرصدة مزدوجة' })
+        } catch (e) {
+          await officeAudit('office_restore_failed', regX.id, { error: String(e.message || e).slice(0, 200) }, b.reason)
+          return bad(`فشل تنفيذ الاستعادة: ${e.message}`)
+        }
+      }
+
+      return bad('مسار نسخ احتياطي غير معروف', 404)
+    }
     if (pkgBookMatch && method === 'POST') {
       const b = await request.json()
       const pkgId = pkgBookMatch[1]
@@ -8971,6 +9257,16 @@ async function handleRoute(request, { params }) {
       // Authorize replacement input BEFORE reversal, deletion, or any balance effect.
       const scopeError = await assertManualJournalScope(db, T, b, B, sess.user)
       if (scopeError) return bad(scopeError, 403)
+      // v7.5 (workspace) — kept as an EXTRA pre-destruction layer: structural validity of
+      // the new lines (existence, group guard, negatives) is confirmed BEFORE reversal too.
+      const preLinesU = b.dual
+        ? [
+          { account_code: b.debit_account_code, debit: Number(b.debit_amount) || 0, credit: 0 },
+          { account_code: b.credit_account_code, debit: 0, credit: Number(b.credit_amount) || 0 },
+        ]
+        : (Array.isArray(b.lines) ? b.lines : [])
+      const vPreU = await validateJournalLines(db, T, preLinesU)
+      if (!vPreU.ok) return bad(vPreU.error)
       // Reverse old effects
       await reverseManualJournalEffects(db, T, oldJe)
       await db.collection('journal_entries').deleteOne({ id: jeId, tenant_id: T }) // v4.5 — tenant-scoped delete

@@ -145,7 +145,7 @@ const AdminCommissionsCenter = () => {
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
 
-  useEffect(() => { api('/admin/tenants').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
+  useEffect(() => { api('/admin/tenants/lookup').then(d => setTenants(d?.tenants || [])).catch(() => {}) }, [])
   useEffect(() => { if (tab === 'overview') api(`/admin/commissions/overview${ovTenant ? `?tenant=${ovTenant}` : ''}`).then(setOv).catch(e => toast.error(e.message)) }, [tab, ovTenant])
   useEffect(() => { if (tab === 'rules' && !rules) api('/admin/commissions/rules').then(setRules).catch(e => toast.error(e.message)) }, [tab])
 

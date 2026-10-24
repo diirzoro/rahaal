@@ -52,7 +52,7 @@ const AdminReportsCenter = () => {
 
   useEffect(() => {
     api('/admin/reports/catalog').then(d => { setCatalog(d.catalog || []); setPermNote(d.permissions_note || '') }).catch(e => toast.error(e.message))
-    api('/admin/tenants').then(d => setTenants(d?.tenants || [])).catch(() => {})
+    api('/admin/tenants/lookup').then(d => setTenants(d?.tenants || [])).catch(() => {})
   }, [])
 
   const pick = (r) => { setSel(r); setFilters({}); setData(null) }

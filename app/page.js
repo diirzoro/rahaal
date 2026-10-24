@@ -44,6 +44,7 @@ import AdminRequestsCenter from './admin/requests' // v4.3 — الطلبات ا
 // v4.4 — scope-correction consolidation: existing components reused as TABS (no copies, no new engines)
 import OfficesSection, { Office360 } from './admin/offices' // Office 360° viewer
 import AdminSystemCenter from './admin/system'
+import AdminEmailCenter from './admin/email-center' // v8.1 — مركز البريد والتحقق والإشعارات
 import AdminAuditCenter from './admin/audit'
 import AdminBackupCenter from './admin/backup'
 import AdminHealthCenter from './admin/health'
@@ -279,24 +280,73 @@ function LoginPage({ onLogin, onBack, initialSignup }) {
       const r = await api('/auth/login', { method: 'POST', body: { email, password } })
       onLogin(r)
       toast.success('مرحباً بك في رحّـــال')
-    } catch (e) { toast.error(e.message) }
+    } catch (e) {
+      // v8.0 — unverified new account → switch to the OTP verification step.
+      // v8.0.1 — NO auto-resend (limited quota): a previously sent code may still be
+      // valid; the user can press «إعادة الإرسال» explicitly when needed.
+      if (e?.data?.needs_verification) {
+        setVerEmail(e.data.email || email)
+        setMode('verify')
+        toast.info('حسابك بانتظار تأكيد البريد — أدخل الرمز المرسل سابقاً أو اطلب رمزاً جديداً')
+      } else toast.error(e.message)
+    }
     finally { setLoading(false) }
   }
 
-  // Forgot password — admin-mediated request only.
+  // v8.0 — Forgot Password via email OTP (Resend): email → OTP → new password → success
   const [mode, setMode] = useState('login')
   const [fpEmail, setFpEmail] = useState('')
-  const [fpNote, setFpNote] = useState('')
+  const [fpStep, setFpStep] = useState('email') // email | otp | done
+  const [fpOtp, setFpOtp] = useState('')
+  const [fpPass, setFpPass] = useState('')
+  const [fpPass2, setFpPass2] = useState('')
   const [fpLoading, setFpLoading] = useState(false)
-  const [fpSent, setFpSent] = useState(false)
+  const [fpMsg, setFpMsg] = useState('')
   const sendForgot = async () => {
     if (!fpEmail || !fpEmail.includes('@')) return toast.error('أدخل بريدك الإلكتروني المسجل')
     try {
       setFpLoading(true)
-      await api('/auth/forgot-password', { method: 'POST', body: { email: fpEmail, note: fpNote } })
-      setFpSent(true)
+      const r = await api('/auth/forgot-password', { method: 'POST', body: { email: fpEmail } })
+      setFpMsg(r.message || 'إذا كان البريد مسجلًا لدينا، فستصلك رسالة تحتوي على تعليمات استعادة كلمة المرور.')
+      setFpStep('otp')
     } catch (e) { toast.error(e.message) }
     finally { setFpLoading(false) }
+  }
+  const submitReset = async () => {
+    // v8.0.1 — ordinary validation errors are handled LOCALLY (no server calls, no emails)
+    if (!/^\d{6}$/.test(fpOtp.trim())) return toast.error('أدخل رمز التحقق المكون من 6 أرقام')
+    if (!fpPass) return toast.error('أدخل كلمة المرور الجديدة')
+    const pwOk = fpPass.length >= 8 && /[A-Z]/.test(fpPass) && /[0-9]/.test(fpPass) && /[!"#$%&'()*+,\-./:;<=>?@[\]^_`{|}~\\]/.test(fpPass)
+    if (!pwOk) return toast.error('كلمة المرور يجب ألا تقل عن 8 أحرف وتحتوي على حرف إنجليزي كبير ورقم ورمز خاص (مثل ! @ # $)')
+    if (fpPass !== fpPass2) return toast.error('كلمتا المرور غير متطابقتين')
+    try {
+      setFpLoading(true)
+      await api('/auth/reset-password', { method: 'POST', body: { email: fpEmail, otp: fpOtp.trim(), new_password: fpPass } })
+      setFpStep('done')
+    } catch (e) { toast.error(e.message) }
+    finally { setFpLoading(false) }
+  }
+  const resetFp = () => { setMode('login'); setFpStep('email'); setFpEmail(''); setFpOtp(''); setFpPass(''); setFpPass2(''); setFpMsg('') }
+
+  // v8.0 — Email verification step (new accounts blocked at login until OTP verify)
+  const [verEmail, setVerEmail] = useState('')
+  const [verOtp, setVerOtp] = useState('')
+  const [verLoading, setVerLoading] = useState(false)
+  const submitVerify = async () => {
+    if (!/^\d{6}$/.test(verOtp.trim())) return toast.error('أدخل رمز التحقق المكون من 6 أرقام')
+    try {
+      setVerLoading(true)
+      const r = await api('/auth/verify-email', { method: 'POST', body: { email: verEmail, otp: verOtp.trim() } })
+      toast.success('✅ تم تأكيد بريدك الإلكتروني بنجاح')
+      onLogin(r)
+    } catch (e) { toast.error(e.message) }
+    finally { setVerLoading(false) }
+  }
+  const resendVerify = async () => {
+    try {
+      await api('/auth/resend-verification', { method: 'POST', body: { email: verEmail } })
+      toast.success('أُرسل رمز جديد إلى بريدك')
+    } catch (e) { toast.error(e.message) }
   }
 
   return (
@@ -315,35 +365,70 @@ function LoginPage({ onLogin, onBack, initialSignup }) {
 
         <Card className="border-blue-900/60 bg-slate-900/80 backdrop-blur-xl shadow-2xl">
           <CardHeader>
-            <CardTitle className="text-white">تسجيل الدخول</CardTitle>
-            <CardDescription className="text-slate-400">أدخل بيانات حسابك للوصول للنظام</CardDescription>
+            <CardTitle className="text-white">{mode === 'verify' ? '📧 تأكيد البريد الإلكتروني' : mode === 'forgot' ? '🔑 استعادة كلمة المرور' : 'تسجيل الدخول'}</CardTitle>
+            <CardDescription className="text-slate-400">{mode === 'verify' ? 'أدخل رمز التحقق المرسل إلى بريدك' : mode === 'forgot' ? 'استعادة آمنة عبر رمز يصل لبريدك' : 'أدخل بيانات حسابك للوصول للنظام'}</CardDescription>
           </CardHeader>
           <CardContent>
-            {mode === 'forgot' ? (
+            {mode === 'verify' ? (
               <div className="space-y-4">
-                {fpSent ? (
+                <div className="text-slate-300 text-sm">أرسلنا رمزاً مكوناً من 6 أرقام إلى <b dir="ltr" className="text-orange-300">{verEmail}</b> — صالح لمدة 10 دقائق.</div>
+                <div className="space-y-2">
+                  <Label className="text-slate-300">رمز التحقق</Label>
+                  <Input dir="ltr" inputMode="numeric" maxLength={6} value={verOtp} onChange={e => setVerOtp(e.target.value.replace(/\D/g, ''))} placeholder="123456" className="bg-slate-800 border-slate-700 text-white text-center text-2xl tracking-[0.5em] font-black" />
+                </div>
+                <Button onClick={submitVerify} disabled={verLoading} className="w-full grad-brand text-white h-11 font-bold">
+                  {verLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '✅ تأكيد البريد والدخول'}
+                </Button>
+                <div className="flex items-center justify-between">
+                  <button type="button" onClick={resendVerify} className="text-xs text-orange-300 hover:text-orange-200 font-bold">🔄 إعادة إرسال الرمز</button>
+                  <button type="button" onClick={() => setMode('login')} className="text-xs text-slate-400 hover:text-slate-200">← العودة لتسجيل الدخول</button>
+                </div>
+              </div>
+            ) : mode === 'forgot' ? (
+              <div className="space-y-4">
+                {fpStep === 'done' ? (
                   <div className="text-center space-y-3 py-4">
-                    <div className="text-4xl">📨</div>
-                    <div className="text-emerald-300 font-bold">تم استلام طلبك بنجاح</div>
-                    <div className="text-slate-300 text-sm">ستقوم الإدارة بمعالجة الطلب وتعيين كلمة مرور جديدة لك، ثم التواصل معك قريباً.</div>
-                    <Button variant="outline" onClick={() => { setMode('login'); setFpSent(false); setFpEmail(''); setFpNote('') }} className="mt-2">← العودة لتسجيل الدخول</Button>
+                    <div className="text-4xl">🎉</div>
+                    <div className="text-emerald-300 font-bold">تم تغيير كلمة المرور بنجاح</div>
+                    <div className="text-slate-300 text-sm">سجّل الدخول الآن بكلمة المرور الجديدة — كل الجلسات القديمة أُنهيت.</div>
+                    <Button variant="outline" onClick={resetFp} className="mt-2">← العودة لتسجيل الدخول</Button>
                   </div>
+                ) : fpStep === 'otp' ? (
+                  <>
+                    <div className="text-emerald-300/90 text-xs bg-emerald-900/30 border border-emerald-700/40 rounded-lg p-2.5">{fpMsg}</div>
+                    <div className="space-y-2">
+                      <Label className="text-slate-300">رمز التحقق (6 أرقام)</Label>
+                      <Input dir="ltr" inputMode="numeric" maxLength={6} value={fpOtp} onChange={e => setFpOtp(e.target.value.replace(/\D/g, ''))} placeholder="123456" className="bg-slate-800 border-slate-700 text-white text-center text-2xl tracking-[0.5em] font-black" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-slate-300">كلمة المرور الجديدة</Label>
+                      <Input dir="ltr" type="password" value={fpPass} onChange={e => setFpPass(e.target.value)} placeholder="••••••••" className="bg-slate-800 border-slate-700 text-white" />
+                      <div className="text-[10px] text-slate-400">8+ أحرف، حرف إنجليزي كبير، رقم، ورمز خاص (مثل ! @ # $)</div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-slate-300">تأكيد كلمة المرور</Label>
+                      <Input dir="ltr" type="password" value={fpPass2} onChange={e => setFpPass2(e.target.value)} placeholder="••••••••" className="bg-slate-800 border-slate-700 text-white" />
+                    </div>
+                    <Button onClick={submitReset} disabled={fpLoading} className="w-full grad-brand text-white h-11 font-bold">
+                      {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '🔐 تغيير كلمة المرور'}
+                    </Button>
+                    <div className="flex items-center justify-between">
+                      <button type="button" onClick={sendForgot} className="text-xs text-orange-300 hover:text-orange-200 font-bold">🔄 إعادة إرسال الرمز</button>
+                      <button type="button" onClick={resetFp} className="text-xs text-slate-400 hover:text-slate-200">← العودة لتسجيل الدخول</button>
+                    </div>
+                  </>
                 ) : (
                   <>
-                    <div className="text-slate-300 text-sm">أدخل بريدك الإلكتروني المسجل لإرسال طلب استعادة كلمة المرور إلى الإدارة.</div>
+                    <div className="text-slate-300 text-sm">أدخل بريدك الإلكتروني المسجل وسنرسل لك رمز تحقق لاستعادة كلمة المرور.</div>
                     <div className="space-y-2">
                       <Label className="text-slate-300">البريد الإلكتروني</Label>
                       <Input dir="ltr" type="email" value={fpEmail} onChange={e => setFpEmail(e.target.value)} placeholder="you@company.com" className="bg-slate-800 border-slate-700 text-white" />
                     </div>
-                    <div className="space-y-2">
-                      <Label className="text-slate-300">ملاحظة للإدارة (اختياري)</Label>
-                      <Input value={fpNote} onChange={e => setFpNote(e.target.value)} placeholder="رقم للتواصل أو ملاحظة" className="bg-slate-800 border-slate-700 text-white" />
-                    </div>
                     <Button onClick={sendForgot} disabled={fpLoading} className="w-full grad-brand text-white h-11 font-bold">
-                      {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '📨 إرسال طلب الاستعادة'}
+                      {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '📨 إرسال رمز الاستعادة'}
                     </Button>
                     <div className="text-center">
-                      <button type="button" onClick={() => { setMode('login'); setFpSent(false); setFpNote('') }} className="text-xs text-slate-400 hover:text-slate-200">← العودة لتسجيل الدخول</button>
+                      <button type="button" onClick={resetFp} className="text-xs text-slate-400 hover:text-slate-200">← العودة لتسجيل الدخول</button>
                     </div>
                   </>
                 )}
@@ -2027,6 +2112,7 @@ function PlatformPeopleHub() {
 function PlatformSystemHub() {
   return <HubTabs tabs={[
     { key: 'system', label: '⚙️ عام وصيانة وبيئة', render: () => <AdminSystemCenter /> },
+    { key: 'email', label: '📧 البريد والإشعارات', render: () => <AdminEmailCenter /> }, // v8.1
     { key: 'backup', label: '💾 النسخ الاحتياطي والاستعادة', render: () => <AdminBackupCenter /> },
     { key: 'audit', label: '🕵️ Audit & Security', render: () => <AdminAuditCenter /> },
     { key: 'health', label: '❤️ System Health', render: () => <AdminHealthCenter /> },
@@ -12109,64 +12195,268 @@ function PackageReportDialog({ pkg, onClose }) {
 }
 
 
-// v3.9.20 — Data Backup Section (Manual JSON export)
-function BackupSection({ tenant }) {
-  const [downloading, setDownloading] = useState(false)
-  const [lastBackup, setLastBackup] = useState(null)
+// v8.0 — OFFICE BACKUP & RESTORE CENTER (Owner). «إنشاء نسخة» opens a modal with
+// EXACTLY 3 selectable option cards (config / data / full office) — the office owner
+// NEVER sees Full System Backup or other tenants. Restore: from saved history OR an
+// uploaded Rahaal backup file — validate → preview → reason + explicit confirm → execute.
+const OFFICE_BACKUP_OPTIONS = [
+  { type: 'office_config', icon: '🏢', title: 'نسخة إعدادات المكتب', desc: 'إعدادات وهيكل المكتب: المستخدمون، الفروع، شجرة الحسابات، العملاء، الموردون، الصناديق والبنوك، العملات وإعدادات المكتب' },
+  { type: 'office_data', icon: '📊', title: 'نسخة بيانات / عمليات المكتب', desc: 'بياناتك التشغيلية والمحاسبية فقط: القيود، السندات، الحركات المالية، التذاكر، التأشيرات، الخدمات، الباقات والعمليات اليومية — لمكتبك وفروعه حصراً' },
+  { type: 'full_office', icon: '📦', title: 'نسخة المكتب الكاملة', desc: 'الإعدادات + البيانات والعمليات معاً في حزمة واحدة كاملة قابلة للاستعادة' },
+]
+const bkB64ToBlob = (b64, type = 'application/zip') => {
+  const bin = atob(b64); const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return new Blob([bytes], { type })
+}
+const bkSaveBlob = (blob, filename) => {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a'); a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url)
+}
+const bkKb = (b) => (b == null ? '—' : b > 1048576 ? `${(b / 1048576).toFixed(1)}MB` : `${Math.round(b / 1024)}KB`)
 
-  const downloadBackup = async () => {
+function OfficeCreateBackupDialog({ onClose, onDone }) {
+  const [type, setType] = useState('')
+  const [reason, setReason] = useState('')
+  const [protect, setProtect] = useState(false)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const run = async () => {
+    if (!type) { setErr('⚠️ اختر نوع النسخة أولاً'); return }
+    if (!reason.trim()) { setErr('⚠️ سبب الإنشاء مطلوب (يُسجل في التدقيق)'); return }
+    setErr(''); setBusy(true)
     try {
-      setDownloading(true)
-      const base = process.env.NEXT_PUBLIC_BASE_URL || ''
-      const res = await fetch(`${base}/api/backup/export`, { credentials: 'include' })
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}))
-        throw new Error(j.error || `HTTP ${res.status}`)
-      }
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      const cd = res.headers.get('Content-Disposition') || ''
-      const m = cd.match(/filename="([^"]+)"/)
-      a.href = url
-      a.download = m ? m[1] : `rahaal-backup-${new Date().toISOString().slice(0, 10)}.json`
-      document.body.appendChild(a); a.click(); a.remove()
-      URL.revokeObjectURL(url)
-      setLastBackup(new Date())
-      toast.success('✅ تم تنزيل النسخة الاحتياطية بنجاح')
-    } catch (e) { toast.error('فشل النسخ الاحتياطي: ' + e.message) } finally { setDownloading(false) }
+      const r = await api('/backup/create', { method: 'POST', body: { type, reason, protect } })
+      toast.success(`✅ اكتملت النسخة — ${bkKb(r.size_bytes)}`)
+      onDone(); onClose()
+    } catch (e) { setErr(e.message); toast.error(e.message) }
+    setBusy(false)
   }
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent className="max-w-xl w-[calc(100vw-1.5rem)] max-h-[88dvh] overflow-y-auto overscroll-contain" dir="rtl">
+        <DialogHeader><DialogTitle>💾 إنشاء نسخة احتياطية — اختر النوع أولاً</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 gap-2">
+            {OFFICE_BACKUP_OPTIONS.map(o => (
+              <button key={o.type} type="button" onClick={() => { setType(o.type); if (err) setErr('') }}
+                className={`text-right p-3 rounded-xl border-2 transition touch-manipulation ${type === o.type ? 'border-rose-500 bg-rose-50 shadow-sm' : 'border-slate-200 bg-white hover:border-slate-300'}`}>
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">{o.icon}</span>
+                  <span className="font-bold text-sm">{o.title}</span>
+                  {type === o.type && <span className="mr-auto text-rose-600 font-black">✓</span>}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">{o.desc}</div>
+              </button>
+            ))}
+          </div>
+          <div className="text-[10px] text-slate-500 bg-slate-50 border rounded-lg p-2">🔒 كل النسخ معزولة بمعرّف مكتبك فقط — لا تشمل أي بيانات لمكاتب أخرى، ولا تحتوي أسراراً أو مفاتيح.</div>
+          <div><div className="text-xs font-bold text-slate-500 mb-1">سبب الإنشاء * (للتدقيق)</div><Input value={reason} onChange={e => { setReason(e.target.value); if (err) setErr('') }} placeholder="مثال: نسخة أسبوعية قبل الجرد" /></div>
+          <label className="flex items-center gap-2 text-xs font-bold"><input type="checkbox" checked={protect} onChange={e => setProtect(e.target.checked)} className="accent-rose-600 w-4 h-4" /> 🛡️ نسخة محمية (مهمة — لا تُحذف تلقائياً)</label>
+          {err && <div className="text-xs font-bold text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5">{err}</div>}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={onClose} className="min-h-[44px]">إلغاء</Button>
+            <Button onClick={run} disabled={busy} className="grad-brand text-white min-h-[44px] gap-1">{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : '💾'} {busy ? 'جارِ الإنشاء...' : 'إنشاء النسخة'}</Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function OfficeRestoreDialog({ rows, preselect, onClose, onDone }) {
+  const [source, setSource] = useState(preselect ? 'existing' : '') // existing | upload
+  const [backupId, setBackupId] = useState(preselect || '')
+  const [file, setFile] = useState(null)
+  const [validated, setValidated] = useState(null) // {backup_id, manifest, preview, warnings}
+  const [reason, setReason] = useState('')
+  const [confirmText, setConfirmText] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [summary, setSummary] = useState(null)
+  const eligible = (rows || []).filter(r => r.status === 'completed' && r.download_available)
+  const validate = async () => {
+    setErr('')
+    try {
+      setBusy(true)
+      let body = null
+      if (source === 'existing') {
+        if (!backupId) { setErr('⚠️ اختر النسخة من السجل'); setBusy(false); return }
+        body = { backup_id: backupId }
+      } else {
+        if (!file) { setErr('⚠️ اختر ملف نسخة رحّال (.json) من جهازك'); setBusy(false); return }
+        const text = await file.text()
+        let pkg
+        try { pkg = JSON.parse(text) } catch { setErr('الملف ليس JSON صالحاً'); setBusy(false); return }
+        body = { package: pkg }
+      }
+      const r = await api('/backup/restore/validate', { method: 'POST', body })
+      setValidated(r)
+      if (r.warnings?.length) r.warnings.forEach(w => toast.warning(w))
+      toast.success('✅ تم التحقق من النسخة — راجع المعاينة ثم أكد')
+    } catch (e) { setErr(e.message); toast.error(e.message) }
+    setBusy(false)
+  }
+  const execute = async () => {
+    if (!reason.trim()) { setErr('⚠️ سبب الاستعادة مطلوب (للتدقيق)'); return }
+    if (confirmText.trim() !== 'أؤكد الاستعادة') { setErr('⚠️ اكتب «أؤكد الاستعادة» حرفياً للمتابعة'); return }
+    setErr(''); setBusy(true)
+    try {
+      const r = await api('/backup/restore/execute', { method: 'POST', body: { backup_id: validated.backup_id, reason, confirm_text: confirmText.trim() } })
+      setSummary(r.summary || {})
+      toast.success('✅ اكتملت الاستعادة بنجاح')
+    } catch (e) { setErr(e.message); toast.error(e.message) }
+    setBusy(false)
+  }
+  return (
+    <Dialog open onOpenChange={() => { if (summary) onDone(); onClose() }}>
+      <DialogContent className="max-w-2xl w-[calc(100vw-1.5rem)] max-h-[88dvh] overflow-y-auto overscroll-contain" dir="rtl">
+        <DialogHeader><DialogTitle>🔁 استعادة نسخة احتياطية</DialogTitle></DialogHeader>
+        {summary ? (
+          <div className="space-y-3">
+            <div className="text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-2.5">✅ اكتملت الاستعادة — استعادة ذكية: البيانات المالية أُدرج الناقص منها فقط، لا قيود مكررة ولا أرصدة مزدوجة</div>
+            <div className="max-h-64 overflow-y-auto border rounded-lg">
+              <table className="w-full text-[11px]"><thead><tr className="bg-slate-50 font-bold"><td className="p-1.5">المجموعة</td><td className="p-1.5">أُدرج</td><td className="p-1.5">حُدّث</td><td className="p-1.5">تُخطي (موجود)</td><td className="p-1.5">رُفض</td></tr></thead>
+                <tbody>{Object.entries(summary).map(([c, s]) => (
+                  <tr key={c} className="border-t"><td className="p-1.5 font-mono font-bold">{c}</td><td className="p-1.5 text-emerald-700">{s.inserted}</td><td className="p-1.5 text-blue-700">{s.updated}</td><td className="p-1.5 text-slate-500">{s.skipped}</td><td className="p-1.5 text-rose-600">{s.rejected}</td></tr>
+                ))}</tbody></table>
+            </div>
+            <Button className="w-full min-h-[44px]" onClick={() => { onDone(); onClose() }}>إغلاق</Button>
+          </div>
+        ) : !validated ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button type="button" onClick={() => { setSource('existing'); if (err) setErr('') }} className={`text-right p-3 rounded-xl border-2 touch-manipulation ${source === 'existing' ? 'border-rose-500 bg-rose-50' : 'border-slate-200 bg-white'}`}>
+                <div className="font-bold text-sm">🗂️ من نسخة محفوظة في رحّال</div>
+                <div className="text-[11px] text-slate-500 mt-1">اختر نسخة من سجل النسخ الاحتياطية لمكتبك</div>
+              </button>
+              <button type="button" onClick={() => { setSource('upload'); if (err) setErr('') }} className={`text-right p-3 rounded-xl border-2 touch-manipulation ${source === 'upload' ? 'border-rose-500 bg-rose-50' : 'border-slate-200 bg-white'}`}>
+                <div className="font-bold text-sm">📤 رفع ملف من جهازك</div>
+                <div className="text-[11px] text-slate-500 mt-1">ملف نسخة رحّال (.json) سبق تنزيله — يُتحقق منه قبل أي استعادة</div>
+              </button>
+            </div>
+            {source === 'existing' && (
+              <div><div className="text-xs font-bold text-slate-500 mb-1">النسخة</div>
+                <Select value={backupId || 'none'} onValueChange={x => setBackupId(x === 'none' ? '' : x)}>
+                  <SelectTrigger className="bg-white"><SelectValue placeholder="اختر النسخة" /></SelectTrigger>
+                  <SelectContent><SelectItem value="none">— اختر —</SelectItem>{eligible.map(b => <SelectItem key={b.id} value={b.id}>{(OFFICE_BACKUP_OPTIONS.find(o => o.type === b.type)?.title) || b.type} — {new Date(b.created_at).toLocaleString('ar-EG')}</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+            )}
+            {source === 'upload' && (
+              <div className="space-y-2">
+                <input type="file" accept=".json,application/json" onChange={e => { setFile(e.target.files?.[0] || null); if (err) setErr('') }}
+                  className="block w-full text-xs file:ml-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-rose-600 file:text-white file:font-bold file:cursor-pointer border rounded-lg p-1.5" />
+                {file && <div className="text-[11px] text-slate-500">📄 {file.name} — {bkKb(file.size)}</div>}
+                <div className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">🔒 يُتحقق من الملف (النوع، التوافق، سلامة checksum، ومطابقة مكتبك) — نسخة مكتب آخر تُرفض تلقائياً. <b>الاستعادة لا تبدأ فور اختيار الملف.</b></div>
+              </div>
+            )}
+            {err && <div className="text-xs font-bold text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5">{err}</div>}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={onClose} className="min-h-[44px]">إلغاء</Button>
+              <Button onClick={validate} disabled={busy || !source} className="grad-brand text-white min-h-[44px]">{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : '🔎'} تحقق ومعاينة</Button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="text-xs bg-blue-50 border border-blue-200 rounded-lg p-2.5 text-blue-900">
+              <b>{(OFFICE_BACKUP_OPTIONS.find(o => o.type === validated.manifest?.backup_type)?.title) || validated.manifest?.backup_type}</b>
+              {' · '}أُنشئت: {validated.manifest?.created_at ? new Date(validated.manifest.created_at).toLocaleString('ar-EG') : '—'}
+              {' · '}بواسطة: <span dir="ltr">{validated.manifest?.created_by || '—'}</span>
+              {validated.manifest?.checksum && <span className="text-emerald-700"> · ✅ checksum سليم</span>}
+            </div>
+            <div className="text-xs font-bold text-slate-600">🔎 معاينة ما سيُستعاد (لم يتغير أي بيان بعد):</div>
+            <div className="max-h-56 overflow-y-auto border rounded-lg">
+              <table className="w-full text-[11px]"><thead><tr className="bg-slate-50 font-bold"><td className="p-1.5">المجموعة</td><td className="p-1.5">في النسخة</td><td className="p-1.5">حالياً</td><td className="p-1.5">وضع الاستعادة</td></tr></thead>
+                <tbody>{(validated.preview || []).map(p => (
+                  <tr key={p.collection} className="border-t"><td className="p-1.5 font-mono font-bold">{p.collection}</td><td className="p-1.5">{p.in_backup}</td><td className="p-1.5">{p.currently_in_db ?? '—'}</td><td className="p-1.5 text-[10px] text-slate-500">{p.mode}</td></tr>
+                ))}</tbody></table>
+            </div>
+            <div><div className="text-xs font-bold text-slate-500 mb-1">سبب الاستعادة * (للتدقيق)</div><Input value={reason} onChange={e => { setReason(e.target.value); if (err) setErr('') }} /></div>
+            <div><div className="text-xs font-bold text-rose-600 mb-1">اكتب حرفياً: «أؤكد الاستعادة»</div><Input value={confirmText} onChange={e => { setConfirmText(e.target.value); if (err) setErr('') }} /></div>
+            {err && <div className="text-xs font-bold text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5">{err}</div>}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setValidated(null)} className="min-h-[44px]">← رجوع</Button>
+              <Button onClick={execute} disabled={busy} className="bg-rose-600 hover:bg-rose-700 text-white min-h-[44px]">{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : '🚀'} تنفيذ الاستعادة</Button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function BackupSection({ tenant }) {
+  const [rows, setRows] = useState(null)
+  const [dlg, setDlg] = useState(null) // {t:'create'} | {t:'restore', preselect?}
+  const load = () => api('/backup/list').then(d => setRows(d.rows || [])).catch(e => toast.error(e.message))
+  useEffect(() => { load() }, [])
+  const download = async (id, format = 'json') => {
+    try {
+      const r = await api(`/backup/download?id=${id}${format === 'zip' ? '&format=zip' : ''}`)
+      if (r.zip_base64) bkSaveBlob(bkB64ToBlob(r.zip_base64), r.filename)
+      else bkSaveBlob(new Blob([r.payload], { type: 'application/json' }), r.filename)
+      toast.success('✅ بدأ التنزيل')
+    } catch (e) { toast.error(e.message) }
+  }
+  const typeTitle = (t) => (OFFICE_BACKUP_OPTIONS.find(o => o.type === t)?.title) || (t === 'tenant_export' ? 'نسخة قديمة' : t)
+  const BK_ST = { completed: ['مكتملة', 'bg-emerald-100 text-emerald-700'], running: ['قيد التنفيذ', 'bg-blue-100 text-blue-700'], failed: ['فشلت', 'bg-rose-100 text-rose-700'] }
 
   return (
     <div className="space-y-4">
       <Card className="border-2 border-rose-200 bg-gradient-to-l from-rose-50 via-orange-50 to-amber-50">
-        <CardContent className="p-6">
-          <div className="flex items-start gap-4">
+        <CardContent className="p-4 sm:p-6">
+          <div className="flex items-start gap-4 flex-wrap">
             <div className="text-5xl">💾</div>
-            <div className="flex-1">
-              <div className="text-2xl font-black text-rose-800">النسخ الاحتياطي لبيانات المكتب</div>
-              <div className="text-sm text-slate-700 mt-2 leading-relaxed">
-                حماية أساسية لبياناتك: احفظ نسخة كاملة (تذاكر، تأشيرات، خدمات، عملاء، موردين، صناديق، قيود يومية، باكجات) على جهازك الشخصي بضغطة واحدة.
-              </div>
+            <div className="flex-1 min-w-[220px]">
+              <div className="text-xl sm:text-2xl font-black text-rose-800">النسخ الاحتياطي والاستعادة — {tenant?.name}</div>
+              <div className="text-sm text-slate-700 mt-2 leading-relaxed">نسخ كاملة قابلة للاستعادة فعلياً (manifest + checksum): إعدادات المكتب، بياناته وعملياته، أو الاثنان معاً — معزولة بمكتبك حصراً.</div>
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              <Button onClick={() => setDlg({ t: 'create' })} className="grad-brand text-white gap-2 min-h-[44px]">💾 إنشاء نسخة احتياطية</Button>
+              <Button variant="outline" onClick={() => setDlg({ t: 'restore' })} className="gap-2 min-h-[44px] border-rose-300 text-rose-700">🔁 استعادة نسخة</Button>
             </div>
           </div>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2">📥 التحميل اليدوي</CardTitle></CardHeader>
-        <CardContent className="space-y-4">
-          <div className="text-sm text-slate-700">تنزيل نسخة احتياطية كاملة كملف JSON على جهازك الآن — يتضمن جميع بيانات مكتب <b>{tenant?.name}</b>.</div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-            <div className="bg-slate-50 p-3 rounded border">✔️ 12 مجموعة بيانات</div>
-            <div className="bg-slate-50 p-3 rounded border">✔️ صيغة JSON قابلة للاستعادة</div>
-            <div className="bg-slate-50 p-3 rounded border">✔️ آمن — تشفير أثناء النقل (HTTPS)</div>
+        <CardHeader><CardTitle className="flex items-center gap-2">🗂️ سجل النسخ الاحتياطية</CardTitle></CardHeader>
+        <CardContent>
+          <div className="border rounded-lg overflow-x-auto">
+            <Table>
+              <TableHeader><TableRow className="bg-slate-50">
+                <TableHead className="text-right">النوع</TableHead><TableHead className="text-right">تاريخ الإنشاء</TableHead>
+                <TableHead className="text-right">المنشئ</TableHead><TableHead className="text-right">الحجم</TableHead>
+                <TableHead className="text-right">الحالة</TableHead><TableHead className="text-right">إجراءات</TableHead>
+              </TableRow></TableHeader>
+              <TableBody>
+                {rows === null ? <TableRow><TableCell colSpan={6} className="text-center py-8 text-slate-400">جارِ التحميل...</TableCell></TableRow>
+                  : rows.length === 0 ? <TableRow><TableCell colSpan={6} className="text-center py-8 text-slate-400">لا نسخ بعد — أنشئ أول نسخة احتياطية لمكتبك</TableCell></TableRow>
+                    : rows.map(r => {
+                      const [sl, sc] = BK_ST[r.status] || [r.status, 'bg-slate-100 text-slate-600']
+                      return (
+                        <TableRow key={r.id}>
+                          <TableCell><div className="text-xs font-bold">{typeTitle(r.type)}</div>{r.source === 'upload' && <div className="text-[9px] text-indigo-600">📤 ملف مرفوع</div>}</TableCell>
+                          <TableCell className="text-[11px]">{new Date(r.created_at).toLocaleString('ar-EG')}</TableCell>
+                          <TableCell className="text-[10px]" dir="ltr">{r.created_by}</TableCell>
+                          <TableCell className="text-xs">{bkKb(r.size_bytes)}{r.protected && <div className="text-[9px] text-blue-600">🛡️ محمية</div>}</TableCell>
+                          <TableCell><Badge className={sc}>{sl}</Badge></TableCell>
+                          <TableCell>
+                            <div className="flex gap-1 flex-wrap">
+                              {r.download_available && <>
+                                <Button size="sm" variant="outline" className="h-8 px-2 text-[11px]" onClick={() => download(r.id)}>⬇️ JSON</Button>
+                                <Button size="sm" variant="outline" className="h-8 px-2 text-[11px]" onClick={() => download(r.id, 'zip')}>🗜️ ZIP</Button>
+                                <Button size="sm" variant="outline" className="h-8 px-2 text-[11px] text-rose-700 border-rose-300" onClick={() => setDlg({ t: 'restore', preselect: r.id })}>🔁 استعادة</Button>
+                              </>}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
+              </TableBody>
+            </Table>
           </div>
-          <Button onClick={downloadBackup} disabled={downloading} className="w-full grad-brand text-white gap-2 py-6 text-base font-bold">
-            {downloading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
-            {downloading ? 'جاري إنشاء النسخة الاحتياطية...' : '💾 تنزيل نسخة احتياطية الآن'}
-          </Button>
-          {lastBackup && <div className="text-xs text-emerald-700 bg-emerald-50 p-2 rounded border border-emerald-200 text-center">✅ آخر نسخة تم تنزيلها: {lastBackup.toLocaleString('ar-EG')}</div>}
         </CardContent>
       </Card>
 
@@ -12179,16 +12469,12 @@ function BackupSection({ tenant }) {
             <li>☁️ حساب سحابي (Google Drive / OneDrive / Dropbox)</li>
             <li>📧 بريد إلكتروني مؤرشف</li>
           </ul>
-          <p className="pt-2 border-t border-amber-300">🛡️ <b>Target Media / رحّال</b> يوفر أيضاً نسخاً احتياطية دورية على السيرفر لأغراض الاستعادة الطارئة، لكن **إدارة النسخ المحلية والاستعادة الشخصية تظل مسؤوليتك**.</p>
+          <p className="pt-2 border-t border-amber-300">🛡️ <b>Target Media / رحّال</b> يوفر أيضاً نسخاً احتياطية دورية على السيرفر لأغراض الاستعادة الطارئة، لكن <b>إدارة النسخ المحلية والاستعادة الشخصية تظل مسؤوليتك</b>.</p>
         </CardContent>
       </Card>
 
-      <Card className="border-2 border-blue-200">
-        <CardHeader><CardTitle className="text-blue-900 flex items-center gap-2">🤖 النسخ التلقائي (قيد التطوير)</CardTitle></CardHeader>
-        <CardContent className="text-sm text-slate-700">
-          سيتم قريباً تفعيل **جدولة تلقائية** لأخذ نسخة احتياطية يومية/أسبوعية إلى بريدك الإلكتروني أو حسابك السحابي. حتى ذلك الحين، يرجى استخدام التنزيل اليدوي بانتظام.
-        </CardContent>
-      </Card>
+      {dlg?.t === 'create' && <OfficeCreateBackupDialog onClose={() => setDlg(null)} onDone={load} />}
+      {dlg?.t === 'restore' && <OfficeRestoreDialog rows={rows || []} preselect={dlg.preselect} onClose={() => setDlg(null)} onDone={load} />}
     </div>
   )
 }
@@ -12330,6 +12616,7 @@ function OfficeSettings() {
   const [users, setUsers] = useState([])
   const [newUser, setNewUser] = useState({ name: '', email: '', password: '', role: 'staff' })
   const [addingUser, setAddingUser] = useState(false)
+  const [addUserOpen, setAddUserOpen] = useState(false) // v8.0 — item 5: modal instead of the inline form (same fields, same logic)
   const [permTarget, setPermTarget] = useState(null)
   const logoRef = useRef(null)
 
@@ -12367,7 +12654,7 @@ function OfficeSettings() {
       setAddingUser(true)
       await api('/tenant/users', { method: 'POST', body: newUser })
       const list = await api('/tenant/users'); setUsers(list)
-      setNewUser({ name: '', email: '', password: '', role: 'staff' }); toast.success('تمت الإضافة')
+      setNewUser({ name: '', email: '', password: '', role: 'staff' }); setAddUserOpen(false); toast.success('تمت الإضافة')
     } catch (e) { toast.error(e.message) } finally { setAddingUser(false) }
   }
 
@@ -12440,15 +12727,12 @@ function OfficeSettings() {
 
         <TabsContent value="users" className="mt-4">
           <Card>
-            <CardHeader className="flex flex-row items-center justify-between"><CardTitle>المستخدمون ({users.length} / {limitLbl(tenant?.max_users ?? 2)})</CardTitle></CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between flex-wrap gap-2">
+              <CardTitle>المستخدمون ({users.length} / {limitLbl(tenant?.max_users ?? 2)})</CardTitle>
+              {/* v8.0 — item 5: low-risk UI improvement — the SAME add-employee fields/logic in a clean modal */}
+              <Button onClick={() => setAddUserOpen(true)} className="grad-brand text-white gap-2 min-h-[42px]"><Plus className="w-4 h-4" /> إضافة موظف</Button>
+            </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end mb-4 p-3 bg-slate-50 rounded-lg">
-                <Field label="الاسم"><Input value={newUser.name} onChange={e => setNewUser({ ...newUser, name: e.target.value })} /></Field>
-                <Field label="البريد"><Input dir="ltr" value={newUser.email} onChange={e => setNewUser({ ...newUser, email: e.target.value })} /></Field>
-                {/* v3.88.4 — S-001: proper password field — masked with autocomplete isolation */}
-                <Field label="كلمة المرور"><Input dir="ltr" type="password" autoComplete="new-password" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} /><PwHint value={newUser.password} /></Field>
-                <Button onClick={addUser} disabled={addingUser} className="grad-brand text-white gap-2">{addingUser ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} إضافة موظف</Button>
-              </div>
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 text-xs text-amber-900">
                 <b>ℹ️ تنويه:</b> المالك (Owner) يحصل تلقائياً على كافة الصلاحيات. الموظف الجديد يبدأ بصلاحيات محدودة (عرض وإضافة التذاكر/التأشيرات/الخدمات فقط). اضغط على <b>"تعديل الصلاحيات"</b> بجانب اسم الموظف لضبط ما يستطيع فعله.
               </div>
@@ -12485,6 +12769,24 @@ function OfficeSettings() {
             </CardContent>
           </Card>
           <PermissionsDialog target={permTarget} onClose={() => setPermTarget(null)} onSaved={() => { setPermTarget(null); api('/tenant/users').then(setUsers).catch(() => {}); toast.success('تم حفظ الصلاحيات') }} />
+          {/* v8.0 — item 5: Add Employee modal (same existing fields + logic — Edit Permissions flow unchanged) */}
+          {addUserOpen && (
+            <Dialog open onOpenChange={() => setAddUserOpen(false)}>
+              <DialogContent className="max-w-md w-[calc(100vw-1.5rem)] max-h-[88dvh] overflow-y-auto" dir="rtl">
+                <DialogHeader><DialogTitle>➕ إضافة موظف جديد</DialogTitle></DialogHeader>
+                <div className="space-y-3">
+                  <Field label="الاسم *"><Input value={newUser.name} onChange={e => setNewUser({ ...newUser, name: e.target.value })} placeholder="اسم الموظف الكامل" /></Field>
+                  <Field label="البريد الإلكتروني *"><Input dir="ltr" value={newUser.email} onChange={e => setNewUser({ ...newUser, email: e.target.value })} placeholder="name@example.com" /></Field>
+                  <Field label="كلمة المرور *"><Input dir="ltr" type="password" autoComplete="new-password" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} /><PwHint value={newUser.password} /></Field>
+                  <div className="text-[11px] text-slate-500 bg-slate-50 border rounded-lg p-2.5">ℹ️ الموظف الجديد يبدأ بصلاحيات محدودة — بعد الإضافة اضغط «تعديل الصلاحيات» بجانب اسمه لضبط ما يستطيع فعله.</div>
+                  <div className="flex gap-2">
+                    <Button onClick={addUser} disabled={addingUser} className="grad-brand text-white gap-2 flex-1 min-h-[44px]">{addingUser ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} إضافة الموظف</Button>
+                    <Button variant="outline" onClick={() => setAddUserOpen(false)} className="min-h-[44px]">إلغاء</Button>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
+          )}
         </TabsContent>
 
         {/* v5.2 — نقطة 2: الفروع من داخل حساب المكتب نفسه (المالك فقط) — نفس محرك الفروع */}
@@ -12633,6 +12935,13 @@ function TenantApp() {
   const [tab, setTab] = useState('dashboard')
   // v3.86 — real mobile drawer state + edge-swipe to open (right edge, RTL)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  // v8.0 — item 2: lock background scroll while the mobile drawer is open (the drawer
+  // itself keeps its own pan-y scroll) — prevents «stuck page» touch behavior
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    document.body.classList.toggle('rahaal-drawer-open', mobileNavOpen)
+    return () => document.body.classList.remove('rahaal-drawer-open')
+  }, [mobileNavOpen])
   // v3.86.1 — lock background page scroll while the drawer is open (drawer itself stays scrollable)
   useEffect(() => {
     if (!mobileNavOpen) return

@@ -382,3 +382,11 @@ See /app/memory/test_credentials.md
 - next.config.js: serverExternalPackages += pdfjs-dist, emergentintegrations. Packages: emergentintegrations@4, pdfjs-dist@4.10.38 (Node 20 compatible).
 - Testing: backend agent 18/19 (الوحيد الفاشل = خطأ في harness الاختبار وليس التطبيق) — شمل charging rules، idempotency متزامن، عزل tenants، RBAC، أدمن (سبب إلزامي/لا سالب/تدقيق)، وFinancial Regression: صفر قيود/أرصدة من القراءة. E2E متصفح: قراءة PDF فعلي عبّأ نموذج التذكرة كاملاً. لا Push، لا Deploy.
 - ملاحظة: tenant التجربة owner@gmail.com عليه بيانات تجربة (رصيد مدفوع 100+ وقراءات) — بيئة Workspace فقط.
+
+## v8.1 — مركز البريد والتحقق والإشعارات المركزي (Super Admin) — فرع round-backup-email-mobile-ui
+- متطلب المستخدم (رسالة 147): قسم «النظام والإعدادات → البريد والتحقق والإشعارات» بسيط، قابل لإعادة الاستخدام، ومستقل عن المزود.
+- المعمارية: Rahaal Notification Service → Email Provider Adapter → (Resend | Brevo | SMTP لاحقاً). التسجيل/الاستعادة لا يتصلان بـ Resend مباشرة أبداً — فقط عبر sendEmail()/dispatchEvent() في lib/emailCenter.js.
+- Backend: lib/emailCenter.js (كتالوج 50+ حدثاً في 6 فئات، مفعّل افتراضياً فقط user_verification + password_reset؛ إعدادات مزود/أمان في platform_settings؛ قوالب قابلة للتخصيص؛ سجلات إرسال بلا أسرار/OTP؛ صندوق وارد support عبر webhook عام POST /api/email/inbound). مسارات /api/admin/email-center/* خلف adminGate بقسم جديد email_center (view/manage/inbox_view/inbox_reply) — كل كتابة تتطلب سبباً (audit).
+- lib/emailOtp.js أعيدت كتابته: كل الحدود ديناميكية من إعدادات «التحقق والأمان» (الافتراضي = القيم المحافظة: 6 أرقام، 10 دقائق، 3 محاولات، 3 رسائل/24س، 60ث cooldown) والإرسال عبر طبقة المحولات فقط. emailVerificationActive/passwordResetActive = مزود مهيأ + الحدث مفعّل.
+- Frontend: app/admin/email-center.js (6 تبويبات: مزود البريد، التحقق والأمان، أحداث الإشعارات بصناديق اختيار مجمعة + مودال إعداد متقدم لكل حدث، القوالب مع معاينة وإرجاع افتراضي، صندوق الوارد مع رد، سجلات الإرسال مع فلاتر) — مضاف لتبويب «إعدادات النظام» في PlatformSystemHub.
+- المفتاح السري كتابة-فقط (عرض مقنّع)، fallback من env RESEND_API_KEY. لا اختبارات/لقطات بطلب صريح من المستخدم هذه الجولة. لا دمج مع main قبل المراجعة.
