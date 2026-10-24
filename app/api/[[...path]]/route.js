@@ -942,6 +942,81 @@ function accountInScope(acc, opMap, B) {
   return true
 }
 
+// Manual input authorization only: system/automatic/Interbranch journals keep their
+// existing posting path. Every supplied code AND party is checked independently.
+async function assertManualJournalScope(db, T, body, branchId, user = {}) {
+  const B = branchId || null
+  const opMap = await operationalCodeScopeMap(db, T)
+  const codeChecks = new Map()
+  const checkCode = async (rawCode) => {
+    if (!rawCode || rawCode === 'MANUAL') return null // existing accounting validator handles missing codes
+    const code = String(rawCode)
+    if (codeChecks.has(code)) return codeChecks.get(code)
+    const acc = await db.collection('accounts').findOne({ tenant_id: T, code })
+    let error = null
+    if ((!acc && !opMap.has(code))) error = 'الحساب غير موجود في دليل المكتب'
+    else if ((acc && !accountInScope(acc, opMap, B)) || (opMap.has(code) && opMap.get(code) !== B)) {
+      error = '🚫 غير مصرح — حساب القيد يخص نطاقاً آخر (فرع/مركز)'
+    }
+    codeChecks.set(code, error)
+    return error
+  }
+  const checkLine = async (line) => {
+    if (!line || typeof line !== 'object') return null
+    let error = await checkCode(line.account_code)
+    if (error) return error
+    if (!line.party_id) return null
+    const type = String(line.party_type || '')
+    const id = String(line.party_id)
+    let party, partyCode
+    if (type === 'account') {
+      party = await db.collection('accounts').findOne({ tenant_id: T, $or: [{ id }, { code: id }] })
+      if (!party) return 'حساب الطرف غير موجود في دليل المكتب'
+      error = await checkCode(party.code)
+      if (error) return error
+      partyCode = party.code
+    } else {
+      const coll = { client: 'clients', supplier: 'suppliers', box: 'boxes' }[type]
+      if (!coll) return 'نوع طرف القيد غير صالح'
+      party = await db.collection(coll).findOne({ tenant_id: T, id })
+      if (!party || (party.branch_id || null) !== B) return '🚫 غير مصرح — طرف القيد خارج نطاقك'
+      if (type === 'box' && user.role !== 'owner' && Array.isArray(user.allowed_box_ids) &&
+          user.allowed_box_ids.length && !user.allowed_box_ids.includes(id)) return '🚫 الصندوق خارج الصناديق المسموحة'
+      partyCode = party.account_code
+    }
+    if (line.account_code && partyCode && String(line.account_code) !== String(partyCode)) return 'حساب القيد لا يطابق حساب الطرف المحدد'
+    return null
+  }
+  const lines = Array.isArray(body?.lines) ? body.lines : []
+  for (const line of lines) {
+    const error = await checkLine(line)
+    if (error) return error
+  }
+  // Check dual fields even if lines[] is absent; never trust party identity or code alone.
+  for (const side of ['debit', 'credit']) {
+    const error = await checkLine({
+      account_code: body?.[`${side}_account_code`],
+      party_type: body?.[`${side}_party_type`],
+      party_id: body?.[`${side}_party_id`],
+    })
+    if (error) return error
+  }
+  return null
+}
+
+async function companyLedgerReadAllowed(db, user) {
+  if (user.role !== 'admin_staff') return true // existing owner/Super Admin/office guards remain
+  const can = await adminCan(db, { user })
+  return can.has('accounting', 'view') // current role + overrides from DB, never tenant linkage or cached mod_*
+}
+
+function sessionTrialBalanceScope(B, q) {
+  if (B) return B
+  // Only explicitly requested summary may consolidate; default is detailed.
+  if (q.mode !== 'summary') return '__HQ__'
+  return q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null
+}
+
 async function ensureOperationalLink(db, T, account) {
   if (account.is_group) return { skipped: 'group' }
   const m = opLinkMapFor(account.parent)
@@ -1041,51 +1116,6 @@ async function validateJournalLines(db, tenantId, lines) {
     }
   }
   return { ok: true }
-}
-
-// =============================================================================
-// v7.5 — APPROVED INTEGRATION (manual-journal protection): operational account
-// CODES and party IDs inside MANUAL journals must belong to the SESSION scope —
-// validated BEFORE any reversal/deletion/recreation/balance mutation.
-// Covers BOTH formats: single-entry (lines[]) and dual-entry (debit_*/credit_*).
-// Shared/Base COA stays usable per the approved accounting design (untagged AND
-// not operationally linked). Automatic engine postings (transactions, FX engine,
-// interbranch, opening/closing) do NOT pass through this guard — posting
-// formulas/calculations are untouched.
-// =============================================================================
-async function assertManualJournalScope(db, T, B, b) {
-  const opMap = await operationalCodeScopeMap(db, T)
-  const checkCode = async (code, where) => {
-    if (!code || code === 'MANUAL') return null
-    const c = String(code)
-    const accD = await db.collection('accounts').findOne({ tenant_id: T, code: c }, { projection: { code: 1, branch_id: 1 } })
-    if (accD && !accountInScope(accD, opMap, B)) return `🚫 الحساب "${c}" يخص نطاقاً آخر (فرع/مركز) — غير مسموح في القيد اليدوي (${where})`
-    if (!accD && opMap.has(c) && opMap.get(c) !== B) return `🚫 الحساب "${c}" مرتبط بطرف تشغيلي يخص نطاقاً آخر (فرع/مركز) — (${where})`
-    return null
-  }
-  const checkParty = async (pt, pid, where) => {
-    if (!pid || !['client', 'supplier', 'box'].includes(String(pt))) return null
-    const pc = String(pt) === 'client' ? 'clients' : String(pt) === 'supplier' ? 'suppliers' : 'boxes'
-    const p = await db.collection(pc).findOne({ id: String(pid), tenant_id: T }, { projection: { branch_id: 1 } })
-    if (!p) return `الطرف المحدد غير موجود (${where})`
-    if ((p.branch_id || null) !== B) return `🚫 الطرف المحدد يخص نطاقاً آخر (فرع/مركز) — (${where})`
-    return null
-  }
-  if (b?.dual) {
-    for (const side of ['debit', 'credit']) {
-      const lbl = side === 'debit' ? 'الطرف المدين' : 'الطرف الدائن'
-      const e1 = await checkCode(b[`${side}_account_code`], lbl); if (e1) return e1
-      const e2 = await checkParty(b[`${side}_party_type`], b[`${side}_party_id`], lbl); if (e2) return e2
-    }
-    return null
-  }
-  const lines = Array.isArray(b?.lines) ? b.lines : []
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i] || {}
-    const e1 = await checkCode(l.account_code, `السطر ${i + 1}`); if (e1) return e1
-    const e2 = await checkParty(l.party_type, l.party_id, `السطر ${i + 1}`); if (e2) return e2
-  }
-  return null
 }
 
 // ============ v4.5 — ACCOUNTING CORE HARDENING (central invariants) ============
@@ -2560,6 +2590,25 @@ async function handleRoute(request, { params }) {
       //   • accounting view → ledger READ modules; accounting edit → ledger_write.
       //   • no role → every derived flag dropped. Travel modules never derived.
       // =======================================================================
+      // Repair legacy admin_staff accounts that were created unbound even though
+      // the unified admin UI requires the Rahaal company/platform tenant.
+      // This is strictly limited to verified admin-realm staff, never office users.
+      if (user.role === 'admin_staff' && user.admin_realm === true && !user.tenant_id) {
+        const platformOrg = await db.collection('tenants').findOne({ is_platform_org: true }, { projection: { id: 1 } })
+        if (!platformOrg?.id) return bad('دفتر شركة رحّال غير مهيأ — تعذر ربط حساب الإدارة', 409)
+        const restricted = {
+          ...(user.permissions || {}),
+          mod_tickets: false, mod_visas: false, mod_visa_monitor: false,
+          mod_services: false, mod_packages: false, mod_meraaj: false, mod_query: false,
+        }
+        await db.collection('users').updateOne({ id: user.id, tenant_id: null }, {
+          $set: { tenant_id: platformOrg.id, platform_org: true, permissions: restricted, updated_at: new Date() },
+        })
+        user.tenant_id = platformOrg.id
+        user.platform_org = true
+        user.permissions = restricted
+      }
+
       if (user.role === 'admin_staff' && user.admin_realm === true) {
         try {
           const syncedL = await syncDerivedLedgerPerms(db, user)
@@ -2595,8 +2644,8 @@ async function handleRoute(request, { params }) {
       const email = String(b.email || '').toLowerCase().trim()
       if (!email || !email.includes('@')) return bad('البريد الإلكتروني مطلوب')
       const user = await db.collection('users').findOne({ email })
+      // Requests are handled by the existing authorized admin reset process.
       if (user && user.active) {
-        // Avoid duplicate pending requests for the same user
         const existing = await db.collection('password_reset_requests').findOne({ user_id: user.id, status: 'pending' })
         if (!existing) {
           let tenantName = null
@@ -2605,22 +2654,14 @@ async function handleRoute(request, { params }) {
             tenantName = t?.name || null
           }
           await db.collection('password_reset_requests').insertOne({
-            id: uuidv4(),
-            user_id: user.id,
-            email,
-            user_name: user.name || '',
-            role: user.role,
-            tenant_id: user.tenant_id || null,
-            tenant_name: tenantName,
-            note: String(b.note || '').slice(0, 300),
-            status: 'pending',
-            created_at: new Date(),
-            resolved_at: null,
-            resolved_by: null,
+            id: uuidv4(), user_id: user.id, email, user_name: user.name || '', role: user.role,
+            tenant_id: user.tenant_id || null, tenant_name: tenantName,
+            note: String(b.note || '').slice(0, 300), status: 'pending',
+            created_at: new Date(), resolved_at: null, resolved_by: null,
           })
         }
       }
-      return ok({ message: 'إذا كان البريد مسجلاً لدينا، فسيتم معالجة طلب الاستعادة والتواصل معك قريباً' }) // v7.0 — neutral (no email enumeration)
+      return ok({ delivery: 'admin', message: 'تم استلام طلبك — ستقوم الإدارة بمعالجته والتواصل معك قريباً' })
     }
 
     // Everything below requires session (except /auth/me which returns null gracefully)
@@ -2672,6 +2713,10 @@ async function handleRoute(request, { params }) {
       if (/^\/reports\//.test(route) && route !== '/reports/query' && !P.mod_reports) return deny('التقارير المالية')
       if (/^\/vouchers/.test(route) && !P.mod_receipt && !P.mod_payment) return deny('السندات')
       if (/^\/affiliate/.test(route) && !P.mod_affiliate) return deny('التسويق بالعمولة')
+      // Admin staff ledger reads require the CURRENT accounting role permission.
+      // These responses include ledger identities/balances, so linkage is never sufficient.
+      if (method === 'GET' && /^\/(clients|suppliers|boxes|accounts)(\/|$)/.test(route) &&
+          !(await companyLedgerReadAllowed(db, sess.user))) return deny('قراءة دفتر الشركة')
       // v3.51 — RBAC Phase 3: fine-grained financial guards (staff only)
       if ((route === '/reports/statement' || route === '/bulk-statement/generate') && !P.fin_statements) return deny('كشوفات الحساب')
       if (/^\/partners\/statements/.test(route) && !P.fin_partner_summary) return deny('ملخص الشركاء')
@@ -8874,12 +8919,14 @@ async function handleRoute(request, { params }) {
     // Manual Journal Voucher (single-currency or dual)
     if (route === '/journal-entries' && method === 'POST') {
       const b = await request.json()
-      // v5.9.4 + v7.5 — APPROVED INTEGRATION: account codes AND party IDs (single +
-      // dual formats, debit & credit sides) are session-scope-validated BEFORE any
-      // financial effect — a branch can never post to HQ/another-branch operational
-      // accounts or parties, and vice versa. Shared/Base COA stays usable.
-      const scErr = await assertManualJournalScope(db, T, B, b)
-      if (scErr) return bad(scErr, 403)
+      const scopeError = await assertManualJournalScope(db, T, b, B, sess.user)
+      if (scopeError) return bad(scopeError, 403)
+      // v5.9.4 — branch scope on every line-level party (box/client/supplier) — session-derived
+      for (const ln of (Array.isArray(b.lines) ? b.lines : [])) {
+        if (!ln || !ln.party_id) continue
+        if (ln.party_type === 'box') { const gLn = await assertBoxScope(ln.party_id); if (gLn) return bad(gLn, 403) }
+        else if (ln.party_type === 'client' || ln.party_type === 'supplier') { const gLn = await assertPartyScope(ln.party_type === 'client' ? 'clients' : 'suppliers', ln.party_id); if (gLn) return bad(gLn, 403) }
+      }
       const result = await createManualJournal(db, T, b, { branchId: B }) // v5.3
       if (result.error) {
         // v4.8.2 — PR#18 (final point): the explicit unsafe state from createManualJournal
@@ -8921,13 +8968,11 @@ async function handleRoute(request, { params }) {
       if (perrOld) return bad(`القيد الأصلي داخل فترة/سنة مقفلة — ${perrOld}`)
       const perrNew = await assertOpenPeriod(db, T, b.date)
       if (perrNew) return bad(perrNew)
-      // v7.5 — APPROVED INTEGRATION: the NEW body is fully validated BEFORE any
-      // destructive step (reversal / deletion / recreation / balance mutation):
-      //   (a) session-scope of every account code + party ID (single & dual formats);
-      //   (b) structural validity of the lines (existence, group guard, negatives).
-      // The old journal and all balances remain untouched if anything is rejected here.
-      const scErrU = await assertManualJournalScope(db, T, B, b)
-      if (scErrU) return bad(scErrU, 403)
+      // Authorize replacement input BEFORE reversal, deletion, or any balance effect.
+      const scopeError = await assertManualJournalScope(db, T, b, B, sess.user)
+      if (scopeError) return bad(scopeError, 403)
+      // v7.5 (workspace) — kept as an EXTRA pre-destruction layer: structural validity of
+      // the new lines (existence, group guard, negatives) is confirmed BEFORE reversal too.
       const preLinesU = b.dual
         ? [
           { account_code: b.debit_account_code, debit: Number(b.debit_amount) || 0, credit: 0 },
@@ -9215,9 +9260,7 @@ async function handleRoute(request, { params }) {
     }
 
     // Reports
-    // v7.5 — APPROVED INTEGRATION: profits rows expose operational party identity →
-    // STRICT session scope (HQ=HQ docs only, branch=own) — ?branch can never widen it.
-    if (route === '/reports/profits' && method === 'GET') return ok(await reportProfits(db, T, { ...q, _branch_id: B || '__HQ__' }))
+    if (route === '/reports/profits' && method === 'GET') return ok(await reportProfits(db, T, { ...q, _branch_id: B || '__HQ__' })) // operational detail: session scope only
     if (route === '/reports/statement' && method === 'GET') {
       // v7.1 — point 8: the party-scope gate applies to EVERY session (not only when a
       // branch_id exists in the session): HQ may only pull statements of HQ-owned
@@ -9253,16 +9296,7 @@ async function handleRoute(request, { params }) {
       const stScope = B || '__HQ__'
       return ok(await reportStatement(db, T, { ...q, _branch_id: stScope }))
     }
-    if (route === '/reports/trial-balance' && method === 'GET') {
-      // v7.5 — APPROVED INTEGRATION: SUMMARY mode (party dimension collapsed) may stay
-      // consolidated office-wide for HQ (?branch selector honored — designed aggregate).
-      // DETAILED mode exposes operational party identity → SESSION scope only:
-      // HQ detailed = HQ scope, branch detailed = own branch (?branch never widens it).
-      const tbScope = q.mode === 'summary'
-        ? (B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null))
-        : (B || '__HQ__')
-      return ok(await reportTrialBalance(db, T, tbScope, { mode: q.mode, currency: q.currency }))
-    }
+    if (route === '/reports/trial-balance' && method === 'GET') return ok(await reportTrialBalance(db, T, sessionTrialBalanceScope(B, q), { mode: q.mode, currency: q.currency })) // HQ summary may consolidate; details remain session-scoped
     if (route === '/reports/income-statement' && method === 'GET') return ok(await reportIncome(db, T, { ...q, _branch_id: B || (q.branch ? (q.branch === 'hq' ? '__HQ__' : q.branch) : null) })) // v5.3/v5.4 — branch/HQ scope
     // v3.10.4 — Unified Query & Filters for Visas + Tickets
     if (route === '/reports/query' && method === 'GET') {

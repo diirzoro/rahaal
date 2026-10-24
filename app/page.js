@@ -283,7 +283,7 @@ function LoginPage({ onLogin, onBack, initialSignup }) {
     finally { setLoading(false) }
   }
 
-  // v3.12 — Forgot password (admin-mediated request)
+  // Forgot password — admin-mediated request only.
   const [mode, setMode] = useState('login')
   const [fpEmail, setFpEmail] = useState('')
   const [fpNote, setFpNote] = useState('')
@@ -330,20 +330,20 @@ function LoginPage({ onLogin, onBack, initialSignup }) {
                   </div>
                 ) : (
                   <>
-                    <div className="text-slate-300 text-sm">أدخل بريدك الإلكتروني المسجل وسيصل طلبك إلى الإدارة لتعيين كلمة مرور جديدة والتواصل معك.</div>
+                    <div className="text-slate-300 text-sm">أدخل بريدك الإلكتروني المسجل لإرسال طلب استعادة كلمة المرور إلى الإدارة.</div>
                     <div className="space-y-2">
                       <Label className="text-slate-300">البريد الإلكتروني</Label>
                       <Input dir="ltr" type="email" value={fpEmail} onChange={e => setFpEmail(e.target.value)} placeholder="you@company.com" className="bg-slate-800 border-slate-700 text-white" />
                     </div>
                     <div className="space-y-2">
                       <Label className="text-slate-300">ملاحظة للإدارة (اختياري)</Label>
-                      <Input value={fpNote} onChange={e => setFpNote(e.target.value)} placeholder="مثال: رقم جوالي للتواصل 77xxxxxxx" className="bg-slate-800 border-slate-700 text-white" />
+                      <Input value={fpNote} onChange={e => setFpNote(e.target.value)} placeholder="رقم للتواصل أو ملاحظة" className="bg-slate-800 border-slate-700 text-white" />
                     </div>
                     <Button onClick={sendForgot} disabled={fpLoading} className="w-full grad-brand text-white h-11 font-bold">
-                      {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '📨 إرسال الطلب للإدارة'}
+                      {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '📨 إرسال طلب الاستعادة'}
                     </Button>
                     <div className="text-center">
-                      <button type="button" onClick={() => setMode('login')} className="text-xs text-slate-400 hover:text-slate-200">← العودة لتسجيل الدخول</button>
+                      <button type="button" onClick={() => { setMode('login'); setFpSent(false); setFpNote('') }} className="text-xs text-slate-400 hover:text-slate-200">← العودة لتسجيل الدخول</button>
                     </div>
                   </>
                 )}

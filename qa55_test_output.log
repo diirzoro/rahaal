@@ -1,7 +1,0 @@
-================================================================================
-QA55 CRITICAL BUG HUNT — Double Balance Effect on EDIT
-================================================================================
-
-=== SETUP: Signup office 'QA55 Office' ===
-❌ Signup failed: 401 {"error":"يجب تسجيل الدخول"}
-❌ Setup failed

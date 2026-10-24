@@ -39,25 +39,40 @@ function SignupPageInner() {
     if (r) setRef(r.toUpperCase())
   }, [params])
 
-  const submit = async (e) => {
-    e.preventDefault()
+  const validateAndBuildBody = () => {
     if (!form.name || !form.owner_email || !form.owner_password || !form.owner_name || !form.owner_phone) {
-      return toast.error('الرجاء إكمال جميع الحقول (بما فيها رقم الهاتف)')
+      toast.error('الرجاء إكمال جميع الحقول (بما فيها رقم الهاتف)')
+      return null
     }
-    // v3.9.18 — Phone must be international format with 7-15 digits
     const cleanPhone = form.owner_phone.replace(/[\s-]/g, '')
-    if (!/^\+?[0-9]{7,15}$/.test(cleanPhone)) return toast.error('رقم الهاتف غير صالح — أدخل رمز الدولة والرقم (مثال: +967771234567)')
+    if (!/^\+?[0-9]{7,15}$/.test(cleanPhone)) {
+      toast.error('رقم الهاتف غير صالح — أدخل رمز الدولة والرقم (مثال: +967771234567)')
+      return null
+    }
     // v7.1 — unified password policy (mirrors the server): 8+ chars, English uppercase,
     // digit, and a REAL ASCII special character (space/Arabic letters don't count).
     const pw = form.owner_password
     const pwOk = String(pw || '').length >= 8 && /[A-Z]/.test(pw) && /[0-9]/.test(pw) && /[!"#$%&'()*+,\-./:;<=>?@[\]^_`{|}~\\]/.test(pw)
-    if (!pwOk) return toast.error('كلمة المرور يجب ألا تقل عن 8 أحرف، وتحتوي على حرف إنجليزي كبير (A-Z) ورقم (0-9) ورمز خاص حقيقي (مثل ! @ # $ %)')
+    if (!pwOk) {
+      toast.error('كلمة المرور يجب ألا تقل عن 8 أحرف، وتحتوي على حرف إنجليزي كبير (A-Z) ورقم (0-9) ورمز خاص حقيقي (مثل ! @ # $ %)')
+      return null
+    }
+    return { ...form, owner_phone: cleanPhone, referral_code: ref || undefined }
+  }
+
+  const finishSignup = async (body) => {
+    const r = await apiPost('/public/signup', body)
+    toast.success('🎉 تم إنشاء حسابك بنجاح!' + (r.referral_applied ? ' • تم منح المُحيل +50 قيد عند استحقاق المكافأة' : ''))
+    setTimeout(() => { window.location.href = '/' }, 1000)
+  }
+
+  const submit = async (e) => {
+    e.preventDefault()
+    const body = validateAndBuildBody()
+    if (!body) return
     try {
       setSaving(true)
-      const body = { ...form, owner_phone: cleanPhone, referral_code: ref || undefined }
-      const r = await apiPost('/public/signup', body)
-      toast.success('🎉 تم إنشاء حسابك بنجاح!' + (r.referral_applied ? ' • تم منح المُحيل +15 قيد مجاني' : ''))
-      setTimeout(() => { window.location.href = '/' }, 1200)
+      await finishSignup(body)
     } catch (err) { toast.error(err.message) } finally { setSaving(false) }
   }
 
@@ -131,7 +146,7 @@ function SignupPageInner() {
                 <div className="text-[10px] text-slate-500 mt-1">أدخل رمز الدولة والرقم (بدون مسافات). سيُستخدم للتواصل والدعم عبر الواتساب.</div>
               </div>
               <div>
-                <label className="text-xs text-slate-600 mb-1 block">كلمة المرور * (8 أحرف فأكثر: حرف كبير A-Z + رقم + رمز خاص مثل !@#$%)</label>
+                <label className="text-xs text-slate-600 mb-1 block">كلمة المرور * (8+ أحرف، حرف إنجليزي كبير، رقم، رمز خاص)</label>
                 <Input dir="ltr" type="password" value={form.owner_password} onChange={e => setForm({ ...form, owner_password: e.target.value })} />
               </div>
               <div>
